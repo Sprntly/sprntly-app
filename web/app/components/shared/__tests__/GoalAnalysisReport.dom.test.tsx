@@ -203,6 +203,41 @@ describe("what the ordering is allowed to claim", () => {
     expect(lede).toMatch(/ordered by confidence/i)
   })
 
+  it("says when the order rests on something the reader cannot see", () => {
+    // `_rank`'s last term is a confidence SCORE, never rendered — the reader
+    // sees bands. With no outcome evidence every band comes out the same, so a
+    // list that LOOKS ranked is read as ranked. Position is the most
+    // persuasive thing on a page.
+    const flat = { ...UNSIZED, confidence_band: "medium" }
+    render(
+      <GoalAnalysisReport
+        run={{ ...RUN, findings: [
+          { ...flat, id: 1, claim_ids: ["c1"] },
+          { ...flat, id: 2, claim_ids: ["c2"] },
+        ] }}
+      />,
+    )
+    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
+    expect(lede).toMatch(/same confidence band/i)
+    expect(lede).toMatch(/not as a verdict on which matters more/i)
+  })
+
+  it("does not disclaim an order the bands actually justify", () => {
+    // The control: when the bands differ the order IS checkable from the page,
+    // and telling the reader to discount it would be its own inaccuracy.
+    render(
+      <GoalAnalysisReport
+        run={{ ...RUN, findings: [
+          { ...UNSIZED, id: 1, confidence_band: "high", claim_ids: ["c1"] },
+          { ...UNSIZED, id: 2, confidence_band: "low", claim_ids: ["c2"] },
+        ] }}
+      />,
+    )
+    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
+    expect(lede).toMatch(/not ranked by reach/i)
+    expect(lede).not.toMatch(/same confidence band/i)
+  })
+
   it("says how many it could not size when the ranking is partial", () => {
     render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
     const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""

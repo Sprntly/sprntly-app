@@ -224,6 +224,11 @@ export function GoalAnalysisReport({
       (a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]),
     )
   })()
+  // One band across more than one finding means the ordering's last term is
+  // invisible to the reader — see the lede below.
+  const oneBand =
+    findings.length > 1 &&
+    new Set(findings.map((f) => (f.confidence_band ?? "").trim())).size === 1
   const sharedWeakest = sharedReason("weakest_leg_reason")
   const sharedCap = sharedReason("cap_reason")
   const unsized = findings.filter((f) => f.impact_value == null).length
@@ -459,10 +464,24 @@ export function GoalAnalysisReport({
             ) : (
               <>
                 Not ranked by reach: nothing here could be sized, so these are
-                ordered by confidence. An authoritative disagreement is still
-                placed above everything that is not one, because two sources
-                that may both speak contradicting each other is worth more than
-                either of them alone.
+                ordered by confidence.
+                {/* AND WHETHER THAT ORDER CARRIES ANYTHING. `_rank`'s last term
+                    is a confidence SCORE, which is never rendered — the reader
+                    sees bands. With no outcome evidence anywhere every band
+                    comes out the same, so a list that LOOKS ranked gets read as
+                    ranked. Position is the most persuasive thing on a page. */}
+                {oneBand ? (
+                  <>
+                    {" "}Every finding here carries the same confidence band, so
+                    that order rests on a score this report does not show you —
+                    read the position as a place in a list, not as a verdict on
+                    which matters more.
+                  </>
+                ) : null}{" "}
+                An authoritative disagreement is still placed above everything
+                that is not one, because two sources that may both speak
+                contradicting each other is worth more than either of them
+                alone.
               </>
             )}
           </p>

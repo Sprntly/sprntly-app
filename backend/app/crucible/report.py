@@ -589,12 +589,30 @@ def _findings_section(
               "alone."
         ))
     else:
+        # AND SAY WHETHER THAT ORDER CARRIES ANYTHING. `_rank`'s last term is a
+        # confidence SCORE, which is real and is never rendered — the reader
+        # sees bands. On a corpus with no outcome evidence anywhere every band
+        # comes out the same, so "ordered by confidence" describes an ordering
+        # they cannot check against a single thing on the page, and a list that
+        # LOOKS ranked gets read as ranked. Position is the most persuasive
+        # thing in a document; claiming it means something it does not is the
+        # same defect as the headline calling an unsized row the largest.
+        bands = {(f.get("confidence_band") or "").strip() for f in findings}
+        one_band = len(bands) == 1 and len(findings) > 1
         out.append(_p(
             "Not ranked by reach: nothing here could be sized, so these are "
-            "ordered by confidence. An authoritative disagreement is still "
-            "placed above everything that is not one, because two sources that "
-            "may both speak contradicting each other is worth more than either "
-            "of them alone."
+            "ordered by confidence."
+            + (
+                " Every finding here carries the same confidence band, so that "
+                "order rests on a score this report does not show you — read "
+                "the position as a place in a list, not as a verdict on which "
+                "matters more."
+                if one_band else ""
+            )
+            + " An authoritative disagreement is still "
+              "placed above everything that is not one, because two sources that "
+              "may both speak contradicting each other is worth more than either "
+              "of them alone."
         ))
 
     if shared_weakest:
