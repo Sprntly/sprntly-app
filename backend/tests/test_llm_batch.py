@@ -224,16 +224,27 @@ def test_cost_multiplier_halves_the_estimate(monkeypatch):
 # streaming or a timeout.
 
 
-def _seam(monkeypatch, *, batch_returns=None):
+def _seam(monkeypatch, *, batch_returns=None, capture=None, capture_sync=None):
+    """Stub both sides of the seam.
+
+    `capture` records the params the BATCH request carried; `capture_sync`
+    records how the FALLBACK was invoked (transport + kwargs), which is what
+    proves a batch miss doesn't silently drop the streaming transport.
+    """
     import app.llm as llm
     calls = {"sync": 0, "batch": 0}
 
-    def fake_sync(client, **kw):
+    def fake_sync(client, *, stream=False, background=False, on_delta=None,
+                  on_json_delta=None, **kw):
         calls["sync"] += 1
+        if capture_sync is not None:
+            capture_sync.update({"stream": stream, "kwargs": kw})
         return "SYNC"
 
     def fake_run_batch(requests, **kw):
         calls["batch"] += 1
+        if capture is not None:
+            capture.update({"params": requests[0].params})
         return batch_returns
 
     monkeypatch.setattr(llm, "_create_with_retries", fake_sync)
@@ -261,18 +272,69 @@ def test_batch_falling_through_runs_the_live_path(monkeypatch):
 
 
 @pytest.mark.parametrize("kw", [
-    {"stream": True},
     {"on_delta": lambda _t: None},
     {"on_json_delta": lambda _t: None},
-    {"timeout": 30.0},
 ])
-def test_shapes_that_cannot_batch_keep_the_live_path(monkeypatch, kw):
-    """Streaming has no deltas to forward from a finished batch, and a
-    per-request timeout bounds a synchronous read that no longer exists."""
+def test_per_delta_callbacks_keep_the_live_path(monkeypatch, kw):
+    """The one shape that can never batch: a finished batch has no deltas to
+    forward, so a caller waiting on them must keep streaming."""
     llm, calls = _seam(monkeypatch, batch_returns={"r0": "BATCHED"})
     out = llm._create_maybe_batched(object(), batch=True, model="m", **kw)
     assert out == "SYNC", f"{kw} must not be batched"
     assert calls["batch"] == 0
+
+
+@pytest.mark.parametrize("kw", [
+    {"stream": True},
+    {"timeout": 30.0},
+    {"stream": True, "timeout": 30.0},
+])
+def test_long_output_transport_no_longer_blocks_a_batch(monkeypatch, kw):
+    """`stream` and `timeout` both exist to bound a synchronous read, and a
+    batch performs none — so neither refuses one any more.
+
+    They used to, which silently downgraded `batch=True` to a full-price live
+    call for every long-output skill (prd-author, evidence-brief,
+    implementation-spec, ideation-prioritize) — i.e. for most of the background
+    generation in the product.
+    """
+    llm, calls = _seam(monkeypatch, batch_returns={"r0": "BATCHED"})
+    out = llm._create_maybe_batched(object(), batch=True, model="m", **kw)
+    assert out == "BATCHED", f"{kw} should now batch"
+    assert calls["batch"] == 1
+
+
+def test_timeout_is_stripped_from_the_batched_request(monkeypatch):
+    """`timeout` is an SDK request option, not a Messages-API body parameter —
+    it cannot ride into a batch request's `params`."""
+    seen: dict = {}
+    llm, _calls = _seam(
+        monkeypatch, batch_returns={"r0": "BATCHED"}, capture=seen
+    )
+    llm._create_maybe_batched(
+        object(), batch=True, model="m", max_tokens=8, timeout=30.0
+    )
+    assert "timeout" not in seen["params"]
+    assert seen["params"]["model"] == "m"
+
+
+def test_fallback_keeps_streaming_and_the_long_timeout(monkeypatch):
+    """The load-bearing half of allowing long-output calls to batch.
+
+    `run_batch` returns None on a switched-off flag, a non-Anthropic key, an API
+    error or a deadline. The fallback then runs the very generation the
+    long-output transport exists for — PRD Part B averages ~185s against a 120s
+    default read timeout — so dropping the transport on the way through would
+    trade a batch miss for a guaranteed httpx.ReadTimeout.
+    """
+    seen: dict = {}
+    llm, calls = _seam(monkeypatch, batch_returns=None, capture_sync=seen)
+    out = llm._create_maybe_batched(
+        object(), batch=True, model="m", stream=True, timeout=900.0
+    )
+    assert out == "SYNC" and calls["batch"] == 1
+    assert seen["stream"] is True, "fallback must keep the streaming transport"
+    assert seen["kwargs"].get("timeout") == 900.0, "fallback must keep the timeout"
 
 
 def test_batched_request_is_byte_identical_to_the_sync_one(monkeypatch):
