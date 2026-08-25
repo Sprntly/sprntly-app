@@ -122,7 +122,9 @@ export interface MainConversationAdapter {
   /** Start a Goal Analysis run for a goal typed into chat and open its panel.
    *  OPTIONAL: a surface without the module (or without the panel) omits it and
    *  a goal falls through to the ask path rather than vanishing. */
-  startGoalAnalysis?: (goalText: string) => void | Promise<void>
+  /** `(extracted goal, what the user actually typed)`. The run works from
+   *  the first; the thread shows the second. */
+  startGoalAnalysis?: (goalText: string, saidText?: string) => void | Promise<void>
   openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
   postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
   markTicketSetAutoOpened: (key: string) => void
@@ -705,8 +707,11 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               //
               // `goalText` is always non-empty (the dispatcher guards on it).
               ...(startGoalAnalysis
+                // `trimmed` is what the reader typed; `goalText` is what the
+                // planner extracted from it. Both, so the run works from the
+                // goal and the thread shows the sentence.
                 ? { onAnalyseGoal: (goalText: string) =>
-                      void startGoalAnalysis(goalText) }
+                      void startGoalAnalysis(goalText, trimmed) }
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {

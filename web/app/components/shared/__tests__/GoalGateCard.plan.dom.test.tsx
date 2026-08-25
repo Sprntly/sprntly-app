@@ -228,6 +228,70 @@ describe("the settled plan is a record, not a receipt", () => {
       />,
     )
 
+  it("keeps the WHOLE plan on screen after approval, not a receipt", () => {
+    // THE POINT OF PUTTING THE GATE IN THE CONVERSATION. Collapsing to "Plan
+    // approved" plus four counts threw away what a PM has to point at later:
+    // which sources were in scope, what each can actually witness, and what
+    // the run said up front it would NOT be able to answer. Scrolling back
+    // showed THAT a plan was approved, not WHAT was approved.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: ["customer_voice"],
+          hypotheses: ["onboarding is where they drop off"],
+          plan: PLAN as GoalRunPlan,
+        }}
+      />,
+    )
+    const card = screen.getByTestId("goal-gate-plan-done").textContent ?? ""
+    expect(card).toContain("Plan approved")
+    // What each source can witness — gone entirely from the receipt.
+    expect(card).toMatch(/can witness what customers asked for/i)
+    // What it said it could not answer, and what would close it.
+    expect(card).toMatch(/will not be able to answer/i)
+    // What the reader said they already believed.
+    expect(card).toContain("onboarding is where they drop off")
+  })
+
+  it("marks the dropped source in the settled plan and drops no control on it", () => {
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: ["customer_voice"], hypotheses: [],
+          plan: PLAN as GoalRunPlan,
+        }}
+      />,
+    )
+    const card = screen.getByTestId("goal-gate-plan-done")
+    expect(card.textContent ?? "").toContain("dropped by you")
+    expect(card.querySelector(".ggc-src-struck")).not.toBeNull()
+    // A SETTLED PLAN IS A RECORD, NOT A CONTROL: no checkboxes, no button.
+    expect(card.querySelectorAll("input[type=checkbox]")).toHaveLength(0)
+    expect(card.querySelector("textarea")).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: /approve and run/i }),
+    ).toBeNull()
+  })
+
+  it("falls back to the terse record for a turn persisted without the plan", () => {
+    // Older turns carried only `sources`. They must still render, and must
+    // still state the exclusion — the fallback is why that is not silence.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: ["customer_voice"], hypotheses: [],
+          plan: { sources: PLAN.sources },
+        }}
+      />,
+    )
+    const card = screen.getByTestId("goal-gate-plan-done").textContent ?? ""
+    expect(card).toContain("dropped by you")
+    expect(card).not.toMatch(/will not be able to answer/i)
+  })
+
   it("still names every source and its count after approval", () => {
     settled()
     const card = screen.getByTestId("goal-gate-plan-done-sources")

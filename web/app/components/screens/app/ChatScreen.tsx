@@ -3865,7 +3865,9 @@ export function ChatScreen() {
   // reordering the hook setup, and republished on every render (below) so the
   // dispatcher always calls the current closure rather than the first one.
   const startGoalAnalysisRef =
-    useRef<((goalText: string) => void | Promise<void>) | null>(null)
+    useRef<
+      ((goalText: string, saidText?: string) => void | Promise<void>) | null
+    >(null)
 
 
   // ── The per-conversation store seam ───────────────────────────────────────
@@ -3891,8 +3893,14 @@ export function ChatScreen() {
       // every body to a no-op, so a return value cannot be read). The ref is
       // written during the same render that declares the callback, above any
       // interaction, so it is never null when this runs.
-      startGoalAnalysis: (goalText: string) => {
-        startGoalAnalysisRef.current?.(goalText)
+      // BOTH ARGUMENTS. This shim dropped `saidText` on the floor, which made
+      // the whole "show what the reader typed" fix inert — the thread went on
+      // rendering the planner's extraction and every test still passed,
+      // because the only path a test drives (the `+` menu) sends one argument
+      // anyway. A forwarder that silently narrows its own signature is the
+      // same shape of bug as an intent missing from `_CLIENT_INTENTS`.
+      startGoalAnalysis: (goalText: string, saidText?: string) => {
+        startGoalAnalysisRef.current?.(goalText, saidText)
       },
       tabsRef,
       activeTabId,
@@ -5169,7 +5177,18 @@ export function ChatScreen() {
 
   // The entry point: start the run, then put its FIRST question in the thread.
   // The panel is not opened here — there is nothing document-shaped to show yet.
-  const startGoalAnalysis = useCallback(async (goalText: string) => {
+  const startGoalAnalysis = useCallback(async (
+    goalText: string,
+    /** WHAT THE USER ACTUALLY TYPED. The planner hands back an EXTRACTED goal
+     *  ("increase revenue by 5%") which is what the run should work from — but
+     *  it is not what the reader said. Emitting the extraction as their message
+     *  rewrote "How can I increase revenue by 5%?" into "increase revenue by
+     *  5%" in their own thread, so scrolling back showed them saying something
+     *  they never said. The run gets the extraction; the transcript gets the
+     *  sentence. Falls back to the extraction for callers that have no raw text
+     *  (the `+` menu, where the two are the same thing). */
+    saidText?: string,
+  ) => {
     const turnId = `goal-${Date.now()}`
     // THE TURN GOES UP FIRST, before the network call. The dispatcher reports
     // `handled` from this executor's PRESENCE, so by the time we run, the caller
@@ -5181,7 +5200,7 @@ export function ChatScreen() {
     // carrying an error, which is still a conversation.
     emitCommandTurn({
       id: turnId,
-      query: goalText,
+      query: (saidText || "").trim() || goalText,
       // A GATE FROM THE FIRST FRAME. The run spends a beat in `resolving_goal`
       // before it has a question, and a turn with no gate and no reply runs the
       // ordinary no-reply ladder — which printed "No response was generated for

@@ -502,8 +502,23 @@ export interface MapMainTurnsDeps {
         // The plan as approved, so the settled record can keep showing WHAT was
         // agreed. Structurally typed for the reason at the top of this file:
         // this module names its host's shapes, it does not import them.
-        plan?: { sources?: { source_type: string; label?: string;
-                             signal_count: number }[] }) => void | Promise<void>)
+        // THE WHOLE PLAN, not a summary. The settled record re-renders the
+        // plan itself now, so it needs every field the live gate had — the
+        // witnesses, the gaps, what it said it would produce. Structurally
+        // typed for the reason at the top of this file: this module names its
+        // host's shapes, it does not import them.
+        plan?: {
+          goal_text?: string
+          definition_text?: string
+          currency?: string
+          total_signals?: number
+          sources?: { source_type: string; label: string;
+                      signal_count: number; witnesses: string }[]
+          cannot_answer?: { question: string; because: string; remedy: string }[]
+          will_produce?: string[]
+          excluded_sources?: string[]
+          hypotheses?: string[]
+        }) => void | Promise<void>)
     | undefined
   setViewerAttachment: (a: {
     name: string

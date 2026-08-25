@@ -81,8 +81,13 @@ export type GoalGateResolved =
  *  Deliberately narrower than `GoalRunPlan`: a record does not need the gaps,
  *  the currency or the will-produce list, and naming only what it reads keeps
  *  a record renderable from a thread persisted by an older build. */
-export type SettledPlan = {
-  sources?: { source_type: string; label?: string; signal_count: number }[]
+/** THE WHOLE PLAN, not a summary of it. This was narrowed to `sources` when the
+ *  settled card was a four-line receipt; it is now re-rendered through
+ *  `GoalAnalysisPlan` itself, so the record cannot drift from what was agreed
+ *  to. Optional throughout, because a turn persisted by an older build has
+ *  whatever it had. */
+export type SettledPlan = Partial<GoalRunPlan> & {
+  sources?: GoalRunPlan["sources"]
 }
 
 export function GoalGateCard({
@@ -226,6 +231,27 @@ function GoalGateSettled({
     )
   }
   const { excludedSources, hypotheses, plan } = resolved
+  // THE PLAN STAYS ON SCREEN. Collapsing it to a receipt threw away which
+  // sources were in scope, what each could witness, and what the run said it
+  // would NOT answer — the exact things a PM has to point at afterwards. Only
+  // a record that actually carries the plan can do that; the terse fallback
+  // below is for turns persisted before the plan was carried.
+  const fullPlan = plan && plan.sources?.length && plan.goal_text
+    ? (plan as GoalRunPlan)
+    : null
+  if (fullPlan) {
+    return (
+      <div className="ggc ggc-settled" data-testid="goal-gate-plan-done">
+        <GoalAnalysisPlan
+          plan={fullPlan}
+          approving={false}
+          onApprove={() => {}}
+          settled={{ excludedSources, hypotheses }}
+        />
+        {note}
+      </div>
+    )
+  }
   const dropped = new Set(excludedSources)
   const kept = (plan?.sources ?? []).filter((x) => !dropped.has(x.source_type))
   const keptSignals = kept.reduce((n, x) => n + (x.signal_count || 0), 0)
