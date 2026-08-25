@@ -1260,14 +1260,14 @@ def test_assemble_count_answer_renders_the_friendly_label_not_the_raw_id():
     raw_id = "01KYHTZG5WZRKNRX0SJQTW9WVW"
     eng = cmr.EngineResult(
         count=1, hit_ids=[raw_id], reasons={raw_id: "asked for exports"},
-        total_items=1, labels={raw_id: "2026-08-25 · Flipkart — Renewal call"},
+        total_items=1, labels={raw_id: "2026-08-25 · Nimbusco — Renewal call"},
     )
     window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
     out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
     assert raw_id not in out["answer"]
-    assert "2026-08-25 · Flipkart — Renewal call" in out["answer"]
+    assert "2026-08-25 · Nimbusco — Renewal call" in out["answer"]
     assert out["citations"] == [
-        {"source": "2026-08-25 · Flipkart — Renewal call",
+        {"source": "2026-08-25 · Nimbusco — Renewal call",
          "evidence": "asked for exports"},
     ]
 
@@ -1293,14 +1293,14 @@ def test_voc_calls_spec_render_label_is_date_account_title():
     `app.call_index.IndexedCall.render()`'s "date · account — title" shape —
     the SAME listing format a "which calls" answer already shows — reused
     rather than reinvented."""
-    # Two Flipkart participants outnumber the one Sprntly rep, so
-    # `derive_account`'s most-common-domain tie-break picks Flipkart
+    # Two Nimbusco participants outnumber the one Sprntly rep, so
+    # `derive_account`'s most-common-domain tie-break picks Nimbusco
     # deterministically rather than depending on dict/set iteration order.
     call = CallTranscript(
         external_id="c1", title="Renewal call", date="2026-08-25T10:00:00",
-        participants=["jane@flipkart.com", "amit@flipkart.com", "rep@sprntly.ai"],
+        participants=["jane@nimbusco.com", "amit@nimbusco.com", "rep@sprntly.ai"],
     )
-    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Flipkart — Renewal call"
+    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Nimbusco — Renewal call"
 
 
 def test_voc_calls_spec_render_label_omits_account_when_undeterminable():
@@ -1316,8 +1316,8 @@ def test_voc_calls_spec_render_label_omits_account_when_undeterminable():
 
 def test_voc_calls_spec_render_label_untitled_call():
     call = CallTranscript(external_id="c1", title="", date="2026-08-25",
-                          participants=["jane@flipkart.com"])
-    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Flipkart — (untitled)"
+                          participants=["jane@nimbusco.com"])
+    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Nimbusco — (untitled)"
 
 
 def test_voc_calls_spec_phase_label_is_not_a_reportphase_value():
@@ -1367,7 +1367,7 @@ def test_prefilter_drops_fully_internal_call_from_the_classification_pool(monkey
     )
     external = CallTranscript(
         external_id="c-external", title="QBR", date="2026-08-21",
-        participants=["rep@sprntly.ai", "jane@flipkart.com"],
+        participants=["rep@sprntly.ai", "jane@nimbusco.com"],
     )
     pool = cd._voc_count_prefilter([internal, external], "co")
     kept_ids = {cd.VOC_CALLS_SPEC.item_id(it) for it in pool}
@@ -1382,14 +1382,14 @@ def test_prefilter_wraps_surviving_calls_with_own_domains_and_account(monkeypatc
     calls = [
         CallTranscript(
             external_id="c1", title="QBR", date="2026-08-21",
-            participants=["rep@sprntly.ai", "jane@flipkart.com"],
+            participants=["rep@sprntly.ai", "jane@nimbusco.com"],
         ),
     ]
     pool = cd._voc_count_prefilter(calls, "co")
     assert len(pool) == 1
     wrapped = pool[0]
     assert isinstance(wrapped, cd._VocAnnotatedCall)
-    assert wrapped.account == "Flipkart"
+    assert wrapped.account == "Nimbusco"
     assert "sprntly.ai" in wrapped.own_domains
 
 
@@ -1412,7 +1412,7 @@ def test_engine_run_never_shows_the_internal_call_id_to_the_model_and_never_coun
     )
     external = CallTranscript(
         external_id="c-external", title="QBR", date="2026-08-21",
-        participants=["rep@sprntly.ai", "jane@flipkart.com"],
+        participants=["rep@sprntly.ai", "jane@nimbusco.com"],
     )
     seen_ids: set[str] = set()
 
@@ -1445,12 +1445,12 @@ def test_render_item_annotates_participant_sides_for_the_classifier(monkeypatch)
     )
     call = CallTranscript(
         external_id="c1", title="Renewal", date="2026-08-20",
-        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+        participants=["jordan@sprntly.ai", "priya@nimbusco.com"],
     )
     pool = cd._voc_count_prefilter([call], "co")
     rendered = cd.VOC_CALLS_SPEC.render_item(pool[0])
     assert "company-side (never the customer): jordan@sprntly.ai" in rendered
-    assert "external customer/prospect (account: Flipkart): priya@flipkart.com" in rendered
+    assert "external customer/prospect (account: Nimbusco): priya@nimbusco.com" in rendered
 
 
 def test_render_item_on_a_bare_call_bypassing_the_prefilter_carries_no_annotation():
@@ -1459,7 +1459,7 @@ def test_render_item_on_a_bare_call_bypassing_the_prefilter_carries_no_annotatio
     since there is no server-computed fact to show."""
     call = CallTranscript(
         external_id="c1", title="Renewal", date="2026-08-20",
-        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+        participants=["jordan@sprntly.ai", "priya@nimbusco.com"],
     )
     rendered = cd.VOC_CALLS_SPEC.render_item(call)
     assert rendered == call.render()
@@ -1482,7 +1482,7 @@ def test_jordan_kim_case_the_classify_prompt_lets_a_faithful_verdict_reject_the_
     )
     call = CallTranscript(
         external_id="c1", title="Renewal", date="2026-08-20",
-        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+        participants=["jordan@sprntly.ai", "priya@nimbusco.com"],
         overview="Jordan walked Priya through the new SSO capability.",
     )
     captured: dict = {}
@@ -1502,7 +1502,7 @@ def test_jordan_kim_case_the_classify_prompt_lets_a_faithful_verdict_reject_the_
         window=SimpleNamespace(label="last 7 days"), items=[call],
     )
     assert "company-side (never the customer): jordan@sprntly.ai" in captured["input"]
-    assert "external customer/prospect (account: Flipkart): priya@flipkart.com" in captured["input"]
+    assert "external customer/prospect (account: Nimbusco): priya@nimbusco.com" in captured["input"]
     assert eng.count == 0
     assert "c1" not in eng.hit_ids
 
