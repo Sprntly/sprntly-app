@@ -18,14 +18,24 @@ to the live gate capacity minus one) so a single big count question can never
 occupy every shared slot in the process — every other in-flight interactive
 call always keeps at least one slot to run on.
 
-`fetch`/`render_item`/`item_id`/`rubric_system`/`verdict_schema` are the only
-domain-specific pieces of a `CorpusMapReduceSpec`. Everything else — batching,
-concurrency, the id-tagging each item gets in its rendered block, the
-cross-batch guard, the reduce, and the unclassified accounting — lives here
-once. A `verdict_schema` MUST shape its structured response as
+`fetch`/`render_item`/`item_id`/`base_discipline`/`criterion`/`verdict_schema`
+are the only domain-specific pieces of a `CorpusMapReduceSpec`. Everything
+else — batching, concurrency, the id-tagging each item gets in its rendered
+block, the cross-batch guard, the reduce, and the unclassified accounting —
+lives here once. A `verdict_schema` MUST shape its structured response as
 `{"verdicts": {<item_id>: {"hit": bool, "reason": str, ...}}}` — the engine
 reads exactly `hit` and `reason` off each entry; a domain schema may carry
 additional fields for its own use (e.g. a theme tag) without the engine caring.
+
+The per-item map system is `base_discipline + criterion`, composed fresh for
+every `run()`: `base_discipline` is the domain's structural guards that ALWAYS
+apply and are NEVER caller-overridable (e.g. "only a real external
+customer/prospect counts"); `criterion` is the classification bar — the
+definitional, per-query part — and a caller's `constraints["criterion"]`
+REPLACES the spec's own default criterion for that one call when supplied
+(see `_resolve_criterion`). This keeps "what always guards the count" and
+"what the count is actually counting" as two separately-owned pieces, so a
+caller can redefine the second without ever being able to relax the first.
 """
 from __future__ import annotations
 
@@ -72,13 +82,28 @@ class CorpusMapReduceSpec:
     #: `(item) -> str` — the item's stable identifier (must be unique within
     #: the fetched corpus).
     item_id: Callable[[Any], str]
-    #: The classification bar — a system prompt telling the model exactly
-    #: what counts as a "hit" for this domain, one call per batch.
-    rubric_system: str
+    #: The structural guards that ALWAYS apply for this domain, regardless of
+    #: any caller-supplied criterion — e.g. scope/external-participant/
+    #: actively-raised discipline. Composed as the FIRST half of every map
+    #: call's system prompt (see module docstring); never replaced by
+    #: `constraints["criterion"]`, only `criterion` below is.
+    base_discipline: str
+    #: The domain's SENSIBLE DEFAULT classification bar — what counts as a
+    #: "hit" once `base_discipline` already holds. A caller's
+    #: `constraints["criterion"]` (see `run()`) REPLACES this text for one
+    #: query; when absent, this default is used and `base_discipline` is
+    #: unaffected either way.
+    criterion: str
     #: The structured-output schema for one map call. See the module
     #: docstring's response-shape contract.
     verdict_schema: dict
     batch_size: int = _DEFAULT_BATCH_SIZE
+    #: The map call's model. `None` (default) resolves to `app.llm.FAST_MODEL`
+    #: at call time — cheap domains keep the default; a domain needing
+    #: stronger comprehension (see `call_digest.VOC_CALLS_SPEC`, which sets
+    #: this to the same Sonnet constant the answer/report synthesis calls
+    #: use) overrides explicitly.
+    map_model: Optional[str] = None
 
 
 @dataclass
@@ -127,6 +152,26 @@ def _render_batch(spec: CorpusMapReduceSpec, batch: list) -> str:
     )
 
 
+def _resolve_criterion(spec: CorpusMapReduceSpec, constraints: Optional[dict]) -> str:
+    """A caller-supplied `constraints["criterion"]` REPLACES the spec's own
+    default `criterion` for this one query; absent (or not a non-empty
+    string) falls back to the spec's default. Only this half is ever
+    caller-overridable — `spec.base_discipline`'s structural guards are
+    composed in unconditionally by `_composed_system`, in BOTH cases."""
+    if isinstance(constraints, dict):
+        raw = constraints.get("criterion")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return spec.criterion
+
+
+def _composed_system(spec: CorpusMapReduceSpec, constraints: Optional[dict]) -> str:
+    """The per-item map system: `spec.base_discipline` (always applied) +
+    the resolved criterion (the spec's own default, or a caller-supplied
+    `constraints["criterion"]` when one is present). See module docstring."""
+    return f"{spec.base_discipline}\n\n{_resolve_criterion(spec, constraints)}"
+
+
 def _map_batch(
     spec: CorpusMapReduceSpec,
     *,
@@ -134,14 +179,20 @@ def _map_batch(
     batch: list,
     enterprise_id: str,
     sem: threading.Semaphore,
+    system: str,
+    model: str,
 ) -> dict:
     """One batch's classification call. Runs on a worker thread (dispatched
     via `asyncio.to_thread` by `run()`) — `sem.acquire()` blocks that thread,
     never an event loop, the same pattern `app.llm._llm_gate` itself relies
     on. Telemetered via `app.graph.gateway.llm_call` (NOT the bare
     `app.llm.call_json`) so usage lands in `llm_usage_events` like every other
-    interactive call."""
-    from app import llm
+    interactive call.
+
+    `system` and `model` are resolved ONCE by `run()` (the composed
+    base_discipline+criterion, and the spec's `map_model` or the default fast
+    model) and passed down identically to every batch of the same run — never
+    recomputed per batch."""
     from app.graph.gateway import llm_call
 
     ids_in_batch = ", ".join(spec.item_id(it) for it in batch)
@@ -156,10 +207,10 @@ def _map_batch(
             enterprise_id=enterprise_id,
             agent="qa",
             purpose=f"{spec.domain}_map_s{idx}",
-            system=spec.rubric_system,
+            system=system,
             input=user,
             prompt_version=f"corpus-mapreduce-{spec.domain}-v1",
-            model=llm.FAST_MODEL,
+            model=model,
             json_schema=spec.verdict_schema,
             max_tokens=_MAP_MAX_TOKENS,
             # Pinned deterministic: an unpinned map call showed run-to-run
@@ -210,6 +261,15 @@ def run(
 
     emit_report_phase(on_phase, ReportPhase.ANALYZING)
 
+    # Resolved ONCE per run, identical across every batch: the composed
+    # system (base_discipline + the resolved criterion — the spec's default,
+    # or a caller-supplied constraints["criterion"]) and the map model (the
+    # spec's own override, or app.llm.FAST_MODEL).
+    from app import llm as llm_module
+
+    system = _composed_system(spec, constraints)
+    map_model = spec.map_model or llm_module.FAST_MODEL
+
     cap = min(_local_fanout_cap(), len(batches)) or 1
     sem = threading.Semaphore(cap)
 
@@ -218,6 +278,7 @@ def run(
             asyncio.to_thread(
                 _map_batch, spec, idx=idx, batch=batch,
                 enterprise_id=enterprise_id, sem=sem,
+                system=system, model=map_model,
             )
             for idx, batch in enumerate(batches)
         ])

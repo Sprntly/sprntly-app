@@ -34,7 +34,8 @@ def _spec(**overrides) -> cmr.CorpusMapReduceSpec:
         fetch=lambda *a, **k: [],
         render_item=lambda it: it.text,
         item_id=lambda it: it.id,
-        rubric_system="RUBRIC",
+        base_discipline="BASE",
+        criterion="CRIT",
         verdict_schema={"type": "object"},
         batch_size=10,
     )
@@ -42,11 +43,11 @@ def _spec(**overrides) -> cmr.CorpusMapReduceSpec:
     return cmr.CorpusMapReduceSpec(**kw)
 
 
-def _run(spec, items, monkeypatch, fake_llm, on_phase=None):
+def _run(spec, items, monkeypatch, fake_llm, on_phase=None, constraints=None):
     monkeypatch.setattr(gateway_mod, "llm_call", fake_llm)
     return cmr.run(
         spec, enterprise_id="ent-A", question="how many calls raised X",
-        window=SimpleNamespace(label="last 7 days"), constraints=None,
+        window=SimpleNamespace(label="last 7 days"), constraints=constraints,
         on_phase=on_phase, items=items,
     )
 
@@ -243,7 +244,8 @@ def test_map_routes_through_gateway_llm_call_with_expected_kwargs(monkeypatch):
     assert kw["purpose"] == "voc_calls_map_s0"
     assert kw["model"] == llm_module.FAST_MODEL
     assert kw["json_schema"] == spec.verdict_schema
-    assert kw["system"] == spec.rubric_system
+    assert kw["system"] == cmr._composed_system(spec, None)
+    assert kw["system"] == f"{spec.base_discipline}\n\n{spec.criterion}"
     assert kw["enterprise_id"] == "ent-A"
     assert kw["agent"] == "qa"
     # Every item's id is tagged in the rendered input the model sees.
@@ -333,3 +335,76 @@ def test_local_fanout_cap_bounds_concurrent_map_calls(monkeypatch):
     _run(spec, items, monkeypatch, _slow_llm)
     assert max_active <= 5
     assert max_active == 5  # real concurrency happened, bounded exactly at the cap
+
+
+# ── map_model ─────────────────────────────────────────────────────────────
+
+def test_map_model_default_is_fast_model_when_spec_carries_no_override(monkeypatch):
+    captured: list[dict] = []
+
+    def _capture(**kw):
+        captured.append(kw)
+        return SimpleNamespace(output={"verdicts": {}}, stop_reason="end_turn")
+
+    items = _items(2)
+    spec = _spec()  # no map_model override
+    assert spec.map_model is None
+    _run(spec, items, monkeypatch, _capture)
+    assert captured[0]["model"] == llm_module.FAST_MODEL
+
+
+def test_map_model_override_is_honoured_over_the_default(monkeypatch):
+    captured: list[dict] = []
+
+    def _capture(**kw):
+        captured.append(kw)
+        return SimpleNamespace(output={"verdicts": {}}, stop_reason="end_turn")
+
+    items = _items(2)
+    spec = _spec(map_model="claude-sonnet-4-6")
+    _run(spec, items, monkeypatch, _capture)
+    assert captured[0]["model"] == "claude-sonnet-4-6"
+    assert captured[0]["model"] != llm_module.FAST_MODEL
+
+
+# ── criterion composition (base_discipline + criterion) ─────────────────────
+
+def test_composed_system_is_base_discipline_then_default_criterion_when_absent():
+    spec = _spec(base_discipline="BASE", criterion="DEFAULT-CRIT")
+    assert cmr._composed_system(spec, None) == "BASE\n\nDEFAULT-CRIT"
+    assert cmr._composed_system(spec, {}) == "BASE\n\nDEFAULT-CRIT"
+
+
+def test_supplied_criterion_replaces_the_default_in_the_composed_system():
+    spec = _spec(base_discipline="BASE", criterion="DEFAULT-CRIT")
+    composed = cmr._composed_system(spec, {"criterion": "CUSTOM BAR"})
+    assert composed == "BASE\n\nCUSTOM BAR"
+    assert "DEFAULT-CRIT" not in composed
+
+
+def test_base_discipline_guards_present_in_both_default_and_overridden_cases():
+    spec = _spec(base_discipline="BASE-GUARD", criterion="DEFAULT-CRIT")
+    default_composed = cmr._composed_system(spec, None)
+    overridden_composed = cmr._composed_system(spec, {"criterion": "CUSTOM BAR"})
+    assert "BASE-GUARD" in default_composed
+    assert "BASE-GUARD" in overridden_composed
+
+
+def test_blank_or_non_string_criterion_falls_back_to_the_default():
+    spec = _spec(base_discipline="BASE", criterion="DEFAULT-CRIT")
+    for bad in ("", "   ", None, 5, [], {}):
+        assert cmr._composed_system(spec, {"criterion": bad}) == "BASE\n\nDEFAULT-CRIT"
+
+
+def test_map_call_uses_the_composed_system_including_a_supplied_criterion(monkeypatch):
+    captured: list[dict] = []
+
+    def _capture(**kw):
+        captured.append(kw)
+        return SimpleNamespace(output={"verdicts": {}}, stop_reason="end_turn")
+
+    items = _items(2)
+    spec = _spec(base_discipline="BASE-GUARD", criterion="DEFAULT-CRIT")
+    _run(spec, items, monkeypatch, _capture, constraints={"criterion": "CUSTOM BAR"})
+    assert captured[0]["system"] == "BASE-GUARD\n\nCUSTOM BAR"
+    assert "DEFAULT-CRIT" not in captured[0]["system"]

@@ -46,7 +46,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Callable
+from typing import Callable, Optional
 
 from app.config import settings
 from app.corpus_mapreduce import CorpusMapReduceSpec
@@ -1618,12 +1618,22 @@ def _ensure_answer(payload: dict, result, window: "Window") -> dict:
 # `len(hit_ids)` count structurally cannot disagree with its own enumerated
 # evidence the way a model-narrated aggregate can.
 
-_VOC_COUNT_RUBRIC = (
+# Split from the original single `_VOC_COUNT_RUBRIC` string into two pieces
+# `app.corpus_mapreduce.CorpusMapReduceSpec` composes together (base_discipline
+# + criterion, see that module's docstring): `_VOC_BASE_DISCIPLINE` is the
+# structural guard the engine NEVER lets a caller relax (scope/external-
+# participant/actively-raised — the vendor-buyer/internal/demo exclusions);
+# `_VOC_DEFAULT_CRITERION` is the classification bar itself — WHICH content
+# counts as a hit — and is the one half a caller's `constraints["criterion"]`
+# may replace per query, so "what counts as a product ask" is no longer
+# hardcoded to one phrasing (see `_assemble_count_answer`'s stated-assumption
+# line for how the answer discloses which bar it actually used).
+_VOC_BASE_DISCIPLINE = (
     "You are reviewing a batch of customer calls for Sprntly, a "
     "product-planning tool. For EACH call in the batch (identified by its "
-    "id), decide whether it raised a PRODUCT FEATURE REQUEST or a PRODUCT "
-    "ISSUE.\n"
-    "A hit requires ALL THREE of the following to be true:\n"
+    "id), decide whether it meets the classification bar below.\n"
+    "A hit requires ALL THREE of the following structural conditions to be "
+    "true, checked BEFORE the classification bar is ever considered:\n"
     "1. SCOPE — the ask/issue was raised by the CUSTOMER or PROSPECT side of "
     "the call, the buying party. It was NOT raised by the reviewed "
     "company's own employees or team, and it is NOT the reviewed company "
@@ -1639,15 +1649,7 @@ _VOC_COUNT_RUBRIC = (
     "own rep pitched, demoed, or described — where the customer only "
     "watched, listened, gave background, or acknowledged it without asking "
     "for it themselves — is never a hit.\n"
-    "Only once all three hold do the content rules below apply:\n"
-    "- A FEATURE REQUEST is an explicit ask for new functionality, an "
-    "integration, an export/import capability, or a change to how the "
-    "product works.\n"
-    "- A PRODUCT ISSUE is a bug, a crash, a broken/missing capability, or "
-    "something that doesn't work as expected.\n"
-    "- Routine scheduling, pricing/contract discussion, relationship/status "
-    "check-ins, and generic \"things are going well\" commentary do NOT "
-    "count, even if the call also has other content.\n"
+    "Only once all three hold does the classification bar below apply.\n"
     "Return a verdict for EVERY call id shown to you — never omit one and "
     "never invent an id that was not shown. For a call that meets the bar, "
     "hit=true and reason is a one-line grounded quote or close paraphrase of "
@@ -1656,6 +1658,23 @@ _VOC_COUNT_RUBRIC = (
     "purely relationship/scheduling, internal-only, a vendor-buyer "
     "inversion, or rep-pitched/demo-only with no customer-raised ask gets "
     "hit=false."
+)
+
+#: The domain's SENSIBLE DEFAULT classification bar — used whenever a query
+#: carries no `constraints["criterion"]`. A caller-supplied criterion
+#: replaces this text for one query; `_VOC_BASE_DISCIPLINE` above is
+#: unaffected either way (see `app.corpus_mapreduce`'s composition contract).
+_VOC_DEFAULT_CRITERION = (
+    "COUNT A CALL AS A HIT WHEN it raised a PRODUCT FEATURE REQUEST or a "
+    "PRODUCT ISSUE:\n"
+    "- A FEATURE REQUEST is an explicit ask for new functionality, an "
+    "integration, an export/import capability, or a change to how the "
+    "product works.\n"
+    "- A PRODUCT ISSUE is a bug, a crash, a broken/missing capability, or "
+    "something that doesn't work as expected.\n"
+    "- Routine scheduling, pricing/contract discussion, relationship/status "
+    "check-ins, and generic \"things are going well\" commentary do NOT "
+    "count, even if the call also has other content."
 )
 
 #: See `app.corpus_mapreduce`'s module docstring for the response-shape
@@ -1699,21 +1718,62 @@ VOC_CALLS_SPEC = CorpusMapReduceSpec(
     fetch=_voc_count_fetch,
     render_item=lambda call: call.render(),
     item_id=lambda call: call.external_id,
-    rubric_system=_VOC_COUNT_RUBRIC,
+    base_discipline=_VOC_BASE_DISCIPLINE,
+    criterion=_VOC_DEFAULT_CRITERION,
     verdict_schema=_VOC_COUNT_VERDICT_SCHEMA,
+    # Sonnet, not the engine's default FAST_MODEL (Haiku): real-corpus
+    # accuracy verification found Haiku plateaus at precision 0.71-0.78 /
+    # recall 0.42-0.58 even on the patched rubric, with a name vendor-buyer
+    # inversion (a call where THIS company is the buyer, not the customer)
+    # still misread in every run — Sonnet cleared it (precision 0.90-1.00,
+    # recall 0.75-0.83) at ~3x the cost and ~1.7x the latency of an already
+    # cheap, already fast per-run classification pass (well under the
+    # interactive path; this runs as a background pass either way). Same
+    # Sonnet constant `ANSWER_MODEL` above (and qa_agent's own identically-
+    # valued `ANSWER_MODEL`) already use for this module's synthesis calls.
+    map_model=ANSWER_MODEL,
 )
 
 
-def _assemble_count_answer(eng, *, window: "Window", source_line: str) -> dict:
+#: The stated assumption when no `constraints["criterion"]` was supplied —
+#: names the default bar in plain language so a bare count is never a silent
+#: unilateral reading (see `_count_assumption_line`).
+_VOC_DEFAULT_ASSUMPTION_LINE = (
+    "Counted calls where a customer actively asked for a feature or raised "
+    "an issue (compliance/hosting requirements not counted)."
+)
+
+
+def _count_assumption_line(criterion: Optional[str]) -> str:
+    """One clean sentence stating the interpretation the count used —
+    `_VOC_DEFAULT_ASSUMPTION_LINE` when the caller supplied none, or the
+    caller's own `constraints["criterion"]` named back verbatim when one was
+    given. Never a silent unilateral reading: the answer always says which
+    bar it counted against, in both cases."""
+    if isinstance(criterion, str) and criterion.strip():
+        return f'Counted calls matching your stated criterion: "{criterion.strip()}".'
+    return _VOC_DEFAULT_ASSUMPTION_LINE
+
+
+def _assemble_count_answer(
+    eng, *, window: "Window", source_line: str, criterion: Optional[str] = None,
+) -> dict:
     """The `EngineResult` -> Ask-shaped payload, matching `_answer_query`'s
     response contract exactly (same field set, same `_skill`/`_skill_action`/
     `_skill_source` mechanism) so the chat surface renders it identically.
     The count and the call list are Python values off `eng`, never model
     prose — reuses the SAME coverage banner (`source_line`) the query/report
-    passes print, so this answer discloses what it read just as loudly."""
+    passes print, so this answer discloses what it read just as loudly.
+
+    `criterion` is the resolved `constraints["criterion"]` the engine actually
+    classified against (or None when the default was used) — see
+    `_count_assumption_line`: the answer always states which bar it counted
+    under, so the user can correct it in one turn instead of distrusting an
+    unexplained number."""
     lines = [source_line, "",
              f"{eng.count} of {eng.total_items} calls in {window.label} "
-             "matched."]
+             "matched.",
+             _count_assumption_line(criterion)]
     if eng.hit_ids:
         lines.append("")
         for item_id in eng.hit_ids:
@@ -2155,6 +2215,10 @@ def answer(
                 )
                 return _assemble_count_answer(
                     eng, window=window, source_line=source_line,
+                    criterion=(
+                        constraints.get("criterion")
+                        if isinstance(constraints, dict) else None
+                    ),
                 )
             except Exception:  # noqa: BLE001 — degrade to the query path, never a dead end
                 logger.exception(

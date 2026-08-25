@@ -1138,6 +1138,70 @@ def test_assemble_count_answer_matches_query_path_response_contract():
     assert out["_skill_source"] == "voc-count-engine"
 
 
+# ── map_model — VOC_CALLS_SPEC uses the Sonnet constant ──────────────────────
+
+def test_voc_calls_spec_map_model_is_the_sonnet_constant():
+    """Real-corpus accuracy verification found Haiku plateaus at precision
+    0.71-0.78 / recall 0.42-0.58 even on the patched rubric — Sonnet cleared
+    it (0.90-1.00 / 0.75-0.83). `VOC_CALLS_SPEC.map_model` must be the SAME
+    Sonnet constant this module's own synthesis calls use, never a
+    second, independently-drifting copy of the model string."""
+    assert cd.VOC_CALLS_SPEC.map_model == cd.ANSWER_MODEL
+    assert cd.VOC_CALLS_SPEC.map_model == "claude-sonnet-4-6"
+
+
+# ── stated assumption — never a silent unilateral reading ───────────────────
+
+def test_assemble_count_answer_states_the_default_assumption_when_no_criterion():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=3, hit_ids=[], reasons={}, total_items=10,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE in out["answer"]
+    assert "actively asked for a feature or raised" in out["answer"]
+    assert "compliance/hosting requirements not counted" in out["answer"]
+
+
+def test_assemble_count_answer_states_a_supplied_criterion_instead_of_the_default():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=3, hit_ids=[], reasons={}, total_items=10,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(
+        eng, window=window, source_line="=== CALLS ===",
+        criterion="asked about pricing changes",
+    )
+    assert "asked about pricing changes" in out["answer"]
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE not in out["answer"]
+
+
+def test_count_engine_call_site_passes_constraints_criterion_to_assemble(monkeypatch):
+    """The `answer()` call site must resolve `constraints["criterion"]` and
+    hand it to `_assemble_count_answer` — not just to the engine — so the
+    stated-assumption sentence reflects what was actually classified against."""
+    import app.corpus_mapreduce as cmr
+
+    monkeypatch.setattr(cd.settings, "voc_count_engine_enabled", True)
+    monkeypatch.setattr(
+        cd, "build_corpus",
+        lambda cid, window: cd.DigestCorpus(status="ok", window=window,
+                                            calls=[_call(1)], text="=== CALLS ==="))
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "x"},
+                           total_items=1, unclassified_ids=[])
+    monkeypatch.setattr(cmr, "run", lambda spec, **kw: eng)
+
+    out = cd.answer(
+        enterprise_id="co",
+        question="how many customers raised billing issues this month",
+        constraints={"criterion": "raised a billing complaint"},
+    )
+    assert "raised a billing complaint" in out["answer"]
+    assert cd._VOC_DEFAULT_ASSUMPTION_LINE not in out["answer"]
+
+
 # ── Zoom as a second live source ─────────────────────────────────────────────
 #
 # The digest fires on generic call/VoC-shaped questions with NO connector name
@@ -2149,42 +2213,88 @@ def test_voc_prompt_lengths_within_bounds():
 # above are pinned — a rewrite that silently drops a guard clause fails here
 # even though it can't fail a live-model accuracy check in CI.
 
-def test_rubric_states_the_vendor_buyer_scope_guard():
-    s = cd._VOC_COUNT_RUBRIC
+def test_base_discipline_states_the_vendor_buyer_scope_guard():
+    s = cd._VOC_BASE_DISCIPLINE
     assert "OWN vendor" in s or "own vendor" in s.lower()
     assert "buying party" in s or "buying" in s.lower()
 
 
-def test_rubric_states_the_internal_only_exclusion():
-    s = cd._VOC_COUNT_RUBRIC
+def test_base_discipline_states_the_internal_only_exclusion():
+    s = cd._VOC_BASE_DISCIPLINE
     assert "internal-only" in s.lower()
     assert "external customer" in s.lower() or "external" in s.lower()
 
 
-def test_rubric_states_the_demo_pitch_exclusion():
-    s = cd._VOC_COUNT_RUBRIC
+def test_base_discipline_states_the_demo_pitch_exclusion():
+    s = cd._VOC_BASE_DISCIPLINE
     low = s.lower()
     assert "pitch" in low or "demo" in low
     assert "watched" in low or "acknowledged" in low
 
 
-def test_rubric_still_states_the_original_content_rules():
-    """The scope guard is additive — the pre-existing feature/issue
-    definitions and the routine-scheduling exclusion must survive."""
-    s = cd._VOC_COUNT_RUBRIC
+def test_default_criterion_still_states_the_original_content_rules():
+    """The scope guard split is additive — the pre-existing feature/issue
+    definitions and the routine-scheduling exclusion must survive, now on
+    `_VOC_DEFAULT_CRITERION` rather than the old single-string rubric."""
+    s = cd._VOC_DEFAULT_CRITERION
     assert "explicit ask for new functionality" in s
     assert "bug, a crash" in s
     assert "Routine scheduling" in s
+
+
+def test_base_discipline_still_states_the_output_format_instructions():
+    s = cd._VOC_BASE_DISCIPLINE
     assert "never invent an id" in s
 
 
-def test_rubric_length_within_bounds():
-    # Guards against both an accidental truncation and an unbounded rewrite.
-    assert 900 <= len(cd._VOC_COUNT_RUBRIC) <= 2600
+def test_base_discipline_and_default_criterion_length_within_bounds():
+    # Guards against both an accidental truncation and an unbounded rewrite —
+    # same combined-length bound the old single-string rubric had.
+    combined = len(cd._VOC_BASE_DISCIPLINE) + len(cd._VOC_DEFAULT_CRITERION)
+    assert 900 <= combined <= 2600
+
+
+def test_voc_calls_spec_composes_base_discipline_and_default_criterion():
+    """`VOC_CALLS_SPEC` carries the two pieces the engine composes together —
+    pins the wiring between call_digest's constants and the spec, independent
+    of the engine's own composition-order test in test_corpus_mapreduce.py."""
+    assert cd.VOC_CALLS_SPEC.base_discipline == cd._VOC_BASE_DISCIPLINE
+    assert cd.VOC_CALLS_SPEC.criterion == cd._VOC_DEFAULT_CRITERION
+
+
+# ── engine-local caching finding — the composed rubric is below the floor ───
+# `app.llm._build_base_kwargs` already attaches `cache_control` to `system`
+# automatically WHENEVER it clears the acting model's own cacheable floor
+# (`app.llm._is_cacheable` / `_MIN_CACHEABLE_TOKENS`, pinned by
+# `tests/test_llm_cache_tiers.py`) — no per-call plumbing is needed for that
+# mechanism to fire. What this test proves is the honest, measured state for
+# VOC_CALLS_SPEC specifically: its composed base_discipline+criterion, even on
+# the Sonnet map model, sits BELOW that floor — so attaching cache_control to
+# it would be exactly the "dead breakpoint" `_is_cacheable`'s own docstring
+# warns against (an ephemeral write that Anthropic's API will not actually
+# fill, silently misreporting "we cache here" in the telemetry). There is also
+# no caller-facing lever on `app.graph.gateway.llm_call` to force the `ttl:1h`
+# tier at all (`_cache_ttl_for` derives it solely from a `skill` allowlist
+# built for the top-insights case, not a general override) — using it here
+# would mean either faking an unrelated "skill" id or bypassing the gateway
+# (both explicitly out of bounds). See the build report for the full
+# reasoning; this is a mutation-provable pin, not a wiring gap: if the rubric
+# ever grows past the floor (e.g. a future domain reuses this engine with a
+# longer method block), this test goes RED and the caching lever becomes live
+# with zero further plumbing.
+
+def test_composed_voc_rubric_is_below_the_cacheable_floor_on_sonnet():
+    from app import llm
+
+    composed = f"{cd._VOC_BASE_DISCIPLINE}\n\n{cd._VOC_DEFAULT_CRITERION}"
+    assert not llm._is_cacheable(composed, cd.VOC_CALLS_SPEC.map_model)
+    floor_chars = llm._MIN_CACHEABLE_TOKENS[cd.VOC_CALLS_SPEC.map_model] * llm._CHARS_PER_TOKEN
+    assert len(composed) < floor_chars
 
 
 # ── count-engine rubric — fixture-driven wiring pins ─────────────────────────
-# These run the REAL `VOC_CALLS_SPEC` (real rubric_system + verdict_schema)
+# These run the REAL `VOC_CALLS_SPEC` (real base_discipline+criterion +
+# verdict_schema)
 # through the REAL `app.corpus_mapreduce.run`, with `app.graph.gateway.llm_call`
 # faked. The fake's verdict per fixture encodes the INTENDED behavior of the
 # new rubric (what a model correctly applying the scope guard above should
