@@ -3966,10 +3966,23 @@ export function ChatScreen() {
   // trailing blockquote (appended in the engine's handleComposerSubmit via the
   // `quote` seam) — quoting is a way to point at a sentence, not a second send
   // button, so nothing is dispatched here.
+  //
+  // The focus is DEFERRED A FRAME, and that is the whole of it: this runs
+  // inside the toolbar button's click handler, which is not a safe moment to
+  // put a caret anywhere. React has not committed `setQuote` yet, so the
+  // composer on screen is not the one being focused; and the caller's very
+  // next statement is `window.getSelection().removeAllRanges()` — clearing the
+  // document selection immediately after a focus, which on the engines that
+  // model an input's caret as part of that selection takes the caret straight
+  // back out. Either way the field looked focused and swallowed the first
+  // thing typed into it. `focusComposerNextFrame` runs after the click handler
+  // has finished and after the commit, which is the same moment the document
+  // quote's own focus already happens from (it focuses from an effect, which
+  // is why THAT path never had this bug).
   const handleQuoteSelection = useCallback((text: string) => {
     setQuote(text)
-    composerRef.current?.focus()
-  }, [composerRef])
+    focusComposerNextFrame()
+  }, [focusComposerNextFrame])
 
   // ── Copy a past prompt ────────────────────────────────────────────────────
   // The WORDS, not the wire form: a message that quoted a passage stores it as
