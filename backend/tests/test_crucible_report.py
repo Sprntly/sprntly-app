@@ -566,3 +566,161 @@ def test_clipping_never_emits_a_half_escaped_entity():
         out = r._esc_clipped('"' * 50, n)
         assert len(out) <= n
         assert "&" not in out or out.count("&") == out.count(";")
+
+
+# ── The report must not claim more than the run established ──────────────────
+
+def test_an_unsized_top_finding_is_not_called_the_largest():
+    """THE SUPERLATIVE HAS TO BE EARNED.
+
+    `_rank` orders by size then confidence, and its size term is constant when
+    nothing could be sized — so on a corpus with no account attribution the
+    order collapses onto the confidence tie-break. Calling row one "the largest
+    thing this reading found" then asserts a comparison that was never made,
+    and the reader can see it is false: the observed report named a 5-claim
+    finding largest with a 27-claim one below it.
+    """
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2", "c3", "c4"]),
+    ])
+    assert "largest thing this reading found" not in html
+    # And it says what IS true of the order. NOT "arbitrary": with every value
+    # None the sort key is (1, 1, -confidence), so the order is strictly
+    # confidence-descending — a real ordering, just not the one the heading
+    # used to imply.
+    assert "ordered by confidence rather than by size" in html
+    assert "Nothing in this reading could be sized" in html
+
+
+def test_a_sized_top_finding_still_says_largest():
+    """The claim is not banned, it is CONDITIONAL. A run that could size its
+    findings has earned the word and keeps it."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=120, claim_ids=["c1"]),
+        _finding(impact_value=10, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+
+
+def test_the_report_says_findings_were_not_filtered_to_the_goal():
+    """The definition gate establishes what the goal means, and claim selection
+    never sees it — `_load_signals` reads the whole corpus and `build_findings`
+    takes no goal argument. A reader cannot tell that from the output, so a run
+    about churn returns receipt-scanning accuracy looking exactly like an
+    answer. Stated, rather than left to be discovered."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html
+
+
+def test_largest_is_not_claimed_while_anything_went_unsized():
+    """"The largest thing this reading found" quantifies over EVERYTHING, and
+    an unsized finding is not a small one — its size is unknown, and an unknown
+    can be bigger. So the superlative is only earned when every row has a size;
+    otherwise the true sentence is the weaker one, about the sized ones."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "largest of the ones that could be sized" in html
+    # And it says HOW MANY it could not size, so "the largest known size" is
+    # something the reader can weigh rather than a hedge they have to trust.
+    assert "One of these could not be sized" in html
+
+
+def test_largest_is_still_claimed_when_everything_was_sized():
+    """The weaker sentence must not swallow the strong one: when every finding
+    has a size, "the largest thing this reading found" is exactly true and
+    saying less than that is its own kind of inaccuracy."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+    assert "largest of the ones that could be sized" not in html
+
+
+def test_the_definition_does_not_claim_to_have_selected_the_findings():
+    """The limits section says findings were NOT filtered or ranked by the
+    definition. This section used to say "everything below is measured against
+    that sentence and nothing else" — the same document asserting both, with
+    the false one three sections higher and in the more prominent position."""
+    html = render_report_html(_run(), [_finding()], plan=_full_plan())
+    assert "measured against that sentence" not in html
+    assert "did not decide which findings appear below" in html
+    # Both halves in one document, and they must not contradict.
+    assert "not selected for your goal" in html
+
+
+def test_the_overflow_line_does_not_invent_a_reach_ranking():
+    """The overflow paragraph called the remainder "ranked lower by reach"
+    unconditionally — directly under a lede that, on an all-unsized run, had
+    just said nothing here could be sized at all."""
+    findings = [
+        _finding(impact_value=None, claim_ids=[f"c{i}"]) for i in range(200)
+    ]
+    html = render_report_html(_run(), findings)
+    assert "The next" in html, "expected the overflow paragraph to render"
+    assert "rank lower by reach" not in html
+    assert "not by size, which nothing here had" in html
+
+
+def test_two_conflicts_are_not_described_as_ordered_regardless_of_size():
+    """The rule is "a conflict outranks everything that is not one", NOT "this
+    row is first regardless of size". With two conflicts `_rank` orders them
+    against EACH OTHER by size, so the row that surfaces is the largest
+    conflict and size did decide which — and the old wording told the reader
+    the ordering carried less information than it actually does."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=900, claim_ids=["c1"]),
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "regardless of size" not in html
+    assert "placed above every finding that is not one" in html
+
+
+def test_a_conflict_placed_first_is_not_called_the_largest_either():
+    """`_rank`'s DOMINANT term is `0 if conflict else 1` — an authoritative
+    disagreement outranks every finding that is not one. The first version of
+    this fix knew only about the size term, so a conflict-led run announced its
+    top row as the largest thing found with a bigger finding directly beneath
+    it."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=900, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "placed first because two sources" in html
+    assert "placed above every finding that is not one" in html
+
+
+def test_an_unsized_top_above_sized_findings_does_not_deny_the_sizes():
+    """The unsized sentence quantifies over EVERY finding, so gating it on the
+    top row's own value made a document say "nothing here could be sized" with
+    412 accounts rendered on the row below."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=None, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=412, claim_ids=["c2"]),
+    ])
+    assert "Nothing in this reading could be sized" not in html
+    assert "not ordered by size at all" not in html
+
+
+def test_the_findings_heading_agrees_with_the_headline():
+    """One document read "not ordered by size at all" and, two lines later,
+    "Ranked by reach — how many accounts each theme touches"."""
+    unsized = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "Ranked by reach" not in unsized
+    assert "Not ranked by reach" in unsized
+    sized = render_report_html(_run(), [_finding(impact_value=7)])
+    assert "Ranked by reach" in sized
+
+
+def test_the_relevance_disclosure_does_not_also_claim_completeness():
+    """The relevance half is true; "every theme is listed" is not — findings
+    are capped, and anecdote/ungroupable/refuted candidates never reach the
+    list. Bundling them would let the false half discredit the true one."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html
+    assert "Every theme in the sources you approved is listed" not in html

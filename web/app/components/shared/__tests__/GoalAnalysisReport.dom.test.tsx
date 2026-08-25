@@ -121,10 +121,23 @@ describe("sizing", () => {
   it("does not size the HEADLINE as zero either", async () => {
     // The headline repeats the leading finding, so it is a second place the
     // same lie can be told — and the more prominent of the two.
+    //
+    // It used to say this by printing "Could not be sized" straight after "It
+    // is the largest thing this reading found:", which is the two halves of
+    // one sentence contradicting each other. The absence is now stated as a
+    // sentence instead of spliced into a superlative — so what this test
+    // guards is the MEANING (no number, and it says the size is unknown), not
+    // the particular words that used to carry it.
     render(<GoalAnalysisReport run={{ ...RUN, findings: [UNSIZED] }} />)
     const headline = screen.getByTestId("goal-headline")
-    expect(headline.textContent).toContain("Could not be sized")
+    // One finding, and it has no size — so the honest sentence is that
+    // nothing in this reading could be sized. What must never appear is a
+    // number, or a superlative resting on one.
+    expect(headline.textContent).toMatch(
+      /nothing in this reading could be sized/i,
+    )
     expect(headline.textContent).not.toMatch(/\b0\b/)
+    expect(headline.textContent).not.toMatch(/largest/i)
     expect(screen.queryByTestId("goal-headline-sized")).toBeNull()
   })
 
@@ -138,6 +151,85 @@ describe("sizing", () => {
     // how "4 accounts" gets read as "worth more points".
     render(<GoalAnalysisReport run={RUN} />)
     expect(screen.getByTestId("goal-report").textContent).toMatch(/reach/i)
+  })
+})
+
+describe("what the ordering is allowed to claim", () => {
+  // THIS PANEL IS THE SECOND RENDERER OF THE SAME REPORT, and it is the one a
+  // reader looks at — `backend/app/crucible/report.py` renders the exported
+  // document. Every rule below exists identically in both, because a fix
+  // applied to one of them leaves the other telling the reader the same
+  // falsehood in a more prominent place.
+  const BIG = { ...SIZED, id: 3, impact_value: 900, claim_ids: ["c9"] }
+
+  it("does not call the top the largest while anything went unsized", () => {
+    // "The largest thing this reading found" quantifies over EVERYTHING, and
+    // an unsized finding is not a small one — its size is unknown, and an
+    // unknown can be bigger.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
+    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
+    expect(note).not.toMatch(/largest thing this reading found/i)
+    expect(note).toMatch(/largest of the ones that could be sized/i)
+    expect(note).toMatch(/One of these could not be sized/i)
+  })
+
+  it("keeps the superlative when every finding was sized", () => {
+    // The weaker sentence must not swallow the strong one: hedging a claim
+    // the run DID establish is its own kind of inaccuracy.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [BIG, SIZED] }} />)
+    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
+    expect(note).toMatch(/largest thing this reading found/i)
+    expect(note).not.toMatch(/could be sized/i)
+  })
+
+  it("does not call a conflict-led run's top row the largest", () => {
+    // `_rank`'s dominant term places an authoritative disagreement above
+    // everything that is not one, so the top row here is a 4-account finding
+    // sitting above a 900-account one.
+    const CONFLICT = { ...SIZED, id: 4, adjudication: "conflict" }
+    render(
+      <GoalAnalysisReport run={{ ...RUN, findings: [CONFLICT, BIG] }} />,
+    )
+    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
+    expect(note).not.toMatch(/largest/i)
+    expect(note).toMatch(/placed above every finding that is not one/i)
+  })
+
+  it("does not claim a reach ranking when nothing could be sized", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [UNSIZED] }} />)
+    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
+    expect(lede).toMatch(/not ranked by reach/i)
+    expect(lede).toMatch(/ordered by confidence/i)
+  })
+
+  it("says how many it could not size when the ranking is partial", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
+    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
+    expect(lede).toMatch(/one of them could not be sized at all/i)
+    expect(lede).toMatch(/its size is unknown, not zero/i)
+  })
+})
+
+describe("what the report admits it did not do", () => {
+  it("says the findings were not selected for the goal", () => {
+    // Claim selection never sees the definition: `build_findings` takes a
+    // `goal_accounts` filter that production does not pass. Unstated, the
+    // panel LOOKS like it answered the question it was asked.
+    render(<GoalAnalysisReport run={RUN} />)
+    const said = screen.getByTestId("goal-not-selected").textContent ?? ""
+    expect(said).toMatch(/not selected for your goal/i)
+    expect(said).toMatch(/filtered or ranked by relevance/i)
+  })
+
+  it("does not also claim the definition chose them", () => {
+    // The two sentences are five sections apart and used to contradict each
+    // other, with the false one in the more prominent position.
+    render(<GoalAnalysisReport run={RUN} />)
+    const report = screen.getByTestId("goal-report").textContent ?? ""
+    expect(report).not.toMatch(/measured against that sentence/i)
+    expect(
+      screen.getByTestId("goal-definition-note").textContent ?? "",
+    ).toMatch(/did not decide which findings appear below/i)
   })
 })
 
