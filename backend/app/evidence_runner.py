@@ -81,6 +81,16 @@ def _run_sync(
         skill="evidence-brief",
         on_delta=on_delta,
         background=background,
+        # `background=True` means pre-generation with nobody waiting — exactly
+        # the precondition for the half-price Batches path — so the two travel
+        # together rather than adding a second flag that could drift from it.
+        # Audited: the only caller that reaches HERE with background=True is
+        # `brief_runner._warm_evidence`. The user-facing path into this function
+        # is `evidence_kg._run_sync_kg`'s corpus fallback, which passes no
+        # `background` at all and so still runs live. A future caller wanting
+        # the low-priority lane WHILE someone waits needs its own flag.
+        batch=background,
+        batch_label="evidence.generate_evidence",
     )
     # Same normalisation as the KG path, so a corpus-grounded brief is stored
     # under exactly the same contract (see app.evidence_html).

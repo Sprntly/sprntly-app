@@ -857,7 +857,8 @@ def run_synthesis(
     brief_theme_ids = [ins.get("theme_id") for ins in insights if ins.get("theme_id")]
     try:
         ideation = sequence_ideation(
-            facade, enterprise_id, exclude_theme_ids=brief_theme_ids)
+            facade, enterprise_id, exclude_theme_ids=brief_theme_ids,
+            batch=batch, batch_deadline_s=batch_deadline_s)
         brief["_ideation_count"] = len(ideation)
     except Exception:  # noqa: BLE001 — ideation is best-effort; brief must survive
         logger.exception("ideation sequencing failed (brief unaffected)")
