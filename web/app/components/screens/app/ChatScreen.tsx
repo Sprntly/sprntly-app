@@ -55,7 +55,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type PersistedTurnReply, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -1291,6 +1291,11 @@ export function ChatScreen() {
             // Carry the file chip (with its storage key) so a reopened import-PRD
             // chat can still render/download the original document.
             ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+            // …and the listing's clickable rows, for the same reason and from
+            // the same column `buildRestored` reads (the PRD tab is as good a
+            // place to ask "show me my PRDs" as the main chat).
+            ...(next?.reply?.artifact_list?.length
+              ? { artifactList: next.reply.artifact_list } : {}),
           })
           if (reply) i++
         } else if (t.role === "assistant" && t.content.trim()) {
@@ -1301,6 +1306,7 @@ export function ChatScreen() {
             id: `prdhist-${conversation.id}-${i}`,
             query: "",
             reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            ...(t.reply?.artifact_list?.length ? { artifactList: t.reply.artifact_list } : {}),
           })
         }
       }
@@ -2552,7 +2558,7 @@ export function ChatScreen() {
         setResumePanelTabId(tabId)
       }
       const buildRestored = (
-        turns: { id?: number; role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
+        turns: { id?: number; role: string; content: string; reply?: PersistedTurnReply | null; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -2561,8 +2567,14 @@ export function ChatScreen() {
           if (t.role === "user") {
             const next = turns[i + 1]
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
+            // What the answer showed BEYOND its prose, when the row carries it
+            // (`conversation_turns.reply`). Null on every row written before
+            // that column was wired, which is why `content` above stays the
+            // source of the answer text rather than being read from here.
+            const cards = next?.role === "assistant" ? next.reply?.artifact_list : null
             restored.push({
               id: `${keyPrefix}-${i}`,
+              ...(cards?.length ? { artifactList: cards } : {}),
               // Carried through so a rehydrated thread can still be rewound to
               // this turn (edit/retry on a past prompt) — the persistence
               // layer's own id map only covers turns THIS session sent.
@@ -2586,6 +2598,9 @@ export function ChatScreen() {
               id: `${keyPrefix}-${i}`,
               query: "",
               reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+              // An agent-only turn keeps its cards too — a listing emitted
+              // with no user line behind it is still a listing.
+              ...(t.reply?.artifact_list?.length ? { artifactList: t.reply.artifact_list } : {}),
             })
           }
         }
@@ -2739,7 +2754,20 @@ export function ChatScreen() {
   // the write and see the conversation one turn short). Every other caller
   // ignores the return, exactly as before.
   const finalizeConversationTurn = useCallback(
-    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string): Promise<void> => {
+    (
+      turnId: string,
+      updates: {
+        reply?: AskResponse
+        error?: string
+        /** The turn's clickable listing rows, when it has them. Saved onto the
+         *  turn's structured `reply` so a reopened thread still renders the
+         *  cards — `content` is prose only, so before this the rows were gone
+         *  the moment the turn was written and "click one to open it" pointed
+         *  at empty space. */
+        artifactList?: ChatArtifactItem[] | null
+      },
+      targetTabId: string,
+    ): Promise<void> => {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
@@ -2762,7 +2790,15 @@ export function ChatScreen() {
       // The helper awaits any in-flight create so the assistant turn lands in the
       // SAME conversation as its user turn.
       if (updates.reply) {
-        return persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
+        return persistence.pushAssistantTurn(
+          targetTabId,
+          replyToText(updates.reply),
+          // Only when there is something prose cannot carry. A plain answer
+          // writes the same content-only row it always has.
+          updates.artifactList?.length
+            ? { ...updates.reply, artifact_list: updates.artifactList }
+            : undefined,
+        )
       }
       return Promise.resolve()
     },
@@ -3772,7 +3808,13 @@ export function ChatScreen() {
     // them persisted an empty user row per gate into the thread's history,
     // which then replays as a blank message on every later restore.
     if (seedQuery) pushPendingConversation(turn.id, seedQuery, tabId)
-    if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
+    // The listing rows ride along — this is the turn `runListArtifactsAction`
+    // emits, and its cards are the whole answer to "show me the PRDs I made".
+    if (turn.reply) {
+      void finalizeConversationTurn(
+        turn.id, { reply: turn.reply, artifactList: turn.artifactList }, tabId,
+      )
+    }
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
   // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────

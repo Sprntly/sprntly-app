@@ -282,3 +282,71 @@ describe("ChatScreen — resumed threads keep their persisted attachments", () =
     })
   })
 })
+
+describe("ChatScreen — resumed threads keep their listing cards", () => {
+  it("rehydrates a listing turn's artifact rows from the persisted reply", async () => {
+    // "Show me the PRDs I created" answers with clickable rows. They lived
+    // only on the live turn, and `content` is prose — so reopening the chat
+    // rendered the sentence announcing them over empty space, with nothing to
+    // click. The rows now ride the turn's structured `reply`
+    // (conversation_turns.reply), and this is what proves they come back.
+    listTurns.mockResolvedValue({
+      turns: [
+        { id: 1, role: "user", content: "just show me the prds that i created" },
+        {
+          id: 2,
+          role: "assistant",
+          content: "Here are your most recent PRDs — click one to open it with its chat.",
+          reply: {
+            answer: "Here are your most recent PRDs — click one to open it with its chat.",
+            artifact_list: [
+              {
+                id: 3827, type: "prd", title: "Checkout margin fix",
+                created_at: "2026-08-24T16:12:00Z", open: { prd_id: 3827 },
+              },
+              {
+                id: 3828, type: "prd", title: "AI SOC collaboration",
+                created_at: "2026-08-23T09:00:00Z", open: { prd_id: 3828 },
+              },
+            ],
+          },
+        },
+      ],
+    })
+    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+      dbId: 42,
+      title: "just show me the prds that i created",
+      fallbackTurns: [{ role: "user", content: "just show me the prds that i created" }],
+    }))
+
+    await act(async () => { renderScreen() })
+
+    await waitFor(() => expect(listTurns).toHaveBeenCalledWith(42))
+    await waitFor(() => {
+      expect(document.querySelectorAll('[data-testid="artifact-list-card"]').length).toBe(2)
+    })
+    expect(document.body.textContent).toContain("Checkout margin fix")
+  })
+
+  it("leaves a plain answer as prose — no empty card group", async () => {
+    listTurns.mockResolvedValue({
+      turns: [
+        { id: 1, role: "user", content: "what did customers say about onboarding" },
+        { id: 2, role: "assistant", content: "Onboarding friction is the top theme." },
+      ],
+    })
+    localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+      dbId: 42,
+      title: "what did customers say about onboarding",
+      fallbackTurns: [{ role: "user", content: "what did customers say about onboarding" }],
+    }))
+
+    await act(async () => { renderScreen() })
+
+    await waitFor(() => expect(listTurns).toHaveBeenCalledWith(42))
+    await waitFor(() => {
+      expect(document.body.textContent).toContain("Onboarding friction")
+    })
+    expect(document.querySelector('[data-testid="artifact-list-cards"]')).toBeNull()
+  })
+})

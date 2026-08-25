@@ -1,6 +1,19 @@
 fastapi==0.115.0
 uvicorn[standard]==0.32.0
-anthropic>=0.55.0
+# Upper bound added 2026-08-25. The floor was the only bare `>=` in this file,
+# and `deploy-backend.yml` runs `pip install -r requirements.txt` on EVERY
+# deploy — so when 1.0.0 shipped, a deploy walked across a major on its own.
+# 1.0.0 removed `temperature` from `messages.create()`, every planner call
+# raised TypeError, and `plan_for_answer` caught it and logged "answering
+# unplanned": the product kept answering, without a router, out of the
+# knowledge graph.
+#
+# The code is now major-agnostic — `llm._anthropic_kwargs` sends `temperature`
+# through `extra_body`, which both majors accept — so this ceiling is hygiene,
+# not a workaround: it stops the NEXT major arriving the same silent way. Raise
+# it deliberately, with `tests/test_anthropic_sdk_compat.py` green against the
+# new version.
+anthropic>=0.55.0,<2.0.0
 python-dotenv==1.0.1
 pydantic==2.9.2
 pydantic-settings==2.6.0

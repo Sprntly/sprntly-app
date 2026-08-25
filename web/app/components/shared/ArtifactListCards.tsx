@@ -104,8 +104,15 @@ export function ArtifactListCards({
         const date = when(a.created_at)
         // The thread affordance is only claimed when a click can honour it —
         // both halves present, same rule the open flow itself applies.
-        const thread = a.source.conversation_id != null && a.source.conversation_title
-          ? a.source.conversation_title
+        //
+        // `source` is OPTIONAL-CHAINED because these rows no longer always
+        // arrive freshly built by the backend: a restored turn replays them
+        // out of `conversation_turns.reply`, where a row written by an older
+        // client can be missing fields this shape once guaranteed. Reading
+        // through a missing `source` threw inside render, which does not fail
+        // one card — it blanks the whole thread the reader came back to.
+        const thread = a.source?.conversation_id != null
+          ? a.source.conversation_title || null
           : null
         return (
           <button

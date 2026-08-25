@@ -287,6 +287,46 @@ def _attempt_delay(attempt: int) -> float:
     return _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
 
 
+def _anthropic_kwargs(client: LLMClient, kwargs: dict) -> dict:
+    """Move `temperature` off the signature and into the request body.
+
+    `anthropic` 1.0.0 REMOVED `temperature` (and `top_p`/`top_k`) from
+    `messages.create()`. Passing one is not an API rejection — it is a plain
+    Python `TypeError` raised before any request is made, and `ask_planner`
+    passes `temperature=0`. Its caller catches that and logs "answering
+    unplanned", so the product does not error: it silently loses its router,
+    and every question falls through to the generic answer path. That is how
+    "show me the PRDs I created" came to be answered out of the knowledge
+    graph and a Slack channel index, naming PRD ids that do not exist.
+
+    `extra_body` is the SDK's own documented escape hatch for exactly this, it
+    lands the value in the same place on the wire, and it exists on BOTH
+    majors — so this is version-agnostic rather than a bet on which SDK a
+    deploy happens to resolve. The models here (`claude-sonnet-4-6`,
+    `claude-haiku-4-5`) still accept the parameter server-side; only the
+    client signature dropped it. Deleting `temperature` instead would have
+    been the smaller diff and the wrong one: sixteen call sites pin it to 0
+    for determinism, several saying so in as many words ("Pin to
+    temperature=0 for deterministic screen matching"), and a router that
+    answers differently to the same question twice is a worse router.
+
+    ANTHROPIC ONLY. `app.openai_client` reads `kwargs["temperature"]` off this
+    same dict and drops it for the GPT-5 family itself, so the OpenAI shim
+    must keep receiving it where it already looks. Metering leaves the client
+    object's type intact (it swaps `.messages`), which is what makes the
+    isinstance check here reliable.
+    """
+    if "temperature" not in kwargs or not isinstance(client, Anthropic):
+        return kwargs
+    out = dict(kwargs)
+    temperature = out.pop("temperature")
+    extra_body = dict(out.get("extra_body") or {})
+    # A caller that set it explicitly wins — this only fills the gap.
+    extra_body.setdefault("temperature", temperature)
+    out["extra_body"] = extra_body
+    return out
+
+
 def _create_with_retries(
     client: LLMClient, *, stream: bool = False, background: bool = False,
     on_delta=None, on_json_delta=None, **kwargs
@@ -328,6 +368,9 @@ def _create_with_retries(
     low-priority lane (capped, and always behind interactive waiters) so a
     user-facing call is never queued behind warm work.
     """
+    # Once, before the retry loop — every attempt sends the same request, and
+    # the translation is not something to redo per attempt.
+    kwargs = _anthropic_kwargs(client, kwargs)
     _wait_start = _time.monotonic()
     _llm_gate.acquire(background=background)
     waited = _time.monotonic() - _wait_start

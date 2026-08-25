@@ -340,7 +340,12 @@ export function runListArtifactsAction(
       ? `You haven't created any ${many} yet — generate one from a chat or the Top Insights brief and it'll show up here.`
       : items.length === 1
         ? `Here's your most recent ${one} — click it to open it with its chat.`
-        : `Here are your ${items.length} newest ${many} — click one to open it with its chat.`
+        // NO COUNT. The rows are a capped page (`_MAX_CHAT_ARTIFACTS`), and
+        // nothing here can tell a page of twelve from a library of exactly
+        // twelve — so "your 12 newest PRDs" reported a cap as if it were a
+        // total, to a reader who asked to be SHOWN their PRDs and never asked
+        // how many there were. "Your most recent" is true either way.
+        : `Here are your most recent ${many} — click one to open it with its chat.`
   const reply: AskResponse = {
     answer,
     sources: [],
