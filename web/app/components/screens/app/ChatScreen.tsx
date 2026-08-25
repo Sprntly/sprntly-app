@@ -5203,7 +5203,13 @@ export function ChatScreen() {
       // path that is already a second from its first question, and only on a
       // first message.
       let convId = activeConvId
-      for (let i = 0; convId == null && i < 20; i++) {
+      // TEN SECONDS, NOT TWO. Two was chosen as "a moment" and is really a bet
+      // on how fast the conversation insert lands; a cold backend or a slow
+      // link loses that bet and the reader is refused for a save that was
+      // seconds from arriving. Waiting longer costs nothing on the ordinary
+      // path — the loop exits the instant the row appears — and the turn is
+      // already on screen in its pending state while it runs.
+      for (let i = 0; convId == null && i < 100; i++) {
         await new Promise((r) => setTimeout(r, 100))
         if (!mountedRef.current) return
         convId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
@@ -5215,9 +5221,15 @@ export function ChatScreen() {
         // the restore (which matches BY conversation) can never bring back.
         // The reader has just waited two seconds for that outcome, so they are
         // told it rather than left with a run that silently cannot return.
+        // AND IT SAYS THE TRUE THING. "Send a message first" was advice the
+        // reader had already taken — the goal they just sent IS the message —
+        // and "has not been saved yet" reads as a permanent state rather than
+        // a save that did not finish in time. What they can actually do is
+        // ask again.
         endGoalTurn(tabId, turnId,
-          "This chat has not been saved yet, so the analysis could not be "
-          + "attached to it. Send a message first, then try the goal again.")
+          "This chat had not finished saving, so the analysis could not be "
+          + "attached to it — starting it anyway would have left it unable to "
+          + "find its way back here. Ask again in a moment.")
         return
       }
       const run = await goalAnalysisApi.start(goalText, {

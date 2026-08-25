@@ -34,6 +34,11 @@ const getRun = vi.fn()
 const confirmRun = vi.fn()
 const approveRun = vi.fn()
 const listTurns = vi.fn()
+// Hoisted like the others so a test can make the conversation insert SLOW.
+// The goal path waits for `dbConvId` before starting a run, and what it does
+// when that row never arrives is the difference between refusing and creating
+// a run bound to no chat.
+const createConv = vi.fn()
 
 /** A plan thin enough to render and real enough to approve. */
 const PLAN = {
@@ -59,7 +64,7 @@ vi.mock("../../../../lib/api", () => {
     askApi: { ask: vi.fn(), skills: vi.fn().mockResolvedValue({ skills: [] }) },
     briefApi: { current: vi.fn().mockResolvedValue({ id: 1, insights: [] }) },
     conversationsApi: {
-      create: vi.fn().mockResolvedValue({ id: 1 }),
+      create: (...a: unknown[]) => createConv(...a),
       addTurn: vi.fn().mockResolvedValue({}),
       // SLOW ON PURPOSE, so a tab can actually be observed mid-hydration. The
       // restore has to wait for this and then RUN.
@@ -235,6 +240,8 @@ beforeEach(() => {
   listRuns.mockResolvedValue({ runs: [] })
   listTurns.mockReset()
   listTurns.mockResolvedValue({ turns: [] })
+  createConv.mockReset()
+  createConv.mockResolvedValue({ id: 1 })
   getRun.mockReset()
   confirmRun.mockReset()
   approveRun.mockReset()
@@ -357,6 +364,57 @@ describe("restoring a run after a reload", () => {
     expect(goalProbe()).toBe("none")
     expect(screen.getByTestId("chat-tab-bar")).toBeTruthy()
   })
+})
+
+describe("a chat that never saves", () => {
+  // A tab that has NOT yet been written to the server: `dbConvId` is null and
+  // the insert happens on the first send. This is the only state in which the
+  // wait below does anything, and it is the state every brand-new chat is in.
+  const seedUnsavedTab = () =>
+    seedPersistedTab(
+      { id: "t1", title: "chat", dbConvId: null, thread: [], messages: [] }, "t1")
+
+  it("refuses instead of starting a run bound to no conversation", async () => {
+    // THE ORPHAN THIS WAIT EXISTS TO PREVENT. The restore matches runs BY
+    // conversation, so a run started before the conversation row lands can
+    // never come back to the thread it was started in — it keeps going, it
+    // finishes, and it is unreachable. Refusing is the honest outcome, and
+    // this asserts BOTH halves: nothing was started, and the reader was told.
+    createConv.mockImplementation(() => new Promise(() => {}))
+    seedUnsavedTab()
+    mountApp()
+    await startAGoal("increase revenue by 5%")
+    await waitFor(
+      () => expect(document.body.textContent)
+        .toContain("had not finished saving"),
+      { timeout: 15_000 },
+    )
+    expect(startRun).not.toHaveBeenCalled()
+  }, 20_000)
+
+  it("still starts once the conversation row arrives late", async () => {
+    // The control, and the reason the window is ten seconds rather than two:
+    // a wait that refuses too eagerly is its own bug. The point is to survive
+    // a slow insert, not to convert one into a failure.
+    let land: (v: unknown) => void = () => {}
+    createConv.mockImplementation(
+      () => new Promise((res) => { land = res as (v: unknown) => void }))
+    seedUnsavedTab()
+    mountApp()
+    await startAGoal("increase revenue by 5%")
+    expect(startRun).not.toHaveBeenCalled()
+    // THREE SECONDS, past the old two-second window. Landing the row
+    // immediately would pass against either bound and prove nothing about the
+    // widening — the test would guard the refusal and leave the number it was
+    // widened to unguarded.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 3_000))
+    })
+    expect(startRun).not.toHaveBeenCalled()
+    await act(async () => { land({ id: 1 }) })
+    await waitFor(() => expect(startRun).toHaveBeenCalled(), { timeout: 5_000 })
+    expect(document.body.textContent).not.toContain("had not finished saving")
+  }, 20_000)
 })
 
 describe("the guards around the restore", () => {

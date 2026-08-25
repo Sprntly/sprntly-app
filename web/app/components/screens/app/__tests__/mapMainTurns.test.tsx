@@ -164,3 +164,76 @@ describe("mapMainTurns", () => {
     expect(animatedTurnIds.current.size).toBe(1)
   })
 })
+
+describe("the goal plan gate carries what was approved", () => {
+  // THE WIRING IS THE FEATURE. `approveGoalPlan` grew a fifth argument — the
+  // plan as shown — so the settled card in the thread can keep listing the
+  // sources, with the ones the reader dropped struck through rather than
+  // silently gone. Nothing asserted that the argument was passed: dropping it
+  // leaves the settled record with no `plan.sources`, which falls back to a
+  // raw-slug line, and produces no failure anywhere. This is the whole of that
+  // seam, tested where it is cheap.
+  const PLAN = {
+    goal_text: "raise net revenue retention",
+    definition_text: "expansion minus churn",
+    currency: "accounts",
+    total_signals: 412,
+    sources: [
+      { source_type: "customer_voice", signal_count: 260,
+        label: "calls and customer tickets", witnesses: "what customers asked for" },
+      { source_type: "project_mgmt", signal_count: 152,
+        label: "the tracker", witnesses: "what was built" },
+    ],
+    cannot_answer: [],
+    will_produce: [],
+    excluded_sources: [] as string[],
+    hypotheses: [] as string[],
+  }
+
+  function approvedWith(gate: Record<string, unknown>) {
+    const approveGoalPlan = vi.fn()
+    const thread = [{
+      id: "t-goal", query: "increase revenue by 5%", goalGate: gate,
+    }] as unknown as ThreadTurn[]
+    const out = mapMainTurns(thread, makeDeps({
+      lastLiveTurnIdx: 0,
+      approveGoalPlan,
+      activeTab: { id: "tab-1", prdId: null, prd: null, prdGenerating: false },
+    } as Partial<MapMainTurnsDeps>))
+    const decision = { excluded_sources: ["customer_voice"], hypotheses: [] }
+    ;(out[0] as unknown as {
+      onApproveGoalPlan?: (d: unknown) => void
+    }).onApproveGoalPlan?.(decision)
+    return { approveGoalPlan, decision }
+  }
+
+  it("hands the approved plan to the approve handler", () => {
+    const { approveGoalPlan, decision } = approvedWith({
+      kind: "plan", runId: 42, plan: PLAN,
+    })
+    expect(approveGoalPlan).toHaveBeenCalledWith(
+      "tab-1", "t-goal", 42, decision, PLAN,
+    )
+    // Named explicitly: the sources are what the settled card renders, and an
+    // argument that arrives as undefined is the silent version of this bug.
+    const passed = approveGoalPlan.mock.calls[0][4] as typeof PLAN | undefined
+    expect(passed?.sources?.map((x) => x.source_type))
+      .toEqual(["customer_voice", "project_mgmt"])
+  })
+
+  it("survives a gate persisted before the plan was carried", () => {
+    // Older records have no `plan` on the gate. That must reach the handler as
+    // undefined rather than throwing — the settled card has a fallback for it.
+    const { approveGoalPlan, decision } = approvedWith({ kind: "plan", runId: 42 })
+    expect(approveGoalPlan).toHaveBeenCalledWith(
+      "tab-1", "t-goal", 42, decision, undefined,
+    )
+  })
+
+  it("does not approve from a definition gate", () => {
+    const { approveGoalPlan } = approvedWith({
+      kind: "definition", runId: 42, goalText: "g", ask: "?",
+    })
+    expect(approveGoalPlan).not.toHaveBeenCalled()
+  })
+})

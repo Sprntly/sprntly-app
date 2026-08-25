@@ -260,10 +260,59 @@ describe("the settled plan is a record, not a receipt", () => {
     expect(kept?.className || "").not.toContain("ggc-src-out")
   })
 
-  it("says how much was actually read, net of what was dropped", () => {
+  it("states the scope net of what was dropped, without claiming it was read", () => {
     settled(["customer_voice"])
+    const card = screen.getByTestId("goal-gate-plan-done").textContent ?? ""
     // 412 total, 260 dropped -> 152 across 1 source.
-    expect(screen.getByTestId("goal-gate-plan-done").textContent)
-      .toContain("152 signals across 1 source")
+    expect(card).toContain("152 signals across 1 source")
+    // NOT "were read". This card renders the instant the plan is approved,
+    // before anything has been read, and `signal_count` is an inventory the
+    // plan step takes without reading content. Past tense here is the same
+    // class of overclaim the report's closing section exists to remove.
+    expect(card).not.toMatch(/were read/i)
+    expect(card).toMatch(/not a record of what has been read/i)
+  })
+
+  it("states an exclusion the source list cannot show", () => {
+    // THE INVARIANT, at its last gap. The list can only strike through a
+    // source it renders, so an excluded slug that is absent from
+    // `plan.sources` had nowhere to appear — and the raw-slug fallback was
+    // suppressed the moment ANY sources existed. Stated nowhere is the single
+    // outcome this card exists to prevent, so it does not get to depend on the
+    // two lists agreeing.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan",
+          excludedSources: ["customer_voice", "a_source_the_plan_forgot"],
+          hypotheses: [],
+          plan: { sources: PLAN.sources },
+        }}
+      />,
+    )
+    const card = screen.getByTestId("goal-gate-plan-done").textContent ?? ""
+    // The one the list CAN show is struck through there.
+    expect(card).toContain("calls and customer tickets")
+    expect(card).toContain("dropped by you")
+    // The one it cannot show is named anyway, slug and all.
+    expect(card).toContain("a_source_the_plan_forgot")
+    // And the sources it CAN show are not repeated as slugs alongside it.
+    expect(card).not.toContain("customer_voice")
+  })
+
+  it("does not bury the dropped disclosure in the struck-out text", () => {
+    // The strike marks the SOURCE. Striking and dimming the row put the words
+    // that carry the fact — "dropped by you" — behind a line and at 0.55
+    // opacity, which is under AA for 13px text and gone entirely for a reader
+    // who cannot resolve a strike-through. Those words are the fallback, so
+    // they cannot be the thing that is hardest to read.
+    settled(["customer_voice"])
+    const list = screen.getByTestId("goal-gate-plan-done-sources")
+    const struck = list.querySelector(".ggc-src-struck")
+    expect(struck).not.toBeNull()
+    expect(struck?.textContent ?? "").not.toMatch(/dropped by you/i)
+    const note = list.querySelector(".ggc-src-note")
+    expect(note?.textContent ?? "").toMatch(/dropped by you/i)
   })
 })

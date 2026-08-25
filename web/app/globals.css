@@ -25026,9 +25026,24 @@
 }
 .ggc-settled-sources li { line-height: 1.5; }
 /* A dropped source stays VISIBLE and struck, never removed — the whole point
-   is that a narrower run is stated rather than silently smaller. */
-.ggc-src-out { text-decoration: line-through; opacity: 0.55; }
+   is that a narrower run is stated rather than silently smaller.
+   THE STRIKE IS ON THE SOURCE, NOT ON THE DISCLOSURE. Striking and dimming the
+   whole row put "— dropped by you" — the words that carry the fact — at 0.55
+   opacity and through a line, which is under AA for 13px text and unreadable
+   to exactly the reader who most needs it. Anyone who cannot resolve a
+   strike-through has only those words left, so they stay at full strength. */
+.ggc-src-out { line-height: 1.5; }
+.ggc-src-struck { text-decoration: line-through; opacity: 0.75; }
+.ggc-src-note { font-weight: 500; }
 .ga-error { color: var(--danger, #b42318); margin: 0; }
+/* The way back from a poll that stopped itself. Inline in the banner, because
+   a stop the reader cannot undo is indistinguishable from a panel that broke.
+   Underlined rather than coloured: it sits inside .ga-error, so a second
+   colour there reads as a second severity. */
+.ga-error-retry {
+  padding: 0; border: 0; background: none; font: inherit; color: inherit;
+  text-decoration: underline; cursor: pointer;
+}
 
 /* Coverage sits ABOVE the findings: a note that a third of the evidence was
    undated changes how every number below it reads. */

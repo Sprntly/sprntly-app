@@ -229,6 +229,15 @@ function GoalGateSettled({
   const dropped = new Set(excludedSources)
   const kept = (plan?.sources ?? []).filter((x) => !dropped.has(x.source_type))
   const keptSignals = kept.reduce((n, x) => n + (x.signal_count || 0), 0)
+  // AN EXCLUSION THE LIST CANNOT SHOW. The list below can only strike through
+  // a source it actually renders, so an excluded slug that is not in
+  // `plan.sources` would be stated nowhere — and "stated nowhere" is the one
+  // outcome this card exists to prevent. Normally the two agree (the
+  // checkboxes are rendered FROM those sources), so this is empty; it is not
+  // empty for a record persisted before the plan was carried, which is exactly
+  // when the fallback line below is the only thing left.
+  const listed = new Set((plan?.sources ?? []).map((x) => x.source_type))
+  const unlisted = excludedSources.filter((x) => !listed.has(x))
   return (
     <div className="ggc ggc-settled" data-testid="goal-gate-plan-done">
       <p className="ggc-settled-label">Plan approved</p>
@@ -245,11 +254,11 @@ function GoalGateSettled({
           better than silence. */}
       {!excludedSources.length ? (
         <p className="ggc-settled-body">Reading every connected source.</p>
-      ) : plan?.sources?.length ? null : (
+      ) : unlisted.length ? (
         <p className="ggc-settled-body">
-          Not reading: {excludedSources.join(", ")}
+          Not reading: {unlisted.join(", ")}
         </p>
-      )}
+      ) : null}
       {/* WHAT WAS ACTUALLY APPROVED, kept on screen. Read-only — the decision
           is made — but present, so the reader can check the run against it
           later without reopening anything. */}
@@ -259,18 +268,31 @@ function GoalGateSettled({
             const out = dropped.has(src.source_type)
             return (
               <li key={src.source_type} className={out ? "ggc-src-out" : undefined}>
-                <strong>{src.signal_count}</strong>{" "}
-                {src.label || src.source_type}
-                {out ? " — dropped by you" : ""}
+                <span className={out ? "ggc-src-struck" : undefined}>
+                  <strong>{src.signal_count}</strong>{" "}
+                  {src.label || src.source_type}
+                </span>
+                {out ? (
+                  <span className="ggc-src-note"> — dropped by you</span>
+                ) : null}
               </li>
             )
           })}
         </ul>
       ) : null}
+      {/* WHAT THIS NUMBER IS. `signal_count` is an INVENTORY taken by the plan
+          step, which reads no content — it is why that step returns in about a
+          second rather than minutes. "were read against this goal" was two
+          claims the run had not made: that the reading had happened (this card
+          renders the moment the plan is approved, before any of it has) and
+          that it was done against the goal (claim selection never sees the
+          definition — the report's closing section says so in as many words).
+          Stated as scope, which is what was actually agreed here. */}
       {plan?.sources?.length ? (
         <p className="ggc-settled-body">
-          {keptSignals} signals across {kept.length} source
-          {kept.length === 1 ? "" : "s"} were read against this goal.
+          In scope: {keptSignals} signals across {kept.length} source
+          {kept.length === 1 ? "" : "s"} — counted when the plan was made, not a
+          record of what has been read.
         </p>
       ) : null}
       {hypotheses.length ? (
