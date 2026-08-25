@@ -7,6 +7,7 @@ namespace.
 from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 
@@ -1117,6 +1118,15 @@ def test_count_engine_exception_falls_through_to_query_path(monkeypatch, caplog)
     assert "voc count engine failed" in caplog.text
 
 
+def _count_corpus(window, calls=None) -> "cd.DigestCorpus":
+    """A minimal `DigestCorpus` for `_assemble_count_answer`'s own tests —
+    `corpus.calls`/`corpus.total`/`corpus.failed_sources` is what the
+    per-hit label and coverage caveat are computed against."""
+    return cd.DigestCorpus(status="ok", window=window,
+                           calls=calls if calls is not None else [_call(1), _call(2)],
+                           text="=== CALLS ===")
+
+
 def test_assemble_count_answer_matches_query_path_response_contract():
     import app.corpus_mapreduce as cmr
 
@@ -1124,9 +1134,9 @@ def test_assemble_count_answer_matches_query_path_response_contract():
                            reasons={"c1": "asked for X", "c2": "raised bug Y"},
                            total_items=5, unclassified_ids=["c3"])
     window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
-    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
     for key in ("answer", "key_points", "citations", "confidence", "unanswered",
-               "_skill", "_skill_action", "_skill_source"):
+               "_skill", "_skill_action", "_skill_source", "_report"):
         assert key in out
     assert isinstance(out["answer"], str) and out["answer"]
     assert isinstance(out["key_points"], list)
@@ -1136,6 +1146,189 @@ def test_assemble_count_answer_matches_query_path_response_contract():
     assert isinstance(out["unanswered"], str) and "c3" in out["unanswered"]
     assert out["_skill"] == cd._VOC_SKILL
     assert out["_skill_source"] == "voc-count-engine"
+    assert out["_report"] is False
+
+
+# ── count answer — no inherited banner, opens on the count line ─────────────
+
+def test_count_answer_never_carries_the_source_banner_or_quote_sampling_clause():
+    """The `=== CUSTOMER CALLS — … ===` banner (and its "verbatim quotes
+    sampled" clause) is `_coverage_line`'s — built for the query/report
+    synthesis passes, which actually read corpus text. A count answer never
+    renders any call text, so that banner must never appear here."""
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=2, unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
+    assert "===" not in out["answer"]
+    assert "CUSTOMER CALLS" not in out["answer"]
+    assert "verbatim quotes sampled" not in out["answer"]
+    assert "distilled summaries are complete" not in out["answer"]
+
+
+def test_count_answer_opens_on_the_count_line_for_a_healthy_corpus():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=2, unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
+    first_line = out["answer"].split("\n", 1)[0]
+    assert first_line == "1 of 2 calls in last 7 days matched."
+
+
+def test_count_answer_appends_a_truncation_caveat_only_when_the_corpus_was_cut():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=0, hit_ids=[], reasons={}, total_items=2,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    truncated = cd.DigestCorpus(status="ok", window=window, calls=[_call(1), _call(2)],
+                                text="=== CALLS ===", total=9)
+    out = cd._assemble_count_answer(eng, window=window, corpus=truncated)
+    assert "most recent 2 of 9 calls" in out["answer"]
+    assert "older calls omitted for space" in out["answer"]
+    # And a healthy (untruncated) corpus states no such caveat at all.
+    healthy = cd.DigestCorpus(status="ok", window=window, calls=[_call(1), _call(2)],
+                              text="=== CALLS ===", total=2)
+    out_healthy = cd._assemble_count_answer(eng, window=window, corpus=healthy)
+    assert "omitted for space" not in out_healthy["answer"]
+    assert "Note:" not in out_healthy["answer"]
+
+
+def test_count_answer_appends_a_failed_source_caveat_when_present():
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=0, hit_ids=[], reasons={}, total_items=1,
+                           unclassified_ids=[])
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    corpus = cd.DigestCorpus(status="ok", window=window, calls=[_call(1)],
+                             text="=== CALLS ===", total=1, failed_sources=["Zoom"])
+    out = cd._assemble_count_answer(eng, window=window, corpus=corpus)
+    assert "Zoom" in out["answer"]
+    assert "could not be reached" in out["answer"]
+
+
+def test_count_answer_per_hit_line_uses_render_label_not_a_customer_name_prefix():
+    """No "Customer (Name)" prefix, no verbatim quote — the per-hit line is
+    `eng.labels`' `render_label` output (date · account — title, see
+    `VOC_CALLS_SPEC.render_label`) + the model's (now name/quote-free)
+    reason, NOT a lesser date-title-only label and NOT the raw item id. This
+    is a presentation-layer pin; the reason text itself is whatever
+    `eng.reasons` carries (pinned separately by the rubric tests)."""
+    import app.corpus_mapreduce as cmr
+
+    label = cd.VOC_CALLS_SPEC.render_label(_call(1))
+    eng = cmr.EngineResult(
+        count=1, hit_ids=["c1"], reasons={"c1": "asked for SSO support"},
+        total_items=1, unclassified_ids=[], labels={"c1": label},
+    )
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window,
+                                    corpus=_count_corpus(window, calls=[_call(1)]))
+    assert f"- {label}: asked for SSO support" in out["answer"]
+    assert "Customer (" not in out["answer"]
+    assert "c1:" not in out["answer"]
+
+
+def test_assemble_count_answer_is_never_a_report():
+    """`_report` is explicit, not merely absent: `app.report_capture.
+    is_report_payload` already reads a missing key as falsy, but this states
+    on the payload itself that a count answer is an inline chat reply, never
+    a saved report document."""
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=1)
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
+    assert out["_report"] is False
+
+    from app import report_capture
+    assert report_capture.is_report_payload(out) is False
+
+
+def test_assemble_count_answer_renders_the_friendly_label_not_the_raw_id():
+    """The count answer's evidence lines and citations name each hit by
+    `eng.labels` (`spec.render_label`'s output), never the raw provider id —
+    the bug this fix exists for: an `external_id` ULID standing in for a
+    human-friendly reference."""
+    import app.corpus_mapreduce as cmr
+
+    raw_id = "01KYHTZG5WZRKNRX0SJQTW9WVW"
+    eng = cmr.EngineResult(
+        count=1, hit_ids=[raw_id], reasons={raw_id: "asked for exports"},
+        total_items=1, labels={raw_id: "2026-08-25 · Flipkart — Renewal call"},
+    )
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
+    assert raw_id not in out["answer"]
+    assert "2026-08-25 · Flipkart — Renewal call" in out["answer"]
+    assert out["citations"] == [
+        {"source": "2026-08-25 · Flipkart — Renewal call",
+         "evidence": "asked for exports"},
+    ]
+
+
+def test_assemble_count_answer_falls_back_to_the_raw_id_when_unlabelled():
+    """A hit `run()` never labelled (a caller-constructed `EngineResult` with
+    no `labels`, e.g. a legacy/degraded call) still renders — the raw id,
+    not a crash or a blank line."""
+    import app.corpus_mapreduce as cmr
+
+    eng = cmr.EngineResult(count=1, hit_ids=["c1"], reasons={"c1": "asked for X"},
+                           total_items=1)  # labels defaults to {}
+    window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
+    assert "c1" in out["answer"]
+    assert out["citations"] == [{"source": "c1", "evidence": "asked for X"}]
+
+
+# ── render_label / phase_label — VOC_CALLS_SPEC ──────────────────────────────
+
+def test_voc_calls_spec_render_label_is_date_account_title():
+    """`VOC_CALLS_SPEC.render_label` matches
+    `app.call_index.IndexedCall.render()`'s "date · account — title" shape —
+    the SAME listing format a "which calls" answer already shows — reused
+    rather than reinvented."""
+    # Two Flipkart participants outnumber the one Sprntly rep, so
+    # `derive_account`'s most-common-domain tie-break picks Flipkart
+    # deterministically rather than depending on dict/set iteration order.
+    call = CallTranscript(
+        external_id="c1", title="Renewal call", date="2026-08-25T10:00:00",
+        participants=["jane@flipkart.com", "amit@flipkart.com", "rep@sprntly.ai"],
+    )
+    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Flipkart — Renewal call"
+
+
+def test_voc_calls_spec_render_label_omits_account_when_undeterminable():
+    """An internal-only call (or every participant on a generic domain) omits
+    the account segment rather than guessing — same as
+    `IndexedCall.render()` when `account` is None."""
+    call = CallTranscript(
+        external_id="c1", title="Internal standup", date="2026-08-25",
+        participants=["a@gmail.com", "b@gmail.com"],
+    )
+    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 — Internal standup"
+
+
+def test_voc_calls_spec_render_label_untitled_call():
+    call = CallTranscript(external_id="c1", title="", date="2026-08-25",
+                          participants=["jane@flipkart.com"])
+    assert cd.VOC_CALLS_SPEC.render_label(call) == "2026-08-25 · Flipkart — (untitled)"
+
+
+def test_voc_calls_spec_phase_label_is_not_a_reportphase_value():
+    """The count engine's progress phrase names the domain and is never the
+    shared report vocabulary — see `app.chat_intent._is_report_pipeline`'s
+    carve-out, which depends on a count answer never carrying a `ReportPhase`
+    signal."""
+    from app.report_phases import ReportPhase
+
+    assert cd.VOC_CALLS_SPEC.phase_label == "Analyzing your calls…"
+    assert cd.VOC_CALLS_SPEC.phase_label not in {p.value for p in ReportPhase}
 
 
 # ── map_model — VOC_CALLS_SPEC uses the Sonnet constant ──────────────────────
@@ -1150,6 +1343,170 @@ def test_voc_calls_spec_map_model_is_the_sonnet_constant():
     assert cd.VOC_CALLS_SPEC.map_model == "claude-sonnet-4-6"
 
 
+# ── deterministic grounding — reused call_index prefilter ───────────────────
+# `_voc_count_prefilter` reuses `app.call_index._own_domains` +
+# `app.call_index.derive_account` (read-only, the same primitive
+# `IndexedCall.account` is built from) to (1) drop fully-internal calls
+# before the map pass ever runs and (2) annotate every surviving call's
+# participant sides for the classify prompt. See EXISTING-GROUNDING-REUSE.md
+# for why these two, specifically, are the reusable primitives.
+
+def test_prefilter_drops_fully_internal_call_from_the_classification_pool(monkeypatch):
+    """A call with no external customer/prospect participant can never be a
+    hit — `derive_account` returns None for it, and `_voc_count_prefilter`
+    excludes it before the map pass ever sees it (condition #2,
+    "EXTERNAL PARTICIPANT", of `_VOC_BASE_DISCIPLINE`, enforced as a hard
+    structural guard rather than a prompt instruction)."""
+    monkeypatch.setattr(
+        "app.db.drip.list_members_with_email",
+        lambda cid: [{"email": "rep@sprntly.ai"}], raising=False,
+    )
+    internal = CallTranscript(
+        external_id="c-internal", title="Standup", date="2026-08-20",
+        participants=["rep@sprntly.ai", "rep2@sprntly.ai"],
+    )
+    external = CallTranscript(
+        external_id="c-external", title="QBR", date="2026-08-21",
+        participants=["rep@sprntly.ai", "jane@flipkart.com"],
+    )
+    pool = cd._voc_count_prefilter([internal, external], "co")
+    kept_ids = {cd.VOC_CALLS_SPEC.item_id(it) for it in pool}
+    assert kept_ids == {"c-external"}
+
+
+def test_prefilter_wraps_surviving_calls_with_own_domains_and_account(monkeypatch):
+    monkeypatch.setattr(
+        "app.db.drip.list_members_with_email",
+        lambda cid: [{"email": "rep@sprntly.ai"}], raising=False,
+    )
+    calls = [
+        CallTranscript(
+            external_id="c1", title="QBR", date="2026-08-21",
+            participants=["rep@sprntly.ai", "jane@flipkart.com"],
+        ),
+    ]
+    pool = cd._voc_count_prefilter(calls, "co")
+    assert len(pool) == 1
+    wrapped = pool[0]
+    assert isinstance(wrapped, cd._VocAnnotatedCall)
+    assert wrapped.account == "Flipkart"
+    assert "sprntly.ai" in wrapped.own_domains
+
+
+def test_engine_run_never_shows_the_internal_call_id_to_the_model_and_never_counts_it(monkeypatch):
+    """End-to-end through the real engine (`corpus_mapreduce.run`), not just
+    the prefilter in isolation: the internal call's id must never appear in
+    a batch's rendered prompt at all, and `total_items` must stay the FULL
+    window count (2) even though only the external call was ever
+    classifiable."""
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(
+        "app.db.drip.list_members_with_email",
+        lambda cid: [{"email": "rep@sprntly.ai"}], raising=False,
+    )
+    internal = CallTranscript(
+        external_id="c-internal", title="Standup", date="2026-08-20",
+        participants=["rep@sprntly.ai", "rep2@sprntly.ai"],
+    )
+    external = CallTranscript(
+        external_id="c-external", title="QBR", date="2026-08-21",
+        participants=["rep@sprntly.ai", "jane@flipkart.com"],
+    )
+    seen_ids: set[str] = set()
+
+    def _fake_llm(**kw):
+        import re
+        ids = re.findall(r'<item id="([^"]+)">', kw["input"])
+        seen_ids.update(ids)
+        return SimpleNamespace(
+            output={"verdicts": {i: {"hit": True, "reason": "hit"} for i in ids}},
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _fake_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many calls raised X",
+        window=SimpleNamespace(label="last 7 days"), items=[internal, external],
+    )
+    assert "c-internal" not in seen_ids
+    assert "c-internal" not in eng.hit_ids
+    assert eng.total_items == 2  # denominator stays the window's real total
+
+
+def test_render_item_annotates_participant_sides_for_the_classifier(monkeypatch):
+    """The classify prompt for a prefiltered call carries the deterministic
+    participant-side map — the server fact a rep-vs-customer misattribution
+    bug needs, not a flat unattributed participants line."""
+    monkeypatch.setattr(
+        "app.db.drip.list_members_with_email",
+        lambda cid: [{"email": "jordan@sprntly.ai"}], raising=False,
+    )
+    call = CallTranscript(
+        external_id="c1", title="Renewal", date="2026-08-20",
+        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+    )
+    pool = cd._voc_count_prefilter([call], "co")
+    rendered = cd.VOC_CALLS_SPEC.render_item(pool[0])
+    assert "company-side (never the customer): jordan@sprntly.ai" in rendered
+    assert "external customer/prospect (account: Flipkart): priya@flipkart.com" in rendered
+
+
+def test_render_item_on_a_bare_call_bypassing_the_prefilter_carries_no_annotation():
+    """A direct `render_item` call on a bare `CallTranscript` (no prefilter
+    run) renders exactly as before this change — no participant-side line,
+    since there is no server-computed fact to show."""
+    call = CallTranscript(
+        external_id="c1", title="Renewal", date="2026-08-20",
+        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+    )
+    rendered = cd.VOC_CALLS_SPEC.render_item(call)
+    assert rendered == call.render()
+    assert "company-side" not in rendered
+
+
+def test_jordan_kim_case_the_classify_prompt_lets_a_faithful_verdict_reject_the_rep_raised_ask(monkeypatch):
+    """The exact bug this ticket exists for: a rep on the company's own
+    domain must not be attributable as the customer. This proves WIRING —
+    the deterministic fact reaches the prompt, and the engine faithfully
+    carries a hit=false verdict through when the classifier honours it — not
+    that the live model reasons correctly (that gate is the real-LLM
+    re-validation, run separately; see the build report)."""
+    import app.corpus_mapreduce as cmr
+    import app.graph.gateway as gateway_mod
+
+    monkeypatch.setattr(
+        "app.db.drip.list_members_with_email",
+        lambda cid: [{"email": "jordan@sprntly.ai"}], raising=False,
+    )
+    call = CallTranscript(
+        external_id="c1", title="Renewal", date="2026-08-20",
+        participants=["jordan@sprntly.ai", "priya@flipkart.com"],
+        overview="Jordan walked Priya through the new SSO capability.",
+    )
+    captured: dict = {}
+
+    def _capture_llm(**kw):
+        captured["input"] = kw["input"]
+        # Stands in for a faithful Sonnet classify: the annotation says
+        # Jordan is company-side, so the ask is rep-raised -> hit=false.
+        return SimpleNamespace(
+            output={"verdicts": {"c1": {"hit": False, "reason": ""}}},
+            stop_reason="end_turn",
+        )
+
+    monkeypatch.setattr(gateway_mod, "llm_call", _capture_llm)
+    eng = cmr.run(
+        cd.VOC_CALLS_SPEC, enterprise_id="co", question="how many calls raised X",
+        window=SimpleNamespace(label="last 7 days"), items=[call],
+    )
+    assert "company-side (never the customer): jordan@sprntly.ai" in captured["input"]
+    assert "external customer/prospect (account: Flipkart): priya@flipkart.com" in captured["input"]
+    assert eng.count == 0
+    assert "c1" not in eng.hit_ids
+
+
 # ── stated assumption — never a silent unilateral reading ───────────────────
 
 def test_assemble_count_answer_states_the_default_assumption_when_no_criterion():
@@ -1158,7 +1515,7 @@ def test_assemble_count_answer_states_the_default_assumption_when_no_criterion()
     eng = cmr.EngineResult(count=3, hit_ids=[], reasons={}, total_items=10,
                            unclassified_ids=[])
     window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
-    out = cd._assemble_count_answer(eng, window=window, source_line="=== CALLS ===")
+    out = cd._assemble_count_answer(eng, window=window, corpus=_count_corpus(window))
     assert cd._VOC_DEFAULT_ASSUMPTION_LINE in out["answer"]
     assert "actively asked for a feature or raised" in out["answer"]
     assert "compliance/hosting requirements not counted" in out["answer"]
@@ -1171,7 +1528,7 @@ def test_assemble_count_answer_states_a_supplied_criterion_instead_of_the_defaul
                            unclassified_ids=[])
     window = cd.Window(since=NOW - timedelta(days=7), until=NOW, label="last 7 days")
     out = cd._assemble_count_answer(
-        eng, window=window, source_line="=== CALLS ===",
+        eng, window=window, corpus=_count_corpus(window),
         criterion="asked about pricing changes",
     )
     assert "asked about pricing changes" in out["answer"]
@@ -2254,6 +2611,34 @@ def test_base_discipline_and_default_criterion_length_within_bounds():
     assert 900 <= combined <= 2600
 
 
+# ── count-engine rubric — reason format (verbosity + name-attribution fix) ──
+# A real-corpus run found the model volunteering multi-sentence reasons with
+# an embedded verbatim quote AND a "Customer (<Name>)" attribution the prompt
+# never asked for — and on several calls that name was the Sprntly rep, not
+# the customer. These pin the tightened reason contract by content.
+
+def test_base_discipline_caps_reason_length_and_bans_names_and_quotes():
+    s = cd._VOC_BASE_DISCIPLINE.lower()
+    assert "12 word" in s
+    assert "verbatim quote" in s
+    assert "speaker" in s and "name" in s
+
+
+def test_base_discipline_states_hit_reason_consistency():
+    """The structured `hit` boolean must agree with the narrated reason — a
+    real-corpus run found a call counted `hit=true` whose own reason argued
+    the ask was rep-attributed (`hit=false` in the model's own prose)."""
+    s = cd._VOC_BASE_DISCIPLINE.lower()
+    assert "hit and reason" in s and "agree" in s
+    assert "hit must be false" in s
+
+
+def test_base_discipline_states_a_self_check_step_for_the_scope_guard():
+    s = cd._VOC_BASE_DISCIPLINE.lower()
+    assert "self-check" in s
+    assert "rep-side" in s or "rep/employee" in s
+
+
 def test_voc_calls_spec_composes_base_discipline_and_default_criterion():
     """`VOC_CALLS_SPEC` carries the two pieces the engine composes together —
     pins the wiring between call_digest's constants and the spec, independent
@@ -2358,9 +2743,19 @@ def _genuine_feature_request_call() -> CallTranscript:
 
 
 def _genuine_issue_call() -> CallTranscript:
+    # A DIFFERENT customer domain than `_genuine_feature_request_call()`,
+    # deliberately: `_voc_count_prefilter` reuses `call_index._own_domains`'s
+    # ubiquity heuristic (a domain on >= half a corpus's calls is treated as
+    # OUR OWN, not a customer's — see call_index.py). In the mixed 5-call
+    # batch below, reusing the same "customerco.com" for both genuine-hit
+    # fixtures would put that domain on 2 of 5 calls — exactly the ubiquity
+    # threshold — and falsely brand a real customer as "our own domain",
+    # silently prefiltering both genuine calls out of the classification
+    # pool. Two distinct customers is also the more realistic fixture shape
+    # for "two different genuine asks in one window".
     return _fixture_call(
         "issue-1", title="Support call",
-        participants=["rep@reviewedco.com", "buyer@customerco.com"],
+        participants=["rep@reviewedco.com", "buyer@otherco.com"],
         overview="Customer reported the dashboard crashes on load.",
         quotes=[{"speaker": "Buyer",
                  "text": "The dashboard crashes every time I try to load it."}],

@@ -34,6 +34,8 @@ def _spec(**overrides) -> cmr.CorpusMapReduceSpec:
         fetch=lambda *a, **k: [],
         render_item=lambda it: it.text,
         item_id=lambda it: it.id,
+        render_label=lambda it: it.id,
+        phase_label="Analyzing the findings…",
         base_discipline="BASE",
         criterion="CRIT",
         verdict_schema={"type": "object"},
@@ -305,6 +307,71 @@ def test_no_phase_sink_is_a_silent_no_op(monkeypatch):
     assert eng.count == 2  # ran to completion without a sink
 
 
+def test_phase_label_is_spec_supplied_never_a_reportphase_value(monkeypatch):
+    """A domain names its own progress phrase — the engine never falls back
+    to `app.report_phases.ReportPhase`. This is the mechanism
+    `app.chat_intent._is_report_pipeline`'s carve-out depends on: a count
+    engine's progress must never carry the raw label the frontend's
+    classify-time envelope keys on to open the Reports drawer."""
+    phases: list[str] = []
+    items = _items(2)
+    spec = _spec(phase_label="Analyzing your widgets…")
+    _run(spec, items, monkeypatch, _all_hit_llm, on_phase=phases.append)
+    assert phases == ["Analyzing your widgets…"]
+    # Never the shared report vocabulary this run's spec did not opt into.
+    assert "Analyzing the findings…" not in phases
+
+
+def test_run_never_imports_reportphase():
+    """Structural guard, not just a phase-string assertion: the engine module
+    itself must carry no dependency on the report vocabulary at all — a
+    domain-agnostic count/classification engine has no business knowing what
+    a report is."""
+    import app.corpus_mapreduce as mod
+
+    assert not hasattr(mod, "ReportPhase")
+    assert not hasattr(mod, "emit_report_phase")
+
+
+# ── render_label / EngineResult.labels ───────────────────────────────────────
+
+def test_render_label_is_honored_on_hit_labels(monkeypatch):
+    """The shared engine renders each hit via `spec.render_label(item)` — a
+    synthetic spec's custom label appears verbatim on `EngineResult.labels`,
+    never the raw `item_id`."""
+    items = _items(2)
+    spec = _spec(render_label=lambda it: f"friendly-{it.id}")
+    eng = _run(spec, items, monkeypatch, _all_hit_llm)
+    assert eng.count == 2
+    assert eng.labels == {"c0": "friendly-c0", "c1": "friendly-c1"}
+    # Never the raw id standing in for the label.
+    assert "c0" not in eng.labels.values()
+
+
+def test_render_label_is_only_resolved_for_hits(monkeypatch):
+    """`labels` is populated for HITS only — the domain-agnostic assembly
+    never needs a label for an item that did not match, and a spec whose
+    `render_label` would raise on a non-hit item (e.g. it assumes a field
+    only present on a qualifying item) must never see one."""
+    def _first_hit_only(**kw):
+        import re
+        ids = re.findall(r'<item id="([^"]+)">', kw["input"])
+        verdicts = {i: {"hit": i == "c0", "reason": "r" if i == "c0" else ""}
+                    for i in ids}
+        return SimpleNamespace(output={"verdicts": verdicts}, stop_reason="end_turn")
+
+    def _label_or_raise(it):
+        if it.id != "c0":
+            raise AssertionError("render_label must not run on a non-hit item")
+        return "friendly-c0"
+
+    items = _items(2)
+    spec = _spec(render_label=_label_or_raise)
+    eng = _run(spec, items, monkeypatch, _first_hit_only)
+    assert eng.hit_ids == ["c0"]
+    assert eng.labels == {"c0": "friendly-c0"}
+
+
 # ── local fan-out cap ────────────────────────────────────────────────────────
 
 def test_local_fanout_cap_is_gate_capacity_minus_one(monkeypatch):
@@ -408,3 +475,131 @@ def test_map_call_uses_the_composed_system_including_a_supplied_criterion(monkey
     _run(spec, items, monkeypatch, _capture, constraints={"criterion": "CUSTOM BAR"})
     assert captured[0]["system"] == "BASE-GUARD\n\nCUSTOM BAR"
     assert "DEFAULT-CRIT" not in captured[0]["system"]
+
+
+# ── generic prefilter hook — domain-agnostic on the engine's side ───────────
+# Proves the engine's `CorpusMapReduceSpec.prefilter` is honoured with NO
+# domain knowledge baked into `corpus_mapreduce.py` itself — a synthetic spec
+# supplies its own filter/wrap logic and the engine applies it uniformly.
+
+def test_prefilter_defaults_to_none_and_is_a_strict_no_op(monkeypatch):
+    items = _items(4)
+    spec = _spec(batch_size=2)
+    assert spec.prefilter is None
+    eng = _run(spec, items, monkeypatch, _all_hit_llm)
+    assert eng.count == 4
+    assert eng.total_items == 4
+
+
+def test_prefilter_narrows_the_classification_pool_but_total_items_stays_the_full_fetch(monkeypatch):
+    items = _items(4)  # c0..c3
+    seen_ids: set[str] = set()
+
+    def _capture_llm(**kw):
+        import re
+        ids = re.findall(r'<item id="([^"]+)">', kw["input"])
+        seen_ids.update(ids)
+        return SimpleNamespace(
+            output={"verdicts": {i: {"hit": True, "reason": "r"} for i in ids}},
+            stop_reason="end_turn",
+        )
+
+    spec = _spec(batch_size=10, prefilter=lambda its, ent: [it for it in its if it.id != "c1"])
+    eng = _run(spec, items, monkeypatch, _capture_llm)
+    assert "c1" not in seen_ids            # never sent to the model
+    assert "c1" not in eng.hit_ids
+    assert eng.total_items == 4            # the FULL fetched count, not the narrowed pool of 3
+    assert eng.count == 3
+
+
+def test_prefilter_receives_the_full_fetched_items_and_the_run_enterprise_id(monkeypatch):
+    captured: dict = {}
+
+    def _prefilter(its, enterprise_id):
+        captured["items"] = its
+        captured["enterprise_id"] = enterprise_id
+        return its
+
+    items = _items(2)
+    spec = _spec(prefilter=_prefilter)
+    _run(spec, items, monkeypatch, _all_hit_llm)
+    assert captured["enterprise_id"] == "ent-A"
+    assert captured["items"] == items
+
+
+def test_prefilter_dropped_items_are_excluded_not_surfaced_as_unclassified(monkeypatch):
+    """An item the prefilter drops was never owed a verdict — it must not
+    land in `unclassified_ids` (that field means the model was shown an id
+    and never returned a verdict for it), unlike a genuinely unclassified
+    surviving item."""
+    def _broken_llm(**kw):
+        return SimpleNamespace(output={"not_verdicts_at_all": True}, stop_reason="end_turn")
+
+    items = _items(3)  # c0, c1, c2
+    spec = _spec(batch_size=10, prefilter=lambda its, ent: [it for it in its if it.id != "c1"])
+    eng = _run(spec, items, monkeypatch, _broken_llm)
+    assert "c1" not in eng.unclassified_ids
+    assert sorted(eng.unclassified_ids) == ["c0", "c2"]
+    assert eng.total_items == 3
+
+
+def test_prefilter_returning_an_empty_pool_short_circuits_with_no_llm_call(monkeypatch):
+    calls_made: list[dict] = []
+    monkeypatch.setattr(gateway_mod, "llm_call", lambda **kw: calls_made.append(kw))
+    items = _items(3)
+    spec = _spec(prefilter=lambda its, ent: [])
+    eng = cmr.run(spec, enterprise_id="ent-A", question="how many",
+                  window=SimpleNamespace(label="last 7 days"), items=items)
+    assert eng.count == 0
+    assert eng.total_items == 3
+    assert eng.unclassified_ids == []
+    assert calls_made == []
+
+
+def test_prefilter_may_return_a_domain_defined_wrapper_type(monkeypatch):
+    """The engine does not care WHAT a prefilter returns, only that
+    `item_id`/`render_item`/`render_label` still work on it — proves the
+    hook supports annotation/wrapping, not just filtering, with zero
+    engine-side knowledge of the wrapper's shape."""
+    @dataclass
+    class _Wrapped:
+        inner: _Item
+        tag: str
+
+    items = _items(2)
+
+    def _wrap(its, ent):
+        return [_Wrapped(inner=it, tag=f"tag-{it.id}") for it in its]
+
+    rendered_tags: list[str] = []
+
+    def _render(w):
+        rendered_tags.append(w.tag)
+        return w.inner.text
+
+    spec = _spec(
+        prefilter=_wrap,
+        item_id=lambda w: w.inner.id,
+        render_item=_render,
+        render_label=lambda w: f"label-{w.inner.id}",
+    )
+    eng = _run(spec, items, monkeypatch, _all_hit_llm)
+    assert eng.count == 2
+    assert set(rendered_tags) == {"tag-c0", "tag-c1"}
+    assert eng.labels == {"c0": "label-c0", "c1": "label-c1"}
+
+
+def test_corpus_mapreduce_module_carries_no_voc_or_email_domain_logic():
+    """Reusability guard: the shared engine must stay domain-agnostic — ALL
+    email-domain / call_index / voc LOGIC lives in call_digest.py's
+    VOC_CALLS_SPEC (`_voc_count_prefilter`), never here. Checks actual code
+    dependencies (imports, calls to the reused primitives), not prose —
+    the module docstring legitimately NAMES "voc_calls" once as an
+    illustrative example domain (`domain="voc_calls"` -> purpose
+    "voc_calls_map_s0"), which is documentation, not a dependency."""
+    import inspect
+
+    source = inspect.getsource(cmr).lower()
+    for banned in ("import app.call_index", "from app.call_index",
+                  "_own_domains(", "derive_account(", "@gmail", "email domain"):
+        assert banned not in source, f"corpus_mapreduce.py must not contain {banned!r}"

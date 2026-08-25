@@ -686,12 +686,26 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
 }
 
 
-def _is_report_pipeline(pipeline_id: Optional[str]) -> bool:
+def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
     """Does this plan's pipeline WRITE A REPORT DOCUMENT?
 
     `qa_agent._REPORT_PIPELINE_IDS` is the set the answer path itself dispatches
     on, so it is the one read here — a second list would drift and the drift
     would be invisible until a report printed itself into a chat thread.
+
+    ONE carve-out: `call-digest` is the machinery id BOTH the full
+    voice-of-customer pass AND the map-reduce count engine
+    (`app.corpus_mapreduce` via `call_digest.VOC_CALLS_SPEC`) resolve to — the
+    planner classifies by question SHAPE ("is this about the calls?"), before
+    the answer path has decided which of the two it will actually run, so one
+    pipeline id has to cover both. A count-shaped question
+    (`call_digest.is_mapreducible_count`, the SAME eligibility check the
+    answer path itself gates the engine on) answers INLINE, never a report —
+    see `app.corpus_mapreduce`'s module docstring — so it must not open the
+    Reports drawer or show report-generation copy just because it shares a
+    pipeline id with the report it is not writing. Every other
+    `_REPORT_PIPELINE_IDS` member names exactly one shape and needs no such
+    carve-out.
 
     Imported lazily: `qa_agent` is a heavy module and this endpoint is on the
     send path, which imports `ask_planner` the same way one function below.
@@ -701,16 +715,32 @@ def _is_report_pipeline(pipeline_id: Optional[str]) -> bool:
     try:
         from app.qa_agent import _REPORT_PIPELINE_IDS
 
-        return pipeline_id in _REPORT_PIPELINE_IDS
+        if pipeline_id not in _REPORT_PIPELINE_IDS:
+            return False
+        if pipeline_id == "call-digest":
+            from app.call_digest import is_mapreducible_count
+            from app.config import settings
+
+            if settings.voc_count_engine_enabled and is_mapreducible_count(question):
+                return False
+        return True
     except Exception:  # noqa: BLE001 — never break the verdict over a hint
         logger.exception("report-pipeline check failed for %s", pipeline_id)
         return False
 
 
 def _plan_to_envelope(
-    plan, *, prd_id: Optional[int], open_artifact: Optional[dict] = None
+    plan, *, prd_id: Optional[int], open_artifact: Optional[dict] = None,
+    question: str = "",
 ) -> dict:
     """A gated `ask_planner.Plan` in this module's envelope vocabulary.
+
+    `question` is the original message, threaded through ONLY so the
+    `"report"` key can tell a count-shaped `call-digest` question apart from
+    a report-shaped one — see `_is_report_pipeline`. Defaulted so every
+    existing direct caller (tests included) that has no message in hand
+    keeps working unchanged; a missing question just means the `call-digest`
+    carve-out never fires, which is the pre-existing (report=True) behaviour.
 
     Three of this module's own downgrade rules are re-applied HERE rather than
     trusted to the planner, because each needs something the planner does not
@@ -820,7 +850,7 @@ def _plan_to_envelope(
         # Read from the SAME set `qa_agent` dispatches on, never a second list:
         # a name that fell out of one and not the other would open a panel for
         # an answer, or print a report into the chat.
-        "report": _is_report_pipeline(plan.pipeline_id),
+        "report": _is_report_pipeline(plan.pipeline_id, question),
         # `edit_artifact` only: WHICH document the edit targets — the report or
         # team document the tab has open, re-read server-side. The client
         # already knows what its own panel is showing; this is echoed so the
@@ -921,7 +951,9 @@ def _resolve_via_planner(
     )
     if plan is None:
         return None
-    envelope = _plan_to_envelope(plan, prd_id=prd_id, open_artifact=open_artifact)
+    envelope = _plan_to_envelope(
+        plan, prd_id=prd_id, open_artifact=open_artifact, question=message,
+    )
     # The full gated plan rides along under `plan`, for the browser console.
     # Everything on it was already decided server-side and is already visible in
     # the backend log; this only saves someone testing from having to watch

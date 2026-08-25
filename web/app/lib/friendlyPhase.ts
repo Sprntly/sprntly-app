@@ -57,6 +57,16 @@ export function friendlyPhase(raw: string | null | undefined): string {
   if (s.startsWith("putting your answer together")) {
     return "Putting your answer together…"
   }
+  // corpus_mapreduce.py's map-reduce count engine (call_digest.py's
+  // VOC_CALLS_SPEC.phase_label) — an INLINE answer engine, never a report
+  // (backend/app/chat_intent.py's `_is_report_pipeline` keeps its questions
+  // out of the Reports drawer even though they share a pipeline id with the
+  // real voice-of-customer report). Checked BEFORE the broader "analyzing" /
+  // ReportPhase.ANALYZING match below so it keeps its own copy instead of
+  // reading as report-generation progress.
+  if (s.startsWith("analyzing your calls")) {
+    return "Analyzing your calls…"
+  }
 
   // ── Competitive-intelligence report (the long / report path) ───────────────
   // competitive_intel.py:1454 "Reading the last competitive review…"
