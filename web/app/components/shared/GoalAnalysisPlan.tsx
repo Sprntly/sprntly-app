@@ -29,11 +29,17 @@
  */
 import * as React from "react"
 import { useMemo, useState } from "react"
+import { planNarrative } from "../../lib/goalPlanNarrative"
 import type { GoalRunPlan } from "../../lib/api"
 
 export type PlanDecision = {
   excluded_sources: string[]
   hypotheses: string[]
+  /** The definition this click adopts, sent ONLY when the reader edited the
+   *  proposal. Absent means "as shown", which the server reads off the plan it
+   *  stored — so an untouched approve cannot round-trip the definition through
+   *  the client, where a stale card could overwrite it with old words. */
+  definition_text?: string
 }
 
 /** Mirrors the API's per-hypothesis cap. One place it can drift, stated here
@@ -67,6 +73,11 @@ export function GoalAnalysisPlan({
   // is the untouched state and no source can be dropped by an off-by-one.
   const [excluded, setExcluded] = useState<Set<string>>(new Set())
   const [hypothesesText, setHypothesesText] = useState("")
+  // THE DEFINITION, EDITABLE IN PLACE. `null` is untouched — distinct from a
+  // string equal to the proposal, because only `null` may be omitted from the
+  // approve body. A reader who selects the text, retypes it identically and
+  // approves has still adopted it; they just have not changed it.
+  const [definitionEdit, setDefinitionEdit] = useState<string | null>(null)
 
   // A settled record reads its exclusions from what was actually posted, not
   // from local state a re-mount would have thrown away.
@@ -99,7 +110,13 @@ export function GoalAnalysisPlan({
 
   const submit = () => {
     if (approving || nothingLeft || tooLong.length) return
+    const editedDefinition =
+      definitionEdit !== null && definitionEdit.trim() &&
+      definitionEdit.trim() !== (plan.definition_text || "").trim()
+        ? definitionEdit.trim()
+        : undefined
     onApprove({
+      ...(editedDefinition ? { definition_text: editedDefinition } : {}),
       excluded_sources: [...excluded],
       // One per line. Blank lines are dropped rather than sent as empty
       // hypotheses, which would be counted and reported back as things the
@@ -120,26 +137,100 @@ export function GoalAnalysisPlan({
         <h1 className="ga-doc-title">{plan.goal_text}</h1>
       </header>
 
+      {/* THE APPROACH, IN FIVE SENTENCES. Everything below this block was
+          already true and already on screen — and unreadable as an approach,
+          because it was four headed sections and a checkbox list with no
+          sentence anywhere saying what was about to happen. The feedback asked
+          for a numbered account first and the detail underneath, which is what
+          this is: what we SAY, then what we DO.
+          RECOMPUTED FROM `effectiveExcluded`, so unticking a source rewrites
+          step 1 under the reader's hand rather than leaving the narrative
+          describing a run they have just changed. */}
+      <section className="ga-plan-section ga-plan-approach" data-testid="goal-plan-approach">
+        <p className="ga-doc-note">
+          {settled
+            ? "This is the approach you approved."
+            : "This is the approach I am going to use. Approve it, or change it below."}
+        </p>
+        <ol className="ga-plan-steps">
+          {planNarrative(plan, effectiveExcluded).map((step, i) => (
+            <li key={i}>{step}</li>
+          ))}
+        </ol>
+      </section>
+
+      {/* THE DEFINITION IS CONFIRMED HERE NOW, not one screen earlier.
+          It used to have its own gate: a bare question, asked before the
+          reader had seen a single thing the run intended to do. The answers
+          showed what that costs — one run's definition of its own metric was
+          recorded as the literal words "that is accurate", because that is
+          what somebody typed at a prompt that was not, to them, asking for a
+          definition.
+          I9 is unchanged: a definition is adopted or elicited, never inferred.
+          It is shown, attributed, and editable in place, and approving is the
+          act of adopting it. What changed is only that the question now has
+          the plan around it to give it meaning. */}
       {plan.definition_text ? (
-        <section className="ga-plan-section">
-          <h2 className="ga-doc-h3">What I am trying to establish</h2>
-          <blockquote className="ga-doc-quote">{plan.definition_text}</blockquote>
+        <section className="ga-plan-section" data-testid="goal-plan-definition">
+          <h2 className="ga-doc-h3">
+            {settled || plan.definition_adopted
+              ? "What this was asked to establish"
+              : "Confirm what this means"}
+          </h2>
+          {settled || plan.definition_adopted ? (
+            <blockquote className="ga-doc-quote">{plan.definition_text}</blockquote>
+          ) : (
+            <>
+              <p className="ga-doc-note">
+                {/* WHERE IT CAME FROM AND THAT YOU MAY CHANGE IT — nothing
+                    else. This line used to end "I work to this sentence
+                    exactly as it stands", which is the first clause of the
+                    server's note rendered immediately below it: the same
+                    promise twice, in consecutive paragraphs. */}
+                {plan.definition_source
+                  ? <>Taken from {plan.definition_source}. Change it if that is not what you meant.</>
+                  : <>Change it if that is not what you meant.</>}
+              </p>
+              <textarea
+                className="ga-plan-definition-edit"
+                aria-label="What this goal means"
+                rows={3}
+                value={definitionEdit ?? plan.definition_text}
+                onChange={(e) => setDefinitionEdit(e.target.value)}
+              />
+              {/* WHAT IS DONE WITH THE SENTENCE, from the server, so §6's
+                  wording lives in one place. It says the part the sentence
+                  itself cannot: that it is taken literally, and what gets read
+                  against it. The CONVENTION is not repeated here — it is the
+                  text in the box above, and saying it twice is the repetition
+                  this whole change was asked to remove. */}
+              {plan.definition_note ? (
+                <p className="ga-doc-note" data-testid="goal-plan-definition-note">
+                  {plan.definition_note}
+                </p>
+              ) : null}
+            </>
+          )}
         </section>
       ) : null}
 
       <section className="ga-plan-section">
         <h2 className="ga-doc-h3">Where I will look</h2>
         <p className="ga-doc-note">
-          {keptSignals.toLocaleString()} signal{keptSignals === 1 ? "" : "s"}
           {settled ? (
             <>
-              {" "}in scope across {kept.length} source
+              {keptSignals.toLocaleString()} signal
+              {keptSignals === 1 ? "" : "s"} in scope across {kept.length} source
               {kept.length === 1 ? "" : "s"} — counted when the plan was made,
               not a record of what has been read.
             </>
           ) : (
+            // NOT THE TOTAL AGAIN. The narrative's first step opens with it;
+            // repeating it as this section's lede put the same number twice on
+            // one card. The per-source counts below are what this section is
+            // for, and they are not a restatement of anything.
             <>
-              . Uncheck anything you do not want read — the report will say that
+              Uncheck anything you do not want read — the report will say that
               you dropped it.
             </>
           )}
@@ -212,16 +303,12 @@ export function GoalAnalysisPlan({
         </section>
       ) : null}
 
-      {plan.will_produce?.length ? (
-        <section className="ga-plan-section" data-testid="goal-plan-produce">
-          <h2 className="ga-doc-h3">What you will get</h2>
-          <ul className="ga-doc-list">
-            {plan.will_produce.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
-        </section>
-      ) : null}
+      {/* "What you will get" LIVED HERE and is gone: `planNarrative` composes
+          its fourth step from these same strings, so the section printed the
+          deliverables a second time, verbatim, three inches below the first.
+          The narrative is the summary AND the only statement of them now. The
+          gap list below stays, because it carries `because` and `remedy` —
+          detail the one-line summary of it genuinely does not have. */}
 
       {settled ? (
         settled.hypotheses.length ? (

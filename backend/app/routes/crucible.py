@@ -388,6 +388,46 @@ _METRIC_CONVENTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
+#: WHAT THE RUN DOES WITH THE SENTENCE, once there is a sentence.
+#:
+#: Split out of `_method_note` when the clarification gate folded into the
+#: plan. On the folded path the CONVENTION is no longer a note about the
+#: definition — it IS the definition, sitting in an editable field — so
+#: repeating it underneath is exactly the "multiple repetitions and LLM
+#: re-explaining" the feedback asked us to cut. What still needs saying is the
+#: part the sentence itself cannot: that it is taken literally, and what gets
+#: read against it.
+#:
+#: A CONSTANT for every company and goal, deliberately: the mechanism it
+#: describes does not vary, so branching on anything would imply the run
+#: behaves differently when it does not.
+_PROCESS_NOTE = (
+    "I will work to that sentence exactly as you write it: I do not "
+    "recompute it, and I do not fill in anything you leave out. The "
+    "analysis then reads your documents, tickets and conversations against "
+    "it, not a metric series, so it reports how much of your book each "
+    "theme touches rather than a movement in this number."
+)
+
+
+def _convention_definition(goal_text: str) -> str:
+    """The definition this run will assume when nothing else has one.
+
+    Same table `_method_note` reads, returning the CONVENTION SENTENCE alone —
+    the note wraps it in process prose, which reads as an explanation rather
+    than as a definition you can edit. Empty when the goal names no metric
+    family we have a convention for, and empty is load-bearing: there is then
+    nothing to propose, so the run asks rather than inventing one, which is the
+    inference I9 exists to forbid.
+    """
+    lowered = f" {(goal_text or '').lower()} "
+    return next(
+        (text for words, text in _METRIC_CONVENTIONS
+         if any(w in lowered for w in words)),
+        "",
+    )
+
+
 def _method_note(goal_text: str) -> str:
     """§6's one sentence: the calculation, stated and editable.
 
@@ -413,13 +453,7 @@ def _method_note(goal_text: str) -> str:
          if any(w in lowered for w in words)),
         "",
     )
-    process = (
-        "I will work to that sentence exactly as you write it: I do not "
-        "recompute it, and I do not fill in anything you leave out. The "
-        "analysis then reads your documents, tickets and conversations against "
-        "it, not a metric series, so it reports how much of your book each "
-        "theme touches rather than a movement in this number."
-    )
+    process = _PROCESS_NOTE
     if not convention:
         return process
     return f"{convention} Say otherwise below and I will use your reading. {process}"
@@ -626,6 +660,13 @@ async def chat_edit_document(
 
 class ApprovePlan(BaseModel):
     """What the user changed about the plan before saying go."""
+    #: THE DEFINITION, ADOPTED BY THIS CLICK. The plan renders it as an
+    #: editable proposal, so approving is the moment a person agrees to those
+    #: words — I9's human act, now on the same screen as the method rather
+    #: than one gate earlier. Optional because a client that sends nothing is
+    #: agreeing to the proposal exactly as it was shown, which the server can
+    #: read straight off the stored plan.
+    definition_text: Optional[Annotated[str, StringConstraints(max_length=4_000)]] = None
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
     # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
     # ten 40,000-char hypotheses render past the document limit with only a
@@ -644,9 +685,18 @@ async def approve(
     """The SECOND gate. The plan said what would be read and what could not be
     answered; this is the user saying go, having seen both.
 
-    Separate from `/confirm` on purpose. Confirming a goal DEFINITION and
-    approving a method are different decisions, and collapsing them is how a
-    user ends up having agreed to something they never saw.
+    THIS NOW CARRIES THE DEFINITION TOO, and the comment it replaces argued
+    the opposite: that confirming a definition and approving a method are
+    different decisions, and collapsing them is how a user agrees to something
+    they never saw. The second half of that is still exactly right and is why
+    the plan renders the definition as an editable field rather than swallowing
+    it — what changed is that a SEPARATE SCREEN turned out to be the thing
+    producing agreement-without-seeing. Asked cold, with no plan yet on screen
+    to give the question meaning, one reader answered it "that is accurate" and
+    that sentence became the definition of the run.
+
+    So both decisions are made here, both are visible here, and neither is
+    inferred: `/confirm` still exists for runs already parked at the old gate.
     """
     claimed = await asyncio.to_thread(
         runs_db.claim_for_approval, run_id, company.company_id
@@ -662,7 +712,13 @@ async def approve(
         )
 
     meta = _meta_of(run_id, company.company_id)
-    definition_text = (meta.get("plan") or {}).get("definition_text") or ""
+    # THE EDIT WINS, THE PROPOSAL IS THE FALLBACK. A body that carries text is
+    # the reader having changed the proposed definition in place; a body that
+    # carries none is them agreeing to it as shown. Blank-after-strip is
+    # treated as "no change" rather than as an empty definition — `confirm_goal`
+    # refuses to lock nothing, and a 500 there would strand a claimed run.
+    edited = (body.definition_text or "").strip()
+    definition_text = edited or (meta.get("plan") or {}).get("definition_text") or ""
 
     kwargs = dict(
         run_id=run_id, company_id=company.company_id,
@@ -704,6 +760,13 @@ def execute_run(
     what happened.
     """
     now = datetime.now(timezone.utc)
+    # WHOSE WORDS THESE ARE. A definition arriving already set came from
+    # `/confirm` — a person typed it at the old gate — so it is adopted before
+    # this function starts. One resolved below on the folded path is a
+    # proposal until `/approve` carries it back, and these two flags are what
+    # keep those cases distinguishable everywhere downstream.
+    definition_source = "your own words"
+    definition_adopted = definition_text is not None
     try:
         runs_db.heartbeat(run_id, company_id)
 
@@ -735,49 +798,104 @@ def execute_run(
                 resolution.definition.definition_text
                 if resolution.definition is not None else ""
             )
-            runs_db.update(
-                run_id, company_id,
-                status="awaiting_confirmation",
-                prioritisation={
-                    "ask": resolution.ask,
-                    "resolution": resolution.status,
-                    "proposed_definition": proposed,
-                    "proposed_source": (
+            # ── FOLD THE CLARIFICATION INTO THE PLAN. ───────────────────────
+            #
+            # Decided BEFORE anything is written, and the order is the fix for
+            # a race rather than a tidiness preference. The first version of
+            # this wrote `awaiting_confirmation` and then fell through to build
+            # the plan — so for the second or so that the inventory query took,
+            # the row advertised a gate that this run was never going to stop
+            # at. The chat polls for either gate; a poll landing in that window
+            # rendered the definition card for a run that had already moved on,
+            # which is precisely the screen this change exists to remove.
+            #
+            # Why it stopped being its own step: asking "what does revenue mean
+            # to you?" cold, before the reader has seen a single thing the run
+            # intends to do, is a question with no context attached — and the
+            # answers showed it. One run went out with its definition recorded
+            # as the literal words "that is accurate", because that is what the
+            # reader typed at a prompt that was not, to them, asking for a
+            # definition. A second screen later they were asked to approve a
+            # plan built on it.
+            #
+            # I9 IS NOT WEAKENED, AND THIS IS THE PART TO CHECK. The rule is
+            # that a definition is adopted or elicited, never inferred — it has
+            # never been a rule about how many screens that takes. What it
+            # requires is that a person sees the words and says yes to them.
+            # They still do: the proposal is rendered inside the plan, editable
+            # in place, and `/approve` locks whatever text comes back from that
+            # field. `definition_adopted=False` says in the row itself that
+            # nobody has agreed yet.
+            #
+            # TWO CASES STILL STOP AT THEIR OWN GATE, because in neither is
+            # there an honest proposal to put in front of anyone:
+            #   - nothing to propose (no KPI-tree definition, and the goal
+            #     names no metric family we hold a convention for) — inventing
+            #     one is the inference the invariant forbids;
+            #   - two authoritative systems that DISAGREE, where the conflict
+            #     is worth more than either answer and picking one silently is
+            #     the failure. That is a decision, not a confirmation, and it
+            #     gets its own screen.
+            prefill = proposed or _convention_definition(goal_text)
+            folds = bool(prefill) and not resolution.conflicts
+
+            if folds:
+                _remember(run_id, resolution)
+                definition_text = prefill
+                definition_source = (
+                    "your own metric tree" if proposed
+                    else "the usual reading of this metric"
+                )
+            else:
+                runs_db.update(
+                    run_id, company_id,
+                    status="awaiting_confirmation",
+                    prioritisation={
+                        "ask": resolution.ask,
+                        "resolution": resolution.status,
+                        "proposed_definition": proposed,
+                        "proposed_source": (
                         resolution.definition.definition_source_ref
                         if resolution.definition is not None else None
-                    ),
-                    # Carried, never resolved: two authoritative systems
-                    # disagreeing about what a metric means is worth more than
-                    # either answer, and picking one silently is the failure.
-                    "conflicts": [
+                        ),
+                        # Carried, never resolved: two authoritative systems
+                        # disagreeing about what a metric means is worth more than
+                        # either answer, and picking one silently is the failure.
+                        "conflicts": [
                         {"metric": c.metric_name,
-             "a": {"source": c.source_a, "definition": c.definition_a},
-             "b": {"source": c.source_b, "definition": c.definition_b}}
+                 "a": {"source": c.source_a, "definition": c.definition_a},
+                 "b": {"source": c.source_b, "definition": c.definition_b}}
                         for c in resolution.conflicts
-                    ],
-                    # §6, IN THE SAME STEP. "If no computation is found, state
-                    # the common convention you are assuming for that metric,
-                    # in one sentence, and let them change it." Identity without
-                    # method is README F4's "half of this that gets missed" —
-                    # two teams can point at the same metric name and mean
-                    # recognised versus booked, and none of that is visible in
-                    # the name while all of it resizes every recommendation.
-                    "method_note": _method_note(goal_text),
-                },
-            )
-            _remember(run_id, resolution)
-            return
+                        ],
+                        # §6, IN THE SAME STEP. "If no computation is found, state
+                        # the common convention you are assuming for that metric,
+                        # in one sentence, and let them change it." Identity without
+                        # method is README F4's "half of this that gets missed" —
+                        # two teams can point at the same metric name and mean
+                        # recognised versus booked, and none of that is visible in
+                        # the name while all of it resizes every recommendation.
+                        "method_note": _method_note(goal_text),
+                    },
+                )
+                _remember(run_id, resolution)
+                return
 
-        # Past this line a human confirmed these words. Lock and persist the
-        # definition BEFORE spending anything, so the run is auditable even if
-        # the analysis below fails.
-        pending = _pending(run_id) or _bare_definition(company_id, goal_text)
-        locked = confirm_goal(
-            pending, user_id=confirmed_by or "", at=now,
-            definition_text=definition_text,
-        )
-        definition_row_id = runs_db.save_definition(company_id, locked)
-        runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
+
+        # NOTHING IS LOCKED ON THE WAY TO THE PLAN. This block used to run
+        # here unconditionally, which was right while the definition arrived
+        # already confirmed from gate one. It is not right now: on the folded
+        # path `definition_text` is a PROPOSAL, and locking it here would
+        # record a person as having confirmed words they had not yet been
+        # shown — with their user id on it. The lock belongs to the act that
+        # actually is the agreement, which is approving the plan.
+        if approved:
+            pending = _pending(run_id) or _bare_definition(company_id, goal_text)
+            locked = confirm_goal(
+                pending, user_id=confirmed_by or "", at=now,
+                definition_text=definition_text,
+            )
+            definition_row_id = runs_db.save_definition(company_id, locked)
+            runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
 
         # ── Stage 1. SAY WHAT WILL BE DONE, then stop for approval. ─────────
         #
@@ -794,6 +912,9 @@ def execute_run(
                 goal_text=goal_text,
                 definition_text=definition_text,
                 currency="accounts",
+                definition_source=definition_source,
+                definition_note=_PROCESS_NOTE,
+                definition_adopted=definition_adopted,
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()

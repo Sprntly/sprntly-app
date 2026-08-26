@@ -96,6 +96,12 @@ import { AGENT_NAME } from "../../../lib/agent"
 const NO_REPORTS: ReportSummary[] = []
 
 export type ThreadTurn = {
+  /** WHY THE WAIT ENDED, in words fit to render. `error` next to it holds the
+   *  raw exception and is never shown. `mapMainTurns` forwards this to the
+   *  bubble, which is where the shape was declared and where it stopped —
+   *  `ShellTurn` carried the field, this type did not, and `next build` failed
+   *  on the read while vitest (which never type-checks) stayed green. */
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   id: string
   /** DISPLAY text — the user's typed ask only. Attached-document content is NOT
    *  folded in here (that goes to the backend separately); the thread renders
@@ -5170,6 +5176,10 @@ export function ChatScreen() {
         await goalAnalysisApi.approve(runId, {
           excluded_sources: decision.excluded_sources,
           hypotheses: decision.hypotheses,
+          // Only present when the reader edited the proposed definition. The
+          // approve click is what adopts it either way — this carries the
+          // change, not the agreement.
+          definition_text: decision.definition_text,
         })
         patchTurn(tabId, turnId, {
           goalGate: undefined,
@@ -5310,8 +5320,26 @@ export function ChatScreen() {
         ...(convId != null ? { conversation_id: convId } : {}),
       })
       goalRunRef.current = run.id
-      // A run is born `resolving_goal` and reaches the gate a moment later.
-      const detail = await awaitGoalRun(run.id, ["awaiting_confirmation"])
+      // A run is born `resolving_goal` and reaches A GATE a moment later —
+      // WHICH ONE depends on whether Stage 0 had anything honest to propose.
+      //
+      // This used to wait for `awaiting_confirmation` alone, and that was
+      // correct while it was the only gate a new run could reach. Now that a
+      // goal naming a recognisable metric resolves its definition and folds
+      // straight into the plan, waiting for the old state alone would time out
+      // on the COMMON path and tell the reader their analysis "could not
+      // start" while a perfectly good plan sat waiting on the row.
+      const detail = await awaitGoalRun(
+        run.id, ["awaiting_confirmation", "awaiting_approval"],
+      )
+      if (detail?.status === "awaiting_approval" && detail.prioritisation?.plan) {
+        patchTurn(tabId, turnId, {
+          goalGate: {
+            kind: "plan", runId: run.id, plan: detail.prioritisation.plan,
+          },
+        })
+        return
+      }
       if (!detail || detail.status !== "awaiting_confirmation") {
         endGoalTurn(tabId, turnId,
           "The analysis could not start for this goal.")

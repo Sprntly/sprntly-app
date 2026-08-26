@@ -25015,6 +25015,31 @@
   text-transform: uppercase; opacity: 0.6;
 }
 .ggc-settled-body { margin: 0; line-height: 1.5; }
+/* THE DEFINITION, EDITABLE WHERE IT IS READ. A proposal you cannot change in
+   place is an assertion with a polite tone, so this is a real field rather
+   than a quote with an "edit" affordance somewhere else. */
+.ga-plan-definition-edit {
+  width: 100%; margin-top: 6px; padding: 8px 10px;
+  font: inherit; line-height: 1.5; resize: vertical;
+  border: 1px solid var(--border, #e5e5e5); border-radius: 6px;
+  background: var(--surface, transparent); color: inherit;
+}
+/* THE APPROACH BLOCK. Sits above the detail and is meant to be the only
+   thing most readers read, so it gets the room a lead paragraph gets. */
+.ga-plan-steps {
+  margin: 8px 0 0; padding-left: 1.25em;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ga-plan-steps li { line-height: 1.55; }
+.ga-plan-approach { padding-bottom: 4px; }
+/* THE HANDOFF LINE. Where the answer went, said in the thread rather than
+   left for the reader to infer from a panel that opened by itself. Separated
+   by a rule because it is the one forward-looking sentence on a card that is
+   otherwise a record of a decision already made. */
+.ggc-settled-next {
+  margin: 6px 0 0; padding-top: 6px; line-height: 1.5;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
 /* Beside the live controls, never instead of them — a refused gate is usually
    retryable, and the run is still waiting server-side. */
 .ggc-error { margin: 0; color: var(--danger, #b42318); line-height: 1.5; }

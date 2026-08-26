@@ -698,6 +698,14 @@ export type GoalRunPlan = {
   excluded_sources?: string[]
   /** The user's own hypotheses, carried into the run. */
   hypotheses?: string[]
+  /** Where the proposed definition came from, in words fit to render. Empty
+   *  on a run that reached its plan through the old clarification gate, where
+   *  the definition is the reader's own and needs no attribution. */
+  definition_source?: string
+  /** The calculation being assumed, stated so it can be argued with. */
+  definition_note?: string
+  /** False until a person has said yes to `definition_text`. */
+  definition_adopted?: boolean
 }
 
 /** What the run has decided so far, written as it goes.
@@ -835,11 +843,21 @@ export const goalAnalysisApi = {
    *  nothing" only when it is wrong. */
   approve: (
     runId: number,
-    opts?: { excluded_sources?: string[]; hypotheses?: string[] },
+    opts?: {
+      excluded_sources?: string[]
+      hypotheses?: string[]
+      /** THE DEFINITION, ADOPTED BY THIS CALL. Omitted means "yes, as
+       *  written" and the server locks the proposal it stored — which is the
+       *  one the card rendered. Sent only when the reader actually changed it,
+       *  so an unedited approve cannot round-trip a definition through the
+       *  client and back, where a stale card could quietly overwrite it. */
+      definition_text?: string
+    },
   ) =>
     api.post<GoalRun>(`/v1/crucible/${runId}/approve`, {
       excluded_sources: opts?.excluded_sources ?? [],
       hypotheses: opts?.hypotheses ?? [],
+      ...(opts?.definition_text ? { definition_text: opts.definition_text } : {}),
     }),
 
   /** This run's report document, or a 404 when it has none yet. */

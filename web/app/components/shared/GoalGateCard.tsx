@@ -212,6 +212,25 @@ function GoalGateSettled({
   const note = error
     ? <p className="ggc-error" role="status">{error}</p>
     : null
+
+  // WHAT HAPPENS NEXT, SAID IN THE THREAD. Approving used to do two things at
+  // once — settle this card and swing the panel open — and say neither of
+  // them. The reader's own words for it: "After I approved the plan, there was
+  // no comms to me. Just the artifact section opening." The thread is where
+  // they are looking, so the thread is where the handoff belongs.
+  //
+  // Tense is load-bearing. This line is part of a transcript that is re-read
+  // long after the run finishes, so anything in the progressive ("we're
+  // analysing this now…") is a lie the moment the report lands. Simple present
+  // — it *appears* there — reads correctly while the run is going AND a week
+  // later. `settledNext` is suppressed on `error` for the same reason: the run
+  // that failed between gates has no destination to send anyone to.
+  const settledNext = error ? null : (
+    <p className="ggc-settled-next" data-testid="goal-gate-plan-next">
+      Started. Your Goal Analysis is built from the sources above and appears
+      in the <strong>Goal Analysis</strong> panel on the right.
+    </p>
+  )
   if (resolved.kind === "failed") {
     return (
       <div className="ggc ggc-settled" data-testid="goal-gate-failed">
@@ -248,6 +267,7 @@ function GoalGateSettled({
           onApprove={() => {}}
           settled={{ excludedSources, hypotheses }}
         />
+        {settledNext}
         {note}
       </div>
     )
@@ -327,6 +347,7 @@ function GoalGateSettled({
           {hypotheses.join(" · ")}
         </p>
       ) : null}
+      {settledNext}
       {note}
     </div>
   )
