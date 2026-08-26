@@ -181,6 +181,7 @@ class GraphFacade:
             "id": signal.id,
             "enterprise_id": signal.enterprise_id,
             "source_id": signal.source_id,
+            "source_call_id": signal.source_call_id,
             "source_type": signal.source_type,
             "kind": signal.kind,
             "content": signal.content,
@@ -327,7 +328,104 @@ class GraphFacade:
         )
         return props
 
+    def update_signal_properties(
+        self, enterprise_id: str, signal_id: str, patch: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Shallow-merge `patch` into a signal's `properties` jsonb and persist.
+        Returns the merged properties. The signal twin of
+        `update_entity_properties`, same tenant-scoped read-modify-write (so a
+        concurrent write to another key is not clobbered). Used by the person
+        directory to stamp `owner_person_id` onto an action-item signal without
+        disturbing the raw `owner`/`due`/`status` the extractor wrote."""
+        existing = (
+            self._tbl("kg_signal")
+            .select("id, properties")
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", signal_id)
+            .execute()
+        )
+        if not existing.data:
+            raise ValueError(
+                f"Signal {signal_id} not found in enterprise {enterprise_id}"
+            )
+        props = existing.data[0].get("properties") or {}
+        props.update(patch)
+        (
+            self._tbl("kg_signal")
+            .update({"properties": props})
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", signal_id)
+            .execute()
+        )
+        return props
+
     # ---- reads ----------------------------------------------------------
+    def signals_for_call(
+        self, enterprise_id: str, provider: str, external_id: str
+    ) -> list[Signal]:
+        """Every signal distilled from ONE call, matched on the
+        `provenance.provider` / `provenance.external_id` a call-shaped extraction
+        stamps. Matched on provenance rather than `source_call_id` on purpose:
+        a signal that raced ahead of its `call_index` row was written with
+        `source_call_id` NULL but still carries `external_id`, and owner
+        resolution must still see it.
+
+        Newest-transaction-first, capped at the same 1000 as `active_signals` —
+        a call's handful of signals were just written, so they sit at the top of
+        that window. Filtered in Python (the arrow-path `provenance->>...` a
+        PostgREST filter would need is neither indexed nor supported by the
+        in-memory test fake); embedding is dropped from the select for the same
+        wire-cost reason `active_signals` drops it."""
+        rows = (
+            self._tbl("kg_signal").select(_SIGNAL_COLS)
+            .eq("enterprise_id", enterprise_id)
+            .order("transaction_at", desc=True)
+            .limit(_ACTIVE_SIGNALS_LIMIT)
+            .execute().data or []
+        )
+        out: list[Signal] = []
+        for r in rows:
+            prov = r.get("provenance") or {}
+            if prov.get("provider") == provider \
+               and str(prov.get("external_id")) == str(external_id):
+                out.append(self._row_to_signal(r))
+        return out
+
+    def unlinked_call_signals(
+        self, enterprise_id: str, *, limit: int = _ACTIVE_SIGNALS_LIMIT
+    ) -> list[Signal]:
+        """This tenant's signals with `source_call_id` still NULL, newest first.
+
+        The candidate set for the steady-state link backfill: a signal distilled
+        from a call that raced ahead of its `call_index` row was written
+        unlinked. Newest-transaction-first (and capped like `active_signals`) so
+        a recently-raced signal is always in the window even for a tenant
+        carrying many legacy unlinked rows. The caller decides which of these
+        actually carry a per-call `provenance.external_id` to relink."""
+        rows = (
+            self._tbl("kg_signal").select(_SIGNAL_COLS)
+            .eq("enterprise_id", enterprise_id)
+            .is_("source_call_id", "null")
+            .order("transaction_at", desc=True)
+            .limit(limit)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
+    def set_source_call_id(
+        self, enterprise_id: str, signal_id: str, call_id: int
+    ) -> None:
+        """Set a signal's `source_call_id` FK (bigint → call_index). Tenant-scoped
+        update; used only by the race backfill to relink a signal once its call's
+        index row exists."""
+        (
+            self._tbl("kg_signal")
+            .update({"source_call_id": call_id})
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", signal_id)
+            .execute()
+        )
+
     def list_sources(
         self,
         enterprise_id: str,
@@ -768,6 +866,7 @@ class GraphFacade:
         sig.id = r["id"]
         sig.enterprise_id = r["enterprise_id"]
         sig.source_id = r.get("source_id")
+        sig.source_call_id = r.get("source_call_id")
         sig.source_type = r["source_type"]
         sig.kind = r["kind"]
         sig.content = r["content"]

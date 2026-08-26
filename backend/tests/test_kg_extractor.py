@@ -2,6 +2,7 @@
 coercion and provenance_extra stamping used by connector-category uploads."""
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -369,3 +370,226 @@ def _llm_result_for_triage(output: dict) -> LLMResult:
         cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=0,
         stop_reason="end_turn",
     )
+
+
+# ── vendor-side taxonomy + owner/timing preservation ─────────────────────────
+#
+# The extractor prompt used to name only customer-voice exemplars, so vendor-side
+# facts (our own pricing, the status of our own capabilities, engagement
+# logistics) were dropped even when present, and an owner-attributed action item
+# lost its owner/due/status. These cover the broadened prompt + the fact that the
+# new kinds and the owner/due/status properties survive into the KG unchanged.
+
+
+def _kind_item(content: str, kind: str, *, source_type: str = "revenue",
+               theme: str = "Pricing", properties: dict | None = None) -> dict:
+    item = {"kind": kind, "content": content, "source_type": source_type,
+            "theme": theme, "relationship": "SUPPORTS", "confidence": 0.9}
+    if properties is not None:
+        item["properties"] = properties
+    return item
+
+
+def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
+    """Content property test on the LLM-facing strings (the actual change):
+    the system prompt names vendor-side facts and owner/due/status, the kind
+    vocabulary carries the new kinds, and the properties description shows the
+    owner/due/status shape. PROMPT_VERSION is bumped so re-extraction cache-busts.
+    """
+    assert ex.PROMPT_VERSION == "extract-doc-v2"
+
+    system = ex._SYSTEM.lower()
+    for term in ("pricing", "commercial", "capabilit", "logistic",
+                 "owner", "due", "status"):
+        assert term in system, f"_SYSTEM should mention {term!r}"
+
+    props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
+    kind_desc = props["kind"]["description"].lower()
+    for term in ("pricing", "commercial_term", "capability", "finding"):
+        assert term in kind_desc, f"kind description should list {term!r}"
+
+    props_desc = props["properties"]["description"].lower()
+    for term in ("owner", "due", "status"):
+        assert term in props_desc, f"properties description should show {term!r}"
+
+
+def test_vendor_side_kinds_and_owner_properties_persist(facade):
+    """A pricing kind, a capability kind, and an owner-attributed action item
+    (properties.owner/due/status) all survive extraction into the signal store
+    unchanged — the extractor neither validates the kind away nor drops the
+    attribution properties."""
+    items = [
+        _kind_item("We charge $30,000 a year for 50 users", "pricing",
+                   properties={"amount_usd": 30000, "seats": 50}),
+        _kind_item("The platform supports remote runbook versioning", "capability",
+                   source_type="verbal_claim", theme="Runbook versioning"),
+        _kind_item("Jane Doe to send the SOW by Friday", "finding",
+                   source_type="communication", theme="SOW",
+                   properties={"owner": "Jane Doe", "due": "Friday", "status": "open"}),
+    ]
+    with patch.object(ex, "llm_call", return_value=_llm_result(items)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        ex.extract_document(facade, "ent-x", doc_name="calls.md", text="doc body")
+
+    import uuid
+    ids = [str(uuid.uuid5(ex._NS, f"ent-x|{it['content']}")) for it in items]
+    by_content = {s.content: s for s in facade.get_signals("ent-x", ids).values()}
+
+    assert by_content["We charge $30,000 a year for 50 users"].kind == "pricing"
+    assert by_content["The platform supports remote runbook versioning"].kind == "capability"
+    owner_sig = by_content["Jane Doe to send the SOW by Friday"]
+    assert owner_sig.properties.get("owner") == "Jane Doe"
+    assert owner_sig.properties.get("due") == "Friday"
+    assert owner_sig.properties.get("status") == "open"
+
+
+# A REAL-LLM eval: it exercises the actual broadened prompt + schema against
+# Anthropic and asserts the vendor-side + owner-attributed signals are minted.
+# Skipped by default because it spends a real API call; run it with a live key:
+#     RUN_KG_EXTRACTOR_LLM=1 ANTHROPIC_API_KEY=... pytest \
+#         tests/test_kg_extractor.py -k real_llm
+# It drives the genuine gateway loop (no stubbed extraction) and inspects the
+# raw model output, so it never touches the DB (log=False, no facade write).
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_vendor_side_and_owner_extraction_real_llm():
+    from app.graph.gateway import llm_call
+
+    summary = (
+        "summary: We walked the customer through pricing. We charge $30,000 a "
+        "year for 50 users, and offer $250 per hour facilitation on top for "
+        "onboarding workshops. They asked whether the platform can version "
+        "runbooks; the platform supports remote runbook versioning today. "
+        "action items: **Jane Doe** to send the SOW by Friday."
+    )
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='calls.md'>\n{summary}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    kinds = {s.get("kind") for s in signals}
+
+    assert kinds & {"pricing", "commercial_term"}, (
+        f"expected a pricing/commercial_term signal, got kinds={kinds}")
+    assert kinds & {"capability", "product_capability_status"}, (
+        f"expected a capability signal, got kinds={kinds}")
+    assert any((s.get("properties") or {}).get("owner") for s in signals), (
+        f"expected an action item with properties.owner, got {signals}")
+
+
+# ── source_call_id / per-call traceability (source_ref) ──────────────────────
+#
+# When the caller names the single source record (call-shaped providers, via
+# the runner's per-call extraction), every signal gets its source call's bigint
+# FK on Signal.source_call_id (a call's bigint id CANNOT live in the uuid
+# source_id column) plus provider/external_id in provenance. Every other caller
+# is unchanged: source_call_id stays NULL and no provider/external_id keys
+# appear. source_id (uuid -> kg_source) is untouched throughout.
+
+
+def test_source_ref_stamps_source_call_id_and_provenance(facade):
+    import app.call_index as ci
+    # resolve_call_id returns a bigint (call_index.id is a bigint identity).
+    with patch.object(ci, "resolve_call_id", return_value=42) as resolve:
+        _extract(facade, [_item("call fact", "customer_voice")],
+                 source_ref=("fireflies", "FF1"))
+    resolve.assert_called_once_with("ent-x", "fireflies", "FF1")
+    sig = _sig(facade, "call fact")
+    assert sig.source_call_id == 42
+    assert sig.source_id is None          # the uuid column stays NULL for calls
+    assert sig.provenance["provider"] == "fireflies"
+    assert sig.provenance["external_id"] == "FF1"
+
+
+def test_source_ref_uncatalogued_call_leaves_source_call_id_null_but_keeps_provenance(facade):
+    """A call not yet in call_index (the puller/index race) resolves to NULL —
+    the signal is written unlinked rather than dropped, and provenance still
+    carries the external_id so it becomes linkable once the index catches up."""
+    import app.call_index as ci
+    with patch.object(ci, "resolve_call_id", return_value=None):
+        _extract(facade, [_item("uncatalogued fact", "customer_voice")],
+                 source_ref=("fireflies", "FF-NEW"))
+    sig = _sig(facade, "uncatalogued fact")
+    assert sig.source_call_id is None
+    assert sig.provenance["provider"] == "fireflies"
+    assert sig.provenance["external_id"] == "FF-NEW"
+
+
+def test_no_source_ref_leaves_source_call_id_null_and_provenance_clean(facade):
+    """Every pre-existing caller passes no source_ref — source_call_id stays
+    NULL and no provider/external_id keys leak into provenance."""
+    _extract(facade, [_item("plain fact", "customer_voice")])
+    sig = _sig(facade, "plain fact")
+    assert sig.source_call_id is None
+    assert sig.source_id is None
+    assert "provider" not in sig.provenance
+    assert "external_id" not in sig.provenance
+
+
+# ── write-swallow narrowing (silent-drop hardening) ──────────────────────────
+#
+# The per-signal write used to swallow EVERY exception as a benign "duplicate
+# skip". That masked a uuid-type violation and dropped 100% of linked-call
+# signals. Now only a true primary-key duplicate is a skip; anything else
+# surfaces.
+
+
+def test_is_duplicate_signal_recognizes_both_backends_only():
+    class _Pg(Exception):
+        code = "23505"
+
+    assert ex._is_duplicate_signal(_Pg("duplicate key value violates unique constraint"))
+    assert ex._is_duplicate_signal(Exception("UNIQUE constraint failed: kg_signal.id"))
+    # NOT a duplicate — the exact failure class the old blanket swallow hid.
+    assert not ex._is_duplicate_signal(
+        Exception('invalid input syntax for type uuid: "2"'))
+
+    class _Other(Exception):
+        code = "22P02"
+
+    assert not ex._is_duplicate_signal(_Other("invalid_text_representation"))
+
+
+def test_non_duplicate_write_error_is_re_raised_not_counted_as_a_skip(facade):
+    """The regression the fakes missed: a non-duplicate write error (the
+    uuid-type violation this fix's separate bigint column prevents) must
+    propagate, never be miscounted as a benign duplicate skip."""
+    class _PgTypeError(Exception):
+        code = "22P02"  # invalid_text_representation
+
+    def _boom(_eid, _signal):
+        raise _PgTypeError('invalid input syntax for type uuid: "2"')
+
+    with patch.object(ex, "llm_call",
+                      return_value=_llm_result([_item("boom fact", "customer_voice")])), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]), \
+         patch.object(facade, "write_signal", side_effect=_boom):
+        with pytest.raises(_PgTypeError):
+            ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+
+
+def test_true_duplicate_write_is_still_tolerated_as_a_skip(facade):
+    """A genuine primary-key duplicate (content-keyed re-sync) stays a skip —
+    idempotency must survive the narrowing."""
+    class _DupError(Exception):
+        code = "23505"
+
+    def _dup(_eid, _signal):
+        raise _DupError("duplicate key value violates unique constraint")
+
+    with patch.object(ex, "llm_call",
+                      return_value=_llm_result([_item("dup fact", "customer_voice")])), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]), \
+         patch.object(facade, "write_signal", side_effect=_dup):
+        out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+    assert out["skipped"] == 1
+    assert out["signals"] == 0

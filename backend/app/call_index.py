@@ -1040,6 +1040,48 @@ def has_index(company_id: str) -> bool:
     return bool(rows)
 
 
+def resolve_call_id(
+    company_id: str, provider: str, external_id: str
+) -> Optional[int]:
+    """The `call_index.id` (bigint) for one catalogued call, keyed by its
+    natural identity, or None when the call is not (yet) in the index.
+
+    This is the FK a per-call KG extraction stamps onto
+    `kg_signal.source_call_id` (a bigint column — NOT the uuid `source_id`,
+    which points at kg_source) so a distilled signal can be traced back to the
+    exact call it came from.
+
+    Returns None — never raises, never invents an id — in the two cases a
+    caller must treat identically to "no link":
+      * the call is not catalogued yet. The KG puller and this index sync on
+        independent schedules, so a freshly-synced transcript can reach
+        extraction before the index has a row for it. A NULL source_id is the
+        honest "not linkable yet" state; a wrong one would mis-attribute
+        evidence.
+      * the lookup failed. Provenance/linkage is best-effort — a Supabase blip
+        must degrade a signal to unlinked, never fail the ingestion writing it.
+    """
+    if not (company_id and provider and external_id):
+        return None
+    from app.db.client import require_client
+
+    try:
+        rows = (
+            require_client().table("call_index").select("id")
+            .eq("company_id", company_id)
+            .eq("provider", provider)
+            .eq("external_id", str(external_id))
+            .limit(1).execute().data
+        )
+    except Exception:  # noqa: BLE001 — linkage is best-effort; never fail ingest
+        logger.warning(
+            "call-index: source_id resolve failed for %s (%s/%s)",
+            company_id, provider, external_id, exc_info=True,
+        )
+        return None
+    return rows[0]["id"] if rows else None
+
+
 # ── listing intent ───────────────────────────────────────────────────────────
 #
 # Questions the index answers OUTRIGHT — "what calls were there", "the 5 latest

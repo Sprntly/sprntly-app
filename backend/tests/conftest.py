@@ -984,6 +984,7 @@ CREATE TABLE kg_signal (
     origin         TEXT,
     channel        TEXT,
     evidence_eligible INTEGER,
+    source_call_id INTEGER,
     created_at     TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
