@@ -306,7 +306,66 @@ def sync_provider(
                 break
             logger.exception("extraction failed: %s batch %d", provider, i)
             errors.append(f"batch {i}: {e}")
+
+    # Call-shaped providers only: now that this provider's fresh calls have been
+    # extracted (their action-item signals carry provenance.external_id), stamp
+    # each action item's owner NAME with an owner_person_id where the owner is a
+    # recognizable participant. Wholly best-effort — attribution metadata must
+    # never fail or slow a sync — and idempotent (a signal already carrying
+    # owner_person_id is skipped).
+    if provider in _CALL_PROVIDERS and fresh:
+        _resolve_call_owners(facade, enterprise_id, provider, fresh)
     return {**totals, "errors": errors}
+
+
+def _record_participants(rec: RawRecord) -> list[str]:
+    """Participant strings for owner matching, from one call RawRecord. Fireflies
+    carries attendee EMAILS; Google Meet carries display NAMES plus one
+    `organizer_email`; Zoom carries only `host_email`. All are folded into one
+    list — the matcher handles email vs bare-name per entry."""
+    props = rec.properties or {}
+    out = [str(p) for p in (props.get("participants") or []) if p]
+    for key in ("organizer_email", "host_email"):
+        value = props.get(key)
+        if value:
+            out.append(str(value))
+    return out
+
+
+def _resolve_call_owners(
+    facade: GraphFacade, enterprise_id: str, provider: str,
+    fresh: list[RawRecord],
+) -> None:
+    """Stamp owner_person_id onto this provider's fresh calls' action items.
+    Fully isolated: any failure degrades to unattributed owners (the raw name is
+    still on the signal), never a failed sync."""
+    try:
+        from app.call_index import _own_domains
+        from app.kg_ingest import directory
+
+        own = _own_domains(
+            enterprise_id,
+            [{"participants": _record_participants(r)} for r in fresh],
+        )
+        # One person-index load shared across the batch — find-or-create then
+        # costs no per-call query for a participant we have already seen.
+        index = directory._load_person_index(facade, enterprise_id)
+        for rec in fresh:
+            try:
+                directory.resolve_owners_for_call(
+                    facade, enterprise_id, provider, rec.external_id,
+                    _record_participants(rec), own, person_index=index,
+                )
+            except Exception:  # noqa: BLE001 — one call must not stop the rest
+                logger.warning(
+                    "owner-resolution failed for %s/%s",
+                    provider, rec.external_id, exc_info=True,
+                )
+    except Exception:  # noqa: BLE001 — attribution is never load-bearing
+        logger.warning(
+            "owner-resolution pass failed for %s/%s",
+            provider, enterprise_id, exc_info=True,
+        )
 
 
 def _content_hash(rendered: str) -> str:
