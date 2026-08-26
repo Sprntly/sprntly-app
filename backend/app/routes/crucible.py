@@ -928,10 +928,38 @@ def execute_run(
         # finished report lists a source the user dropped among the ones it
         # read, and loses the hypotheses they typed entirely — a report that
         # misstates its own inputs is worse than one that shows fewer.
-        if excluded_sources or hypotheses:
+        # AND THE DEFINITION, WHICH WAS THE ONE ANSWER THAT NEVER LANDED.
+        #
+        # The report renders `plan.definition_text` under the words "You
+        # confirmed this goal means, IN YOUR OWN WORDS". Approve folded the
+        # dropped sources and the hypotheses into the stored plan and left the
+        # definition at whatever was PROPOSED — so a reader who corrected the
+        # proposal got their correction locked (the definition ROW was always
+        # right) and then read the document attributing the sentence they had
+        # just rejected to themselves. A false attribution is worse than the
+        # clumsy definition this gate exists to prevent, and a test that checked
+        # the write and not the read is how it survived.
+        #
+        # UNCONDITIONAL NOW. This block only runs on approve, and every approve
+        # settles the same three things — what was dropped, what was believed,
+        # and what the metric means. The old gate asked whether sources or
+        # hypotheses had changed, so a reader who edited ONLY the definition
+        # skipped it entirely; a predicate for "did the definition change"
+        # would have fixed that case and left a branch whose two sides write the
+        # same bytes, since an unedited approve carries the proposal forward
+        # verbatim anyway.
+        if True:
             meta = dict(_meta_of(run_id, company_id))
             plan_json = dict(meta.get("plan") or {})
             if plan_json:
+                # The words the run actually worked from — the reader's edit
+                # when they made one, the proposal verbatim when they did not.
+                plan_json["definition_text"] = definition_text
+                # AND IT IS ADOPTED, which is the whole meaning of this click.
+                # `definition_adopted` was written False at plan time to say
+                # nobody had agreed yet; leaving it False past the agreement
+                # would make the record contradict the act it exists to record.
+                plan_json["definition_adopted"] = True
                 kept = [
                     src for src in (plan_json.get("sources") or [])
                     if src.get("source_type") not in excluded_sources
