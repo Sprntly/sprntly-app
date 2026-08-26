@@ -25015,6 +25015,14 @@
   text-transform: uppercase; opacity: 0.6;
 }
 .ggc-settled-body { margin: 0; line-height: 1.5; }
+/* THE HANDOFF LINE. Where the answer went, said in the thread rather than
+   left for the reader to infer from a panel that opened by itself. Separated
+   by a rule because it is the one forward-looking sentence on a card that is
+   otherwise a record of a decision already made. */
+.ggc-settled-next {
+  margin: 6px 0 0; padding-top: 6px; line-height: 1.5;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
 /* Beside the live controls, never instead of them — a refused gate is usually
    retryable, and the run is still waiting server-side. */
 .ggc-error { margin: 0; color: var(--danger, #b42318); line-height: 1.5; }

@@ -380,3 +380,75 @@ describe("the settled plan is a record, not a receipt", () => {
     expect(note?.textContent ?? "").toMatch(/dropped by you/i)
   })
 })
+
+describe("approving says what happens next", () => {
+  // Apurva, on the feedback doc: "After I approved the plan, there was no
+  // comms to me. Just the artifact section opening." Approve did two things
+  // silently — settled the card and swung the panel open — so the thread, the
+  // place the reader was actually looking, went quiet at the exact moment the
+  // work started.
+  it("names the artefact and where it appears, on the full settled card", () => {
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: [], hypotheses: [],
+          plan: PLAN as GoalRunPlan,
+        }}
+      />,
+    )
+    const next = screen.getByTestId("goal-gate-plan-next").textContent ?? ""
+    // WHAT is being made, and WHERE it lands. Either half alone leaves the
+    // reader guessing at the other.
+    expect(next).toMatch(/Goal Analysis/)
+    expect(next).toMatch(/on the right/i)
+  })
+
+  it("says it on the terse card too, where there is no plan to fall back on", () => {
+    // The record persisted before the plan was carried renders the fallback
+    // branch. That reader has LESS on screen, not more, so the handoff line
+    // matters there at least as much.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{ kind: "plan", excludedSources: [], hypotheses: [] }}
+      />,
+    )
+    expect(screen.getByTestId("goal-gate-plan-next").textContent ?? "")
+      .toMatch(/Goal Analysis/)
+  })
+
+  it("makes no progress claim that the transcript will outlive", () => {
+    // TENSE IS LOAD-BEARING. This card is re-read long after the run lands, so
+    // "analysing now" / "will appear shortly" is false every time it is read
+    // after the first minute. Simple present survives both readings.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: [], hypotheses: [],
+          plan: PLAN as GoalRunPlan,
+        }}
+      />,
+    )
+    const next = screen.getByTestId("goal-gate-plan-next").textContent ?? ""
+    expect(next).not.toMatch(/analysing now|analyzing now|in progress|shortly|any moment|will appear/i)
+  })
+
+  it("sends nobody to a panel when the run died at the gate", () => {
+    // `error` on a settled card means the run failed BETWEEN gates. Pointing
+    // that reader at the Goal Analysis panel points them at nothing.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN as GoalRunPlan }}
+        resolved={{
+          kind: "plan", excludedSources: [], hypotheses: [],
+          plan: PLAN as GoalRunPlan,
+        }}
+        error="That analysis stopped before it could read anything."
+      />,
+    )
+    expect(screen.queryByTestId("goal-gate-plan-next")).toBeNull()
+    expect(document.body.textContent).toContain("stopped before it could read")
+  })
+})
