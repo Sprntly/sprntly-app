@@ -19,6 +19,7 @@ question.
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -375,7 +376,7 @@ def build_findings(
         # wants the theme in the corpus's own words. Rendering the key is how
         # the first version put "c490" in front of a user.
         label = _label(group, key)
-        statement = _statement(label, group, accounts)
+        statement, example = _statement_parts(label, group, accounts)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
             drops["uncausal"] += 1
@@ -400,6 +401,8 @@ def build_findings(
         finding = Finding(
             id=f"f-{key}",
             statement=statement,
+            label=label,
+            example=example,
             claim_ids=ids,
             impact_inputs=ImpactInputs(
                 currency=currency,
@@ -519,6 +522,52 @@ def _rank(
 MAX_NAMED_SOURCES = 4
 
 
+#: `kg_ingest.runner.sync_provider`'s doc_name shape: `<provider>-sync-batch-<n>`.
+#:
+#: THE NUMBER IS AN INGEST CHUNK, NOT A DOCUMENT. A connector sync slices its
+#: pull into arbitrary batches and stamps each with its index, so a finding read
+#: back as
+#:
+#:   fireflies-sync-batch-0 (9) · fireflies-sync-batch-4 (7) ·
+#:   fireflies-sync-batch-10 (4) · fireflies-sync-batch-5 (3) · +1 more documents
+#:
+#: looks like evidence spread across five documents and is one source chopped
+#: five ways. That is worse than unhelpful: breadth across documents is exactly
+#: what a reader uses to judge whether a finding is well-supported, and this
+#: inflates it.
+#:
+#: There is no call title to put here instead, and that is a property of the
+#: data rather than of this function: `call_digest` records that KG extraction
+#: is per-BATCH, so `extract_document` stamps only `{"doc": <batch name>}` and
+#: an extracted signal carries no call id to resolve. The provider is the ONLY
+#: real attribution in the string, so the provider is what gets rendered.
+_SYNC_BATCH = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
+
+#: What to call a provider's batches once they are collapsed. Anything not
+#: listed falls back to its own name, title-cased — a new connector reads
+#: acceptably without a code change.
+_PROVIDER_LABELS = {
+    "fireflies": "Fireflies call transcripts",
+    "zoom": "Zoom call transcripts",
+    "slack": "Slack",
+    "gong": "Gong call transcripts",
+}
+
+
+def _document_label(doc: str) -> str:
+    """The name to show for one source document.
+
+    Real document names — `slack/#mvp-product (part 2/3)`, a Drive filename —
+    pass through untouched. Only the sync-batch shape is rewritten, and only
+    because its number identifies nothing a reader could look up.
+    """
+    m = _SYNC_BATCH.match(doc)
+    if not m:
+        return doc
+    provider = m.group(1)
+    return _PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
+
+
 def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     """Which documents this finding rests on, most-cited first.
 
@@ -529,7 +578,12 @@ def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     for c in claims:
         doc = (c.artifact_id or "").strip()
         if doc:
-            counts[doc] = counts.get(doc, 0) + 1
+            # COLLAPSED BEFORE COUNTING, so the count is per SOURCE rather than
+            # per ingest chunk: five batches of one provider become one entry
+            # carrying all five counts, which is the true number of claims that
+            # source contributed.
+            label = _document_label(doc)
+            counts[label] = counts.get(label, 0) + 1
     if not counts:
         return ()
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -562,6 +616,26 @@ def _label(claims: Sequence[Claim], key: str) -> str:
 
 
 def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+    """The sentence alone. See `_statement_parts` for why there are two."""
+    return _statement_parts(label, claims, accounts)[0]
+
+
+def _statement_parts(
+    label: str, claims: Sequence[Claim], accounts: Sequence[str],
+) -> tuple[str, str]:
+    """The statement, AND the example quote it used — or "" when it used none.
+
+    Two returns rather than one because the renderer needs the example on its
+    own. A finding renders as a heading (the theme), a row of chips (the counts)
+    and the quote; the sentence form puts all three in one clause, which reads
+    well and scans terribly.
+
+    THE EXAMPLE COMES BACK ONLY IF THE WHOLE CANDIDATE PASSED THE LINT. That is
+    why this is one function and not two: the lint runs on the assembled
+    sentence, so an example that is fine alone and causal in context must not
+    escape. Recomputing it beside `_statement` would drift the moment either
+    side changed.
+    """
     """Prose that survives the causal lint by construction.
 
     Says what was OBSERVED and in what population, and stops. No "because", no
@@ -626,5 +700,5 @@ def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> 
             f"\u2014 for example, \u201c{example}\u201d."
         )
         if lint_claim(candidate, strongest.strength).ok:
-            return candidate
-    return plain
+            return candidate, example
+    return plain, ""

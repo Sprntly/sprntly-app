@@ -29,11 +29,12 @@ def claim(
     cid: str, *, subject="export latency", days_ago=1, accounts=("Northwind",),
     authoritative=True, strength="reported", ctype="mechanism",
     source="customer_voice", direction="neutral", assertion=None,
+    artifact_id="a",
 ) -> Claim:
     return Claim(
         id=cid, assertion=(f"claim {cid}" if assertion is None else assertion),
         type=ctype, subject=subject,
-        source_id=source, artifact_id="a", artifact_type="t",
+        source_id=source, artifact_id=artifact_id, artifact_type="t",
         strength=strength, observed_at=NOW - timedelta(days=days_ago),
         authoritative=authoritative,
         population=PopulationFilter(
@@ -643,3 +644,86 @@ def test_two_claims_from_one_document_in_one_window_still_echo():
     ])
     assert out.findings == ()
     assert out.stats["dropped"]["echo"] == 1
+
+
+# ─── The source line names a SOURCE, not an ingest chunk ────────────────────
+
+
+def test_sync_batches_of_one_provider_collapse_into_one_source():
+    """Apurva, reading a real report: "it says fireflies-sync-batch-9 (6) ·
+    fireflies-sync-batch-0 (2) · fireflies-sync-batch-14 (2), a user might not
+    know what's in the sync batch".
+
+    The number is an INGEST CHUNK. A connector sync slices its pull into
+    arbitrary batches and stamps each with its index, so one source chopped
+    three ways reads as evidence spread across three documents — and breadth
+    across documents is exactly what a reader uses to judge support. It does not
+    merely fail to inform; it inflates.
+    """
+    from app.crucible.pipeline import _sources_of
+
+    out = _sources_of([
+        claim("c1", artifact_id="fireflies-sync-batch-9"),
+        claim("c2", artifact_id="fireflies-sync-batch-9"),
+        claim("c3", artifact_id="fireflies-sync-batch-0"),
+        claim("c4", artifact_id="fireflies-sync-batch-14"),
+    ])
+    assert out == ("Fireflies call transcripts (4)",)
+    # The counts are SUMMED, not the largest chunk kept: four claims came from
+    # that source and the line has to say four.
+    assert "batch" not in " ".join(out)
+
+
+def test_a_real_document_name_is_left_alone():
+    """Only the sync-batch shape is rewritten. A Slack channel or a filename is
+    something a reader can go and open, and renaming it would destroy the one
+    thing the line is for."""
+    from app.crucible.pipeline import _sources_of
+
+    out = _sources_of([
+        claim("c1", artifact_id="slack/#mvp-product (part 2/3)"),
+        claim("c2", artifact_id="Q3 renewal deck.pdf"),
+    ])
+    assert set(out) == {"slack/#mvp-product (part 2/3) (1)", "Q3 renewal deck.pdf (1)"}
+
+
+def test_two_providers_do_not_collapse_into_each_other():
+    """The provider is the only real attribution in the string, so it is the
+    one thing that must survive."""
+    from app.crucible.pipeline import _sources_of
+
+    out = _sources_of([
+        claim("c1", artifact_id="fireflies-sync-batch-1"),
+        claim("c2", artifact_id="zoom-sync-batch-4"),
+    ])
+    assert set(out) == {"Fireflies call transcripts (1)", "Zoom call transcripts (1)"}
+
+
+def test_an_unknown_provider_still_reads_as_a_name():
+    """A connector added later must not render as a raw slug."""
+    from app.crucible.pipeline import _document_label
+
+    assert _document_label("hubspot-sync-batch-2") == "Hubspot"
+    assert _document_label("some_tool-sync-batch-0") == "Some Tool"
+
+
+def test_the_finding_carries_its_theme_and_its_example_separately():
+    """The renderer leads with the theme and sets the quote as a quote, so both
+    have to arrive as fields rather than be dug back out of the sentence."""
+    # Distinct accounts AND distinct documents, or the group is refuted as a
+    # single account or as one conversation echoing, and there is no finding to
+    # inspect.
+    out = run([
+        claim("c1", accounts=("Northwind",), artifact_id="call-a", days_ago=1,
+              assertion="export runs time out at 10k rows"),
+        claim("c2", accounts=("Vandelay",), artifact_id="call-b", days_ago=20,
+              assertion="export runs time out at 10k rows"),
+        claim("c3", accounts=("Initech",), artifact_id="call-c", days_ago=40,
+              assertion="export runs time out at 10k rows"),
+    ])
+    f = out.findings[0]
+    assert f.label
+    assert f.label in f.statement
+    # The example, when there is one, is the words a source actually used.
+    if f.example:
+        assert f.example in f.statement
