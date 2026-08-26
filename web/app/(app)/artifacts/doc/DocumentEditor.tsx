@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef } from "react"
 import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
-import Underline from "@tiptap/extension-underline"
 import Link from "@tiptap/extension-link"
 import { TableKit } from "@tiptap/extension-table"
 import {
@@ -13,6 +12,7 @@ import {
   FontSize,
   TextStyle,
 } from "@tiptap/extension-text-style"
+import { isToolbarDriven } from "../../../lib/documentToolbarExec"
 import {
   FONT_FAMILIES,
   FONT_SIZES,
@@ -133,7 +133,12 @@ export function DocumentEditor({
         // two Link marks in one schema is a duplicate-name error.
         link: false,
       }),
-      Underline,
+      // NO `Underline` HERE. StarterKit v3 ships one, and registering
+      // `@tiptap/extension-underline` alongside it put a second mark of the
+      // same name in the schema — TipTap warned "Duplicate extension names
+      // found: ['underline']" on every single mount. Link above was disabled
+      // for exactly this reason; underline was the one that got missed. The
+      // button is unchanged: `toggleUnderline` comes from StarterKit's copy.
       TextStyle,
       FontFamily,
       FontSize,
@@ -172,7 +177,15 @@ export function DocumentEditor({
     ],
     content: initialHtml || "",
     onUpdate: ({ editor: ed }) => {
-      if (!interactedRef.current) return
+      // `isToolbarDriven` is the second half of this gate, and it exists
+      // because the gate's listeners below only cover the editor's own
+      // wrapper. Both panel hosts pin the formatting bar OUTSIDE that wrapper
+      // (the report's is portalled into a slot elsewhere in the tree), so
+      // clicking Bold there marked nothing: the text went bold, the status
+      // pill still read "Saved", and the edit was gone on reopen. Every one of
+      // those clicks goes through `execDocumentCommand`, which is where it is
+      // now recorded.
+      if (!interactedRef.current && !isToolbarDriven(ed)) return
       onChange?.(ed.getHTML())
     },
     onBlur: () => onBlur?.(),
