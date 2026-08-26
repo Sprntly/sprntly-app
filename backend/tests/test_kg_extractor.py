@@ -482,3 +482,114 @@ def test_vendor_side_and_owner_extraction_real_llm():
         f"expected a capability signal, got kinds={kinds}")
     assert any((s.get("properties") or {}).get("owner") for s in signals), (
         f"expected an action item with properties.owner, got {signals}")
+
+
+# ── source_call_id / per-call traceability (source_ref) ──────────────────────
+#
+# When the caller names the single source record (call-shaped providers, via
+# the runner's per-call extraction), every signal gets its source call's bigint
+# FK on Signal.source_call_id (a call's bigint id CANNOT live in the uuid
+# source_id column) plus provider/external_id in provenance. Every other caller
+# is unchanged: source_call_id stays NULL and no provider/external_id keys
+# appear. source_id (uuid -> kg_source) is untouched throughout.
+
+
+def test_source_ref_stamps_source_call_id_and_provenance(facade):
+    import app.call_index as ci
+    # resolve_call_id returns a bigint (call_index.id is a bigint identity).
+    with patch.object(ci, "resolve_call_id", return_value=42) as resolve:
+        _extract(facade, [_item("call fact", "customer_voice")],
+                 source_ref=("fireflies", "FF1"))
+    resolve.assert_called_once_with("ent-x", "fireflies", "FF1")
+    sig = _sig(facade, "call fact")
+    assert sig.source_call_id == 42
+    assert sig.source_id is None          # the uuid column stays NULL for calls
+    assert sig.provenance["provider"] == "fireflies"
+    assert sig.provenance["external_id"] == "FF1"
+
+
+def test_source_ref_uncatalogued_call_leaves_source_call_id_null_but_keeps_provenance(facade):
+    """A call not yet in call_index (the puller/index race) resolves to NULL —
+    the signal is written unlinked rather than dropped, and provenance still
+    carries the external_id so it becomes linkable once the index catches up."""
+    import app.call_index as ci
+    with patch.object(ci, "resolve_call_id", return_value=None):
+        _extract(facade, [_item("uncatalogued fact", "customer_voice")],
+                 source_ref=("fireflies", "FF-NEW"))
+    sig = _sig(facade, "uncatalogued fact")
+    assert sig.source_call_id is None
+    assert sig.provenance["provider"] == "fireflies"
+    assert sig.provenance["external_id"] == "FF-NEW"
+
+
+def test_no_source_ref_leaves_source_call_id_null_and_provenance_clean(facade):
+    """Every pre-existing caller passes no source_ref — source_call_id stays
+    NULL and no provider/external_id keys leak into provenance."""
+    _extract(facade, [_item("plain fact", "customer_voice")])
+    sig = _sig(facade, "plain fact")
+    assert sig.source_call_id is None
+    assert sig.source_id is None
+    assert "provider" not in sig.provenance
+    assert "external_id" not in sig.provenance
+
+
+# ── write-swallow narrowing (silent-drop hardening) ──────────────────────────
+#
+# The per-signal write used to swallow EVERY exception as a benign "duplicate
+# skip". That masked a uuid-type violation and dropped 100% of linked-call
+# signals. Now only a true primary-key duplicate is a skip; anything else
+# surfaces.
+
+
+def test_is_duplicate_signal_recognizes_both_backends_only():
+    class _Pg(Exception):
+        code = "23505"
+
+    assert ex._is_duplicate_signal(_Pg("duplicate key value violates unique constraint"))
+    assert ex._is_duplicate_signal(Exception("UNIQUE constraint failed: kg_signal.id"))
+    # NOT a duplicate — the exact failure class the old blanket swallow hid.
+    assert not ex._is_duplicate_signal(
+        Exception('invalid input syntax for type uuid: "2"'))
+
+    class _Other(Exception):
+        code = "22P02"
+
+    assert not ex._is_duplicate_signal(_Other("invalid_text_representation"))
+
+
+def test_non_duplicate_write_error_is_re_raised_not_counted_as_a_skip(facade):
+    """The regression the fakes missed: a non-duplicate write error (the
+    uuid-type violation this fix's separate bigint column prevents) must
+    propagate, never be miscounted as a benign duplicate skip."""
+    class _PgTypeError(Exception):
+        code = "22P02"  # invalid_text_representation
+
+    def _boom(_eid, _signal):
+        raise _PgTypeError('invalid input syntax for type uuid: "2"')
+
+    with patch.object(ex, "llm_call",
+                      return_value=_llm_result([_item("boom fact", "customer_voice")])), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]), \
+         patch.object(facade, "write_signal", side_effect=_boom):
+        with pytest.raises(_PgTypeError):
+            ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+
+
+def test_true_duplicate_write_is_still_tolerated_as_a_skip(facade):
+    """A genuine primary-key duplicate (content-keyed re-sync) stays a skip —
+    idempotency must survive the narrowing."""
+    class _DupError(Exception):
+        code = "23505"
+
+    def _dup(_eid, _signal):
+        raise _DupError("duplicate key value violates unique constraint")
+
+    with patch.object(ex, "llm_call",
+                      return_value=_llm_result([_item("dup fact", "customer_voice")])), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]), \
+         patch.object(facade, "write_signal", side_effect=_dup):
+        out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+    assert out["skipped"] == 1
+    assert out["signals"] == 0

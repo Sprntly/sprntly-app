@@ -112,6 +112,45 @@ PROVIDER_SKILLS: dict[str, str] = {
 #: connect their wiki.
 _DOCUMENT_PROVIDERS: frozenset[str] = frozenset({"uploads", "confluence"})
 
+#: Providers whose records are individual CALLS. These are extracted ONE CALL
+#: PER DOCUMENT rather than char-budget-batched, so every signal can carry its
+#: source call's ``(provider, external_id)`` — the FK
+#: (``call_index.resolve_call_id`` → ``kg_signal.source_id``) that links a
+#: distilled signal back to the exact call it came from. Char-budget batching
+#: mixes several calls' text into one extraction and flattens that provenance
+#: away (it also lets one call's facts contaminate another's). Kept in step with
+#: ``call_index.CALL_PROVIDERS`` / ``call_digest._CALL_PROVIDERS``. Every OTHER
+#: provider keeps batching unchanged — see ``_extraction_units``.
+_CALL_PROVIDERS: frozenset[str] = frozenset({"fireflies", "zoom", "google_meet"})
+
+
+def _extraction_units(
+    provider: str, fresh: list[RawRecord]
+) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None]]:
+    """Yield ``(doc_name, text, records, source_ref)`` — one per extraction pass.
+
+    Call providers (``_CALL_PROVIDERS``) get ONE pass per call, with a
+    ``source_ref`` = the call's ``(provider, external_id)`` so the extractor can
+    stamp ``kg_signal.source_id``. Every other provider keeps the existing
+    char-budget batching, with no ``source_ref`` (``source_id`` stays NULL,
+    unchanged).
+
+    The ``<provider>-sync-batch-<n>`` doc_name shape is DELIBERATELY preserved
+    for both — ``call_digest`` identifies a call-provider signal by matching
+    that shape against ``provenance["doc"]`` (``call_digest._SYNC_BATCH_DOC``,
+    the double-counting filter), so changing it here would silently break that
+    filter. The per-call linkage rides ``source_id`` and
+    ``provenance["provider"]/["external_id"]`` instead, not the doc name.
+    """
+    if provider in _CALL_PROVIDERS:
+        for i, rec in enumerate(fresh):
+            yield (f"{provider}-sync-batch-{i}", rec.render(), [rec],
+                   (rec.provider, rec.external_id))
+    else:
+        for i, batch in enumerate(_batches(fresh)):
+            yield (f"{provider}-sync-batch-{i}",
+                   "\n\n".join(r.render() for r in batch), batch, None)
+
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
     batch: list[RawRecord] = []
@@ -190,12 +229,12 @@ def sync_provider(
     from app.llm_errors import PROVIDER_LIMIT, classify_provider_error, user_message
 
     errors: list[str] = []
-    for i, batch in enumerate(_batches(fresh)):
-        text = "\n\n".join(r.render() for r in batch)
+    for i, (doc_name, text, unit_records, source_ref) in enumerate(
+            _extraction_units(provider, fresh)):
         try:
             r = extract_document(
                 facade, enterprise_id,
-                doc_name=f"{provider}-sync-batch-{i}",
+                doc_name=doc_name,
                 text=text,
                 agent=f"ingest:{provider}",
                 source_hint=hint,
@@ -210,18 +249,23 @@ def sync_provider(
                     {"channel": "upload"} if provider in _DOCUMENT_PROVIDERS else None
                 ),
                 skill_id=PROVIDER_SKILLS.get(provider),
-                # Haiku relevance + category triage ahead of every batch
-                # — the core connector-sync ingestion path.
+                # Call-shaped providers extract one call per document and pass
+                # that call's (provider, external_id) so the extractor can
+                # stamp kg_signal.source_id; every other provider passes None
+                # (batched, no per-call link) — see _extraction_units.
+                source_ref=source_ref,
+                # Haiku relevance + category triage ahead of every extraction
+                # unit — the core connector-sync ingestion path.
                 triage=True,
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
-            # Only a batch that made it through extraction is recorded — a
-            # failed batch keeps its hashes out of the ledger and is simply
+            # Only a unit that made it through extraction is recorded — a
+            # failed unit keeps its hashes out of the ledger and is simply
             # re-extracted on the next sync.
             record_hashes(
-                enterprise_id, provider, [hashes[id(rec)] for rec in batch]
+                enterprise_id, provider, [hashes[id(rec)] for rec in unit_records]
             )
         except Exception as e:  # noqa: BLE001 — error-isolation per batch
             # A dead account is not a per-batch problem. Isolating it makes

@@ -181,6 +181,7 @@ class GraphFacade:
             "id": signal.id,
             "enterprise_id": signal.enterprise_id,
             "source_id": signal.source_id,
+            "source_call_id": signal.source_call_id,
             "source_type": signal.source_type,
             "kind": signal.kind,
             "content": signal.content,
@@ -768,6 +769,7 @@ class GraphFacade:
         sig.id = r["id"]
         sig.enterprise_id = r["enterprise_id"]
         sig.source_id = r.get("source_id")
+        sig.source_call_id = r.get("source_call_id")
         sig.source_type = r["source_type"]
         sig.kind = r["kind"]
         sig.content = r["content"]

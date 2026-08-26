@@ -1847,9 +1847,9 @@ def test_runner_batches_and_aggregates(isolated_settings):
     seen_docs = []
     def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None,
                      origin=None, provenance_extra=None, skill_id=None,
-                     triage=None):
+                     source_ref=None, triage=None):
         seen_docs.append((doc_name, len(text), source_hint, origin,
-                          provenance_extra, skill_id))
+                          provenance_extra, skill_id, source_ref))
         return {"signals": 2, "themes": 1, "skipped": 0}
 
     with patch.object(runner, "extract_document", side_effect=fake_extract):
@@ -1864,12 +1864,14 @@ def test_runner_batches_and_aggregates(isolated_settings):
     assert all(h and "project_mgmt" in h for _, _, h, *_ in seen_docs)
     # Connector syncs stamp origin="connector" so the brief gate never treats
     # a tenant with live connectors as upload-only.
-    assert all(o == "connector" for _, _, _, o, _, _ in seen_docs)
+    assert all(t[3] == "connector" for t in seen_docs)
     # Third-party syncs carry no channel stamp (only `uploads` does).
-    assert all(pe is None for *_, pe, _sid in seen_docs)
+    assert all(t[4] is None for t in seen_docs)
     # ClickUp is skill-routed (PROVIDER_SKILLS) — every batch carries its
     # dedicated extraction skill id.
-    assert all(sid == "clickup-extraction" for *_, sid in seen_docs)
+    assert all(t[5] == "clickup-extraction" for t in seen_docs)
+    # A non-call provider is batched, so it carries no per-call source_ref.
+    assert all(t[6] is None for t in seen_docs)
 
 
 def test_runner_stamps_upload_channel_for_uploads_provider(isolated_settings):
