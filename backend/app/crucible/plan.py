@@ -100,6 +100,25 @@ class RunPlan:
     #: "the thing you believed is not supported, and here is what killed it",
     #: which is usually the more valuable half.
     hypotheses: tuple[str, ...] = ()
+    #: WHERE THE DEFINITION CAME FROM, and whether a person has said yes to it.
+    #:
+    #: The goal definition used to be settled at its own gate, one screen
+    #: earlier, before the plan existed. Product feedback collapsed the two: a
+    #: separate clarification step made the reader answer a question with no
+    #: context for it, and the answer it collected showed exactly why — a run
+    #: went out with its definition recorded as the literal words "that is
+    #: accurate", because that is what the reader typed at a question that was
+    #: not asking for a definition.
+    #:
+    #: So the definition now arrives here as a PROPOSAL and is adopted by the
+    #: same click that approves the plan. I9 is unchanged and these three
+    #: fields are how it stays unchanged: the proposal must be shown, be
+    #: attributed to whatever produced it, and be editable at the moment of
+    #: approval. `definition_adopted` is False for exactly as long as no person
+    #: has said yes.
+    definition_source: str = ""
+    definition_note: str = ""
+    definition_adopted: bool = False
 
     def to_json(self) -> dict:
         return {
@@ -112,6 +131,9 @@ class RunPlan:
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
             "hypotheses": list(self.hypotheses),
+            "definition_source": self.definition_source,
+            "definition_note": self.definition_note,
+            "definition_adopted": self.definition_adopted,
         }
 
 
@@ -249,6 +271,9 @@ def build_plan(
     currency: str = "accounts",
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
+    definition_source: str = "",
+    definition_note: str = "",
+    definition_adopted: bool = False,
 ) -> RunPlan:
     """What this run will try to establish, where it will look, and what it
     will not be able to tell you."""
@@ -265,4 +290,7 @@ def build_plan(
         total_signals=sum(s.signal_count for s in kept),
         excluded_sources=tuple(excluded_sources),
         hypotheses=tuple(h.strip() for h in hypotheses if h.strip()),
+        definition_source=definition_source,
+        definition_note=definition_note,
+        definition_adopted=definition_adopted,
     )

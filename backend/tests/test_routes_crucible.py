@@ -125,8 +125,19 @@ def ctx(crucible_env, monkeypatch):
     return c
 
 
+from dataclasses import replace  # noqa: E402
+from app.crucible.types import DefinitionConflict  # noqa: E402
+
+
 def _start(ctx, goal="raise net revenue retention", **kw):
     return ctx.client.post("/v1/crucible", json={"goal_text": goal, **kw})
+
+
+#: A goal naming NO metric family, so `_convention_definition` returns nothing
+#: and — with no KPI tree either — there is no honest proposal to fold into the
+#: plan. This is the case that still stops at its own gate to ask, and it is
+#: what every legacy `/confirm` test below now uses to reach that gate.
+NO_METRIC = "make the roadmap easier to explain"
 
 
 # ─── 1. The gate is the server's, not the UI's ───────────────────────────────
@@ -189,12 +200,45 @@ def test_the_listing_shows_only_this_companys_runs(ctx, monkeypatch):
 
 # ─── 3. I9 — a human confirms, always ────────────────────────────────────────
 
-def test_a_new_run_stops_at_confirmation_and_analyses_nothing(ctx):
-    """No KPI tree here, so Stage 0 misses and asks. The point is that it STOPS
-    — an unconfirmed goal must not spend a run."""
+def test_a_new_run_stops_before_it_analyses_anything(ctx):
+    """THE INVARIANT, WHICH DID NOT MOVE: an unadopted goal must not spend a
+    run. What moved is where it stops. Stage 0 used to halt at a clarification
+    gate of its own; it now resolves a proposal and halts at the plan, where
+    that proposal is shown and the reader can change it. Either way nothing is
+    read and nothing is locked until a person says yes."""
     body = _start(ctx).json()
+    assert body["status"] == "awaiting_approval"
+    assert body["claim_count"] == 0
+    # Nothing locked. `crucible_goal_definitions` is the table that authorises
+    # spending, and a proposal nobody has agreed to must not be in it.
+    assert _table("crucible_goal_definitions") == []
+
+
+def test_a_goal_with_nothing_to_propose_still_stops_to_ask(ctx):
+    """The half of Stage 0 that did NOT fold. With no KPI tree and no metric
+    family we hold a convention for, there is no proposal to put in front of
+    anyone — and writing one anyway is the inference I9 forbids. So this case
+    keeps its own gate."""
+    body = _start(ctx, goal=NO_METRIC).json()
     assert body["status"] == "awaiting_confirmation"
     assert body["claim_count"] == 0
+
+
+def test_a_recognised_metric_is_proposed_in_the_plan_rather_than_asked_cold(ctx):
+    """THE FOLD. A goal naming a metric family arrives at the plan with a
+    definition already written, attributed, and editable — instead of a bare
+    question one screen earlier. The question asked cold is what produced a run
+    whose recorded definition was the literal words "that is accurate"."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    assert body["status"] == "awaiting_approval"
+    plan = _prioritisation(body["id"])["plan"]
+    assert "LOGO churn" in plan["definition_text"]
+    # WHERE IT CAME FROM, said on the plan. A proposal that cannot be
+    # attributed is indistinguishable from an assertion.
+    assert plan["definition_source"]
+    # AND THAT NOBODY HAS AGREED TO IT YET.
+    assert plan["definition_adopted"] is False
+    assert _table("crucible_goal_definitions") == []
 
 
 def test_a_candidate_from_the_companys_own_kpi_tree_still_waits_for_a_human(
@@ -216,22 +260,38 @@ def test_a_candidate_from_the_companys_own_kpi_tree_still_waits_for_a_human(
     monkeypatch.setattr("app.kpi_tree.load_kpi_tree", lambda cid: tree)
 
     body = _start(ctx, goal="improve net revenue retention").json()
-    assert body["status"] == "awaiting_confirmation"
+    # It waits at the PLAN now rather than at a gate of its own — but it still
+    # waits, which is the whole of the claim. The tree's own wording is
+    # prefilled and nothing has been adopted.
+    assert body["status"] == "awaiting_approval"
 
     detail = ctx.client.get(f"/v1/crucible/{body['id']}").json()
-    proposed = _prioritisation(body["id"])["proposed_definition"]
-    assert "expansion minus churn" in proposed
+    plan = _prioritisation(body["id"])["plan"]
+    assert "expansion minus churn" in plan["definition_text"]
+    assert plan["definition_adopted"] is False
+    assert _table("crucible_goal_definitions") == []
     assert detail["findings"] == []
 
 
 def test_confirming_locks_the_definition_with_who_and_when(ctx):
     """I9 at the storage layer: `locked` is the state that authorises spending,
-    so it must carry the user who authorised it."""
-    run_id = _start(ctx).json()["id"]
+    so it must carry the user who authorised it.
+
+    THE LOCK MOVED TO APPROVE. It used to fire the moment `/confirm` returned,
+    which was right while that was the only human act in the flow. Now that the
+    plan carries a PROPOSED definition, locking on the way to the plan would
+    stamp a user id onto words nobody had agreed to yet. So both doors —
+    `/confirm` for a goal with nothing to propose, and the folded path for one
+    with a proposal — lock at the same place: the click that says go. Still
+    before anything is spent, which is all the invariant ever asked."""
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     ctx.client.post(
         f"/v1/crucible/{run_id}/confirm",
         json={"definition_text": "renewal-cohort revenue, net of churn"},
     )
+    # Not yet: the plan is on screen and nobody has said go.
+    assert _table("crucible_goal_definitions") == []
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     rows = _table("crucible_goal_definitions")
     assert len(rows) == 1
     assert rows[0]["status"] == "locked"
@@ -245,22 +305,26 @@ def test_confirming_locks_the_definition_with_who_and_when(ctx):
 def test_the_locked_definition_is_the_users_words_verbatim(ctx):
     """A paraphrase is a different metric, asserted by us. "revenue" tidied into
     "recognised revenue" answers a question nobody asked."""
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     words = "revenue, as finance books it, excluding one-offs"
     ctx.client.post(f"/v1/crucible/{run_id}/confirm", json={"definition_text": words})
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     assert _table("crucible_goal_definitions")[0]["definition_text"] == words
 
 
 def test_confirming_a_run_that_is_not_waiting_is_refused(ctx):
     """The confirm path is the only door from awaiting_confirmation onward.
     Re-posting it must not start a second analysis on the same row."""
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     ctx.client.post(f"/v1/crucible/{run_id}/confirm", json={"definition_text": "x"})
     again = ctx.client.post(
         f"/v1/crucible/{run_id}/confirm", json={"definition_text": "y"}
     )
     assert again.status_code == 409
-    assert len(_table("crucible_goal_definitions")) == 1
+    # And the second definition never reached the plan, which is the thing the
+    # 409 is protecting: one row, one set of words, whatever the client does.
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["definition_text"] == "x"
 
 
 # ─── 4. The row is the job ───────────────────────────────────────────────────
@@ -396,30 +460,35 @@ def test_a_double_confirm_cannot_start_two_analyses(ctx):
     the ordinary way to produce it."""
     from app.db import crucible_runs as runs_db
 
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     first = runs_db.claim_for_confirmation(run_id, ctx.company_id)
     second = runs_db.claim_for_confirmation(run_id, ctx.company_id)
     assert first is not None
     assert second is None
 
 
-def test_the_client_can_see_what_stage_0_is_asking_for(ctx, monkeypatch):
+def test_the_client_can_see_what_stage_0_is_asking_for(ctx):
     """A run that reports `awaiting_confirmation` without saying what it is
-    waiting FOR leaves the panel a blank box. The proposal was written to the
-    row and returned by nothing."""
-    from app.kpi_tree import KpiTree, NorthStar
+    waiting FOR leaves the panel a blank box.
 
-    tree = KpiTree(
-        north_star=NorthStar(metric="Net Revenue Retention (NRR)",
-                             description="expansion minus churn"),
-        primary_metrics=[], secondary_signals=[],
-    )
-    monkeypatch.setattr("app.kpi_tree.load_kpi_tree", lambda cid: tree)
-    run_id = _start(ctx, goal="improve net revenue retention").json()["id"]
+    REWRITTEN FOR THE CASE THAT STILL REACHES THAT GATE. This used to seed a
+    KPI tree and check the prefilled proposal came back; a tree match now folds
+    straight into the plan, so that scenario cannot arrive here any more — the
+    proposal is checked at the plan instead. What still stops here is the goal
+    with NOTHING to propose, and it is the one that most needs the question to
+    be legible: there is no prefill to lean on, so the ask and the assumed
+    method are all the reader has."""
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
 
     body = ctx.client.get(f"/v1/crucible/{run_id}").json()
-    assert "expansion minus churn" in body["prioritisation"]["proposed_definition"]
-    assert body["prioritisation"]["ask"] or body["prioritisation"]["resolution"]
+    assert body["status"] == "awaiting_confirmation"
+    meta = body["prioritisation"]
+    # The question itself, and what will be done with the answer.
+    assert meta["ask"]
+    assert meta["method_note"]
+    # And no invented prefill: there was nothing to propose, which is the
+    # entire reason this run is sitting here rather than at a plan.
+    assert not meta["proposed_definition"]
 
 
 def test_the_signal_read_is_ordered_because_it_is_paged(ctx):
@@ -705,7 +774,7 @@ def test_a_double_approval_cannot_start_two_analyses(ctx):
 
 
 def test_approving_a_run_that_has_no_plan_is_refused(ctx):
-    run_id = _start(ctx).json()["id"]           # still awaiting_confirmation
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]  # awaiting_confirmation
     r = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     assert r.status_code == 409
 
@@ -1545,7 +1614,7 @@ def test_the_method_note_does_not_promise_what_the_engine_does_not_do(ctx):
     The note is a CONSTANT for every company and goal, deliberately: the
     mechanism it describes does not vary, so branching on anything would imply
     the run behaves differently when it does not."""
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
 
     assert note
@@ -1618,7 +1687,7 @@ def test_the_ask_and_the_method_note_do_not_repeat_each_other(ctx):
     exact redundancy the ask rewrite exists to remove, reintroduced one element
     lower. The ask asks for the parts; the note says what will be done with
     them."""
-    run_id = _start(ctx).json()["id"]
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
     meta = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]
     ask, note = meta["ask"], meta["method_note"]
 
@@ -1648,25 +1717,33 @@ def test_the_method_note_states_the_convention_for_the_metric_named(ctx):
     versus booked") as its justification. True sentence, wrong question, §6's
     citation on it."""
     run_id = _start(ctx, goal="reduce customer churn").json()["id"]
-    note = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["method_note"]
+    plan = _prioritisation(run_id)["plan"]
 
+    # STATED AS THE DEFINITION, not as a note about one. That is where the
+    # convention moved when the clarification gate folded into the plan: it is
+    # the sentence in the editable field, which is a stronger reading of §6
+    # than a paragraph underneath a question — you can change it in place.
+    stated = plan["definition_text"].lower()
     # It names the fork it is choosing, because the fork is what resizes every
     # recommendation.
-    assert "logo churn" in note.lower()
-    assert "revenue churn" in note.lower()
-    # And it is offered for correction, not asserted.
-    assert "say otherwise" in note.lower()
+    assert "logo churn" in stated
+    assert "revenue churn" in stated
+    # And it is offered for correction, not asserted: nobody has adopted it.
+    assert plan["definition_adopted"] is False
+    # The note underneath must NOT restate it — repeating the convention below
+    # the field holding it is the redundancy this change was asked to cut.
+    assert "logo churn" not in plan["definition_note"].lower()
 
 
 def test_the_convention_follows_the_goal_not_the_company(ctx):
     """Keyed on the GOAL's words. A per-company convention would be the
     cross-customer contamination README F11 bars."""
-    churn = ctx.client.get(
-        f"/v1/crucible/{_start(ctx, goal='reduce churn').json()['id']}"
-    ).json()["prioritisation"]["method_note"]
-    revenue = ctx.client.get(
-        f"/v1/crucible/{_start(ctx, goal='grow revenue').json()['id']}"
-    ).json()["prioritisation"]["method_note"]
+    churn = _prioritisation(
+        _start(ctx, goal="reduce churn").json()["id"]
+    )["plan"]["definition_text"]
+    revenue = _prioritisation(
+        _start(ctx, goal="grow revenue").json()["id"]
+    )["plan"]["definition_text"]
 
     assert "logo churn" in churn.lower()
     assert "recognised" in revenue.lower() and "booked" in revenue.lower()
@@ -1770,3 +1847,101 @@ def test_the_last_page_still_ends_the_outer_loop_after_a_retry():
     rows = _signal_page(client, "co", 1)
     assert len(rows) == 30
     assert len(rows) < _PAGE
+
+
+# ─── The definition is adopted at the plan, and only there ──────────────────
+
+
+def test_approving_locks_the_definition_the_reader_was_shown(ctx):
+    """A body carrying no definition means "yes, as written". The server must
+    then lock the exact proposal that was on screen — locking an empty string,
+    or re-deriving one, would settle the run on words nobody saw."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    shown = _prioritisation(body["id"])["plan"]["definition_text"]
+    ctx.client.post(f"/v1/crucible/{body['id']}/approve", json={})
+    rows = _table("crucible_goal_definitions")
+    assert len(rows) == 1
+    assert rows[0]["definition_text"] == shown
+    assert rows[0]["status"] == "locked"
+    assert rows[0]["confirmed_by_user_id"] == ctx.user_id
+    assert rows[0]["confirmed_by_user_at"]
+
+
+def test_an_edited_definition_is_locked_verbatim_over_the_proposal(ctx):
+    """The proposal is a starting point, not a decision. Editing it in the plan
+    and approving must lock the reader's words — a paraphrase, or a silent
+    fallback to the proposal, is a different metric asserted by us."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    mine = "churn means seats lost, not accounts, counted at renewal"
+    ctx.client.post(
+        f"/v1/crucible/{body['id']}/approve", json={"definition_text": mine}
+    )
+    rows = _table("crucible_goal_definitions")
+    assert len(rows) == 1
+    assert rows[0]["definition_text"] == mine
+    assert "LOGO churn" not in rows[0]["definition_text"]
+
+
+def test_a_blank_edit_falls_back_to_the_proposal_rather_than_locking_nothing(ctx):
+    """A cleared textarea posts "" or whitespace. Treating that as a definition
+    strands the run — `confirm_goal` refuses to lock nothing, on a row already
+    claimed for approval. It means "no change"."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    shown = _prioritisation(body["id"])["plan"]["definition_text"]
+    r = ctx.client.post(
+        f"/v1/crucible/{body['id']}/approve", json={"definition_text": "   "}
+    )
+    assert r.status_code == 200
+    assert _table("crucible_goal_definitions")[0]["definition_text"] == shown
+
+
+def test_two_systems_disagreeing_is_a_decision_and_keeps_its_own_screen(ctx, monkeypatch):
+    """The other half that did NOT fold. When two authoritative systems define
+    the same metric differently, the disagreement is worth more than either
+    answer and picking one silently is the failure. That is a decision, not a
+    confirmation, so it does not get folded into a plan the reader can approve
+    without noticing."""
+    import app.routes.crucible as mod
+
+    real = mod.resolve
+
+    def conflicted(**kw):
+        out = real(**kw)
+        return replace(out, conflicts=(
+            DefinitionConflict(
+                metric_name="churn", source_a="finance", definition_a="revenue churn",
+                source_b="the tracker", definition_b="logo churn",
+            ),
+        ))
+
+    monkeypatch.setattr(mod, "resolve", conflicted)
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    assert body["status"] == "awaiting_confirmation"
+    assert _prioritisation(body["id"])["conflicts"]
+
+
+def test_a_folded_run_never_advertises_the_gate_it_skips(ctx, monkeypatch):
+    """A RACE, not a tidiness point. The first version of the fold wrote
+    `awaiting_confirmation` and only then built the plan — so for the second or
+    so the inventory query takes, the row advertised a gate this run was never
+    going to stop at. The chat polls for either gate, so a poll landing in that
+    window rendered the definition card for a run that had already moved on:
+    exactly the screen the fold exists to remove, now appearing at random.
+
+    Caught by watching every status the row is ever written with."""
+    import app.db.crucible_runs as db
+
+    seen: list[str] = []
+    real = db.update
+
+    def watched(run_id, company_id, **kw):
+        if kw.get("status"):
+            seen.append(kw["status"])
+        return real(run_id, company_id, **kw)
+
+    monkeypatch.setattr(db, "update", watched)
+    monkeypatch.setattr("app.routes.crucible.runs_db.update", watched)
+
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    assert body["status"] == "awaiting_approval"
+    assert "awaiting_confirmation" not in seen

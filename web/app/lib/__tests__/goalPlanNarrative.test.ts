@@ -70,7 +70,7 @@ describe("the plan reads as an approach, not a form", () => {
   })
 
   it("measures against the adopted definition, and stays silent without one", () => {
-    expect(planNarrative(PLAN, new Set()).join(" "))
+    expect(planNarrative({ ...PLAN, definition_adopted: true }, new Set()).join(" "))
       .toContain("revenue means new ARR closed this quarter")
     // I9: a definition is adopted or elicited, never inferred. No definition,
     // no step claiming one.
@@ -105,5 +105,14 @@ describe("the plan reads as an approach, not a form", () => {
   it("leaves an acronym's capitals alone when folding a promise into a sentence", () => {
     const steps = planNarrative({ ...PLAN, will_produce: ["ARR at risk, by account"] }, new Set())
     expect(steps.join(" ")).toContain("ARR at risk")
+  })
+  it("points at an unsettled definition instead of printing it twice", () => {
+    // While the definition is a PROPOSAL it sits in an editable field a few
+    // lines below the narrative. Quoting it here put the same sentence on the
+    // card twice — the repetition the feedback asked us to cut, reintroduced
+    // by the fix for the rest of it.
+    const steps = planNarrative(PLAN, new Set()).join(" ")
+    expect(steps).not.toContain("revenue means new ARR closed this quarter")
+    expect(steps).toMatch(/confirm below/i)
   })
 })

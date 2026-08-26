@@ -405,6 +405,7 @@ export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onCla
 export type GoalPlanDecision = {
   excluded_sources: string[]
   hypotheses: string[]
+  definition_text?: string
 }
 
 export interface MapMainTurnsDeps {

@@ -24,7 +24,8 @@ import type { GoalRunPlan } from "./api"
  *  after the reading, from evidence. */
 export function planNarrative(
   plan: Pick<GoalRunPlan,
-    "sources" | "definition_text" | "will_produce" | "cannot_answer">,
+    "sources" | "definition_text" | "will_produce" | "cannot_answer"
+    | "definition_adopted">,
   excluded: ReadonlySet<string>,
 ): string[] {
   const kept = (plan.sources ?? []).filter((s) => !excluded.has(s.source_type))
@@ -56,7 +57,17 @@ export function planNarrative(
   // 3. WHAT IT IS MEASURED AGAINST. Only when a definition was adopted — the
   //    run never infers one, so neither does this.
   if (plan.definition_text?.trim()) {
-    steps.push(`Judge what survives against your own definition: “${plan.definition_text.trim()}”.`)
+    // QUOTED ONLY WHEN IT IS SETTLED. While the definition is still a proposal
+    // it is sitting in an editable field a few lines below this, so quoting it
+    // here printed the same sentence twice on one card — the "multiple
+    // repetitions" the feedback asked us to cut, reintroduced by the fix for
+    // the rest of it. Pointing at it is enough while it is still on screen;
+    // once it is adopted the field is gone and the words have to be here.
+    steps.push(
+      plan.definition_adopted
+        ? `Judge what survives against your own definition: “${plan.definition_text.trim()}”.`
+        : "Judge what survives against your own definition of the metric, which you confirm below.",
+    )
   }
 
   // 4. WHAT COMES BACK. The planner's own promises, verbatim, so the narrative

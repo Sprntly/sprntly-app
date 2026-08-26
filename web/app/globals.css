@@ -25015,6 +25015,15 @@
   text-transform: uppercase; opacity: 0.6;
 }
 .ggc-settled-body { margin: 0; line-height: 1.5; }
+/* THE DEFINITION, EDITABLE WHERE IT IS READ. A proposal you cannot change in
+   place is an assertion with a polite tone, so this is a real field rather
+   than a quote with an "edit" affordance somewhere else. */
+.ga-plan-definition-edit {
+  width: 100%; margin-top: 6px; padding: 8px 10px;
+  font: inherit; line-height: 1.5; resize: vertical;
+  border: 1px solid var(--border, #e5e5e5); border-radius: 6px;
+  background: var(--surface, transparent); color: inherit;
+}
 /* THE APPROACH BLOCK. Sits above the detail and is meant to be the only
    thing most readers read, so it gets the room a lead paragraph gets. */
 .ga-plan-steps {

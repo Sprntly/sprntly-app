@@ -582,3 +582,71 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
         .toBeNull()
     }, 30_000)
 })
+
+
+describe("a goal whose metric we recognise skips straight to the plan", () => {
+  // THE FOLD. Stage 0 used to stop at a clarification gate for every goal. Now,
+  // when it can propose a definition honestly, it resolves one and the run
+  // arrives at the plan with that proposal shown and editable.
+  //
+  // THIS TEST EXISTS BECAUSE THE FIRST VERSION OF THE FIX WAS INERT. The chat
+  // waited for `awaiting_confirmation` alone, so a folded run — the common path
+  // — timed out and told the reader the analysis "could not start" while a
+  // perfectly good plan sat on the row. Nothing else on screen would have shown
+  // it; the feature simply stopped working for most goals.
+  /** What the server returns on the folded path: a plan carrying a PROPOSED
+   *  definition, attributed, with nothing adopted yet. `runAwaitingApproval`
+   *  cannot stand in — its definition comes from the confirm mock, which this
+   *  path never calls, so it would arrive blank. */
+  const runFolded = (): GoalRunDetail => ({
+    ...runRow("awaiting_approval"),
+    prioritisation: {
+      plan: {
+        ...planAsOffered(),
+        definition_text: PROPOSED,
+        definition_source: "your KPI tree",
+        definition_adopted: false,
+      },
+    },
+  })
+
+  const foldedStart = () => {
+    getRun.mockImplementation(async () => runFolded())
+    seedPersistedTab(
+      { id: "t1", title: "chat", dbConvId: CONV_ID, thread: [], messages: [] },
+      "t1")
+    mountApp()
+  }
+
+  it("renders the plan without ever asking the definition question", async () => {
+    foldedStart()
+    await typeAndSend(TYPED)
+    await waitFor(() => expect(startRun).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(screen.getByTestId("goal-gate-plan")).toBeTruthy(),
+      { timeout: 8_000 })
+    // The gate that folded never appeared, and confirm was never called.
+    expect(screen.queryByTestId("goal-gate-definition")).toBeNull()
+    expect(confirmRun).not.toHaveBeenCalled()
+  }, 30_000)
+
+  it("adopts an edited definition on the approve, with no confirm step", async () => {
+    foldedStart()
+    await typeAndSend(TYPED)
+    await waitFor(() =>
+      expect(screen.getByTestId("goal-gate-plan")).toBeTruthy(),
+      { timeout: 8_000 })
+    const gate = screen.getByTestId("goal-gate-plan")
+    await act(async () => {
+      fireEvent.change(within(gate).getByLabelText("What this goal means"),
+        { target: { value: CONFIRMED } })
+    })
+    await act(async () => {
+      fireEvent.click(
+        within(gate).getByRole("button", { name: /approve and run/i }))
+    })
+    await waitFor(() => expect(approveRun).toHaveBeenCalled())
+    expect(approveRun.mock.calls[0][1].definition_text).toBe(CONFIRMED)
+    expect(confirmRun).not.toHaveBeenCalled()
+  }, 30_000)
+})

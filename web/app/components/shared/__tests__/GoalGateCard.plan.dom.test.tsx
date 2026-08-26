@@ -50,7 +50,7 @@ const PLAN = {
       remedy: "connect Amplitude, or upload a cohort export",
     },
   ],
-  will_produce: ["Themes ranked by how much of your book they touch"],
+  will_produce: ["A ranked list of what is blocking this goal"],
   excluded_sources: [],
   hypotheses: [],
 } as unknown as GoalRunPlan
@@ -503,5 +503,114 @@ describe("the plan leads with the approach, not the form", () => {
     const approach = screen.getByTestId("goal-plan-approach").textContent ?? ""
     expect(approach).toMatch(/approach you approved/i)
     expect(approach).not.toMatch(/I am going to use/i)
+  })
+})
+
+
+describe("the definition is confirmed in the plan, not one screen earlier", () => {
+  // Apurva: "Lets remove the goal clarification and add it to the plan. In the
+  // plan we can confirm that." The gate it replaces asked what a metric meant
+  // before the reader had seen anything the run intended to do — and collected
+  // answers to match: one run recorded its definition as the words "that is
+  // accurate", because that is what somebody typed at a question that was not,
+  // to them, asking for a definition.
+  const PROPOSED = {
+    ...PLAN, definition_adopted: false,
+    definition_source: "the usual reading of this metric",
+    definition_note:
+      "I will work to that sentence exactly as you write it: I do not "
+      + "recompute it.",
+  } as unknown as GoalRunPlan
+
+  const renderProposed = (onApprovePlan = vi.fn()) => {
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 4, plan: PROPOSED }}
+        onApprovePlan={onApprovePlan}
+      />,
+    )
+    return onApprovePlan
+  }
+
+  it("shows the proposal as an editable field, attributed to what produced it", () => {
+    renderProposed()
+    const box = screen.getByLabelText("What this goal means") as HTMLTextAreaElement
+    expect(box.value).toBe(PLAN.definition_text)
+    // A proposal that cannot be attributed is an assertion with a polite tone.
+    expect(screen.getByTestId("goal-plan-definition").textContent)
+      .toContain("the usual reading of this metric")
+  })
+
+  it("carries an edited definition on the approve that adopts it", () => {
+    const onApprove = renderProposed()
+    fireEvent.change(screen.getByLabelText("What this goal means"), {
+      target: { value: "retention counted on seats, not accounts" },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    expect(onApprove).toHaveBeenCalledTimes(1)
+    expect(onApprove.mock.calls[0][0].definition_text)
+      .toBe("retention counted on seats, not accounts")
+  })
+
+  it("sends no definition at all when the reader did not change it", () => {
+    // OMISSION IS THE SIGNAL FOR "as shown". Echoing the proposal back lets a
+    // stale card overwrite the stored definition with words the server already
+    // has — a round trip that can only lose.
+    const onApprove = renderProposed()
+    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    expect(onApprove.mock.calls[0][0].definition_text).toBeUndefined()
+  })
+
+  it("treats retyping the same words as agreement, not as an edit", () => {
+    const onApprove = renderProposed()
+    fireEvent.change(screen.getByLabelText("What this goal means"), {
+      target: { value: `  ${PLAN.definition_text}  ` },
+    })
+    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    expect(onApprove.mock.calls[0][0].definition_text).toBeUndefined()
+  })
+
+  it("says what is done with the sentence without restating it", () => {
+    // §6's note, from the server so the wording lives in one place. It must
+    // say the part the sentence cannot — that it is taken literally — and must
+    // NOT repeat the convention, which is already the text in the field above.
+    // That repetition is exactly what the feedback asked us to cut.
+    renderProposed()
+    const note = screen.getByTestId("goal-plan-definition-note").textContent ?? ""
+    expect(note).toMatch(/exactly as you write it/i)
+    expect(note).not.toContain(PLAN.definition_text)
+  })
+
+  it("says each thing once", () => {
+    // "let's review the copy of what we show. There are multiple repetitions
+    // and LLM reexplaining etc." Three of them were real and are pinned here,
+    // because each was introduced by a fix for something else and would come
+    // back the same way.
+    renderProposed()
+    const card = screen.getByTestId("goal-plan").textContent ?? ""
+    // 1. The deliverables, once — the narrative's step, not a second section.
+    const produce = "A ranked list of what is blocking this goal"
+    expect(card.split(produce).length - 1).toBeLessThanOrEqual(1)
+    // 2. The signal total, once.
+    const total = PLAN.total_signals.toLocaleString()
+    expect(card.split(`${total} signal`).length - 1).toBeLessThanOrEqual(1)
+    // 3. "I work to this sentence" — the server's note owns it, so the
+    //    attribution line above must not say it too.
+    expect(card.toLowerCase().split("work to th").length - 1)
+      .toBeLessThanOrEqual(1)
+  })
+
+  it("stops offering a field once the definition is adopted", () => {
+    // A settled plan is a record. An editable box on it invites a change that
+    // cannot happen and says nothing about why.
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 4, plan: PROPOSED }}
+        resolved={{ kind: "plan", excludedSources: [], hypotheses: [], plan: PROPOSED }}
+      />,
+    )
+    expect(screen.queryByLabelText("What this goal means")).toBeNull()
+    expect(screen.getByTestId("goal-plan-definition").textContent)
+      .toContain(PLAN.definition_text)
   })
 })
