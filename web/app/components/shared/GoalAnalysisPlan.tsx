@@ -154,7 +154,17 @@ export function GoalAnalysisPlan({
         </p>
         <ol className="ga-plan-steps">
           {planNarrative(plan, effectiveExcluded).map((step, i) => (
-            <li key={i}>{step}</li>
+            <li key={i}>
+              {step.text}
+              {/* A LIST STAYS A LIST. Several full sentences folded into one
+                  with commas and an "and" is what made this step 487
+                  characters on a real run. */}
+              {step.items?.length ? (
+                <ul className="ga-plan-step-items">
+                  {step.items.map((it, j) => <li key={j}>{it}</li>)}
+                </ul>
+              ) : null}
+            </li>
           ))}
         </ol>
       </section>

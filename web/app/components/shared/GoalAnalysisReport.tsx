@@ -207,11 +207,17 @@ export function GoalAnalysisReport({
         .map((p) => [(p.name ?? "").trim(), (p.basis ?? "").trim()])
         .sort(),
     )
+  // FINDINGS WITH NO ASSUMPTION ARE NOT COUNTED AGAINST THE MATCH. Asking
+  // whether EVERY finding carried the identical set sounded right and never
+  // fired: a live run had 326 findings, 30 sized and carrying
+  // `value_per_account`, 296 unsized and carrying nothing. An unsized finding
+  // has no size to qualify, so it has no assumption — that is not
+  // disagreement. Mirrors `_shared_assumptions` in `report.py`.
+  const carriers = findings.filter((f) => (f.assumed_params ?? []).length)
   const sharedAssumptions: GoalFinding["assumed_params"] | undefined =
-    findings.length >= 2 &&
-    new Set(findings.map(assumptionKey)).size === 1 &&
-    (findings[0].assumed_params ?? []).length
-      ? findings[0].assumed_params
+    carriers.length >= 2 &&
+    new Set(carriers.map(assumptionKey)).size === 1
+      ? carriers[0].assumed_params
       : undefined
 
   const sharedReason = (key: "weakest_leg_reason" | "cap_reason"): string => {
@@ -566,8 +572,14 @@ export function GoalAnalysisReport({
           {sharedAssumptions?.length ? (
             <div className="ga-doc-note" data-testid="goal-shared-assumptions">
               <p>
+                {/* SAYS HOW MANY IT SPEAKS FOR. "Every finding below" is false
+                    when only the sized ones carry an assumption, and a hoisted
+                    sentence that overstates its scope is worse than the
+                    repetition it replaced. */}
                 <strong>
-                  Every finding below rests on the same assumption
+                  {carriers.length === findings.length
+                    ? "Every finding below rests on the same assumption"
+                    : `${carriers.length} of the findings below rest on the same assumption`}
                   {sharedAssumptions.length > 1 ? "s" : ""}
                 </strong>
                 , so {sharedAssumptions.length > 1 ? "they are" : "it is"}{" "}

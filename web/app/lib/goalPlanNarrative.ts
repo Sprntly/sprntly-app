@@ -22,37 +22,52 @@ import type { GoalRunPlan } from "./api"
  *  worth, and a figure quoted before anything is read would be invention
  *  dressed as a promise. The size of the opportunity is the report's to state,
  *  after the reading, from evidence. */
+export type PlanStep = {
+  text: string
+  /** Rendered as a nested list under `text` rather than folded into it.
+   *
+   *  MEASURED AGAINST REAL DATA, NOT THE FIXTURE. `will_produce` reads like a
+   *  list of short noun phrases in every test here; on a live run its entries
+   *  are full sentences carrying their own em-dashes and subclauses. Joined
+   *  with commas and an "and", five of them produced a single 487-character
+   *  step sitting between four others of 87 to 173 — one unreadable paragraph
+   *  in the middle of the thing whose whole purpose is being readable. */
+  items?: string[]
+}
+
 export function planNarrative(
   plan: Pick<GoalRunPlan,
     "sources" | "definition_text" | "will_produce" | "cannot_answer"
     | "definition_adopted">,
   excluded: ReadonlySet<string>,
-): string[] {
+): PlanStep[] {
   const kept = (plan.sources ?? []).filter((s) => !excluded.has(s.source_type))
-  const steps: string[] = []
+  const steps: PlanStep[] = []
 
   // 1. WHAT GETS READ. Named in the reader's own vocabulary — the labels the
   //    checkboxes carry — not in source-type slugs.
   if (kept.length) {
     const signals = kept.reduce((n, s) => n + (s.signal_count || 0), 0)
-    steps.push(
-      `Read your ${joinWords(kept.map((s) => s.label || s.source_type))}` +
-      ` — ${signals.toLocaleString()} ${signals === 1 ? "signal" : "signals"} in all.`,
-    )
+    steps.push({
+      text:
+        `Read your ${joinWords(kept.map((s) => s.label || s.source_type))}` +
+        ` — ${signals.toLocaleString()} ${signals === 1 ? "signal" : "signals"} in all.`,
+    })
   } else {
     // NOT SILENCE. A plan with everything dropped still renders, and the
     // narrative saying nothing would read as though a full run were coming.
-    steps.push("Read nothing — every source is unchecked below.")
+    steps.push({ text: "Read nothing — every source is unchecked below." })
   }
 
   // 2. HOW IT IS JUDGED. The refutation rules in one sentence, because they
   //    are the reason the answer is short, and a reader who does not know them
   //    reads a short answer as a thin one.
-  steps.push(
-    "Group what they say into findings, and throw out anything only one" +
-    " account raises, anything that is one voice repeated, and anything the" +
-    " source is not in a position to know.",
-  )
+  steps.push({
+    text:
+      "Group what they say into findings, and throw out anything only one" +
+      " account raises, anything that is one voice repeated, and anything the" +
+      " source is not in a position to know.",
+  })
 
   // 3. WHAT IT IS MEASURED AGAINST. Only when a definition was adopted — the
   //    run never infers one, so neither does this.
@@ -63,29 +78,35 @@ export function planNarrative(
     // repetitions" the feedback asked us to cut, reintroduced by the fix for
     // the rest of it. Pointing at it is enough while it is still on screen;
     // once it is adopted the field is gone and the words have to be here.
-    steps.push(
-      plan.definition_adopted
+    steps.push({
+      text: plan.definition_adopted
         ? `Judge what survives against your own definition: “${plan.definition_text.trim()}”.`
         : "Judge what survives against your own definition of the metric, which you confirm below.",
-    )
+    })
   }
 
   // 4. WHAT COMES BACK. The planner's own promises, verbatim, so the narrative
   //    cannot promise something the run did not.
   const produce = (plan.will_produce ?? []).map((w) => w.trim()).filter(Boolean)
-  if (produce.length) {
-    steps.push(`Give you ${joinWords(produce.map(lowerFirst))}.`)
+  if (produce.length === 1) {
+    steps.push({ text: `Give you ${lowerFirst(produce[0])}.` })
+  } else if (produce.length) {
+    // A LIST, BECAUSE IT IS A LIST. Folding several full sentences into one
+    // with commas and an "and" is exactly what produced the 487-character step
+    // this branch exists to prevent; see `PlanStep.items`.
+    steps.push({ text: "Give you:", items: produce })
   }
 
   // 5. WHAT IT WILL NOT DO. Last, and stated as a step, because a limit
   //    disclosed up front is part of the approach — not a footnote to it.
   const gaps = plan.cannot_answer ?? []
   if (gaps.length) {
-    steps.push(
-      `Tell you plainly what this cannot settle — ${gaps.length} ` +
-      `${gaps.length === 1 ? "question is" : "questions are"} already out of` +
-      ` reach, listed below with what would close ${gaps.length === 1 ? "it" : "them"}.`,
-    )
+    steps.push({
+      text:
+        `Tell you plainly what this cannot settle — ${gaps.length} ` +
+        `${gaps.length === 1 ? "question is" : "questions are"} already out of` +
+        ` reach, listed below with what would close ${gaps.length === 1 ? "it" : "them"}.`,
+    })
   }
   return steps
 }

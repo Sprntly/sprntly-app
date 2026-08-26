@@ -445,8 +445,8 @@ def _assumption_key(finding: dict) -> tuple:
     ))
 
 
-def _shared_assumptions(findings: list[dict]) -> tuple:
-    """The assumptions EVERY finding makes, or empty if they differ.
+def _shared_assumptions(findings: list[dict]) -> tuple[tuple, int]:
+    """The assumption every finding that MAKES one makes, and how many do.
 
     I8 requires an assumed parameter be disclosed where the number is read.
     It does not require it be disclosed 279 times. On a corpus with no revenue
@@ -459,17 +459,30 @@ def _shared_assumptions(findings: list[dict]) -> tuple:
     disclosures that ARE per-finding, and it is a large part of what "lots of
     irrelevant information" meant.
 
-    Same shape as `_shared` above, and the same rule: only a single distinct
-    value across MORE THAN ONE finding is a statement about the corpus. The
-    moment two findings assume different things they both go back on their own
-    rows, where they belong.
+    Same rule as `_shared` above — a single distinct value across MORE THAN ONE
+    finding is a statement about the corpus, and the moment two findings assume
+    different things they both go back on their own rows.
+
+    FINDINGS WITH NO ASSUMPTION ARE NOT COUNTED AGAINST THE MATCH, and that is
+    the whole correction. The first version asked whether EVERY finding carried
+    the identical set, which sounded right and never fired on a real run: a live
+    report had 326 findings of which 30 were sized and carried
+    `value_per_account`, and 296 were unsized and carried nothing at all. An
+    unsized finding has no size to qualify, so it has no assumption — that is
+    not disagreement, and treating it as disagreement left the line repeated 30
+    times on the page it was written to de-duplicate.
+
+    The COUNT comes back with the key because the hoisted sentence has to say
+    how many findings it speaks for. "Every finding below" is a false sentence
+    when 296 of them assume nothing.
     """
-    if len(findings) < 2:
-        return ()
-    keys = {_assumption_key(f) for f in findings}
+    with_any = [f for f in findings if _assumption_key(f)]
+    if len(with_any) < 2:
+        return (), 0
+    keys = {_assumption_key(f) for f in with_any}
     if len(keys) != 1:
-        return ()
-    return keys.pop()
+        return (), 0
+    return keys.pop(), len(with_any)
 
 
 def _finding_block(
@@ -739,13 +752,21 @@ def _findings_section(
             + _esc(shared_cap) + "."
         ))
 
-    shared_assumptions = _shared_assumptions(findings)
+    shared_assumptions, shared_count = _shared_assumptions(findings)
     if shared_assumptions:
+        many = len(shared_assumptions) > 1
+        # SAYS HOW MANY IT SPEAKS FOR. "Every finding below" is false when only
+        # the sized ones carry an assumption, and a hoisted sentence that
+        # overstates its own scope is worse than the repetition it replaced.
+        subject = (
+            "Every finding below rests on the same assumption"
+            if shared_count == len(findings)
+            else f"{shared_count} of the findings below rest on the same "
+                 f"assumption"
+        )
         out.append(_p(
-            "<strong>Every finding below rests on the same assumption</strong>"
-            + ("s" if len(shared_assumptions) > 1 else "")
-            + ", so "
-            + ("they are" if len(shared_assumptions) > 1 else "it is")
+            f"<strong>{subject}{'s' if many else ''}</strong>, so "
+            + ("they are" if many else "it is")
             + " stated here once rather than repeated on each of them:"
         ))
         out.append(_ul(
