@@ -452,3 +452,56 @@ describe("approving says what happens next", () => {
     expect(document.body.textContent).toContain("stopped before it could read")
   })
 })
+
+describe("the plan leads with the approach, not the form", () => {
+  // Apurva, on the feedback doc: the plan needs to be "more human readable",
+  // with "what we do" separated from "what we say". What was on screen was
+  // four headed sections and a checkbox list — accurate, and with no sentence
+  // anywhere saying what was about to happen.
+  it("opens with a numbered account of what will happen", () => {
+    renderPlan()
+    const approach = screen.getByTestId("goal-plan-approach")
+    expect(approach.textContent).toMatch(/This is the approach I am going to use/i)
+    const steps = approach.querySelectorAll("li")
+    expect(steps.length).toBeGreaterThanOrEqual(4)
+    // Step one is what gets read, in the reader's words and with the total.
+    expect(steps[0].textContent).toContain("calls and customer tickets")
+    expect(steps[0].textContent).toContain("412")
+  })
+
+  it("sits above the controls, so the account is read before the form", () => {
+    // ORDER IS THE FEATURE. Underneath the checkboxes it is a footnote, and
+    // the card is back to being a form with a paragraph attached.
+    renderPlan()
+    const approach = screen.getByTestId("goal-plan-approach")
+    const firstBox = document.querySelector("input[type=checkbox]")!
+    expect(approach.compareDocumentPosition(firstBox) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+  })
+
+  it("rewrites itself the moment a source is unticked", () => {
+    // A narrative that kept describing the tracker after the reader unticked
+    // the tracker would be the most confidently wrong sentence on the card.
+    renderPlan()
+    expect(screen.getByTestId("goal-plan-approach").textContent).toContain("the tracker")
+    fireEvent.click(screen.getByLabelText("Read the tracker"))
+    const after = screen.getByTestId("goal-plan-approach").textContent ?? ""
+    expect(after).not.toContain("the tracker")
+    expect(after).toContain("calls and customer tickets")
+    expect(after).toContain("260")
+  })
+
+  it("speaks in the past on a settled plan, because the decision is made", () => {
+    render(
+      <GoalGateCard
+        gate={{ kind: "plan", runId: 1, plan: PLAN }}
+        resolved={{
+          kind: "plan", excludedSources: [], hypotheses: [], plan: PLAN,
+        }}
+      />,
+    )
+    const approach = screen.getByTestId("goal-plan-approach").textContent ?? ""
+    expect(approach).toMatch(/approach you approved/i)
+    expect(approach).not.toMatch(/I am going to use/i)
+  })
+})

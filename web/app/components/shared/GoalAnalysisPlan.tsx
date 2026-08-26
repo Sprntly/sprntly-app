@@ -29,6 +29,7 @@
  */
 import * as React from "react"
 import { useMemo, useState } from "react"
+import { planNarrative } from "../../lib/goalPlanNarrative"
 import type { GoalRunPlan } from "../../lib/api"
 
 export type PlanDecision = {
@@ -119,6 +120,28 @@ export function GoalAnalysisPlan({
         </p>
         <h1 className="ga-doc-title">{plan.goal_text}</h1>
       </header>
+
+      {/* THE APPROACH, IN FIVE SENTENCES. Everything below this block was
+          already true and already on screen — and unreadable as an approach,
+          because it was four headed sections and a checkbox list with no
+          sentence anywhere saying what was about to happen. The feedback asked
+          for a numbered account first and the detail underneath, which is what
+          this is: what we SAY, then what we DO.
+          RECOMPUTED FROM `effectiveExcluded`, so unticking a source rewrites
+          step 1 under the reader's hand rather than leaving the narrative
+          describing a run they have just changed. */}
+      <section className="ga-plan-section ga-plan-approach" data-testid="goal-plan-approach">
+        <p className="ga-doc-note">
+          {settled
+            ? "This is the approach you approved."
+            : "This is the approach I am going to use. Approve it, or change it below."}
+        </p>
+        <ol className="ga-plan-steps">
+          {planNarrative(plan, effectiveExcluded).map((step, i) => (
+            <li key={i}>{step}</li>
+          ))}
+        </ol>
+      </section>
 
       {plan.definition_text ? (
         <section className="ga-plan-section">
