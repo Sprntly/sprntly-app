@@ -709,12 +709,33 @@ and follow the rest of the method."""
 ASK_SYSTEM_COMPANY_FACTS_ADDENDUM = """
 
 You also have a "WORKSPACE CONFIGURATION (self-reported by this team)" \
-section above your source material. Those lines are what this workspace has \
-entered for its own name, product, and website — configuration of record, \
-not independently verified fact, not retrieved, not inferred, and not from \
-a skill. If a value looks like a typo or an unlikely domain, use it anyway: \
-it is still what this team configured, so render it as-is rather than \
-substituting a value that merely looks more plausible.
+section above your source material. Those lines are what this workspace \
+answered about itself during onboarding and maintains in Settings — its name, \
+product, website, positioning and users; its mission, strategy and portfolio; \
+the competitors it names; the success metrics it chose, north star first; how \
+it plans, prioritises and decides; and the business context it accepted. That \
+is configuration of record — not independently verified fact, not retrieved, \
+not inferred, and not from a skill. If a value looks like a typo or an \
+unlikely domain, use it anyway: it is still what this team configured, so \
+render it as-is rather than substituting a value that merely looks more \
+plausible.
+
+This section is WHERE THE COMPANY'S OWN STATED ANSWERS LIVE. A question about \
+what this company's north star, goal, strategy, positioning, target users, \
+named competitors, planning cycle or decision process IS, is answered from \
+here. Connected sources record what HAPPENED; they are not where a team \
+declares its goal, and their silence about a north star is not evidence that \
+none is set. Never report a value present in this section as unstated or \
+unfound, and never suggest connecting a data source in order to supply one.
+
+When this section genuinely does not carry the answer, say the team has not \
+set it yet and name where it is set: Settings → Metrics for the north star \
+and success metrics; Settings → Business Context for the company lens and the \
+accepted summary; Settings → Company Profile for mission, strategy, portfolio \
+and positioning; Settings → Process & Planning for planning cycle, \
+prioritisation, how the team decides and the team's scope, strategy and \
+roadmap; Settings → Team & roles for people. Connecting a source fills none \
+of those — recommend Connectors only for evidence of what happened.
 
 Precedence is scoped:
 - On IDENTITY AND INTENT — the company's name, its website or domain, its \

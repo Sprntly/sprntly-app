@@ -65,6 +65,35 @@ logger = logging.getLogger(__name__)
 # than being "corrected" toward a more plausible-looking value.
 WORKSPACE_CONFIG_HEADER = "WORKSPACE CONFIGURATION (self-reported by this team)"
 
+# What onboarding actually captured, and where each answer is maintained
+# afterwards. Asked "what is their north star goal", chat replied that no
+# connected source states one and told the team to connect Google Drive,
+# Confluence or Notion — to a workspace that had picked a north star on the
+# onboarding metrics page and can see it in Settings > Metrics. The answer was
+# not retrieved-and-lost; it was never in the prompt. This block carried the
+# company name, the product name and the website and nothing else, so every
+# strategy question the team had already answered looked to the model like a
+# question no source had answered, and the only remedy it could name was a
+# connector.
+#
+# The reads below mirror the facts block onboarding's own drafting pass
+# assembles (`app/onboarding/wizard_drafts._facts_block`) — same wizard fields,
+# rendered compactly rather than as raw JSON, because this one rides a cached
+# answer prefix instead of a one-off draft call.
+_CONFIG_COMPANY_COLUMNS = (
+    "mission, strategy, portfolio, industry, business_type, competitors, "
+    "planning_cycle, prioritization_framework, decision_process, "
+    "business_context_summary"
+)
+
+#: Per-line cap. Long enough for a pasted strategy paragraph, short enough that
+#: one verbose field cannot crowd out the rest of the configuration.
+_CONFIG_VALUE_MAX_CHARS = 1200
+
+#: Cap on the structured 8-layer lens, matching what synthesis and ideation
+#: already give it (`app/synthesis/agent.py`).
+_CONFIG_LENS_MAX_CHARS = 1500
+
 # Hostnames that are obviously infra, not a brand site — a preview-deploy
 # domain, or localhost. The website is omitted rather than rendered when it
 # resolves to one of these, or to an "app." subdomain, or carries a query
@@ -102,10 +131,13 @@ def _should_skip_website(url: str) -> bool:
 
 
 def company_facts_block(enterprise_id: str | None) -> str:
-    """The workspace's self-reported identity — company name
-    (`companies.display_name`) and its primary product's name/website
-    (`products`, `is_primary` row) — rendered for the answer prompt as
-    configuration of record, not verified fact (see `WORKSPACE_CONFIG_HEADER`).
+    """Everything this workspace has told us about itself — its identity
+    (`companies.display_name`, the `is_primary` `products` row) and the answers
+    onboarding collected and Settings maintains: mission, strategy, portfolio,
+    positioning, users, competitors, the chosen success metrics, how the team
+    plans and decides, and the business context it accepted. Rendered for the
+    answer prompt as configuration of record, not verified fact (see
+    `WORKSPACE_CONFIG_HEADER`).
 
     Returns "" for every degradation path — no tenant, no company row, no
     product row, every field empty/guarded, or any read failure — so chat
@@ -137,9 +169,126 @@ def company_facts_block(enterprise_id: str | None) -> str:
         lines.append(f"Product name: {product_name}")
     if website:
         lines.append(f"Website: {website}")
+    _add_config_line(lines, "Positioning", product.get("positioning"))
+    _add_config_line(lines, "Users / customers", product.get("users_description"))
+    lines.extend(_captured_context_lines(enterprise_id))
     if not lines:
         return ""
     return WORKSPACE_CONFIG_HEADER + "\n" + "\n".join(lines)
+
+
+def _add_config_line(lines: list[str], label: str, value: object) -> None:
+    """Append `label: value` when the workspace actually filled that field in.
+    An empty field is simply absent — never rendered as "unknown", which the
+    model would otherwise repeat back as a finding of its own."""
+    if value in (None, "", [], {}):
+        return
+    if isinstance(value, list):
+        text = ", ".join(_clean_text(str(v)) for v in value if v not in (None, ""))
+    elif isinstance(value, dict):
+        text = "; ".join(
+            f"{k}: {_clean_text(str(v))}"
+            for k, v in value.items()
+            if v not in (None, "", [], {})
+        )
+    else:
+        text = _clean_text(str(value))
+    if not text:
+        return
+    if len(text) > _CONFIG_VALUE_MAX_CHARS:
+        text = text[: _CONFIG_VALUE_MAX_CHARS - 1].rstrip() + "…"
+    lines.append(f"{label}: {text}")
+
+
+def _captured_context_lines(enterprise_id: str) -> list[str]:
+    """The rest of what this workspace has told us about itself: the onboarding
+    wizard's answers, plus whatever Settings has edited since.
+
+    Best-effort exactly like the identity lines above — a read that fails
+    contributes nothing and the answer proceeds on what did load, so a
+    workspace that skipped onboarding gets the same block it got before."""
+    lines: list[str] = []
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client().table("companies")
+            .select(_CONFIG_COMPANY_COLUMNS)
+            .eq("id", enterprise_id)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        company = dict(rows[0]) if rows else {}
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "workspace context unavailable for %s; answering without it",
+            enterprise_id, exc_info=True,
+        )
+        company = {}
+
+    _add_config_line(lines, "Industry", company.get("industry"))
+    _add_config_line(lines, "Business type", company.get("business_type"))
+    _add_config_line(lines, "Mission & vision", company.get("mission"))
+    _add_config_line(lines, "Strategy / OKRs", company.get("strategy"))
+    _add_config_line(lines, "Portfolio", company.get("portfolio"))
+    _add_config_line(lines, "Named competitors", company.get("competitors"))
+
+    # The metrics this team picked, north star first — the exact field the
+    # reported answer went hunting for in the connectors.
+    try:
+        from app.kpi_tree import load_kpi_tree
+
+        tree = load_kpi_tree(enterprise_id)
+    except Exception:  # noqa: BLE001
+        tree = None
+    if tree is not None:
+        lines.append("Success metrics (chosen by this team):")
+        lines.extend(
+            f"  {ln}" for ln in tree.render_for_prompt().splitlines() if ln.strip()
+        )
+
+    _add_config_line(lines, "Planning cycle", company.get("planning_cycle"))
+    _add_config_line(
+        lines, "Prioritization framework", company.get("prioritization_framework")
+    )
+    _add_config_line(lines, "How the team decides", company.get("decision_process"))
+
+    # Workspace-owned since 2026-07-22 (see wizard_drafts): the team's own
+    # scope, strategy, roadmap and free-form context.
+    try:
+        from app.db.workspaces import default_workspace_for_company
+
+        workspace = dict(default_workspace_for_company(enterprise_id) or {})
+    except Exception:  # noqa: BLE001
+        workspace = {}
+    _add_config_line(lines, "Team name", workspace.get("name"))
+    _add_config_line(lines, "Team scope of work", workspace.get("team_scope"))
+    _add_config_line(lines, "Team strategy", workspace.get("team_strategy"))
+    _add_config_line(lines, "Team roadmap", workspace.get("team_roadmap"))
+    _add_config_line(lines, "Additional context", workspace.get("additional_context"))
+
+    # The prose the team read and ACCEPTED at the end of onboarding, then the
+    # structured lens the research agents maintain underneath it.
+    _add_config_line(
+        lines,
+        "Business context (accepted by this team)",
+        company.get("business_context_summary"),
+    )
+    try:
+        from app.business_context import load_business_context
+
+        doc = load_business_context(enterprise_id)
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc is not None:
+        rendered = doc.render_for_prompt(max_chars=_CONFIG_LENS_MAX_CHARS)
+        if rendered.strip():
+            lines.append("Researched business context:")
+            lines.extend(
+                f"  {ln}" for ln in rendered.splitlines() if ln.strip()
+            )
+    return lines
 
 
 # ── Uploaded-document grounding (existence-vs-retrieval contract) ───────────
