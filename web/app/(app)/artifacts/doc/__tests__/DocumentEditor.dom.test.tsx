@@ -16,6 +16,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { DocumentEditor } from "../DocumentEditor"
+import { execDocumentCommand } from "../../../../lib/documentToolbarExec"
 
 beforeAll(() => {
   // ProseMirror measures the caret; jsdom returns nothing for these.
@@ -218,6 +219,105 @@ describe("opening a document is not editing it", () => {
     getEditor().commands.insertContentAt(1, "X")
 
     await waitFor(() => expect(onChange).toHaveBeenCalled())
+  })
+
+  // ── The bar that is not inside this component ─────────────────────────────
+  //
+  // Both panel hosts pin `PrdToolbar` OUTSIDE the wrapper the listeners above
+  // are attached to — the document tab renders it at the top of the panel, the
+  // report portals it into a slot elsewhere in the tree — and drive this editor
+  // through `execDocumentCommand`. So none of the events above ever fire for a
+  // toolbar click, and the gate swallowed the edit: the text changed on screen,
+  // the status pill went on reading "Saved", and the formatting was gone on
+  // reopen with nothing anywhere saying so.
+  //
+  // `hideToolbar` and NO event on the editor, because that is the shape of the
+  // defect. A click inside the document first would mark interaction and the
+  // test would pass with the fix reverted.
+  it.each([
+    ["bold", undefined, "<strong>"],
+    ["italic", undefined, "<em>"],
+    ["formatBlock", "h2", "<h2>"],
+    ["insertUnorderedList", undefined, "<ul>"],
+  ])("saves a %s from a toolbar mounted outside this component", async (
+    cmd, value, expected,
+  ) => {
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<p>hello</p>",
+      hideToolbar: true,
+    })
+    onChange.mockClear()
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 6 })
+
+    expect(execDocumentCommand(editor, cmd, value)).toBe(true)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain(expected)
+  })
+
+  it("undo from that toolbar saves too", async () => {
+    // Undo and redo dispatch their own transactions from the history plugin
+    // rather than the chain's, which is why the marker is sticky per editor
+    // and not carried on the transaction.
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<p>hello</p>",
+      hideToolbar: true,
+    })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 6 })
+    execDocumentCommand(editor, "bold")
+    onChange.mockClear()
+
+    execDocumentCommand(editor, "undo")
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).not.toContain("<strong>")
+  })
+
+  it("a document nobody touched is still not saved by another one's toolbar", async () => {
+    // The marker is per editor, not per module: opening a second document must
+    // not inherit the first one's "this has been edited" state, or merely
+    // opening it would bump its version — the defect the gate exists to stop.
+    const first = await mount({ initialHtml: "<p>one</p>", hideToolbar: true })
+    execDocumentCommand(
+      first.getEditor() as unknown as Parameters<typeof execDocumentCommand>[0],
+      "bold",
+    )
+    const second = await mount({
+      initialHtml: "<h1>Title</h1><p>two</p><hr>",
+      hideToolbar: true,
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(second.onChange).not.toHaveBeenCalled()
+  })
+})
+
+describe("the schema registers each extension exactly once", () => {
+  it("warns about no duplicate extension name", async () => {
+    // `@tiptap/extension-underline` was registered alongside StarterKit v3,
+    // which already ships one, so every mount logged "Duplicate extension
+    // names found: ['underline']" — the state TipTap itself calls out as
+    // leading to issues. Link was disabled in the StarterKit config for
+    // exactly this reason; underline was the one that got missed.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await mount({ initialHtml: "<p>hello</p>" })
+      const messages = warn.mock.calls.map((c) => c.join(" "))
+      expect(messages.filter((m) => m.includes("Duplicate extension names"))).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("still underlines, on StarterKit's own mark", async () => {
+    const { container, onChange, selectAll } = await mount({ initialHtml: "<p>hello</p>" })
+    selectAll()
+    fireEvent.click(container.querySelector('[data-testid="doc-underline"]')!)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain("<u>")
   })
 })
 
