@@ -127,6 +127,44 @@ def test_style_attribute_keeps_only_allowlisted_properties():
     assert "position" not in out and "z-index" not in out
 
 
+def test_an_inserted_table_keeps_its_structure_and_loses_only_its_geometry():
+    """What the toolbar's Table button actually emits.
+
+    TipTap writes a `min-width` and a `<colgroup>` for column sizing. Neither
+    is on the allowlist and neither needs to be: the ROWS AND CELLS are the
+    content, and the geometry was never ours to store (the editor is configured
+    non-resizable for exactly this reason). What must not happen is the table
+    arriving as a run of concatenated words, which is the failure that put the
+    table extension in the schema in the first place.
+    """
+    out = sanitize_artifact_html(
+        '<table style="min-width: 75px"><colgroup><col></colgroup><tbody>'
+        "<tr><th>Theme</th></tr><tr><td>Billing</td></tr></tbody></table>"
+    )
+
+    for kept in ("<table", "<tbody", "<tr", "<th", "<td", "Theme", "Billing"):
+        assert kept in out, f"{kept} was lost"
+    for dropped in ("colgroup", "min-width"):
+        assert dropped not in out
+
+
+def test_indent_is_the_only_box_property_allowed():
+    """`margin-left` went in for the toolbar's indent. Its NEIGHBOURS did not,
+    and that is the point: a margin moves a block sideways inside its own
+    column, while `position`, `top` and friends lift text out of the document
+    and over the app's own chrome. Adding one box property must not be read as
+    opening the box model."""
+    out = sanitize_artifact_html(
+        '<p style="margin-left: 24px; margin-top: 40px; margin: 0 0 0 99px;'
+        ' padding-left: 30px; position: fixed">x</p>'
+    )
+    assert "margin-left: 24px" in out
+    for dropped in ("margin-top", "padding-left", "position"):
+        assert dropped not in out, f"{dropped} survived the allowlist"
+    # The `margin` shorthand is not `margin-left` and does not smuggle one in.
+    assert "99px" not in out
+
+
 def test_style_values_cannot_fetch():
     out = sanitize_artifact_html(
         '<p style="background-color: url(https://evil.test/pixel.png)">x</p>'
@@ -267,6 +305,19 @@ def test_a_named_target_still_gets_noopener():
         '<p><span style="color: #B42318">red</span></p>',
         # A link, with the rel/target the editor attaches.
         '<p><a target="_blank" rel="noopener noreferrer" href="https://sprntly.ai">s</a></p>',
+        # Alignment and indentation, both stored on the BLOCK rather than on a
+        # span. The toolbar gained these when the three bars were made to offer
+        # the same controls; an indent dropped here is a user watching their
+        # paragraph slide back to the margin on save.
+        '<p style="text-align: center">centred</p>',
+        '<p style="margin-left: 24px">indented</p>',
+        '<h2 style="margin-left: 48px; text-align: right">both</h2>',
+        # A table, which the report engines write and the toolbar can now
+        # insert directly. The second is what the editor ACTUALLY emits: a
+        # min-width and a colgroup it adds for column sizing. Neither is on the
+        # allowlist, and neither needs to be — the table itself is what has to
+        # survive, and the geometry was never ours to store.
+        "<table><thead><tr><th>h</th></tr></thead><tbody><tr><td>c</td></tr></tbody></table>",
     ],
 )
 def test_editor_output_survives_the_sanitizer(editor_output):
@@ -287,7 +338,8 @@ def test_editor_output_survives_the_sanitizer(editor_output):
     # Every style PROPERTY the editor emitted is still there (the value's
     # notation may be normalized; the declaration must not vanish).
     for prop in re.findall(r"([\w-]+)\s*:", re.sub(r"<[^>]*?href[^>]*?>", "", editor_output)):
-        if prop in {"font-family", "font-size", "color", "background-color"}:
+        if prop in {"font-family", "font-size", "color", "background-color",
+                    "text-align", "margin-left"}:
             assert prop in out, f"{prop} was dropped from {editor_output!r}"
 
 

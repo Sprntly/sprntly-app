@@ -1,4 +1,5 @@
 import type { Editor } from "@tiptap/react"
+import { indentSelection } from "../(app)/artifacts/doc/editorIndent"
 
 /**
  * Run one `PrdToolbar` command against a TipTap document.
@@ -9,26 +10,22 @@ import type { Editor } from "@tiptap/react"
  * translated into chains. One bar, two hosts, no second toolbar to keep in step:
  * the PRD's and the document's formatting controls are now the same control.
  *
- * WHAT IS NOT HERE IS AS DELIBERATE AS WHAT IS. Align, indent and table have no
- * extension in this editor's schema (see `DocumentEditor`'s `extensions`), so
- * they are not translated — the panel passes them to the toolbar's `omit` set
- * and they never render. Adding them means adding the extension first; a
- * silently-ignored command would be a button that does nothing, which this
- * codebase has shipped once already and left a note about.
+ * EVERY COMMAND THE BAR CAN EMIT IS TRANSLATED HERE. Align, indent and table
+ * used to be missing, and the panel passed them to the toolbar's `omit` set so
+ * they never rendered — which meant one bar offered different controls
+ * depending on which artifact was open. They now have extensions behind them
+ * (`TextAlign`, `editorIndent`, `TableKit`), so nothing is omitted. If a
+ * command is ever added to the bar without a translation here, add the
+ * extension first: a silently-ignored command is a button that does nothing,
+ * which this codebase has shipped once already and left a note about.
  *
  * Returns whether the command was handled, so a caller can tell "did nothing"
  * from "not mine" — the panel logs the difference rather than swallowing it.
  */
-export const UNSUPPORTED_DOCUMENT_COMMANDS: ReadonlySet<string> = new Set([
-  "indent",
-  "outdent",
-  "justifyLeft",
-  "justifyCenter",
-  "justifyRight",
-  // The toolbar's table button inserts raw HTML, which a schema-backed editor
-  // cannot accept without a Table extension.
-  "insertHTML",
-])
+/** Nothing. Kept as the toolbar's `omit` contract — a host that genuinely
+ *  cannot run a command should still leave it out rather than render it inert
+ *  — but this editor now answers every command the bar emits. */
+export const UNSUPPORTED_DOCUMENT_COMMANDS: ReadonlySet<string> = new Set()
 
 /** Editors this bar has actually been used on.
  *
@@ -114,6 +111,39 @@ export function execDocumentCommand(
       return true
     case "formatBlock":
       return setBlock(editor, value)
+    case "insertTable":
+      // 3x3 with a header row — the shape you almost always want, and the same
+      // one the PRD's raw-HTML insert produces, so a table looks identical
+      // whichever artifact it was made in.
+      chain().insertTable({ rows: 3, cols: 3, withHeaderRow: true }).run()
+      return true
+    case "justifyLeft":
+    case "justifyCenter":
+    case "justifyRight":
+      chain().setTextAlign(cmd.replace("justify", "").toLowerCase()).run()
+      return true
+    case "indent":
+      toolbarDriven.add(editor)
+      return indentSelection(editor, 1)
+    case "outdent":
+      toolbarDriven.add(editor)
+      return indentSelection(editor, -1)
+    case "fontName":
+      value
+        ? chain().setFontFamily(value).run()
+        : chain().unsetFontFamily().run()
+      return true
+    case "fontSize":
+      value ? chain().setFontSize(value).run() : chain().unsetFontSize().run()
+      return true
+    case "foreColor":
+      value ? chain().setColor(value).run() : chain().unsetColor().run()
+      return true
+    case "hiliteColor":
+      value
+        ? chain().setBackgroundColor(value).run()
+        : chain().unsetBackgroundColor().run()
+      return true
     default:
       return false
   }

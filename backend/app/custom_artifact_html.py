@@ -89,6 +89,17 @@ _DROP_WITH_CONTENT = frozenset({
 _ALLOWED_CSS = frozenset({
     "font-family", "font-size", "font-weight", "font-style",
     "color", "background-color", "text-align", "text-decoration",
+    # Indentation, which the editor stores as a margin on the block (see
+    # web/app/(app)/artifacts/doc/editorIndent.ts). Added when the toolbar
+    # gained indent/outdent for documents: without it the indent applied on
+    # screen and was stripped on the next save, which is the silent-loss
+    # failure this allowlist and the editor's schema are paired to prevent.
+    #
+    # Safe on the terms the exclusions above are drawn: a margin cannot fetch
+    # (no `url()` — and `_CSS_VALUE_BANNED` refuses one anyway), cannot lift
+    # text out of the document the way `position` can, and cannot overlay the
+    # app's own chrome. It moves a block sideways inside its own column.
+    "margin-left",
 })
 
 # A CSS value may not reach the network or invoke a scheme. `url(...)` covers

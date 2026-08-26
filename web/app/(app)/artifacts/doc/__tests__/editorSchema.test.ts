@@ -15,8 +15,7 @@ import {
   FONT_FAMILIES,
   FONT_SIZES,
   HEADING_LEVELS,
-  HIGHLIGHT_COLORS,
-  TEXT_COLORS,
+  COLOR_SWATCHES,
   isSafeHref,
   normalizeHref,
 } from "../editorSchema"
@@ -67,16 +66,33 @@ describe("the pickers only produce CSS the server keeps", () => {
   it("colours map to color / background-color", () => {
     expect(SERVER_KEEPS_CSS.has("color")).toBe(true)
     expect(SERVER_KEEPS_CSS.has("background-color")).toBe(true)
-    for (const c of [...TEXT_COLORS, ...HIGHLIGHT_COLORS].filter((c) => c.value)) {
-      expect(c.value).toMatch(/^#[0-9A-Fa-f]{3,8}$/)
+    for (const swatch of COLOR_SWATCHES.flat()) {
+      expect(swatch.value, `${swatch.label} is not a hex literal`).toMatch(
+        /^#[0-9A-Fa-f]{6}$/,
+      )
     }
+  })
+
+  it("offers a grid, not a shortlist — every row the same width", () => {
+    // The picker replaced a five-entry list. Ten per row is what makes it read
+    // as a palette rather than a menu, and a ragged row reads as a bug.
+    expect(COLOR_SWATCHES.length).toBeGreaterThanOrEqual(4)
+    for (const row of COLOR_SWATCHES) expect(row.length).toBe(10)
+  })
+
+  it("names every swatch, because a hex is not a name", () => {
+    // The label is the accessible name and the tooltip. "#4A86E8" tells a
+    // screen-reader user nothing they can act on.
+    const labels = COLOR_SWATCHES.flat().map((s) => s.label)
+    expect(new Set(labels).size, "two swatches share a name").toBe(labels.length)
+    for (const label of labels) expect(label).not.toMatch(/^#/)
   })
 
   it("no picker value can reach the network", () => {
     // `url(...)` in a CSS value is stripped server-side (`_CSS_VALUE_BANNED`),
     // so a picker offering one would produce a style that silently vanishes —
     // and, worse, would be a fetch if it ever did survive.
-    for (const v of [...FONT_FAMILIES, ...FONT_SIZES, ...TEXT_COLORS, ...HIGHLIGHT_COLORS]) {
+    for (const v of [...FONT_FAMILIES, ...FONT_SIZES, ...COLOR_SWATCHES.flat()]) {
       expect(v.value.toLowerCase()).not.toContain("url(")
       expect(v.value.toLowerCase()).not.toContain("javascript:")
     }
@@ -85,8 +101,11 @@ describe("the pickers only produce CSS the server keeps", () => {
   it("every picker offers a way back to the default", () => {
     // Without an explicit "none" option, a span applied by accident can only be
     // removed by clearing ALL formatting.
-    for (const list of [FONT_FAMILIES, FONT_SIZES, TEXT_COLORS, HIGHLIGHT_COLORS]) {
-      expect(list.some((o) => o.value === "")).toBe(true)
+    // The colour picker's way back is its own "Default" / "None" control
+    // rather than a row in the list — see `ColorGrid`, which is asserted where
+    // it is rendered.
+    for (const list of [FONT_FAMILIES, FONT_SIZES]) {
+      expect(list.some((o: { value: string }) => o.value === "")).toBe(true)
     }
   })
 })

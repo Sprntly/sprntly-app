@@ -61,13 +61,14 @@ describe("PrdToolbar — the always-visible row", () => {
     expect(notCancelled).toBe(false)
   })
 
-  it("inserts a real table — the button used to have no onClick at all", () => {
+  it("inserts a table through a command BOTH hosts implement", () => {
+    // It shipped with NO onClick and was inert; then it emitted raw HTML, which
+    // only a contenteditable could take, so documents and reports had no table
+    // button at all. `insertTable` is translated by each host into what that
+    // host can run.
     const { view, exec } = renderBar()
     fireEvent.click(view.getByTestId("prd-tool-table"))
-    expect(exec).toHaveBeenCalledTimes(1)
-    const [cmd, html] = exec.mock.calls[0]
-    expect(cmd).toBe("insertHTML")
-    expect(html).toContain("<table>")
+    expect(exec).toHaveBeenCalledWith("insertTable")
   })
 
   it("applies a block format from the style menu", () => {
@@ -76,6 +77,24 @@ describe("PrdToolbar — the always-visible row", () => {
     fireEvent.click(view.getByTestId("prd-tool-block"))
     fireEvent.click(view.getByTestId("prd-more-h2"))
     expect(exec).toHaveBeenCalledWith("formatBlock", "h2")
+  })
+
+  it.each([
+    ["prd-tool-color", "prd-color-grid", "foreColor"],
+    ["prd-tool-highlight", "prd-highlight-grid", "hiliteColor"],
+  ])("opens a colour GRID from %s, not a list of five", (trigger, grid, cmd) => {
+    // The report: "can you do a colour picker like Google Docs does — a box of
+    // colours" instead of naming five of them.
+    const { view, exec } = renderBar()
+    fireEvent.click(view.getByTestId(trigger))
+
+    const swatches = view.getByTestId(grid).querySelectorAll(".prd-colorgrid-swatch")
+    expect(swatches.length).toBeGreaterThanOrEqual(40)
+
+    fireEvent.click(view.getByTestId(`${grid}-ff0000`))
+    expect(exec).toHaveBeenCalledWith(cmd, "#FF0000")
+    // …and the menu gets out of the way once a colour is chosen.
+    expect(view.queryByTestId(grid)).toBeNull()
   })
 
   it("shows an icon beside every entry in both menus", () => {
@@ -156,6 +175,70 @@ describe("PrdToolbar — the overflow menu", () => {
     expect(view.container.querySelector(".prd-toolbar")!.contains(menu)).toBe(true)
   })
 
+  it("draws the STYLE menu clear of the scrolling row it lives in", () => {
+    // The reported bug: "I click the style tool and no dropdown appears."
+    //
+    // The overflow menu escaped this by living outside `.prd-tools-l` (see the
+    // test above). The Style trigger sits between Redo and Bold and cannot
+    // move without reordering the bar, so its menu escapes the other way: it
+    // is `position: fixed` and takes its coordinates from the trigger's own
+    // rect, which no scrolling ancestor can clip.
+    //
+    // jsdom applies no layout, so the clipping cannot be observed — but the
+    // coordinates CAN, and an inline `top` is the thing that is absent when
+    // the menu is back to hanging off a clipped ancestor.
+    const { view } = renderBar()
+    const trigger = view.getByTestId("prd-tool-block")
+    trigger.getBoundingClientRect = () =>
+      ({ top: 40, bottom: 70, left: 120, right: 180, width: 60, height: 30,
+         x: 120, y: 40, toJSON: () => ({}) }) as DOMRect
+
+    fireEvent.click(trigger)
+
+    const menu = view.getByTestId("prd-tool-block-menu") as HTMLElement
+    expect(menu.style.top, "the menu has no measured position").toBe("76px")
+    // The style menu hangs LEFT — it is at the left end of the bar, so a
+    // right-anchored menu would shoot off toward the middle of the panel.
+    expect(menu.style.left).toBe("120px")
+  })
+
+  it("keeps a menu inside the window when its trigger sits at the edge", () => {
+    // What fixed positioning costs, and the only thing it costs: an absolute
+    // menu running past the right edge still belonged to the page and could be
+    // scrolled to. A fixed one off the viewport is simply gone. The overflow
+    // trigger is the rightmost control in the bar, so this is its case.
+    const { view } = renderBar()
+    const trigger = view.getByTestId("prd-tool-more")
+    trigger.getBoundingClientRect = () =>
+      ({ top: 40, bottom: 70, left: 980, right: 1020, width: 40, height: 30,
+         x: 980, y: 40, toJSON: () => ({}) }) as DOMRect
+    Object.defineProperty(window, "innerWidth", { value: 1000, configurable: true })
+
+    fireEvent.click(trigger)
+
+    const menu = view.getByTestId("prd-tool-more-menu") as HTMLElement
+    // 1000 - 178 (the menu's own min-width) - 8 (edge gap), not the trigger's
+    // 980, which would put all but 20px of it past the window.
+    expect(menu.style.left).toBe("814px")
+    expect(menu.style.top).toBe("76px")
+  })
+
+  it.each([
+    ["the tool row scrolls", () => fireEvent.scroll(document, {})],
+    ["the panel is resized", () => fireEvent(window, new Event("resize"))],
+  ])("closes when %s, rather than hanging beside nothing", (_label, move) => {
+    // A fixed menu is positioned ONCE. Anything that moves the trigger would
+    // otherwise leave the menu floating over the document, detached from the
+    // button it belongs to.
+    const { view } = renderBar()
+    fireEvent.click(view.getByTestId("prd-tool-block"))
+    expect(view.queryByTestId("prd-tool-block-menu")).not.toBeNull()
+
+    move()
+
+    expect(view.queryByTestId("prd-tool-block-menu")).toBeNull()
+  })
+
   it("suppresses mousedown on menu items too", () => {
     const { view } = renderBar()
     fireEvent.click(view.getByTestId("prd-tool-more"))
@@ -199,6 +282,16 @@ describe("PrdToolbar — pinned to the top", () => {
     const menuZ = /z-index:\s*(\d+)/.exec(menu)
     expect(menuZ).not.toBeNull()
     expect(Number(z![1])).toBeLessThan(Number(menuZ![1]))
+  })
+
+  it("draws its dropdowns against the viewport, not a clipping ancestor", () => {
+    // `position: absolute` here is the defect: `.prd-tools-l` sets
+    // `overflow-x: auto`, and a box that sets overflow on one axis clips the
+    // other too, so a dropdown hanging BELOW that row was clipped away
+    // entirely. Fixed boxes are positioned against the viewport instead.
+    const menu = /^\s*\.prd-more-menu \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+    expect(menu).toMatch(/position:\s*fixed/)
+    expect(menu).not.toMatch(/position:\s*absolute/)
   })
 
   it("has no clipping ancestor — `.prd-frame` must not set overflow", () => {
