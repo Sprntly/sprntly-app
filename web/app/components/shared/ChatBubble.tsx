@@ -177,6 +177,7 @@ export interface ChatBubbleProps {
   livePhase?: string
 
   error?: string | null
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   onAskAgain?: () => void
   stopped?: boolean
   timedOut?: boolean
@@ -438,6 +439,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     streamDropped,
     livePhase,
     error,
+    providerNotice,
     onAskAgain,
     stopped,
     timedOut,
@@ -700,7 +702,9 @@ export function ChatBubble(props: ChatBubbleProps) {
                 agentBodyNode
               ) : (
                 <>
-                  {error ? <WaitFailedState onAskAgain={onAskAgain} /> : null}
+                  {error ? (
+                    <WaitFailedState onAskAgain={onAskAgain} notice={providerNotice} />
+                  ) : null}
                   {stopped && !reply ? <WaitStoppedState onAskAgain={onAskAgain} /> : null}
                   {/* A turn carrying a GATE is not a turn awaiting a reply: the
                       card IS the agent's message. Without this the whole

@@ -365,7 +365,18 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // Drop any streamed partial too: a half-answer above an error
           // bubble would read as the reply having (partly) succeeded.
           conv.patchTurns((thread) => thread.map((turn) => turn.id === id
-            ? { ...turn, error: msg, partial: undefined, streamDropped: undefined, livePhase: undefined }
+            ? {
+                ...turn, error: msg, partial: undefined,
+                streamDropped: undefined, livePhase: undefined,
+                // THE TURN IS THE DURABLE RECORD; the toast is not. Without
+                // this the turn said "There was an interruption, try again"
+                // while a toast — gone in seconds, and absent entirely on a
+                // reload — carried the actual reason.
+                providerNotice: providerNotice
+                  ? { message: providerNotice.message,
+                      needsAdmin: providerNotice.needsAdmin }
+                  : undefined,
+              }
             : turn))
           // `msg` is kept on the turn and in the persisted conversation row as
           // the RECORD of what failed. It is not what the user reads: the failed
@@ -374,7 +385,11 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // 404 the tenant gate raises must not tell a foreign tenant that the
           // row it asked for exists somewhere.
           finalizeConversationTurn(id, { error: msg }, tabId)
-          showToast("Interrupted", WAIT_FAILED)
+          // ONE EVENT, ONE MESSAGE. When a provider notice fired above, this
+          // second toast contradicted it: the account was out of credits and
+          // the user got a persistent "top this up" toast AND a transient
+          // "There was an interruption, try again" for the same failure.
+          if (!providerNotice) showToast("Interrupted", WAIT_FAILED)
         },
       })
     },

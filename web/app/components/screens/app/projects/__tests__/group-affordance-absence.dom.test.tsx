@@ -289,11 +289,20 @@ describe("closed-world — group FE symbols are gone from the source tree (AC6)"
     // touch (`chat-shell/__tests__/ChatShell.module-graph.test.tsx`'s own
     // FORBIDDEN guard already bars ChatShell from importing `mentions` at
     // all — this is prose, not a reference, and the file is on this
-    // ticket's explicit KEEP-entirely/do-not-touch list). Excluded by exact
-    // (file, line) so a REAL future `MentionBubble` reference anywhere else
-    // still fails this guard.
+    // ticket's explicit KEEP-entirely/do-not-touch list).
+    //
+    // Excluded by (file, exact line TEXT) rather than (file, line NUMBER). The
+    // number was the original key and it made this guard a landmine: ANY edit
+    // above line 250 of `types.ts` shifted the comment and failed the build,
+    // with a diff that had nothing to do with groups. That is exactly what
+    // happened — one optional field added near the top of `ShellTurn` moved it
+    // to 256 and this went red.
+    //
+    // The text key keeps the intent the number was chosen for: a REAL future
+    // `MentionBubble` reference anywhere — including elsewhere in this same
+    // file — is different text and still fails.
     const KNOWN_PRODUCT_FALSE_POSITIVES = new Set([
-      "components/shared/chat-shell/types.ts:250",
+      "components/shared/chat-shell/types.ts::/** project: MentionBubble / markdown user body. Unset \u2192 main's plain-query",
     ])
 
     const hits: string[] = []
@@ -312,7 +321,7 @@ describe("closed-world — group FE symbols are gone from the source tree (AC6)"
         const lines = content.split("\n")
         lines.forEach((line, i) => {
           if (!PATTERN.test(line)) return
-          const relKey = `${relative(webAppRoot, full)}:${i + 1}`
+          const relKey = `${relative(webAppRoot, full)}::${line.trim()}`
           if (KNOWN_PRODUCT_FALSE_POSITIVES.has(relKey)) return
           hits.push(`${full}:${i + 1}: ${line.trim()}`)
         })

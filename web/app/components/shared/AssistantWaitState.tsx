@@ -445,17 +445,38 @@ export function WaitTimedOutState({
  *  role="alert" because the chat surface had NO alert, status or live region at
  *  all — a screen-reader user got total silence on failure.
  *
- *  The copy is FIXED. The raw error is deliberately not rendered: a backend
- *  detail string is meaningless to the person reading it, and the 404 the tenant
- *  gate raises must read as an interruption with no hint that the row exists
- *  somewhere else. */
-export function WaitFailedState({ onAskAgain }: { onAskAgain?: () => void }) {
+ *  The copy is FIXED BY DEFAULT. The raw error is deliberately not rendered: a
+ *  backend detail string is meaningless to the person reading it, and the 404
+ *  the tenant gate raises must read as an interruption with no hint that the
+ *  row exists somewhere else.
+ *
+ *  A PROVIDER NOTICE IS THE ONE EXCEPTION, and it is not a raw error — it is a
+ *  TYPED, server-authored, deliberately user-safe sentence produced for exactly
+ *  this purpose ("the account is out of credits or rate limited"). Suppressing
+ *  it left the durable turn saying "There was an interruption" while a toast —
+ *  transient, and gone by the time anyone scrolled back — carried the truth.
+ *  Observed on staging with `credit_balance: 0`: two toasts fired for one
+ *  event, saying different things, and the turn kept the less useful one.
+ *
+ *  AND THE RETRY GOES WITH IT when an admin has to act. "Ask again" on an
+ *  out-of-credits account is a control that cannot work, which is worse than
+ *  no control: it reads as though the failure were transient. A transient
+ *  overload (`needsAdmin: false`) keeps it, because there retrying is exactly
+ *  right. */
+export function WaitFailedState({
+  onAskAgain,
+  notice,
+}: {
+  onAskAgain?: () => void
+  notice?: { message: string; needsAdmin: boolean } | null
+}) {
+  const canRetry = onAskAgain && !(notice && notice.needsAdmin)
   return (
     <div className="cw">
       <div className="bc-error" role="alert">
-        {WAIT_FAILED}
+        {notice ? notice.message : WAIT_FAILED}
       </div>
-      {onAskAgain ? (
+      {canRetry ? (
         <div className="cw-actions">
           <button type="button" className="cw-btn cw-btn--primary" onClick={onAskAgain}>Ask again</button>
         </div>

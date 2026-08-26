@@ -150,6 +150,12 @@ export interface ShellTurn {
   streamDropped?: boolean
   stopped?: boolean
   error?: string | null
+  /** A TYPED provider refusal for this turn — out of credits, rate limited,
+   *  overloaded. Distinct from `error`, which stays the raw RECORD of what
+   *  failed and is never shown; this is the server's user-safe sentence and is
+   *  the thing the failed turn renders. `needsAdmin` marks the case a retry
+   *  cannot fix. */
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   timedOut?: boolean
   /** Driven by the turn's own persisted clock, never `Date.now()` at render. */
   createdAt?: number

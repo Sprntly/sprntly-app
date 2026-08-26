@@ -286,6 +286,9 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       streamDropped: turn.streamDropped,
       livePhase: turn.livePhase,
       error: turn.error,
+      // Forwarded beside `error`, not folded into it: `error` is the raw
+      // record and is never rendered; this is the user-safe sentence that is.
+      providerNotice: turn.providerNotice,
       onAskAgain: () => handleAskAgain(turn),
       stopped: turn.stopped,
       timedOut: turn.timedOut,
