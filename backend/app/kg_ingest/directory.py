@@ -340,3 +340,35 @@ def resolve_owners_for_call(
             enterprise_id, sig.id, {"owner_person_id": pid})
         stamped += 1
     return stamped
+
+
+# ── steady-state race backfill ───────────────────────────────────────────────
+
+def backfill_source_call_ids(facade: GraphFacade, enterprise_id: str) -> int:
+    """Relink signals that raced ahead of their `call_index` row.
+
+    A call-shaped extraction stamps `source_call_id` from
+    `call_index.resolve_call_id` at extraction time; when the transcript reached
+    extraction before the index had catalogued it, that resolved to NULL but the
+    signal still carries `provenance.provider` / `provenance.external_id`. Once
+    the index catches up (this runs right after a call-index refresh), those keys
+    resolve, so set `source_call_id`.
+
+    One scoped read + bounded per-signal updates. No LLM, no external calls.
+    Legacy pre-branch batched signals have no per-call `external_id` — unlinkable
+    by construction — and are left NULL. Returns the number relinked."""
+    from app import call_index
+
+    linked = 0
+    for sig in facade.unlinked_call_signals(enterprise_id):
+        prov = sig.provenance or {}
+        provider = prov.get("provider")
+        external_id = prov.get("external_id")
+        if not external_id or provider not in call_index.CALL_PROVIDERS:
+            continue
+        call_id = call_index.resolve_call_id(enterprise_id, provider, external_id)
+        if call_id is None:
+            continue  # still not catalogued — a later cycle heals it
+        facade.set_source_call_id(enterprise_id, sig.id, call_id)
+        linked += 1
+    return linked

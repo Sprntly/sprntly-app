@@ -391,6 +391,41 @@ class GraphFacade:
                 out.append(self._row_to_signal(r))
         return out
 
+    def unlinked_call_signals(
+        self, enterprise_id: str, *, limit: int = _ACTIVE_SIGNALS_LIMIT
+    ) -> list[Signal]:
+        """This tenant's signals with `source_call_id` still NULL, newest first.
+
+        The candidate set for the steady-state link backfill: a signal distilled
+        from a call that raced ahead of its `call_index` row was written
+        unlinked. Newest-transaction-first (and capped like `active_signals`) so
+        a recently-raced signal is always in the window even for a tenant
+        carrying many legacy unlinked rows. The caller decides which of these
+        actually carry a per-call `provenance.external_id` to relink."""
+        rows = (
+            self._tbl("kg_signal").select(_SIGNAL_COLS)
+            .eq("enterprise_id", enterprise_id)
+            .is_("source_call_id", "null")
+            .order("transaction_at", desc=True)
+            .limit(limit)
+            .execute().data or []
+        )
+        return [self._row_to_signal(r) for r in rows]
+
+    def set_source_call_id(
+        self, enterprise_id: str, signal_id: str, call_id: int
+    ) -> None:
+        """Set a signal's `source_call_id` FK (bigint → call_index). Tenant-scoped
+        update; used only by the race backfill to relink a signal once its call's
+        index row exists."""
+        (
+            self._tbl("kg_signal")
+            .update({"source_call_id": call_id})
+            .eq("enterprise_id", enterprise_id)
+            .eq("id", signal_id)
+            .execute()
+        )
+
     def list_sources(
         self,
         enterprise_id: str,

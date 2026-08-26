@@ -574,6 +574,7 @@ def _run_call_index_sync(company_id: str) -> None:
     # so a call-index failure that still left some rows can still yield persons;
     # itself fully isolated so a directory failure never fails the refresh.
     _mint_persons(company_id)
+    _backfill_source_call_ids(company_id)
 
 
 def _mint_persons(company_id: str) -> None:
@@ -594,6 +595,24 @@ def _mint_persons(company_id: str) -> None:
     except Exception:  # noqa: BLE001 — directory is never load-bearing on a sync
         logger.warning("directory: person minting failed for %s", company_id,
                        exc_info=True)
+
+
+def _backfill_source_call_ids(company_id: str) -> None:
+    """Relink any call signals that raced ahead of their index row, now that the
+    index has just been refreshed. Best-effort; never raises into the refresh."""
+    try:
+        from app.graph import GraphFacade
+        from app.kg_ingest import directory
+
+        linked = directory.backfill_source_call_ids(GraphFacade(), company_id)
+        if linked:
+            logger.info(
+                "call-index: backfilled source_call_id on %d signal(s) for %s",
+                linked, company_id,
+            )
+    except Exception:  # noqa: BLE001 — backfill is never load-bearing on a sync
+        logger.warning("call-index: source_call_id backfill failed for %s",
+                       company_id, exc_info=True)
 
 
 def kickoff_call_index_sync(company_id: str) -> bool:
