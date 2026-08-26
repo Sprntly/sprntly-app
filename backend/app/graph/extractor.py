@@ -12,6 +12,7 @@ extraction can't duplicate (PK conflict → skipped).
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 
 from app.graph.config_layers import resolve_config
@@ -602,16 +603,114 @@ manufacture a fact for one that never came up. Return exactly one checklist entr
 category, in the order listed."""
 
 
-def _quote_is_grounded(quote: str, text: str) -> bool:
-    """True iff `quote` (normalized whitespace, case-insensitive) is a verbatim
-    substring of `text`. This is the precision gate: a checklist item whose
-    quote cannot be found in the transcript is ungrounded and must be dropped
-    rather than written as a signal — see `run_checklist_pass`."""
-    quote = " ".join(quote.split()).strip().lower()
-    if not quote:
+# A transcript block renders one sentence per line, speaker-prefixed
+# ("{speaker}: {text}\n..." — see fireflies._record_from / zoom/meet
+# `_to_record`). Live-verify (2026-08-26) found the model correctly quotes a
+# REAL, contiguous, multi-sentence remark the natural way a human would: it
+# drops the repeated "{speaker}: " prefixes and joins the sentences with a
+# space instead of a newline. That quote is genuine — but a literal substring
+# check on the raw, still-prefixed/newline-joined source rejects it on
+# FORMATTING, not on truth, which is why the checklist pass was minting
+# almost nothing in production (USANA 0/11, Agnico 2/11, TIB 1/11) despite
+# the model behaving correctly. `_flatten_transcript_lines` reproduces that
+# same, harmless transformation on the SOURCE so the grounding check compares
+# like with like.
+_SPEAKER_LINE_PREFIX = re.compile(r"^[^:\n]{1,80}:\s+")
+
+
+def _flatten_transcript_lines(text: str) -> str:
+    """Strip each line's leading `"{label}: "` prefix (transcript speaker
+    tags, and harmlessly also the puller's own `"summary: "` / `"title: "`
+    style meta-lines) and join every non-empty line with a single space —
+    the same shape a model naturally produces when it quotes a real,
+    contiguous, multi-sentence remark without repeating the speaker tag on
+    every sentence."""
+    lines = [_SPEAKER_LINE_PREFIX.sub("", ln, count=1) for ln in text.splitlines()]
+    return " ".join(ln.strip() for ln in lines if ln.strip())
+
+
+_WORD_RE = re.compile(r"[a-z0-9']+")
+
+
+def _words(s: str) -> list[str]:
+    return _WORD_RE.findall(s.lower())
+
+
+#: Minimum run of consecutive, VERBATIM source words a quote must contain to
+#: count as grounded once it is no longer a literal substring — this is the
+#: actual fabrication-guard bar, not a fuzzy/bag-of-words similarity
+#: threshold. Live-verify validated 6: every real (merely reformatted) quote
+#: in production contained a consecutive 6+-word run drawn straight from the
+#: source, while a fabricated quote's words do not appear as a real
+#: consecutive run anywhere in the source and is still rejected. A quote
+#: shorter than this many words must still match in FULL (see
+#: `_has_consecutive_word_run`) — short claims never get MORE lenient.
+_MIN_CONSECUTIVE_WORDS = 6
+
+
+def _has_consecutive_word_run(
+    quote_words: list[str], source_words: list[str], min_run: int
+) -> bool:
+    """True iff some window of `min_run` consecutive QUOTE words (or the
+    FULL quote, if it has fewer than `min_run` words) appears, in that exact
+    order, as a consecutive run somewhere in SOURCE words. Deliberately NOT
+    order-free / bag-of-words: this is still a genuine "these words really
+    sit next to each other in the transcript" check, just tolerant of
+    reformatting noise (dropped speaker prefixes, newline-vs-space joins,
+    punctuation) that the two substring checks in `_quote_is_grounded`
+    already normalize past."""
+    n = min(min_run, len(quote_words))
+    if n == 0 or len(source_words) < n:
         return False
-    haystack = " ".join(text.split()).lower()
-    return quote in haystack
+    source_windows = {
+        tuple(source_words[i:i + n]) for i in range(len(source_words) - n + 1)
+    }
+    return any(
+        tuple(quote_words[start:start + n]) in source_windows
+        for start in range(len(quote_words) - n + 1)
+    )
+
+
+def _quote_is_grounded(quote: str, text: str) -> bool:
+    """True iff `quote` is grounded in `text` — the precision gate for the
+    directed-checklist pass. A checklist item whose quote fails every check
+    below is ungrounded and MUST be dropped, never written as a signal (see
+    `run_checklist_pass`).
+
+    THREE checks, in order, any ONE passing is grounded — this is a
+    fabrication guard throughout, not a similarity score. A quote whose
+    words are not a genuine, in-order run anywhere in the source fails all
+    three and is rejected:
+
+      1. Strict: whitespace-normalized, case-insensitive literal substring
+         of the raw source — the original check, cheapest and strictest.
+      2. Flattened: the source's speaker-prefixed, one-sentence-per-line
+         transcript format is flattened the SAME way a model naturally
+         quotes it (prefixes dropped, sentences space-joined — see
+         `_flatten_transcript_lines`) before the same substring check. Fixes
+         the dominant real rejection mode found live: a genuine, in-order,
+         non-fabricated multi-sentence quote failing on formatting, not on
+         truth.
+      3. Consecutive-word-run fallback (`_has_consecutive_word_run`): the
+         quote must still contain a run of at least `_MIN_CONSECUTIVE_WORDS`
+         (or its full length, if shorter) consecutive words that appear, in
+         that exact order, in the flattened source. Catches anything (1) and
+         (2) miss for incidental reasons while remaining a real fabrication
+         filter.
+    """
+    norm_quote = " ".join(quote.split()).strip().lower()
+    if not norm_quote:
+        return False
+    if norm_quote in " ".join(text.split()).lower():
+        return True
+
+    flattened = _flatten_transcript_lines(text).lower()
+    if norm_quote in flattened:
+        return True
+
+    return _has_consecutive_word_run(
+        _words(quote), _words(flattened), _MIN_CONSECUTIVE_WORDS
+    )
 
 
 def run_checklist_pass(

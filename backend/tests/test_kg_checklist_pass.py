@@ -206,6 +206,123 @@ def test_quote_grounded_helper_normalizes_whitespace_and_case():
     assert ex._quote_is_grounded("missing", "present only") is False
 
 
+# ── grounding-gate fix (live-verify 2026-08-26): real quotes drop the ────────
+# repeated per-line "{speaker}: " prefix and join sentences with a space,
+# so a strict literal-substring check against the raw newline-joined,
+# speaker-prefixed source rejected most REAL quotes on formatting grounds.
+
+
+def test_quote_grounded_accepts_a_real_speaker_prefix_dropped_multi_sentence_quote():
+    """The exact failure mode live-verify found: a real, in-order,
+    non-fabricated quote spanning two source lines, with the repeated
+    speaker prefix dropped and the sentences joined by a space instead of a
+    newline — the natural way a model quotes a contiguous remark."""
+    source = (
+        "Carter Hayes: The base subscription comes with 50 seats and that's "
+        "thirty thousand dollars a year for fifty users.\n"
+        "Carter Hayes: As you go up in user count the price per seat goes "
+        "down significantly."
+    )
+    quote = (
+        "The base subscription comes with 50 seats and that's thirty "
+        "thousand dollars a year for fifty users. As you go up in user "
+        "count the price per seat goes down significantly."
+    )
+    assert ex._quote_is_grounded(quote, source) is True
+
+
+def test_quote_grounded_accepts_reformatting_via_the_word_run_fallback():
+    """A quote that drops a filler word/interjection from the START of a
+    source line (so it is no longer a literal substring even after
+    flattening) is still grounded IF it contains a genuine run of >= 6
+    consecutive verbatim source words — the word-run fallback, not the
+    flattened-substring check, is what saves this one."""
+    source = (
+        "Carter Hayes: Well, the base plan is fifty seats.\n"
+        "Carter Hayes: And moving up from there the price drops."
+    )
+    quote = "the base plan is fifty seats and moving up from there the price drops"
+    # Not a literal substring of the flattened source (still carries "Well,"
+    # and mid-sentence periods) — proves this is the word-run path, not (1)/(2).
+    assert quote not in ex._flatten_transcript_lines(source).lower()
+    assert ex._quote_is_grounded(quote, source) is True
+
+
+def test_quote_grounded_still_rejects_a_fabricated_quote_with_unrelated_content():
+    """The fabrication guard holds: a quote whose content was never said at
+    all shares no consecutive word run with the source and is rejected by
+    all three checks."""
+    source = (
+        "Carter Hayes: The base subscription comes with 50 seats and that's "
+        "thirty thousand dollars a year for fifty users."
+    )
+    quote = "the customer explicitly agreed to sign a three year exclusive contract"
+    assert ex._quote_is_grounded(quote, source) is False
+
+
+def test_quote_grounded_still_rejects_source_words_reordered_or_scattered():
+    """Sharing individual WORDS with the source is not enough — the guard is
+    order-sensitive, not bag-of-words. Scrambling real source words into a
+    new sentence must still be rejected."""
+    source = (
+        "Carter Hayes: The base subscription comes with 50 seats and that's "
+        "thirty thousand dollars a year for fifty users."
+    )
+    # Same vocabulary as the source, shuffled into a different claim/order.
+    quote = "fifty seats a year thirty thousand dollars base users subscription"
+    assert ex._quote_is_grounded(quote, source) is False
+
+
+def test_quote_grounded_short_quote_still_requires_a_full_match():
+    """A quote shorter than the word-run minimum (< 6 words) must still
+    match in FULL — the fallback never gets MORE lenient for a short claim.
+    Dropping even one word ("already") from the middle of a short quote is
+    enough to fail every check, same as a wholly unrelated claim."""
+    source = "Carter Hayes: We already have SOC2 in place."
+    assert ex._quote_is_grounded("we already have SOC2 in place", source) is True
+    assert ex._quote_is_grounded("we have SOC2", source) is False
+
+
+def test_checklist_pass_mints_a_signal_for_a_real_reformatted_multi_line_quote(facade):
+    """End-to-end reproduction of the live-verify symptom (USANA 0/11): a
+    real, correctly-quoted multi-sentence checklist answer must actually
+    mint a signal now, not just pass the isolated grounding helper."""
+    source = (
+        "Carter Hayes: The base subscription comes with 50 seats and that's "
+        "thirty thousand dollars a year for fifty users.\n"
+        "Carter Hayes: As you go up in user count the price per seat goes "
+        "down significantly."
+    )
+    quote = (
+        "The base subscription comes with 50 seats and that's thirty "
+        "thousand dollars a year for fifty users. As you go up in user "
+        "count the price per seat goes down significantly."
+    )
+    entries = [_entry("commercial", content="base plan is $30k/yr for 50 seats",
+                       quote=quote)]
+    result = _run_checklist(facade, entries, source)
+    assert result["signals"] == 1
+    sig = _csig(facade, "base plan is $30k/yr for 50 seats")
+    assert sig is not None
+    assert sig.kind == "commercial_term"
+
+
+def test_checklist_pass_still_drops_a_fabricated_quote_end_to_end(facade):
+    """Same end-to-end path, but a fabricated quote must still be dropped —
+    the fix must not have widened the gate for content that was never said."""
+    source = (
+        "Carter Hayes: The base subscription comes with 50 seats and that's "
+        "thirty thousand dollars a year for fifty users."
+    )
+    entries = [_entry(
+        "commercial", content="customer agreed to a 3-year exclusive deal",
+        quote="the customer explicitly agreed to sign a three year exclusive contract",
+    )]
+    result = _run_checklist(facade, entries, source)
+    assert result["signals"] == 0
+    assert _csig(facade, "customer agreed to a 3-year exclusive deal") is None
+
+
 def test_checklist_system_prompt_names_all_11_categories_and_precision_contract():
     """Content property test on the LLM-facing checklist system prompt: every
     category is named (so the model can't drift the vocabulary) and the
