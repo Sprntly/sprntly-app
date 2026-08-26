@@ -1945,3 +1945,50 @@ def test_a_folded_run_never_advertises_the_gate_it_skips(ctx, monkeypatch):
     body = _start(ctx, goal="reduce churn this quarter").json()
     assert body["status"] == "awaiting_approval"
     assert "awaiting_confirmation" not in seen
+
+
+def test_an_edited_definition_reaches_the_report_not_just_the_lock(ctx):
+    """THE REPORT SAID "IN YOUR OWN WORDS" OVER WORDS THAT WERE NOT THEIRS.
+
+    Approve folded the dropped sources and the hypotheses into the stored plan
+    and left `definition_text` at whatever was PROPOSED. The definition ROW was
+    correct — `test_an_edited_definition_is_locked_verbatim_over_the_proposal`
+    passed throughout — but the document renders `plan.definition_text`, so a
+    reader who corrected the proposal read the sentence they had just rejected,
+    attributed to themselves.
+
+    A test that checks the write and not the read is how this survived."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    proposed = _prioritisation(body["id"])["plan"]["definition_text"]
+    mine = "churn means seats lost, not accounts, counted at renewal"
+    assert mine != proposed
+
+    ctx.client.post(f"/v1/crucible/{body['id']}/approve",
+                    json={"definition_text": mine})
+
+    plan = _prioritisation(body["id"])["plan"]
+    assert plan["definition_text"] == mine
+    assert proposed not in plan["definition_text"]
+    # And it is adopted: a definition the reader typed is not still a proposal.
+    assert plan["definition_adopted"] is True
+
+
+def test_editing_only_the_definition_still_updates_the_plan(ctx):
+    """THE GATE THAT SKIPPED IT. The fold was keyed on
+    `excluded_sources or hypotheses`, so a reader who changed ONLY the
+    definition — dropping no source, typing no hypothesis — skipped the block
+    entirely. That is exactly the shape that produced the bug."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    mine = "churn means seats lost at renewal"
+    ctx.client.post(f"/v1/crucible/{body['id']}/approve",
+                    json={"definition_text": mine})
+    assert _prioritisation(body["id"])["plan"]["definition_text"] == mine
+
+
+def test_approving_unchanged_leaves_the_proposal_exactly_as_shown(ctx):
+    """A body carrying no definition means "yes, as written", and rewriting the
+    plan then would change the record of what was offered."""
+    body = _start(ctx, goal="reduce churn this quarter").json()
+    shown = _prioritisation(body["id"])["plan"]["definition_text"]
+    ctx.client.post(f"/v1/crucible/{body['id']}/approve", json={})
+    assert _prioritisation(body["id"])["plan"]["definition_text"] == shown
