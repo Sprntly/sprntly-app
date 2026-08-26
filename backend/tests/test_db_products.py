@@ -229,7 +229,10 @@ def test_get_primary_product_prefers_primary(products):
     )
 
     result = products.mod.get_primary_product("co-x")
-    assert result == {"name": "Primary", "website": "https://primary.example"}
+    assert result == {
+        "name": "Primary", "website": "https://primary.example",
+        "positioning": "", "users_description": "",
+    }
 
 
 def test_get_primary_product_falls_back_to_recent_when_none_primary(products):
@@ -247,6 +250,7 @@ def test_get_primary_product_falls_back_to_recent_when_none_primary(products):
 
     assert products.mod.get_primary_product("co-y") == {
         "name": "Newer", "website": "https://newer.example",
+        "positioning": "", "users_description": "",
     }
 
 
@@ -271,7 +275,10 @@ def test_get_primary_product_never_fans_out_across_multiple_products(products):
     )
 
     result = products.mod.get_primary_product("co-multi")
-    assert result == {"name": "One", "website": "https://one.example"}
+    assert result == {
+        "name": "One", "website": "https://one.example",
+        "positioning": "", "users_description": "",
+    }
 
 
 def test_get_primary_product_website_empty_string_when_null(products):
@@ -282,7 +289,10 @@ def test_get_primary_product_website_empty_string_when_null(products):
         name="No Website Co",
     )
     result = products.mod.get_primary_product("co-nowebsite")
-    assert result == {"name": "No Website Co", "website": ""}
+    assert result == {
+        "name": "No Website Co", "website": "",
+        "positioning": "", "users_description": "",
+    }
 
 
 def test_get_primary_product_returns_none_when_no_product(products):

@@ -292,6 +292,14 @@ class BusinessContext(BaseModel):
         gs = self.goals_strategy
         if known(gs.stated_goal):
             out.append(f"Goal: {val(gs.stated_goal)}")
+        # The goals layer was rendering half of itself: `north_star` and
+        # `current_priorities` are collected and shown in Settings > Business
+        # Context, but never reached a prompt, so an agent asked "what is our
+        # north star" could not see the answer the team had already given.
+        if known(gs.north_star):
+            out.append(f"North star: {val(gs.north_star)}")
+        if known(gs.current_priorities):
+            out.append(f"Current priorities: {val(gs.current_priorities)}")
         if known(gs.known_constraints):
             out.append(f"Constraints: {val(gs.known_constraints)}")
 
