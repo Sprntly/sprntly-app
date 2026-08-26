@@ -38,11 +38,11 @@ a consumer domain" is decided in exactly one place.
 """
 from __future__ import annotations
 
-import difflib
 import logging
 import re
 from typing import Iterable, Optional
 
+from app import name_match
 from app.call_index import _GENERIC_EMAIL_DOMAINS, _own_domains
 from app.graph.facade import GraphFacade
 from app.graph.types import Entity, Relationship
@@ -55,10 +55,6 @@ PERSON_ENTITY_TYPE = "person"
 #: RELATIONSHIP_VOCAB; `source_kind="entity"` keeps it off convergence's
 #: signal→theme evidence walk.
 _PERSON_SCOPE_VERB = "SCOPED_TO"
-
-#: Fuzzy owner↔participant acceptance floor. Above this SequenceMatcher ratio a
-#: name is considered the same person; below it we decline rather than guess.
-_OWNER_MATCH_THRESHOLD = 0.82
 
 
 # ── name / company derivation ────────────────────────────────────────────────
@@ -230,69 +226,6 @@ def mint_persons_for_indexed_calls(
     return len(touched)
 
 
-# ── owner name ↔ participant matching ────────────────────────────────────────
-
-def _normalize_name(name: str) -> str:
-    return " ".join((name or "").strip().lower().split())
-
-
-def _local_part_patterns(tokens: list[str]) -> set[str]:
-    """Plausible email local parts for a person name, e.g. `Jane Doe` →
-    {jane.doe, jdoe, janed, jane, janedoe}. Deliberately small and explicit;
-    the fuzzy ratio below catches the rest."""
-    patterns: set[str] = set()
-    if not tokens:
-        return patterns
-    first = tokens[0]
-    patterns.add(first)                                   # jane
-    if len(tokens) >= 2:
-        last = tokens[-1]
-        patterns.add(f"{first}.{last}")                   # jane.doe
-        patterns.add(f"{first}{last}")                    # janedoe
-        patterns.add(f"{first[:1]}{last}")                # jdoe
-        patterns.add(f"{first}{last[:1]}")                # janed
-    return patterns
-
-
-def _match_owner_to_participant(
-    owner_name: str, participants: Iterable[str]
-) -> Optional[str]:
-    """The participant string an owner NAME refers to, or None.
-
-    An email participant is matched on its local part (exact against the name
-    patterns, else fuzzy on the separator-stripped form). A name-only
-    participant (Google Meet exposes display names, not addresses) is matched
-    name↔name. Returns the raw participant string so the caller can decide
-    whether it carries an address to mint from."""
-    target = _normalize_name(owner_name)
-    if not target:
-        return None
-    tokens = target.split()
-    patterns = _local_part_patterns(tokens)
-    patterns_stripped = {re.sub(r"[._\-+]", "", p) for p in patterns}
-    name_joined = "".join(tokens)
-
-    best: Optional[str] = None
-    best_ratio = 0.0
-    for participant in participants:
-        value = (participant or "").strip().lower()
-        if not value:
-            continue
-        if "@" in value:
-            local = value.split("@", 1)[0]
-            local_stripped = re.sub(r"[._\-+]", "", local)
-            if local in patterns or local_stripped in patterns_stripped:
-                return participant  # strong exact-pattern hit
-            ratio = difflib.SequenceMatcher(None, local_stripped, name_joined).ratio()
-        else:
-            ratio = difflib.SequenceMatcher(None, value, target).ratio()
-        if ratio > best_ratio:
-            best_ratio, best = ratio, participant
-    if best is not None and best_ratio >= _OWNER_MATCH_THRESHOLD:
-        return best
-    return None
-
-
 # ── entry point 2: owner resolution ──────────────────────────────────────────
 
 def resolve_owners_for_call(
@@ -328,7 +261,7 @@ def resolve_owners_for_call(
     stamped = 0
     for sig in pending:
         owner_name = str((sig.properties or {}).get("owner") or "").strip()
-        matched = _match_owner_to_participant(owner_name, participant_list)
+        matched = name_match.match_name(owner_name, participant_list)
         if not matched or "@" not in matched:
             continue  # miss, or name-only participant → nothing to mint
         person = _person_from_email(matched, own_domains)
