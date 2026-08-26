@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
   type ComponentType,
+  type CSSProperties,
   type ReactNode,
 } from "react"
 import { prdApi } from "../../lib/api"
@@ -36,9 +37,16 @@ import {
   IconLetterP,
   IconLineDashed,
   IconListNumbers,
+  IconHighlight,
+  IconPalette,
   IconStrikethrough,
+  IconTextSize,
+  IconTypography,
   IconUnlink,
 } from "@tabler/icons-react"
+
+import { FONT_FAMILIES, FONT_SIZES } from "../../(app)/artifacts/doc/editorSchema"
+import { ColorGrid } from "./ColorGrid"
 
 export type { PrdSaveStatus } from "./PrdHtmlView"
 
@@ -67,14 +75,6 @@ function saveDraft(prdId: number, html: string, scope?: string) {
  *  PrdPanelContent so both consumers render the identical control. Exported so
  *  the panel can also render the DISABLED no-document variant it shows in the
  *  empty / generating states (unchanged pre-extraction behavior). */
-/** A 3x2 starter table — the shape you almost always want, and trivially
- *  extendable once it is in the document. `insertHTML` rather than a command,
- *  because execCommand has never had a table primitive. */
-const STARTER_TABLE =
-  "<table><thead><tr><th>Column</th><th>Column</th><th>Column</th></tr></thead>" +
-  "<tbody><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>" +
-  "<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr></tbody></table><p><br></p>"
-
 /** The block formats the style menu offers. `formatBlock` takes a tag name, and
  *  every one of these is a tag the PRD stylesheet already styles. */
 const BLOCK_FORMATS: MenuEntry[] = [
@@ -85,6 +85,22 @@ const BLOCK_FORMATS: MenuEntry[] = [
   { cmd: "formatBlock", value: "blockquote", label: "Quote", Icon: IconBlockquote },
   { cmd: "formatBlock", value: "pre", label: "Code", Icon: IconCode },
 ]
+
+/** Font family / size / text colour / highlight, as menus rather than the
+ *  full-page editor's `<select>`s — this bar has never had a select in it, and
+ *  a swatch reads faster than a colour's name.
+ *
+ *  Built from `editorSchema`'s lists, which are the SAME values the full-page
+ *  editor offers and are each known to survive the server's CSS allowlist.
+ *  Duplicating them here would be two palettes drifting apart in a codebase
+ *  that already keeps the schema and the sanitizer side by side on purpose. */
+const FONT_TOOLS: MenuEntry[] = FONT_FAMILIES.map((f) => ({
+  cmd: "fontName", value: f.value, label: f.label, Icon: IconTypography,
+}))
+
+const SIZE_TOOLS: MenuEntry[] = FONT_SIZES.map((f) => ({
+  cmd: "fontSize", value: f.value, label: f.label, Icon: IconTextSize,
+}))
 
 /**
  * The less-reached-for half of the toolbar, behind a "More" menu.
@@ -108,6 +124,14 @@ const OVERFLOW_TOOLS: MenuEntry[] = [
   { cmd: "removeFormat", label: "Clear formatting", Icon: IconClearFormatting },
 ]
 
+//: `.prd-more-menu`'s own `min-width` in globals.css. Mirrored here because the
+//: clamp below has to know how wide the menu will be BEFORE it is drawn, and a
+//: measured width would need a layout pass the click cannot wait for.
+const MENU_MIN_WIDTH = 178
+
+//: Breathing room kept between an open menu and the window edge.
+const MENU_EDGE_GAP = 8
+
 /** One row of a toolbar dropdown: what it runs, what it says, what it shows.
  *
  *  `Icon` is the COMPONENT, never a rendered element. These arrays live at
@@ -115,6 +139,11 @@ const OVERFLOW_TOOLS: MenuEntry[] = [
  *  classic-runtime test file has set its React global, which takes down every
  *  suite that transitively imports this module with "React is not defined".
  *  Same footgun `ChatBubble` and `ArtifactListCards` already carry notes on. */
+/** Every dropdown in the bar. One `openMenu` value, so opening any of them
+ *  closes whichever was open — several hanging over the document at once is
+ *  the bug two independent booleans would have written. */
+type MenuId = "style" | "font" | "size" | "color" | "highlight" | "more"
+
 type MenuEntry = {
   cmd: string
   value?: string
@@ -167,7 +196,14 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
   const statusColor = saveStatus === "saving" ? "var(--accent)" : saveStatus === "unsaved" ? "var(--ink-3)" : "var(--accent)"
   // WHICH menu is open, not whether one is — opening either must close the
   // other, and two independent booleans would let both sit open at once.
-  const [openMenu, setOpenMenu] = useState<"style" | "more" | null>(null)
+  const [openMenu, setOpenMenu] = useState<MenuId | null>(null)
+  // WHERE the open menu is drawn, taken from its trigger's own rect at the
+  // moment it opens. The menu is `position: fixed` (see `.prd-more-menu` in
+  // globals.css), so these are viewport coordinates and no scrolling ancestor
+  // can clip it — the Style menu lives inside `.prd-tools-l`, which scrolls,
+  // and an absolutely-positioned dropdown there was clipped away to nothing:
+  // the button opened, the state flipped, and the screen showed no menu.
+  const [menuPos, setMenuPos] = useState<CSSProperties | null>(null)
   const barRef = useRef<HTMLDivElement>(null)
   // The two menu lists, minus anything this host cannot run. Computed rather
   // than filtered inline so both the list and the "is the menu worth showing"
@@ -185,11 +221,21 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") setOpenMenu(null)
     }
+    // A fixed menu is positioned once and does not follow its trigger, so
+    // anything that MOVES the trigger closes it rather than leaving it hanging
+    // beside nothing: scrolling the tool row, scrolling the document under the
+    // sticky bar, or resizing the panel. `capture` because the tool row's own
+    // scroll event does not bubble.
+    const onMove = () => setOpenMenu(null)
     document.addEventListener("mousedown", onDown)
     document.addEventListener("keydown", onKey)
+    document.addEventListener("scroll", onMove, true)
+    window.addEventListener("resize", onMove)
     return () => {
       document.removeEventListener("mousedown", onDown)
       document.removeEventListener("keydown", onKey)
+      document.removeEventListener("scroll", onMove, true)
+      window.removeEventListener("resize", onMove)
     }
   }, [openMenu])
 
@@ -217,13 +263,16 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
   /** A toolbar dropdown: a trigger plus a list of icon + label rows. Both the
    *  style menu and the overflow menu are this, so they cannot drift apart in
    *  look or in close-behaviour. */
-  const ToolMenu = ({ id, trigger, title, entries, testId, align }: {
-    id: "style" | "more"
+  /** The trigger + popover shell. `entries` renders a list of commands;
+   *  `children` renders anything else — today the colour grid — so both kinds
+   *  of menu open, close, and are positioned by the same code. */
+  const ToolMenu = ({ id, trigger, title, entries, testId, children }: {
+    id: MenuId
     trigger: ReactNode
     title: string
-    entries: MenuEntry[]
+    entries?: MenuEntry[]
     testId: string
-    align?: "left" | "right"
+    children?: ReactNode
   }) => (
     <div className="prd-more">
       <button
@@ -236,17 +285,38 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
         aria-expanded={openMenu === id}
         data-testid={testId}
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpenMenu((cur) => (cur === id ? null : id))}
+        onClick={(e) => {
+          // Measured here rather than in an effect so the menu has its
+          // coordinates on the very first paint — an effect would draw it at
+          // the top-left corner for a frame first.
+          //
+          // Both menus hang LEFT from their own trigger, which is what they
+          // did before they were fixed. The clamp is new and is the one thing
+          // fixed positioning costs: an absolutely-positioned menu that ran
+          // past the right edge still belonged to the page and could be
+          // scrolled to, while a fixed one off the viewport is simply gone.
+          const r = e.currentTarget.getBoundingClientRect()
+          setMenuPos({
+            top: r.bottom + 6,
+            left: Math.max(
+              MENU_EDGE_GAP,
+              Math.min(r.left, window.innerWidth - MENU_MIN_WIDTH - MENU_EDGE_GAP),
+            ),
+          })
+          setOpenMenu((cur) => (cur === id ? null : id))
+        }}
       >
         {trigger}
       </button>
       {openMenu === id && (
         <div
-          className={`prd-more-menu${align === "left" ? " prd-more-menu--left" : ""}`}
+          className="prd-more-menu"
           role="menu"
           data-testid={`${testId}-menu`}
+          style={menuPos ?? undefined}
         >
-          {entries.map((t) => (
+          {children}
+          {(entries ?? []).map((t) => (
             <button
               key={`${t.cmd}:${t.value ?? ""}`}
               type="button"
@@ -280,9 +350,51 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
           title="Text style"
           testId="prd-tool-block"
           entries={BLOCK_FORMATS}
-          align="left"
           trigger={<span className="prd-tool-styletrigger">Style<IconChevronDown size={13} stroke={2} /></span>}
         />
+        <div className="prd-tool-divider" />
+
+        {/* Typography. On this bar since the document editor's own bar had
+            font/size/colour and this one did not — one control for every
+            artifact means the same controls, not merely the same component. */}
+        <ToolMenu
+          id="font"
+          title="Font"
+          testId="prd-tool-font"
+          entries={FONT_TOOLS}
+          trigger={<IconTypography size={16} stroke={1.9} />}
+        />
+        <ToolMenu
+          id="size"
+          title="Text size"
+          testId="prd-tool-size"
+          entries={SIZE_TOOLS}
+          trigger={<IconTextSize size={16} stroke={1.9} />}
+        />
+        <ToolMenu
+          id="color"
+          title="Text colour"
+          testId="prd-tool-color"
+          trigger={<IconPalette size={16} stroke={1.9} />}
+        >
+          <ColorGrid
+            testId="prd-color-grid"
+            clearLabel="Default"
+            onPick={(value) => { exec("foreColor", value); setOpenMenu(null) }}
+          />
+        </ToolMenu>
+        <ToolMenu
+          id="highlight"
+          title="Highlight"
+          testId="prd-tool-highlight"
+          trigger={<IconHighlight size={16} stroke={1.9} />}
+        >
+          <ColorGrid
+            testId="prd-highlight-grid"
+            clearLabel="None"
+            onPick={(value) => { exec("hiliteColor", value); setOpenMenu(null) }}
+          />
+        </ToolMenu>
         <div className="prd-tool-divider" />
 
         <Tool cmd="bold" title="Bold" testId="prd-tool-bold"><strong>B</strong></Tool>
@@ -308,8 +420,13 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
           <IconLinkInsert size={15} /><span style={{ marginLeft: 5 }}>Link</span>
         </button>
         {/* This button shipped with NO onClick — it has been inert the whole
-            time. `insertHTML` because execCommand has no table primitive. */}
-        {supports("insertHTML") && <button
+            time. It now emits `insertTable`, a command BOTH hosts implement:
+            the HTML PRD turns it into an `insertHTML` of a starter table (see
+            PrdHtmlView), the schema-backed editor into a real `insertTable`.
+            It used to emit the raw HTML directly, which only a contenteditable
+            could take — which is why documents and reports had no table
+            button at all. */}
+        {supports("insertTable") && <button
           type="button"
           className="prd-tool"
           disabled={!hasDoc}
@@ -318,7 +435,7 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
           data-testid="prd-tool-table"
           style={{ display: "inline-flex", alignItems: "center" }}
           onMouseDown={(e) => e.preventDefault()}
-          onClick={() => exec("insertHTML", STARTER_TABLE)}
+          onClick={() => exec("insertTable")}
         >
           <IconGrid size={15} /><span style={{ marginLeft: 5 }}>Table</span>
         </button>}
@@ -338,7 +455,6 @@ export function PrdToolbar({ hasDoc, saveStatus, exec, omit, savedLabel }: {
           title="More formatting"
           testId="prd-tool-more"
           entries={overflow}
-          align="left"
           trigger={<IconDots size={16} stroke={1.9} />}
         />
       )}

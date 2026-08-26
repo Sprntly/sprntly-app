@@ -1,10 +1,11 @@
 "use client"
 
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
 import Link from "@tiptap/extension-link"
 import { TableKit } from "@tiptap/extension-table"
+import TextAlign from "@tiptap/extension-text-align"
 import {
   BackgroundColor,
   Color,
@@ -12,15 +13,15 @@ import {
   FontSize,
   TextStyle,
 } from "@tiptap/extension-text-style"
-import { isToolbarDriven } from "../../../lib/documentToolbarExec"
+import { execDocumentCommand, isToolbarDriven } from "../../../lib/documentToolbarExec"
+import { INDENTABLE, Indent } from "./editorIndent"
 import {
   FONT_FAMILIES,
   FONT_SIZES,
   HEADING_LEVELS,
-  HIGHLIGHT_COLORS,
-  TEXT_COLORS,
   normalizeHref,
 } from "./editorSchema"
+import { ColorGrid } from "../../../components/shared/ColorGrid"
 
 // ── The document editor ──────────────────────────────────────────────────────
 //
@@ -166,6 +167,13 @@ export function DocumentEditor({
       // save with no error — the same trap the heading levels avoid. Structure
       // survives the round trip; geometry was never ours to store.
       TableKit.configure({ table: { resizable: false } }),
+      // Alignment and indentation, both stored as inline style on the block
+      // and both on the server's CSS allowlist — `text-align` was already
+      // there, `margin-left` went in with `editorIndent`. They were the last
+      // two controls the toolbar offered on a PRD and not here, which made one
+      // bar mean two different things depending on which artifact was open.
+      TextAlign.configure({ types: [...INDENTABLE] }),
+      Indent,
       Link.configure({
         openOnClick: false,
         autolink: true,
@@ -329,6 +337,15 @@ function Toolbar({ editor }: { editor: Editor }) {
 
   return (
     <div data-doc-toolbar style={S.bar} role="toolbar" aria-label="Formatting">
+      {/* Everything below that is not a mark or a block type runs through
+          `execDocumentCommand` — the same translation the panel's bar uses, so
+          the two bars cannot drift into meaning different things by the same
+          name. `Btn`'s pressed state is for marks; these have none. */}
+      <Cmd ed={editor} cmd="undo" label="&#8630;" title="Undo" />
+      <Cmd ed={editor} cmd="redo" label="&#8631;" title="Redo" />
+
+      <Sep />
+
       <Btn ed={editor} name="bold" label="B" title="Bold"
            style={{ fontWeight: 800 }}
            run={() => editor.chain().focus().toggleBold().run()} />
@@ -380,25 +397,30 @@ function Toolbar({ editor }: { editor: Editor }) {
         }
         options={FONT_SIZES}
       />
-      <Select
+      {/* The SAME picker the panel's bar opens — a grid plus the platform's own
+          colour dialog, rather than the five-entry <select> this was. Two bars
+          offering different colours would be two documents' worth of palette. */}
+      <ColorPopover
         testId="doc-color"
-        aria-label="Text colour"
-        value={(editor.getAttributes("textStyle").color as string) || ""}
-        onChange={(v) =>
-          v ? editor.chain().focus().setColor(v).run() : editor.chain().focus().unsetColor().run()
+        title="Text colour"
+        swatch={(editor.getAttributes("textStyle").color as string) || "#1A1A17"}
+        clearLabel="Default"
+        onPick={(v) =>
+          v
+            ? editor.chain().focus().setColor(v).run()
+            : editor.chain().focus().unsetColor().run()
         }
-        options={TEXT_COLORS}
       />
-      <Select
+      <ColorPopover
         testId="doc-highlight"
-        aria-label="Highlight"
-        value={(editor.getAttributes("textStyle").backgroundColor as string) || ""}
-        onChange={(v) =>
+        title="Highlight"
+        swatch={(editor.getAttributes("textStyle").backgroundColor as string) || "#FEF3C7"}
+        clearLabel="None"
+        onPick={(v) =>
           v
             ? editor.chain().focus().setBackgroundColor(v).run()
             : editor.chain().focus().unsetBackgroundColor().run()
         }
-        options={HIGHLIGHT_COLORS}
       />
 
       <Sep />
@@ -411,6 +433,17 @@ function Toolbar({ editor }: { editor: Editor }) {
            run={() => editor.chain().focus().toggleBlockquote().run()} />
       <Btn ed={editor} name="codeBlock" label="&lt;/&gt;" title="Code block"
            run={() => editor.chain().focus().toggleCodeBlock().run()} />
+
+      <Cmd ed={editor} cmd="insertTable" label="Table" title="Insert a table" />
+      <Cmd ed={editor} cmd="insertHorizontalRule" label="&#8213;" title="Divider" />
+
+      <Sep />
+
+      <Cmd ed={editor} cmd="justifyLeft" label="&#8801;" title="Align left" />
+      <Cmd ed={editor} cmd="justifyCenter" label="&#8788;" title="Align centre" />
+      <Cmd ed={editor} cmd="justifyRight" label="&#8803;" title="Align right" />
+      <Cmd ed={editor} cmd="outdent" label="&#8592;|" title="Decrease indent" />
+      <Cmd ed={editor} cmd="indent" label="|&#8594;" title="Increase indent" />
 
       <Sep />
 
@@ -425,6 +458,98 @@ function Toolbar({ editor }: { editor: Editor }) {
         Clear
       </button>
     </div>
+  )
+}
+
+/** A colour trigger and the grid it opens, for the full-page bar.
+ *
+ *  The panel's bar hangs its grid off `PrdToolbar`'s own menu machinery; this
+ *  bar has none, so the open state lives here. Click-away and Escape close it,
+ *  the same two gestures that close the other one — a popover you can only
+ *  dismiss by choosing something is a trap. */
+function ColorPopover({ testId, title, swatch, clearLabel, onPick }: {
+  testId: string
+  title: string
+  swatch: string
+  clearLabel: string
+  onPick: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false) }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid={testId}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen((v) => !v)}
+        style={{ ...S.btn, display: "inline-flex", alignItems: "center", gap: 6 }}
+      >
+        <span aria-hidden style={{
+          width: 13, height: 13, borderRadius: 3, background: swatch,
+          border: "1px solid var(--line, #E8E6E0)",
+        }} />
+        <span aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div
+          className="prd-more-menu"
+          role="menu"
+          data-testid={`${testId}-menu`}
+          style={{ position: "absolute", top: "calc(100% + 6px)", left: 0 }}
+        >
+          <ColorGrid
+            testId={`${testId}-grid`}
+            clearLabel={clearLabel}
+            onPick={(v) => { onPick(v); setOpen(false) }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A toolbar button whose whole job is one `execDocumentCommand`. Separate
+ *  from `Btn` because these commands have no `isActive` state to reflect —
+ *  there is no such thing as "the caret is inside an undo". */
+function Cmd({ ed, cmd, label, title }: {
+  ed: Editor
+  cmd: string
+  label: string
+  title: string
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      data-testid={`doc-${cmd}`}
+      // Same reason as `Btn`: the selection IS the argument to these commands,
+      // and it does not survive the focus move a plain mousedown causes.
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => execDocumentCommand(ed, cmd)}
+      style={S.btn}
+      dangerouslySetInnerHTML={{ __html: label }}
+    />
   )
 }
 

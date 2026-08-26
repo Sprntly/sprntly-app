@@ -55,24 +55,56 @@ export const FONT_SIZES: { label: string; value: string }[] = [
   { label: "Huge", value: "24px" },
 ]
 
-/** Text colours. Kept short on purpose: a full picker invites a document that
- *  looks like a ransom note, and every value here has to read on the white
- *  page the document is rendered on. */
-export const TEXT_COLORS: { label: string; value: string }[] = [
-  { label: "Default", value: "" },
-  { label: "Muted", value: "#5A5853" },
-  { label: "Red", value: "#B42318" },
-  { label: "Green", value: "#0E6E49" },
-  { label: "Blue", value: "#1E40AF" },
+/** The colour picker's grid — the same forty a document tool is expected to
+ *  offer, laid out the way everyone already reads one: a row of greys, then
+ *  ten hues at full strength, light, and dark.
+ *
+ *  It replaced a five-item list. A list is fine for fonts, where the options
+ *  ARE the vocabulary, and wrong for colour, where the option someone wants is
+ *  a point in a space and naming five of them just means the other one is
+ *  unreachable. A custom picker sits under the grid for that case (see
+ *  `ColorGrid`), so nothing is unreachable at all.
+ *
+ *  Every value is a hex literal, which is what the sanitizer's
+ *  `background-color` / `color` allowlist keeps and what `_CSS_VALUE_BANNED`
+ *  cannot mistake for a fetch. */
+const GREYS = [
+  ["Black", "#000000"], ["Grey 1", "#434343"], ["Grey 2", "#666666"],
+  ["Grey 3", "#999999"], ["Grey 4", "#B7B7B7"], ["Grey 5", "#CCCCCC"],
+  ["Grey 6", "#D9D9D9"], ["Grey 7", "#EFEFEF"], ["Grey 8", "#F3F3F3"],
+  ["White", "#FFFFFF"],
+] as const
+
+const HUES = [
+  "Berry", "Red", "Orange", "Yellow", "Green", "Cyan", "Cornflower", "Blue",
+  "Purple", "Magenta",
+] as const
+
+const HUE_ROWS: { suffix: string; hexes: string[] }[] = [
+  {
+    suffix: "",
+    hexes: ["#980000", "#FF0000", "#FF9900", "#FFD966", "#00A550", "#00BCD4",
+            "#4A86E8", "#1155CC", "#9900FF", "#E91E8C"],
+  },
+  {
+    suffix: " light",
+    hexes: ["#E6B8AF", "#F4CCCC", "#FCE5CD", "#FFF2CC", "#D9EAD3", "#D0E0E3",
+            "#C9DAF8", "#CFE2F3", "#D9D2E9", "#EAD1DC"],
+  },
+  {
+    suffix: " dark",
+    hexes: ["#A61C00", "#CC0000", "#E69138", "#BF9000", "#38761D", "#134F5C",
+            "#1C4587", "#073763", "#674EA7", "#A64D79"],
+  },
 ]
 
-/** Highlight (background) colours. Stored as `background-color` on a span,
- *  which the sanitizer keeps. */
-export const HIGHLIGHT_COLORS: { label: string; value: string }[] = [
-  { label: "None", value: "" },
-  { label: "Yellow", value: "#FEF3C7" },
-  { label: "Green", value: "#DBF1E7" },
-  { label: "Blue", value: "#DBEAFE" },
+export type Swatch = { label: string; value: string }
+
+export const COLOR_SWATCHES: Swatch[][] = [
+  GREYS.map(([label, value]) => ({ label, value })),
+  ...HUE_ROWS.map((row) =>
+    row.hexes.map((value, i) => ({ label: `${HUES[i]}${row.suffix}`, value })),
+  ),
 ]
 
 /** Link hrefs the editor will accept, mirroring the server's `_SAFE_URL`.

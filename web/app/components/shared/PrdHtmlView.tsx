@@ -98,6 +98,80 @@ function clearHtmlDraft(prdId: number) {
   try { localStorage.removeItem(HTML_DRAFT_KEY(prdId)) } catch { /* ignore */ }
 }
 
+/** A 3x3 starter table with a header row — the shape you almost always want,
+ *  and the same one `insertTable` produces in the schema-backed editor, so a
+ *  table looks the same whichever artifact it was made in. Raw HTML because
+ *  execCommand has never had a table primitive. */
+const STARTER_TABLE =
+  "<table><thead><tr><th>Column</th><th>Column</th><th>Column</th></tr></thead>" +
+  "<tbody><tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr>" +
+  "<tr><td>&nbsp;</td><td>&nbsp;</td><td>&nbsp;</td></tr></tbody></table><p><br></p>"
+
+/** execCommand's `fontSize` takes 1-7 and nothing else, while the toolbar
+ *  speaks the px values the document editor stores. With `styleWithCSS` on,
+ *  Chrome renders these buckets as keyword sizes on a span, which the server's
+ *  CSS allowlist keeps. */
+const FONT_SIZE_BUCKETS: Record<string, string> = {
+  "13px": "2",
+  "15px": "3",
+  "19px": "5",
+  "24px": "6",
+}
+
+/**
+ * Map one toolbar command onto what THIS host can run.
+ *
+ * Returns `[null]` for a command that cannot run at all, so the caller reports
+ * nothing happened rather than calling execCommand with a name it will refuse.
+ *
+ * The two translations that carry weight:
+ *   * `insertTable` — no execCommand primitive exists, so it becomes an
+ *     `insertHTML` of the starter table above.
+ *   * the typography commands — `styleWithCSS` is turned on first, or Chrome
+ *     writes legacy `<font>` tags, which are not on the server's tag allowlist
+ *     and would be unwrapped on save. An EMPTY value means "default", which
+ *     execCommand cannot express, so it resolves to what the page actually
+ *     renders today and applies that explicitly.
+ */
+function translateForContentEditable(
+  command: string,
+  value: string | undefined,
+  cdoc: Document,
+  target: HTMLElement,
+): [string | null, string | undefined] {
+  if (command === "insertTable") return ["insertHTML", STARTER_TABLE]
+
+  const TYPOGRAPHY = ["fontName", "fontSize", "foreColor", "hiliteColor"]
+  if (!TYPOGRAPHY.includes(command)) return [command, value]
+
+  try {
+    cdoc.execCommand("styleWithCSS", false, "true")
+  } catch {
+    // An engine without it still runs the command; it just writes older markup.
+  }
+
+  if (value) {
+    return command === "fontSize"
+      ? ["fontSize", FONT_SIZE_BUCKETS[value] ?? "3"]
+      : [command, value]
+  }
+
+  // "Default" / "None": what the page itself renders, applied explicitly.
+  const base = target.ownerDocument.defaultView?.getComputedStyle(target)
+  switch (command) {
+    case "fontName":
+      return base?.fontFamily ? ["fontName", base.fontFamily] : [null, undefined]
+    case "fontSize":
+      return ["fontSize", "3"]
+    case "foreColor":
+      return base?.color ? ["foreColor", base.color] : [null, undefined]
+    case "hiliteColor":
+      return ["hiliteColor", "transparent"]
+    default:
+      return [null, undefined]
+  }
+}
+
 /**
  * Renders the v3 PRD artifact — the `prd-author` skill's self-contained,
  * editable HTML page (inline <style> + `contenteditable` document) — inside a
@@ -255,6 +329,12 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     const cdoc = frameRef.current?.contentDocument
     const target = cdoc?.querySelector<HTMLElement>("[contenteditable='true']")
     if (!cdoc || !target) return false
+    // The bar speaks one vocabulary for both hosts. Two of its commands have
+    // no execCommand behind them and are translated here rather than being
+    // left out of the bar for this host — see `execDocumentCommand` for the
+    // schema-backed editor's side of the same contract.
+    const [cmd, arg] = translateForContentEditable(command, value, cdoc, target)
+    if (cmd === null) return false
     // The command applies to whatever is selected INSIDE the iframe, so the
     // iframe has to hold focus first — clicking a toolbar button in the parent
     // moves focus out of it, and an unfocused document has no selection for
@@ -262,7 +342,7 @@ export const PrdHtmlView = forwardRef<PrdHtmlHandle, {
     try {
       frameRef.current?.contentWindow?.focus()
       target.focus()
-      const ok = cdoc.execCommand(command, false, value)
+      const ok = cdoc.execCommand(cmd, false, arg)
       if (ok) markEdited()
       return ok
     } catch {
