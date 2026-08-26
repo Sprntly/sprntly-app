@@ -3,7 +3,11 @@
 import { Suspense, useCallback, useEffect, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { AuthApiError } from "@supabase/supabase-js"
-import { getSupabase, isSupabaseConfigured } from "../lib/supabase/client"
+import {
+  getSupabase,
+  isSupabaseConfigured,
+  postLoginPath,
+} from "../lib/supabase/client"
 import { useAuth } from "../lib/auth"
 import { validatePassword } from "../lib/auth-validation"
 import {
@@ -20,7 +24,20 @@ import {
  *   2. The email carries a 6-digit code (supabase/templates/recovery.html),
  *      entered here → verifyOtp({type:"recovery"}) mints the recovery session
  *   3. User picks a new password → supabase.auth.updateUser({ password })
- *   4. Success → router.replace("/")
+ *   4. Success → straight into the app, at `postLoginPath()`
+
+ *
+ * STEP 4 ASKS FOR NOTHING. The recovery OTP already minted a session, and
+ * updateUser returns one — the person IS signed in by the time the new
+ * password is saved, so a screen telling them so and offering a button is an
+ * interstitial in front of a door that is already open. It used to sit there
+ * for a second and a half before bouncing to "/". Now it renders only for as
+ * long as the redirect takes, and keeps its link purely as a way out if the
+ * redirect never lands.
+ *
+ * `postLoginPath()` rather than "/", for the same reason /set-password uses
+ * it: someone resetting a password may still be mid-onboarding or carrying an
+ * unaccepted invite, and "/" is only correct for the finished case.
  *
  * Arriving with a session already in hand skips straight to step 3 — that's
  * the /auth/confirm?type=recovery path, still live for recovery links sent
@@ -124,9 +141,10 @@ function ResetPasswordContent() {
           password: newPassword,
         })
         if (updateErr) throw updateErr
+        // Shown while the redirect resolves — `postLoginPath` reads the user
+        // and their workspace, so it is not instant.
         setMode("done")
-        // Soft auto-bounce to home after a beat so confirmation is visible.
-        setTimeout(() => router.replace("/"), 1500)
+        router.replace(await postLoginPath())
       } catch (e) {
         if (e instanceof AuthApiError) {
           setError(e.message)
