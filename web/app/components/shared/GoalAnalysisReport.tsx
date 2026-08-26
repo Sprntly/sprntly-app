@@ -86,9 +86,15 @@ function Sized({ f, idPrefix = "goal" }: { f: GoalFinding; idPrefix?: string }) 
  *  it we trust, what it rests on, and what had to be assumed to state it. */
 function ReportFinding({
   f, rank, sharedWeakest = false, sharedCap = false,
+  sharedAssumptions = false,
 }: {
   f: GoalFinding
   rank: number
+  /** Hoisted to the top of the section because every finding assumes the
+   *  identical thing. Suppressed here rather than emptied upstream, so the
+   *  finding itself is untouched and the two renderers cannot disagree about
+   *  what a finding assumed. */
+  sharedAssumptions?: boolean
   /** The section already stated this sentence once, because every finding
    *  carries the identical one. See `sharedReason` below. */
   sharedWeakest?: boolean
@@ -140,7 +146,7 @@ function ReportFinding({
       ) : null}
       {/* I8: every assumed parameter is disclosed where the number is read,
           not in a methodology page nobody opens. */}
-      {f.assumed_params?.length ? (
+      {f.assumed_params?.length && !sharedAssumptions ? (
         <ul className="ga-assumed">
           {f.assumed_params.map((p) => (
             <li key={p.name}>
@@ -190,6 +196,24 @@ export function GoalAnalysisReport({
   // outcome evidence anywhere gives all 32 findings an identical sentence, and
   // printing it 32 times reads as 32 separate judgements. Detected, never
   // assumed: two different values and both go back on their own rows.
+  // THE SAME RULE FOR ASSUMED PARAMETERS. I8 says disclose the assumption
+  // where the number is read; it does not say disclose it 279 times. On a
+  // corpus with no revenue connected every finding carries the identical
+  // "value_per_account: no revenue data connected; accounts weighted equally",
+  // and a real report printed it on all 279. Mirrors `_shared_assumptions`.
+  const assumptionKey = (f: GoalFinding): string =>
+    JSON.stringify(
+      (f.assumed_params ?? [])
+        .map((p) => [(p.name ?? "").trim(), (p.basis ?? "").trim()])
+        .sort(),
+    )
+  const sharedAssumptions: GoalFinding["assumed_params"] | undefined =
+    findings.length >= 2 &&
+    new Set(findings.map(assumptionKey)).size === 1 &&
+    (findings[0].assumed_params ?? []).length
+      ? findings[0].assumed_params
+      : undefined
+
   const sharedReason = (key: "weakest_leg_reason" | "cap_reason"): string => {
     if (findings.length < 2) return ""
     const vals = new Set(
@@ -243,6 +267,22 @@ export function GoalAnalysisReport({
   const sharedCap = sharedReason("cap_reason")
   const unsized = findings.filter((f) => f.impact_value == null).length
   const anythingSized = unsized < findings.length
+  // HOW MUCH OF THE UNSIZED DISCLOSURE THE HEADLINE ALREADY MADE. Mirrors
+  // `_headline_unsized_coverage` in `report.py` exactly, because the panel and
+  // the document render the same run and a reader compares them.
+  //
+  // Three states, not two, and the third is why this is not a boolean: the
+  // branch with an UNSIZED top row states the caveat and NEVER NAMES THE
+  // COUNT, so treating it as "covered" drops "N of them could not be sized"
+  // out of the page entirely — de-duplication turning into deletion.
+  const headlineCovers: "full" | "caveat" | "none" =
+    !findings.length || !unsized
+      ? "none"
+      : findings[0].impact_value != null
+        ? "full"
+        : anythingSized
+          ? "caveat"
+          : "none"
   const topIsConflict = headline?.adjudication === "conflict"
   // Confidence and claim count read the same in every branch, so they are
   // built once rather than repeated four times and drifting.
@@ -455,12 +495,21 @@ export function GoalAnalysisReport({
           </h2>
           <p className="ga-doc-lede" data-testid="goal-findings-lede">
             {anythingSized ? (
-              unsized ? (
+              unsized && headlineCovers !== "full" ? (
                 <>
                   Ranked by reach — how many accounts each theme touches, and{" "}
                   {unsized === 1 ? "one" : unsized} of them could not be sized at
-                  all. An unsized theme sorts last without being small: its size
-                  is unknown, not zero. An authoritative disagreement is placed
+                  all.
+                  {/* The caveat only when the headline did not make it. With an
+                      unsized top row it did — three lines above — and saying it
+                      again is the repetition the feedback named. */}
+                  {headlineCovers === "none" ? (
+                    <>
+                      {" "}An unsized theme sorts last without being small: its
+                      size is unknown, not zero.
+                    </>
+                  ) : null}{" "}
+                  An authoritative disagreement is placed
                   above everything that is not one, because two sources that may
                   both speak contradicting each other is worth more than either
                   of them alone.
@@ -514,6 +563,25 @@ export function GoalAnalysisReport({
               is stated here once rather than on each of them: {sharedCap}.
             </p>
           ) : null}
+          {sharedAssumptions?.length ? (
+            <div className="ga-doc-note" data-testid="goal-shared-assumptions">
+              <p>
+                <strong>
+                  Every finding below rests on the same assumption
+                  {sharedAssumptions.length > 1 ? "s" : ""}
+                </strong>
+                , so {sharedAssumptions.length > 1 ? "they are" : "it is"}{" "}
+                stated here once rather than repeated on each of them:
+              </p>
+              <ul className="ga-assumed">
+                {sharedAssumptions.map((p) => (
+                  <li key={p.name}>
+                    <b>{p.name}</b>: {p.basis}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           <ol className="ga-doc-findings">
             {findings.map((f, i) => (
               <ReportFinding
@@ -522,6 +590,7 @@ export function GoalAnalysisReport({
                 rank={i + 1}
                 sharedWeakest={!!sharedWeakest}
                 sharedCap={!!sharedCap}
+                sharedAssumptions={!!sharedAssumptions?.length}
               />
             ))}
           </ol>

@@ -480,14 +480,23 @@ def test_it_sheds_detail_when_the_first_rung_does_not_fit():
     """
     from app.crucible import report as r
 
+    # ASSUMPTIONS VARY PER FINDING, and that is not incidental. Identical
+    # assumptions across every finding are now hoisted to a single paragraph at
+    # the top of the section, which is a large enough saving that a fixture
+    # sharing one assumption no longer overflows the first rung at all — this
+    # test went green for the wrong reason and stopped exercising the ladder.
+    # A run that is genuinely large in every dimension has assumptions that
+    # differ, so varying them by index is both what keeps the ladder under test
+    # and the more honest fixture.
     fat = [
         _finding(
             statement="s" * 2_000,
             surfaced_by=[f"{'n' * 500}.pdf ({i})" for i in range(10)],
-            assumed_params=[{"name": "p" * 500, "basis": "b" * 500}
-                            for _ in range(20)],
+            assumed_params=[{"name": f"{j}-{k}-{'p' * 500}",
+                             "basis": "b" * 500}
+                            for k in range(20)],
         )
-        for _ in range(1_500)
+        for j in range(1_500)
     ]
     html = r.render_report_html(_run(), fat, _full_ledger(101), _full_plan())
 
@@ -891,3 +900,116 @@ def test_the_relevance_disclosure_does_not_also_claim_completeness():
     html = render_report_html(_run(), [_finding(impact_value=None)])
     assert "not selected for your goal" in html
     assert "Every theme in the sources you approved is listed" not in html
+
+
+# ─── Said once: the report stops repeating itself ───────────────────────────
+#
+# Apurva, on a real report: "poorly formatted (not human readable), lots of
+# irrelevant information and it did not answer the question." Two of the
+# repetitions were mechanical and are pinned here.
+
+
+def test_an_assumption_every_finding_makes_is_stated_once_not_on_each():
+    """I8 says disclose the assumption where the number is read. It does not
+    say disclose it 279 times.
+
+    On a corpus with no revenue connected EVERY finding carries the identical
+    line — "value_per_account: no revenue data connected; accounts weighted
+    equally" — and a real report printed it on all 279 findings. That is not
+    disclosure; it is the noise a reader has to look past to find the
+    assumptions that ARE per-finding."""
+    shared = [{"name": "value_per_account",
+               "basis": "no revenue data connected; accounts weighted equally"}]
+    findings = [_finding(statement=f"finding {i}", assumed_params=list(shared))
+                for i in range(6)]
+    html = render_report_html(_run(), findings)
+
+    # Stated — the disclosure is not lost.
+    assert "value_per_account" in html
+    # Once.
+    assert html.count("value_per_account") == 1
+    assert "same assumption" in html
+
+
+def test_assumptions_that_differ_stay_on_their_own_findings():
+    """The moment two findings assume different things, the hoist is wrong: it
+    would attribute one finding's assumption to every other. Only a single
+    distinct value across more than one finding is a statement about the
+    corpus."""
+    findings = [
+        _finding(statement="a", assumed_params=[{"name": "seats", "basis": "median"}]),
+        _finding(statement="b", assumed_params=[{"name": "seats", "basis": "mean"}]),
+    ]
+    html = render_report_html(_run(), findings)
+
+    assert "same assumption" not in html
+    # Both bases survive, each on its own finding.
+    assert "median" in html and "mean" in html
+
+
+def test_a_lone_finding_keeps_its_assumption_on_itself():
+    """Hoisting out of a single finding moves the disclosure AWAY from the
+    number it qualifies for no saving at all."""
+    html = render_report_html(_run(), [_finding()])
+    assert "same assumption" not in html
+    assert "cohort median" in html
+
+
+def test_the_unsized_caveat_is_not_stated_twice_in_adjacent_paragraphs():
+    """The headline and the findings lede both disclosed how many findings had
+    no size, and both explained that a missing size is not a small one — three
+    lines apart, in a real report:
+
+        …257 of these could not be sized at all, and a missing size is not a
+        small one — so this is the largest known size…
+
+        Ranked by reach …, and 257 of them could not be sized at all. An
+        unsized theme sorts last without being small: its size is unknown…
+    """
+    findings = [_finding(impact_value=14), _finding(statement="b", impact_value=None)]
+    html = render_report_html(_run(), findings)
+
+    # Still disclosed.
+    assert "could not be sized" in html
+    # Once.
+    assert html.count("could not be sized") == 1
+    assert "is not a small" in html
+    assert html.count("is not a small") == 1
+
+
+def test_the_count_survives_when_the_headline_states_only_the_caveat():
+    """THE CASE A BOOLEAN GOT WRONG, and it got it wrong by losing data.
+
+    When the TOP finding is unsized but others below it are sized, the headline
+    says "a missing size is not a small one" and never names how many. Treating
+    that as "the headline covered it" suppressed the whole lede clause and
+    dropped "N of them could not be sized" out of the document entirely — a
+    de-duplication quietly turning into a deletion.
+
+    So the count is still made here, and the caveat — which WAS said above — is
+    not repeated."""
+    findings = [
+        _finding(statement="top", impact_value=None),
+        _finding(statement="b", impact_value=None),
+        _finding(statement="c", impact_value=9),
+    ]
+    html = render_report_html(_run(), findings)
+
+    # The count is here, because nothing above it said one.
+    assert "2 of them could not be sized" in html
+    # The caveat is not repeated: the headline made it.
+    assert "its size is unknown, not zero" not in html
+    assert html.count("is not a small") == 1
+
+
+def test_the_unsized_fact_survives_when_the_headline_cannot_carry_it():
+    """The branch where NOTHING could be sized. The headline says something
+    else entirely, so this paragraph is the only place the fact can appear —
+    silence here drops an honesty disclosure rather than de-duplicating one."""
+    findings = [_finding(statement="a", impact_value=None),
+                _finding(statement="b", impact_value=None)]
+    html = render_report_html(_run(), findings)
+    # The actual disclosure, in this branch's own words — and on each row.
+    assert "Nothing in this reading could be sized" in html
+    assert "nothing here could be sized" in html
+    assert html.count("Could not be sized") == 2
