@@ -34,6 +34,13 @@ def captured(monkeypatch):
         return {"signals": 1, "themes": 0, "skipped": 0}
 
     monkeypatch.setattr(runner, "extract_document", fake_extract)
+    # These tests are about extract_document's source_ref threading, not the
+    # directed-checklist second pass — stub it to a no-op so a call-provider
+    # sync here never reaches a real LLM call.
+    monkeypatch.setattr(
+        runner, "run_checklist_pass",
+        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     return calls

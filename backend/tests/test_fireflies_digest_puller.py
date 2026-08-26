@@ -110,14 +110,19 @@ def test_render_max_quotes_trims_and_zero_drops_block():
     assert "summary: Acme wants SSO." in summary_only
 
 
-def test_pull_is_distilled_only_and_window_scoped():
-    """The KG-ingest pull() must NOT request sentences (no raw-dump §6) and must
-    forward the window to the API."""
+def test_pull_requests_transcript_and_is_window_scoped():
+    """The KG-ingest pull() now requests `sentences` so a transcript-only fact
+    reaches extraction (parity with Zoom/Meet), and still forwards the window.
+
+    This REVERSES the previous distilled-only assertion: §6 (no raw dump) is a
+    PERSISTENCE contract — the transcript rides the transient `RawRecord.text`
+    into one extraction call and is never written to a table (see runner /
+    `_record_from`), so it is correct for the in-memory text to carry it."""
     since = datetime(2026, 6, 1, tzinfo=timezone.utc)
     with patch("app.kg_ingest.pullers.fireflies.requests.post", return_value=_resp([_T])) as post:
         records = list(fireflies.pull("key", since=since, limit=10))
     body = post.call_args.kwargs["json"]
-    assert "sentences" not in body["query"]
+    assert "sentences" in body["query"]
     # `skip` joined the variables on 2026-08-16. Without it this path could
     # never see past the API's 50-per-query ceiling, which is why the KG held
     # roughly three days of meetings however high the record cap was set. An
@@ -127,5 +132,63 @@ def test_pull_is_distilled_only_and_window_scoped():
         "fromDate": "2026-06-01T00:00:00+00:00", "toDate": None,
     }
     assert records[0].provider == "fireflies" and records[0].kind == "meeting"
-    # No verbatim quotes leak into the persisted record.
-    assert "SAML SSO" not in records[0].text
+    # The transcript-only fact now reaches the extraction text.
+    assert "SAML SSO" in records[0].text
+
+
+def test_record_text_is_summary_first_then_full_transcript():
+    """`_record_from` emits the distilled summary FIRST, then the FULL
+    speaker-attributed transcript."""
+    text = fireflies._record_from(_T).text
+    # Summary leads; transcript follows.
+    assert text.index("summary: Acme wants SSO.") < text.index("transcript:")
+    assert "action items: Send SSO docs" in text
+    # Speaker-attributed, same "{speaker}: {text}" shape Zoom/Meet render;
+    # empty-text sentence dropped.
+    assert "CTO: We can't roll out without SAML SSO." in text
+    assert "PM: Got it, I'll scope it." in text
+
+
+def test_deep_transcript_fact_beyond_4000_chars_is_retained():
+    """The failure mode from live verify: a fact stated deep in a long call —
+    well past the old 4000-char head window, near the tail — must now appear in
+    `RawRecord.text`. Feed-full replaces head-truncation, so a USANA-scale call
+    (the real one is ~74k chars) keeps its deep asks. This is a DELIBERATE
+    contract change from the prior 4000-char bound."""
+    # ~1000 filler sentences (~26k chars) push the real fact far past 4000.
+    filler = [{"speaker_name": "Rep", "text": "Thanks, that all makes sense to me."}
+              for _ in range(1000)]
+    deep_fact = {"speaker_name": "Buyer",
+                 "text": "One more thing — we really need a download button on the report page."}
+    tail = [{"speaker_name": "Rep", "text": "Understood, noting that."}
+            for _ in range(20)]
+    call = {**_T, "sentences": filler + [deep_fact] + tail}
+    text = fireflies._record_from(call).text
+    offset = text.find("download button")
+    assert offset > 4000, f"deep fact should sit well past 4000 chars, at {offset}"
+    assert "download button" in text
+    # Well under the ceiling → nothing truncated.
+    assert len(text) < fireflies._TRANSCRIPT_CHAR_CEILING
+
+
+def test_ceiling_trims_transcript_tail_but_keeps_summary():
+    """The ONLY cap is the defensive `_TRANSCRIPT_CHAR_CEILING`: a pathological
+    call that exceeds it is trimmed at the TAIL — the summary (emitted first)
+    always survives, and the text is bounded to the ceiling."""
+    ceiling = fireflies._TRANSCRIPT_CHAR_CEILING
+    # Each sentence ~2k chars; enough of them to blow past the ceiling.
+    huge = {**_T, "sentences": [{"speaker_name": "X", "text": "word " * 400}
+                                for _ in range(ceiling // 2000 + 50)]}
+    huge_text = fireflies._record_from(huge).text
+    assert len(huge_text) == ceiling
+    assert huge_text.startswith("summary: Acme wants SSO.")
+    assert "action items: Send SSO docs" in huge_text
+
+
+def test_record_without_sentences_is_summary_only():
+    """A transcript with no `sentences` still builds a clean summary record —
+    no dangling 'transcript:' header."""
+    no_sent = {k: v for k, v in _T.items() if k != "sentences"}
+    text = fireflies._record_from(no_sent).text
+    assert "summary: Acme wants SSO." in text
+    assert "transcript:" not in text

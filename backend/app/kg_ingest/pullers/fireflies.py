@@ -4,12 +4,17 @@ GraphQL API (api.fireflies.ai), API-key auth (per #106).
 
 TWO surfaces, deliberately separated by what they persist:
 
-  • pull()        — the KG-ingest path. Pulls the DISTILLED layer only
-                    (summary overview + action items + keywords), never raw
-                    sentences, and yields RawRecords the runner extracts into
-                    the KG. This is the no-raw-dump §6 contract — unchanged
-                    except that it now accepts an optional date window/limit so
-                    a sync can be scoped to "what landed recently".
+  • pull()        — the KG-ingest path. Yields RawRecords the runner extracts
+                    into the KG: the distilled layer (summary overview + action
+                    items + keywords) FIRST, then a bounded speaker-attributed
+                    transcript block, so a fact stated only in the transcript
+                    (never surfaced in the summary) still reaches extraction —
+                    parity with Zoom/Meet, which already feed transcript text.
+                    §6 (no raw dump) is a PERSISTENCE contract: the transcript
+                    lives only in the transient `RawRecord.text` the runner
+                    hands to one extraction call — nothing writes a raw sentence
+                    to a table. Also accepts an optional date window/limit so a
+                    sync can be scoped to "what landed recently".
 
   • fetch_calls() — the on-demand call-digest path. Pulls the same distilled
                     layer PLUS a bounded sample of verbatim sentences so the
@@ -30,7 +35,7 @@ from typing import Iterator, Optional
 
 import requests
 
-from app.kg_ingest.types import RawRecord
+from app.kg_ingest.types import TRANSCRIPT_CHAR_CEILING, RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +72,30 @@ _DIGEST_LIMIT = 300
 # pick 2–3 strong quotes per theme, not the whole transcript.
 _QUOTES_PER_CALL = 60
 
-# Distilled-only query (KG-ingest path) — no `sentences`, per §6. `skip` is
-# what lets a first sync walk past the API's 50-per-query ceiling; without it
-# this path could never see more than one page however high the cap was set.
+# DEFENSIVE ceiling on the in-memory extraction text — deliberately NOT a
+# head bound. A transcript-only fact can sit anywhere in the call (on the
+# real 1,064-sentence USANA briefing the deep asks land at sentence
+# ~125/270/940, ~22k chars in), so a small head window silently loses them —
+# the whole point of transcript-read. Fireflies therefore feeds the FULL
+# transcript per call, and this ceiling exists ONLY to stop a pathological
+# multi-hour call from blowing the model's context window.
+#
+# Sizing: that real USANA call renders to ~74k chars (~18.5k tokens) in FULL.
+# 200k chars (~50k tokens at ~4 chars/token) clears it ~2.7x — so every normal
+# long call fits entirely — while staying ~25% of claude-sonnet-4-6's ~200k
+# token context, leaving ample headroom for the (now guardrail-extended) system
+# prompt, the JSON schema, and the output. If the ceiling is ever hit the
+# summary is preserved and only the transcript TAIL is trimmed (summary-first
+# assembly below). Bounds only the transient `RawRecord.text` handed to the
+# extractor — nothing here is persisted (§6). Shared with Zoom/Meet
+# (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`) — kept under this module's
+# historical private name so nothing here has to change beyond the value.
+_TRANSCRIPT_CHAR_CEILING = TRANSCRIPT_CHAR_CEILING
+
+# Distilled-only query (kept for reference / any distilled-only caller). No
+# `sentences`. `skip` is what lets a first sync walk past the API's
+# 50-per-query ceiling; without it this path could never see more than one page
+# however high the cap was set.
 _QUERY = """
 query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
   transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
@@ -78,6 +104,26 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
     date
     participants
     summary { overview action_items keywords }
+  }
+}
+"""
+
+# KG-ingest query — distilled summary PLUS `sentences`, so a fact that lives
+# ONLY in the transcript (never surfaced in the overview or action items)
+# still reaches extraction (closes "transcript-only facts never ingested").
+# This is PARITY with Zoom/Meet, which already feed transcript text into the
+# ingest `text`. §6 is about PERSISTENCE, not about what the in-memory
+# extraction text may contain: the sentences ride `RawRecord.text` into one LLM
+# call and are never written to a table — see `_record_from` and the runner.
+_QUERY_KG_WITH_TRANSCRIPT = """
+query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
+  transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
+    id
+    title
+    date
+    participants
+    summary { overview action_items keywords }
+    sentences { speaker_name text }
   }
 }
 """
@@ -209,19 +255,42 @@ def _post(api_key: str, query: str, variables: dict) -> list[dict]:
 
 
 def _record_from(t: dict) -> RawRecord:
-    """One transcript's distilled layer as a RawRecord. No sentences, per §6."""
+    """One transcript as a RawRecord: distilled summary FIRST, then the FULL
+    speaker-attributed transcript — every sentence, not a head window. A
+    transcript-only fact can sit deep in the call (on the real USANA briefing the
+    deep asks land ~22k chars in), so a small bound would silently lose exactly
+    the facts transcript-read exists to capture. Summary leads so it always
+    survives, and the only cap is the defensive `_TRANSCRIPT_CHAR_CEILING`, which
+    trims the transcript TAIL if a pathological multi-hour call would blow the
+    model context — never the summary. Zoom/Meet share this same ceiling in
+    their own modules (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`) — the
+    three call providers can't drift apart on it.
+
+    §6 (no raw dump) is honored at the PERSISTENCE boundary, not here: this text
+    is transient — the runner hands it to one extraction call and nothing writes
+    a raw sentence to a table. See `_QUERY_KG_WITH_TRANSCRIPT`."""
     s = t.get("summary") or {}
     text_parts = []
     if s.get("overview"):
         text_parts.append(f"summary: {s['overview']}")
     if s.get("action_items"):
         text_parts.append(f"action items: {s['action_items']}")
+    # Speaker-attributed transcript block, same "{speaker}: {text}" shape Zoom
+    # and Meet render — but ALL sentences. Appended AFTER the summary so the
+    # ceiling, if ever hit, trims the transcript tail and never the summary.
+    lines = [
+        f"{sent.get('speaker_name') or '?'}: {text}"
+        for sent in (t.get("sentences") or [])
+        if (text := (sent.get("text") or "").strip())
+    ]
+    if lines:
+        text_parts.append("transcript:\n" + "\n".join(lines))
     return RawRecord(
         provider="fireflies",
         kind="meeting",
         external_id=str(t["id"]),
         title=t.get("title", ""),
-        text="\n".join(text_parts)[:3000],
+        text="\n".join(text_parts)[:_TRANSCRIPT_CHAR_CEILING],
         properties={
             "participants": t.get("participants") or [],
             "keywords": s.get("keywords") or [],
@@ -280,7 +349,12 @@ def pull(
     until: Optional[datetime] = None,
     limit: int = _LIMIT,
 ) -> Iterator[RawRecord]:
-    """KG-ingest pull: distilled summaries → RawRecords (no raw sentences, §6).
+    """KG-ingest pull: distilled summary + bounded transcript → RawRecords.
+
+    Requests `sentences` (via `_QUERY_KG_WITH_TRANSCRIPT`) so a transcript-only
+    fact reaches extraction — parity with Zoom/Meet. §6 (no raw dump) holds at
+    the persistence boundary: the transcript rides the transient `RawRecord.text`
+    into one extraction call and is never written to a table.
 
     PAGINATED, and BOUNDED BY A CURSOR — both new on 2026-08-16, and the two
     halves of the same fix:
@@ -320,7 +394,7 @@ def pull(
     skip = 0
     while fetched < limit:
         page_size = min(_PAGE_SIZE, limit - fetched)
-        page = _post(api_key, _QUERY, {
+        page = _post(api_key, _QUERY_KG_WITH_TRANSCRIPT, {
             "limit": page_size, "skip": skip,
             "fromDate": _iso(since), "toDate": _iso(until),
         })

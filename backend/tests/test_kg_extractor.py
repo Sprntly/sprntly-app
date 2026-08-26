@@ -396,7 +396,7 @@ def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
     vocabulary carries the new kinds, and the properties description shows the
     owner/due/status shape. PROMPT_VERSION is bumped so re-extraction cache-busts.
     """
-    assert ex.PROMPT_VERSION == "extract-doc-v2"
+    assert ex.PROMPT_VERSION == "extract-doc-v3"
 
     system = ex._SYSTEM.lower()
     for term in ("pricing", "commercial", "capabilit", "logistic",
@@ -405,12 +405,61 @@ def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
 
     props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
     kind_desc = props["kind"]["description"].lower()
-    for term in ("pricing", "commercial_term", "capability", "finding"):
+    for term in ("pricing", "commercial_term", "capability", "finding", "legal_term"):
         assert term in kind_desc, f"kind description should list {term!r}"
 
     props_desc = props["properties"]["description"].lower()
     for term in ("owner", "due", "status"):
         assert term in props_desc, f"properties description should show {term!r}"
+
+
+def test_scenario_noise_guardrail_is_in_the_shared_system_prompt():
+    """The simulated/hypothetical guardrail lives in the SHARED `_SYSTEM`, so it
+    applies to EVERY provider (Fireflies/Zoom/Meet + future) rather than in a
+    per-provider hint. Deterministic content assertions on the LLM-facing text:
+    the framing-cue vocabulary, the contrastive real-vs-simulated pair, and the
+    keep-when-unsure fallback are all present, and `reality_confidence` is an
+    optional (not required) schema output field."""
+    system = ex._SYSTEM.lower()
+    for cue in ("simulated", "hypothetical", "tabletop", "roleplay",
+                "let's say", "imagine", "in this scenario"):
+        assert cue in system, f"_SYSTEM guardrail should mention {cue!r}"
+    # The one contrastive pair (real vs simulated ransomware) and keep-when-unsure.
+    assert "ransomware" in system
+    assert "casual or conversational phrasing does not make something simulated" in system
+    assert "reality_confidence" in system
+
+    props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
+    assert "reality_confidence" in props
+    assert props["reality_confidence"]["type"] == "number"
+    required = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["required"]
+    assert "reality_confidence" not in required, "reality_confidence must be optional"
+
+
+def test_reality_confidence_persists_into_signal_properties(facade):
+    """A model-supplied `reality_confidence` is written into the signal's
+    `properties` jsonb (no migration), and an item without one is unaffected —
+    keep-don't-drop: the uncertain item is still written, just flagged lower."""
+    items = [
+        {**_item("simulated-scenario fact", "communication"),
+         "reality_confidence": 0.3},
+        _item("plainly real fact", "communication"),   # no reality_confidence
+    ]
+    _extract(facade, items)
+    flagged = _sig(facade, "simulated-scenario fact")
+    plain = _sig(facade, "plainly real fact")
+    assert flagged.properties.get("reality_confidence") == 0.3
+    # Both are WRITTEN — the guardrail never drops the uncertain one.
+    assert plain is not None
+    assert "reality_confidence" not in plain.properties
+
+
+def test_legal_term_kind_is_in_the_kind_vocabulary():
+    """The checklist's legal/security/compliance category needs a clean kind
+    home — `legal_term` must be a documented option, not folded silently into
+    the `finding` catch-all."""
+    props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
+    assert "legal_term" in props["kind"]["description"].lower()
 
 
 def test_vendor_side_kinds_and_owner_properties_persist(facade):
@@ -482,6 +531,52 @@ def test_vendor_side_and_owner_extraction_real_llm():
         f"expected a capability signal, got kinds={kinds}")
     assert any((s.get("properties") or {}).get("owner") for s in signals), (
         f"expected an action item with properties.owner, got {signals}")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_fireflies_transcript_only_fact_is_extracted_real_llm():
+    """Loss-A closure end-to-end: a fact that appears ONLY in the Fireflies
+    transcript (`sentences`) — never in the summary overview or action items —
+    reaches extraction now that pull() feeds transcript into RawRecord.text.
+    Builds the record through the real puller path (`_record_from`) so the test
+    exercises the exact text the runner would hand the extractor."""
+    from app.graph.gateway import llm_call
+    from app.kg_ingest.pullers import fireflies
+
+    payload = {
+        "id": "ff-transcript-only",
+        "title": "Acme sync",
+        "date": 1_780_000_000_000,
+        "participants": ["pm@us.com", "user@acme.com"],
+        # The summary layer deliberately omits the download-button ask.
+        "summary": {"overview": "General check-in about rollout timelines.",
+                    "action_items": "Confirm next meeting date.",
+                    "keywords": ["rollout"]},
+        "sentences": [
+            {"speaker_name": "User", "text": "Rollout is going fine overall."},
+            {"speaker_name": "User", "text": "One thing — we need a download button on the report page."},
+            {"speaker_name": "PM", "text": "Noted."},
+        ],
+    }
+    text = fireflies._record_from(payload).text
+    assert "download button" in text and "download button" not in payload["summary"]["overview"]
+
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='fireflies-sync-batch-0'>\n{text}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    blob = " ".join((s.get("content") or "") for s in signals).lower()
+    assert "download" in blob, (
+        f"expected a signal for the transcript-only download-button ask, "
+        f"got signals={signals}")
 
 
 # ── source_call_id / per-call traceability (source_ref) ──────────────────────

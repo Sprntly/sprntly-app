@@ -9,6 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+#: Shared DEFENSIVE ceiling on the in-memory extraction text one call-shaped
+#: provider (fireflies / zoom / google_meet) hands to a single extraction
+#: call. NOT a head-truncation window: a high-value fact can sit anywhere in
+#: a long call — deep asks on a real 1,064-sentence call landed ~22k chars
+#: in — so these providers feed the FULL transcript (their own
+#: summary/agenda first, where they have one) and this exists only to stop a
+#: pathological multi-hour call from blowing the model's context window.
+#: 200k chars ~= 50k tokens, ~25% of claude-sonnet-4-6's ~200k-token context,
+#: leaving ample headroom for the system prompt, schema and output. One
+#: shared constant so the three providers can't silently drift apart on it.
+TRANSCRIPT_CHAR_CEILING = 200_000
+
 
 @dataclass
 class RawRecord:
