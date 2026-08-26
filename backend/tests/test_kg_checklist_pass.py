@@ -649,6 +649,58 @@ def test_checklist_pass_failure_is_isolated_and_ledger_still_advances(monkeypatc
     assert len(recorded) == 1, "the ledger still advanced for the successful unit"
 
 
+# ── call-transcript condensation tuning (Zoom/Meet main-pass input) ─────────
+#
+# Live-verify (2026-08-26) found the first version of `summarize_call_transcript`
+# only cut Zoom/Meet cost ~7% ($0.2086/call): a "dense, factual digest" prompt
+# produced a summary long/detailed enough that the main pass's OWN extraction
+# call still cost ~$0.0704, most of the way back to the pre-Config-B baseline.
+# These tests guard the fix: a short, theme-only gist with a bounded token cap.
+
+
+def _text_llm_result(text: str) -> LLMResult:
+    return LLMResult(
+        output=text, model="m", prompt_version=ex.CALL_SUMMARY_PROMPT_VERSION,
+        input_tokens=0, output_tokens=0, cache_read_input_tokens=0,
+        cache_creation_input_tokens=0, cost_usd=0.0, latency_ms=0,
+        stop_reason="end_turn",
+    )
+
+
+def test_summarize_call_transcript_caps_output_and_asks_for_a_short_gist():
+    """The Haiku call-summary must be SHORT — a bounded `max_tokens` (so a
+    verbose model can't quietly regress the savings) and a prompt that
+    explicitly asks for a brief, theme-only gist rather than a dense,
+    fact-preserving digest. This is the exact regression the tuning fix
+    closes: the too-dense first version re-inflated the main pass's own
+    extraction cost."""
+    with patch.object(ex, "llm_call",
+                      return_value=_text_llm_result("a short gist")) as mock_call:
+        result = ex.summarize_call_transcript("ent-x", "full transcript text")
+    assert result == "a short gist"
+
+    kwargs = mock_call.call_args.kwargs
+    assert kwargs["max_tokens"] <= 400, (
+        "max_tokens must bound the summary to a short gist, not a digest")
+    assert kwargs["model"] == "claude-haiku-4-5"
+
+    system = ex._CALL_SUMMARY_SYSTEM.lower()
+    for phrase in ("short", "150-250 words", "general theme", "brief"):
+        assert phrase in system, f"call-summary prompt should ask for {phrase!r}"
+    # Explicitly tells the model the specific facts are handled elsewhere, so
+    # leaving them out of THIS summary is correct, not a loss — the root
+    # cause fix, not just a shorter word count.
+    assert "not try to preserve" in system
+    assert "leaving them out is correct" in system
+
+
+def test_summarize_call_transcript_prompt_version_is_bumped_for_the_tuning_fix():
+    """The prompt content materially changed (dense digest -> short gist) —
+    the prompt_version must be bumped so any downstream cache/log keyed on it
+    reflects the new behavior."""
+    assert ex.CALL_SUMMARY_PROMPT_VERSION == "kg-call-summary-v2"
+
+
 # ── real-LLM eval: checklist guardrail (Config B — checklist is now the ─────
 # sole full-transcript reader, so ITS guardrail must independently hold)
 

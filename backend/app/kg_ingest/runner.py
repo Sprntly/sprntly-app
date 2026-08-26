@@ -171,10 +171,14 @@ def _condensed_and_full_text(
     — Config B (2026-08-26): the directed-checklist pass is the SOLE
     full-transcript reader; the main open-extraction pass runs on a cheap
     CONDENSED input instead. Reading the full transcript twice (once per
-    pass) was the main cost driver (~$0.20/call); this halves it
-    (measured ~$0.13/call Fireflies, ~$0.16/call Zoom/Meet) with recall
-    preserved, since nothing that used to reach the main pass's transcript
-    read is lost — it now reaches the checklist pass instead.
+    pass) was the main cost driver (~$0.20/call); this cuts it — measured
+    ~$0.13/call for Fireflies. Zoom/Meet's first cut only reached ~$0.2086
+    (a too-dense Haiku summary re-inflated the main pass's own extraction
+    cost); `extractor.summarize_call_transcript` was tightened to a short
+    theme-only gist on 2026-08-26 — TARGET ~$0.15-0.16/call, pending
+    re-measurement, not yet confirmed live. Recall is preserved either way:
+    nothing that used to reach the main pass's transcript read is lost — it
+    now reaches the checklist pass instead.
 
     Fireflies condenses at the PULLER level: ``rec.text`` is already its
     free digest (no LLM call needed — see ``fireflies._record_from``), and
