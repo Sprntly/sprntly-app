@@ -48,6 +48,12 @@ from typing import Iterable, Optional
 #: false positives between different people.
 DEFAULT_THRESHOLD = 0.82
 
+#: When the fuzzy fallback's top two candidates BOTH clear the threshold and sit
+#: within this ratio of each other, the match is too close to call — decline
+#: rather than pick by a rounding difference. Mirrors the deterministic-tier
+#: ambiguity rule for the inexact tier.
+_FUZZY_AMBIGUITY_MARGIN = 0.05
+
 #: Nickname / diminutive equivalence groups — plain data, easy to extend. Every
 #: token in a group is treated as interchangeable with the others, in BOTH
 #: directions, so the canonical given name and its diminutives all resolve to
@@ -235,35 +241,61 @@ def match_name(
     mixed — an `@` decides which comparison a candidate gets. The RAW candidate
     (original casing) is returned so a caller can tell an address from a name.
 
-    Deterministic tiers (exact local-part convention, nickname-expanded, and
-    name↔name identity) return immediately; only on a miss does the calibrated
-    fuzzy fallback decide. No confident match → None."""
+    Evaluated in tiers, best/most-certain first: (1) exact local-part
+    convention on email candidates, (2) name↔name identity on bare-name
+    candidates, (3) calibrated fuzzy fallback. AMBIGUITY DECLINES: at the best
+    tier that produces any match, exactly one distinct candidate resolves; two
+    or more distinct candidates tie → None. It does NOT fall through to a lower
+    tier to break a tie. This is what makes the result order-independent and
+    keeps the decline-not-fabricate contract when a nickname legitimately
+    expands into two different people (e.g. "Jay" → James AND Jason)."""
     target_tokens = parse_name(target)
     if not target_tokens:
         return None
     patterns = local_part_patterns(target_tokens)
     target_full = full_name_forms(target_tokens)
 
-    best: Optional[str] = None
-    best_ratio = 0.0
+    # De-dupe candidates by canonical (lowercased) form up front so a repeated
+    # address is one candidate, not a false ambiguity — while keeping the first
+    # raw spelling for the return value. Order-independence follows from
+    # counting DISTINCT candidates at a tier rather than returning on first hit.
+    unique: dict[str, str] = {}
     for candidate in candidates:
         raw = (candidate or "").strip()
         if not raw:
             continue
-        value = raw.lower()
-        if "@" in value:
-            local = _alnum(value.split("@", 1)[0])
-            if local and local in patterns:
-                return raw  # tier 1/2: exact convention (nickname-expanded)
-            ratio = max((_ratio(local, form) for form in target_full), default=0.0)
-        else:
-            cand_full = full_name_forms(parse_name(value))
-            if cand_full & target_full:
-                return raw  # tier 1/2: name↔name identity (nickname-expanded)
-            ratio = max((_ratio(_alnum(value), form) for form in target_full),
-                        default=0.0)
-        if ratio > best_ratio:
-            best_ratio, best = ratio, raw
-    if best is not None and best_ratio >= threshold:
-        return best  # tier 3: calibrated fuzzy fallback
-    return None
+        unique.setdefault(raw.lower(), raw)
+
+    # Tier 1 — exact local-part convention (email candidates).
+    tier1 = [
+        raw for key, raw in unique.items()
+        if "@" in key and (_alnum(key.split("@", 1)[0]) in patterns)
+        and _alnum(key.split("@", 1)[0])
+    ]
+    if tier1:
+        return tier1[0] if len(tier1) == 1 else None
+
+    # Tier 2 — name↔name identity (bare-name candidates).
+    tier2 = [
+        raw for key, raw in unique.items()
+        if "@" not in key and (full_name_forms(parse_name(key)) & target_full)
+    ]
+    if tier2:
+        return tier2[0] if len(tier2) == 1 else None
+
+    # Tier 3 — calibrated fuzzy fallback. A comparison string per candidate
+    # (email local part, or the whole bare name), scored against the expanded
+    # full-name forms. Decline if nothing clears the floor, OR if the top two
+    # both clear it within a hair of each other (same ambiguity principle).
+    scored: list[tuple[float, str]] = []
+    for key, raw in unique.items():
+        comp = _alnum(key.split("@", 1)[0]) if "@" in key else _alnum(key)
+        ratio = max((_ratio(comp, form) for form in target_full), default=0.0)
+        scored.append((ratio, raw))
+    scored.sort(key=lambda t: -t[0])
+    if not scored or scored[0][0] < threshold:
+        return None
+    if len(scored) > 1 and scored[1][0] >= threshold \
+       and (scored[0][0] - scored[1][0]) <= _FUZZY_AMBIGUITY_MARGIN:
+        return None  # two near-equal fuzzy matches → decline rather than guess
+    return scored[0][1]

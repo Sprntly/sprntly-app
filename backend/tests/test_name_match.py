@@ -144,3 +144,51 @@ def test_surname_alone_does_not_auto_match():
     """The bare last name is deliberately NOT a convention — it collides between
     different people who share a surname."""
     assert match_name("David Troha", ["troha@x.com"]) is None
+
+
+# ── ambiguity DECLINES (fail-safe) — multi-group nickname collisions ──────────
+#
+# A token in more than one nickname group (Jay∈{James,Jason}, Sam∈{Samuel,
+# Samantha}, …) expands to both. When a single candidate list contains TWO
+# different people who both match, the matcher must decline, not pick by order.
+
+_COLLISION_CASES = [
+    # (target, two colliding candidates that are DIFFERENT people)
+    ("Jay Smith", ["james.smith@x", "jason.smith@x"]),        # James vs Jason
+    ("Sam Carter", ["samuel.carter@x", "samantha.carter@x"]),  # Samuel vs Samantha
+    ("Pat Riley", ["patrick.riley@x", "patricia.riley@x"]),    # Patrick vs Patricia
+    ("Chris Nolan", ["christopher.nolan@x", "christina.nolan@x"]),
+    ("Alex Kim", ["alexander.kim@x", "alexandra.kim@x"]),
+]
+
+
+@pytest.mark.parametrize("target,candidates", _COLLISION_CASES)
+def test_multigroup_nickname_collision_declines(target, candidates):
+    assert match_name(target, candidates) is None
+
+
+@pytest.mark.parametrize("target,candidates", _COLLISION_CASES)
+def test_collision_decline_is_order_independent(target, candidates):
+    """The same candidate set in EITHER order yields the same answer — a
+    decline — never an order-dependent pick."""
+    assert match_name(target, candidates) is None
+    assert match_name(target, list(reversed(candidates))) is None
+
+
+def test_collision_target_still_resolves_when_only_one_person_present():
+    """The multi-group expansion does not break the common case: with only ONE
+    matching person in the list, that person resolves."""
+    # Only a Jason-family candidate present → resolves (no James to collide).
+    assert match_name("Jay Smith", ["jason.smith@x"]) == "jason.smith@x"
+    # Only a Samantha present → resolves.
+    assert match_name("Sam Carter", ["samantha.carter@x"]) == "samantha.carter@x"
+    # A colliding candidate for a DIFFERENT surname does not count as a tie.
+    assert match_name("Jay Smith", ["jason.smith@x", "james.jones@x"]) \
+        == "jason.smith@x"
+
+
+def test_unique_match_alongside_a_nonmatch_resolves():
+    """Order-independence for the resolving case too: a single true match plus
+    unrelated candidates resolves regardless of position."""
+    assert match_name("David Troha", ["trohad@x", "alice.smith@x"]) == "trohad@x"
+    assert match_name("David Troha", ["alice.smith@x", "trohad@x"]) == "trohad@x"
