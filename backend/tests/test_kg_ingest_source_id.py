@@ -41,6 +41,13 @@ def captured(monkeypatch):
         runner, "run_checklist_pass",
         lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
     )
+    # Zoom/Meet's Config-B main-pass condensation is a real (Haiku) LLM call
+    # (`app.graph.extractor.summarize_call_transcript`) — stub it too so the
+    # zoom/google_meet parametrization below never reaches a real LLM call
+    # either. Fireflies never calls this (condenses for free at the puller).
+    monkeypatch.setattr(
+        runner, "summarize_call_transcript", lambda enterprise_id, text: "condensed"
+    )
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     return calls

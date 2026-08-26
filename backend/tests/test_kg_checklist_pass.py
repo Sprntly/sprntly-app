@@ -5,6 +5,7 @@ allowlist that scopes that pipeline's rollout.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from unittest.mock import patch
 
@@ -323,11 +324,56 @@ def test_checklist_pass_still_drops_a_fabricated_quote_end_to_end(facade):
     assert _csig(facade, "customer agreed to a 3-year exclusive deal") is None
 
 
-def test_checklist_system_prompt_names_all_11_categories_and_precision_contract():
+def test_checklist_has_13_categories_including_the_two_new_ones():
+    """Config B widens the checklist 11 -> 13: `customer_environment` (->
+    `finding`) and `partnership_commercial` (-> `commercial_term`) join with
+    the SAME contract as the original 11 — verbatim-quote-required, minted
+    via the shared `_write_items` path."""
+    assert len(ex._CHECKLIST_CATEGORIES) == 13
+    by_key = {c[0]: c for c in ex._CHECKLIST_CATEGORIES}
+    assert by_key["customer_environment"][2] == "finding"
+    assert by_key["customer_environment"][6] is True  # mints a signal
+    assert by_key["partnership_commercial"][2] == "commercial_term"
+    assert by_key["partnership_commercial"][6] is True
+
+
+def test_new_categories_mint_signals_with_the_grounding_contract(facade):
+    """The two new categories go through the exact same grounded-write path
+    as the original 11 — no special-casing."""
+    entries = [
+        _entry("customer_environment", content="China plant runs on Alibaba Cloud",
+               quote="our China plant actually runs on Alibaba Cloud"),
+        _entry("partnership_commercial", content="Markel partnership drives referrals",
+               quote="the Markel partnership has been driving referrals"),
+    ]
+    text = (
+        "Rep: our China plant actually runs on Alibaba Cloud.\n"
+        "Rep: the Markel partnership has been driving referrals."
+    )
+    result = _run_checklist(facade, entries, text)
+    assert result["signals"] == 2
+    env_sig = _csig(facade, "China plant runs on Alibaba Cloud")
+    assert env_sig is not None and env_sig.kind == "finding"
+    partner_sig = _csig(facade, "Markel partnership drives referrals")
+    assert partner_sig is not None and partner_sig.kind == "commercial_term"
+
+
+def test_new_categories_still_require_a_grounded_quote(facade):
+    """Same precision contract as the original 11: an ungrounded claim in a
+    new category is dropped, not invented."""
+    entries = [_entry("customer_environment", content="fabricated environment claim",
+                       quote="this sentence never appears anywhere in the call")]
+    result = _run_checklist(facade, entries, "Rep: everything is running smoothly.")
+    assert result["signals"] == 0
+    assert _csig(facade, "fabricated environment claim") is None
+
+
+def test_checklist_system_prompt_names_every_category_and_precision_contract():
     """Content property test on the LLM-facing checklist system prompt: every
     category is named (so the model can't drift the vocabulary) and the
     precision contract (honest not-discussed over invention, verbatim
-    grounding) is present."""
+    grounding) is present. Dynamic against `_CHECKLIST_CATEGORIES` so it
+    holds regardless of how many categories the checklist carries."""
     system = ex._CHECKLIST_SYSTEM.lower()
     for key, *_rest in ex._CHECKLIST_CATEGORIES:
         assert key in system, f"checklist system prompt should name category {key!r}"
@@ -335,6 +381,18 @@ def test_checklist_system_prompt_names_all_11_categories_and_precision_contract(
     assert "verbatim" in system
     assert "invent" in system
     assert len(ex._CHECKLIST_SYSTEM) > 500
+
+
+def test_checklist_system_prompt_carries_the_scenario_noise_guardrail():
+    """Config B makes the checklist pass the SOLE full-transcript reader, so
+    the scenario-noise guardrail (simulated/hypothetical content must not be
+    minted as real) must live HERE too, not just in the shared `_SYSTEM` —
+    the exact gap this ticket closes."""
+    system = ex._CHECKLIST_SYSTEM.lower()
+    for cue in ("simulated", "hypothetical", "tabletop", "let's say", "imagine"):
+        assert cue in system, f"checklist guardrail should mention {cue!r}"
+    assert "ransomware" in system
+    assert "discussed=false" in system or "discussed = false" in system
 
 
 def test_checklist_schema_requires_category_discussed_content_quote():
@@ -428,7 +486,12 @@ def test_gating_does_not_restrict_non_call_providers(monkeypatch):
 # ── runner wiring: checklist pass invocation ──────────────────────────────────
 
 
-def test_call_provider_sync_invokes_checklist_pass_with_matching_args(monkeypatch):
+def test_fireflies_checklist_pass_reads_full_transcript_not_the_digest(monkeypatch):
+    """Config B: for Fireflies, `extract_document` (main pass) gets the
+    cheap digest (`RawRecord.text`) while `run_checklist_pass` gets the FULL
+    transcript (`RawRecord.checklist_text`) — same call (doc_name/source_ref
+    match), DIFFERENT text. The checklist is now the sole full-transcript
+    reader; known-fact recall flows through it, not the main pass."""
     monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
@@ -445,17 +508,102 @@ def test_call_provider_sync_invokes_checklist_pass_with_matching_args(monkeypatc
 
     monkeypatch.setattr(runner, "extract_document", fake_extract)
     monkeypatch.setattr(runner, "run_checklist_pass", fake_checklist)
-    rec = RawRecord(provider="fireflies", kind="meeting", external_id="FF1",
-                    title="t", text="call body")
+    rec = RawRecord(
+        provider="fireflies", kind="meeting", external_id="FF1", title="t",
+        text="summary: cheap digest only",
+        checklist_text=("summary: cheap digest only\ntranscript:\n"
+                        "CTO: the deep fact lives only in the full transcript"),
+    )
     out = runner.sync_provider(None, "ent-A", "fireflies", token="t", records=[rec])
 
-    assert len(checklist_calls) == 1
-    assert checklist_calls[0] == extract_calls[0], (
-        "the checklist pass must run over the SAME doc_name/text/source_ref "
-        "as the main extraction pass, on the same call")
+    assert len(extract_calls) == 1 and len(checklist_calls) == 1
+    # Same call — doc_name and source_ref must still match.
+    assert extract_calls[0][0] == checklist_calls[0][0]
+    assert extract_calls[0][2] == checklist_calls[0][2]
+    # DIFFERENT text: the main pass never sees the transcript block; the
+    # checklist pass does.
+    assert "transcript:" not in extract_calls[0][1]
+    assert "deep fact" not in extract_calls[0][1]
+    assert "transcript:" in checklist_calls[0][1]
+    assert "deep fact" in checklist_calls[0][1]
     # totals combine both passes.
     assert out["signals"] == 3
     assert out["themes"] == 1
+
+
+def test_zoom_main_pass_gets_haiku_summary_checklist_gets_full_transcript(monkeypatch):
+    """Zoom/Meet have no native digest, so Config B derives the main pass's
+    condensed input via a `claude-haiku-4-5` call
+    (`extractor.summarize_call_transcript`) HERE in the runner, while the
+    checklist pass still reads the untouched full transcript (Zoom/Meet have
+    no separate `checklist_text` — `RawRecord.text` already IS the full
+    transcript)."""
+    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
+    monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
+    monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
+    extract_calls: list[tuple] = []
+    checklist_calls: list[tuple] = []
+    summarize_calls: list[tuple] = []
+
+    def fake_extract(facade, enterprise_id, *, doc_name, text, source_ref=None, **kw):
+        extract_calls.append((doc_name, text, source_ref))
+        return {"signals": 1, "themes": 1, "skipped": 0}
+
+    def fake_checklist(facade, enterprise_id, *, doc_name, text, source_ref=None, **kw):
+        checklist_calls.append((doc_name, text, source_ref))
+        return {"signals": 2, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    def fake_summarize(enterprise_id, text):
+        summarize_calls.append((enterprise_id, text))
+        return "condensed haiku summary"
+
+    monkeypatch.setattr(runner, "extract_document", fake_extract)
+    monkeypatch.setattr(runner, "run_checklist_pass", fake_checklist)
+    monkeypatch.setattr(runner, "summarize_call_transcript", fake_summarize)
+    full_transcript = "Rep: this is the full zoom transcript with lots of detail."
+    rec = RawRecord(provider="zoom", kind="meeting", external_id="Z1", title="t",
+                    text=full_transcript)
+    out = runner.sync_provider(None, "ent-A", "zoom", token="t", records=[rec])
+
+    assert summarize_calls == [("ent-A", full_transcript)]
+    # Main pass got the (fake) Haiku summary, not the full transcript.
+    assert "condensed haiku summary" in extract_calls[0][1]
+    assert full_transcript not in extract_calls[0][1]
+    # Checklist pass got the ORIGINAL full transcript, untouched.
+    assert full_transcript in checklist_calls[0][1]
+    assert out["signals"] == 3
+
+
+def test_zoom_summarization_failure_falls_back_to_full_transcript_for_main_pass(monkeypatch):
+    """A Haiku summarization failure must degrade to feeding the main pass
+    the full transcript — never fail the sync or leave the main pass with
+    nothing. Uses google_meet to also prove Meet shares this path with Zoom."""
+    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
+    monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
+    monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
+    extract_calls: list[tuple] = []
+
+    def fake_extract(facade, enterprise_id, *, doc_name, text, source_ref=None, **kw):
+        extract_calls.append((doc_name, text, source_ref))
+        return {"signals": 1, "themes": 0, "skipped": 0}
+
+    def boom(enterprise_id, text):
+        raise RuntimeError("haiku call failed")
+
+    monkeypatch.setattr(runner, "extract_document", fake_extract)
+    monkeypatch.setattr(
+        runner, "run_checklist_pass",
+        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
+    monkeypatch.setattr(runner, "summarize_call_transcript", boom)
+    full_transcript = "Rep: this is the full meet transcript."
+    rec = RawRecord(provider="google_meet", kind="meeting", external_id="M1",
+                    title="t", text=full_transcript)
+    out = runner.sync_provider(None, "ent-A", "google_meet", token="t", records=[rec])
+
+    assert out["errors"] == []
+    assert full_transcript in extract_calls[0][1]
+    assert out["signals"] == 1
 
 
 def test_non_call_provider_sync_never_invokes_checklist_pass(monkeypatch):
@@ -499,3 +647,49 @@ def test_checklist_pass_failure_is_isolated_and_ledger_still_advances(monkeypatc
     assert out["errors"] == [], "a checklist failure is not a sync error"
     assert out["signals"] == 1, "only the main extraction's count survives"
     assert len(recorded) == 1, "the ledger still advanced for the successful unit"
+
+
+# ── real-LLM eval: checklist guardrail (Config B — checklist is now the ─────
+# sole full-transcript reader, so ITS guardrail must independently hold)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_checklist_guardrail_filters_simulated_incident_keeps_real_fact_real_llm():
+    """Config B makes the checklist pass the SOLE full-transcript reader, so
+    its OWN guardrail (not just the shared `_SYSTEM`'s, which no longer sees
+    this transcript) must independently suppress a simulated tabletop
+    scenario while still extracting a real fact stated plainly in the same
+    transcript — the over-filter guard."""
+    transcript = (
+        "Facilitator: Let's run a quick security tabletop. Let's say we get "
+        "hit by ransomware overnight and the primary database is encrypted "
+        "— walk me through what you'd each do first.\n"
+        "Ops: I'd isolate the affected hosts and page the on-call.\n"
+        "Security: I'd start the comms tree and check our backups.\n"
+        "Facilitator: Good. One real thing before we wrap: honestly we "
+        "don't even have an NDA in place with Acme yet, and they keep "
+        "asking for one.\n"
+        "Legal: Right, I'll get that moving this week."
+    )
+    result = ex.llm_call(
+        enterprise_id="ent-eval", agent="test:checklist-eval",
+        purpose="extract_checklist", prompt_version=ex.CHECKLIST_PROMPT_VERSION,
+        system=ex._CHECKLIST_SYSTEM,
+        input=f"<document name='call.md'>\n{transcript}\n</document>",
+        json_schema=ex._CHECKLIST_SCHEMA,
+    )
+    checklist = result.output.get("checklist", [])
+    by_cat = {c.get("category"): c for c in checklist}
+
+    objection = by_cat.get("objection") or {}
+    assert "ransomware" not in (objection.get("content") or "").lower(), (
+        f"simulated ransomware must not be reported as a real objection/"
+        f"incident; got {objection}")
+
+    legal = by_cat.get("legal") or {}
+    assert legal.get("discussed") is True and "nda" in (legal.get("content") or "").lower(), (
+        f"the plainly-real NDA gap must still be reported discussed; got {legal}")

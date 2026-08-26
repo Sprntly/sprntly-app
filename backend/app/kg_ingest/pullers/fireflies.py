@@ -4,17 +4,22 @@ GraphQL API (api.fireflies.ai), API-key auth (per #106).
 
 TWO surfaces, deliberately separated by what they persist:
 
-  • pull()        — the KG-ingest path. Yields RawRecords the runner extracts
-                    into the KG: the distilled layer (summary overview + action
-                    items + keywords) FIRST, then a bounded speaker-attributed
-                    transcript block, so a fact stated only in the transcript
-                    (never surfaced in the summary) still reaches extraction —
-                    parity with Zoom/Meet, which already feed transcript text.
+  • pull()        — the KG-ingest path. Yields RawRecords with a Config-B
+                    split: `RawRecord.text` is the CHEAP, free Fireflies
+                    digest (overview/gist/outline/topics/action items/tasks/
+                    questions — no LLM call needed) that feeds the main
+                    open-extraction pass, and `RawRecord.checklist_text`
+                    carries the digest PLUS the full speaker-attributed
+                    transcript that feeds the directed-checklist pass ONLY —
+                    the checklist is now the sole full-transcript reader (see
+                    `app.kg_ingest.runner`). This halves the redundant
+                    full-transcript-read cost a prior design paid twice.
                     §6 (no raw dump) is a PERSISTENCE contract: the transcript
-                    lives only in the transient `RawRecord.text` the runner
-                    hands to one extraction call — nothing writes a raw sentence
-                    to a table. Also accepts an optional date window/limit so a
-                    sync can be scoped to "what landed recently".
+                    lives only in the transient `RawRecord.checklist_text` the
+                    runner hands to one checklist call — nothing writes a raw
+                    sentence to a table. Also accepts an optional date
+                    window/limit so a sync can be scoped to "what landed
+                    recently".
 
   • fetch_calls() — the on-demand call-digest path. Pulls the same distilled
                     layer PLUS a bounded sample of verbatim sentences so the
@@ -108,13 +113,14 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
 }
 """
 
-# KG-ingest query — distilled summary PLUS `sentences`, so a fact that lives
-# ONLY in the transcript (never surfaced in the overview or action items)
-# still reaches extraction (closes "transcript-only facts never ingested").
-# This is PARITY with Zoom/Meet, which already feed transcript text into the
-# ingest `text`. §6 is about PERSISTENCE, not about what the in-memory
-# extraction text may contain: the sentences ride `RawRecord.text` into one LLM
-# call and are never written to a table — see `_record_from` and the runner.
+# KG-ingest query — the richer FREE digest fields (outline/topics_discussed/
+# tasks/questions/gist cost nothing extra — same API call, no extra LLM spend)
+# PLUS `sentences`, so a fact that lives ONLY in the transcript (never
+# surfaced anywhere in the digest) still reaches the checklist pass (closes
+# "transcript-only facts never ingested"). §6 is about PERSISTENCE, not about
+# what the in-memory checklist text may contain: the sentences ride the
+# transient `RawRecord.checklist_text` into one LLM call and are never written
+# to a table — see `_record_from` and the runner.
 _QUERY_KG_WITH_TRANSCRIPT = """
 query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTime) {
   transcripts(limit: $limit, skip: $skip, fromDate: $fromDate, toDate: $toDate) {
@@ -122,7 +128,7 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
     title
     date
     participants
-    summary { overview action_items keywords }
+    summary { overview action_items keywords gist outline topics_discussed tasks questions }
     sentences { speaker_name text }
   }
 }
@@ -254,43 +260,83 @@ def _post(api_key: str, query: str, variables: dict) -> list[dict]:
     return (body.get("data") or {}).get("transcripts", []) or []
 
 
-def _record_from(t: dict) -> RawRecord:
-    """One transcript as a RawRecord: distilled summary FIRST, then the FULL
-    speaker-attributed transcript — every sentence, not a head window. A
-    transcript-only fact can sit deep in the call (on the real USANA briefing the
-    deep asks land ~22k chars in), so a small bound would silently lose exactly
-    the facts transcript-read exists to capture. Summary leads so it always
-    survives, and the only cap is the defensive `_TRANSCRIPT_CHAR_CEILING`, which
-    trims the transcript TAIL if a pathological multi-hour call would blow the
-    model context — never the summary. Zoom/Meet share this same ceiling in
-    their own modules (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`) — the
-    three call providers can't drift apart on it.
+def _stringify_digest_field(value) -> str:
+    """Fireflies' free digest fields (gist/outline/topics_discussed/tasks/
+    questions) — normalize either a plain string or a list of strings into
+    one string. Defensive: this ticket adds these fields to the query for
+    the first time, so their exact shape is trusted from the API contract,
+    not re-derived here; a list is joined rather than assumed to fail."""
+    if isinstance(value, list):
+        return "; ".join(str(v) for v in value if v)
+    return str(value)
 
-    §6 (no raw dump) is honored at the PERSISTENCE boundary, not here: this text
-    is transient — the runner hands it to one extraction call and nothing writes
-    a raw sentence to a table. See `_QUERY_KG_WITH_TRANSCRIPT`."""
+
+def _record_from(t: dict) -> RawRecord:
+    """One transcript as a RawRecord — Config B split (measured ~$0.13/call
+    vs. the prior ~$0.20/call double-read of the full transcript):
+
+      * `.text` — the CHEAP main-pass input: Fireflies' own FREE digest
+        (overview, gist, outline, topics discussed, action items, tasks,
+        questions — all free fields on the same API call, no LLM spend).
+        This is condensed AT THE PULLER, no summarization call needed.
+      * `.checklist_text` — the digest FIRST, then the FULL speaker-
+        attributed transcript (every sentence, not a head window — a
+        transcript-only fact can sit deep in the call, on the real USANA
+        briefing the deep asks land ~22k chars in). This is what the
+        directed-checklist pass reads; it is now the SOLE full-transcript
+        reader (see `app.kg_ingest.runner`). The only cap is the defensive
+        `_TRANSCRIPT_CHAR_CEILING`, trimming the transcript TAIL if a
+        pathological multi-hour call would blow the model context — never
+        the digest. Shared with Zoom/Meet
+        (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`).
+
+    §6 (no raw dump) is honored at the PERSISTENCE boundary, not here: both
+    fields are transient — the runner hands them to one LLM call each and
+    nothing writes a raw sentence to a table. See `_QUERY_KG_WITH_TRANSCRIPT`.
+    """
     s = t.get("summary") or {}
-    text_parts = []
+    digest_parts = []
     if s.get("overview"):
-        text_parts.append(f"summary: {s['overview']}")
+        digest_parts.append(f"summary: {s['overview']}")
+    if s.get("gist"):
+        digest_parts.append(f"gist: {_stringify_digest_field(s['gist'])}")
+    if s.get("outline"):
+        digest_parts.append(f"outline: {_stringify_digest_field(s['outline'])}")
+    if s.get("topics_discussed"):
+        digest_parts.append(
+            f"topics discussed: {_stringify_digest_field(s['topics_discussed'])}"
+        )
     if s.get("action_items"):
-        text_parts.append(f"action items: {s['action_items']}")
+        digest_parts.append(f"action items: {s['action_items']}")
+    if s.get("tasks"):
+        digest_parts.append(f"tasks: {_stringify_digest_field(s['tasks'])}")
+    if s.get("questions"):
+        digest_parts.append(f"questions: {_stringify_digest_field(s['questions'])}")
+    digest_text = "\n".join(digest_parts)
+
     # Speaker-attributed transcript block, same "{speaker}: {text}" shape Zoom
-    # and Meet render — but ALL sentences. Appended AFTER the summary so the
-    # ceiling, if ever hit, trims the transcript tail and never the summary.
+    # and Meet render — but ALL sentences. Checklist-only: never appended to
+    # `.text` (the main pass), which is why this ticket exists.
     lines = [
         f"{sent.get('speaker_name') or '?'}: {text}"
         for sent in (t.get("sentences") or [])
         if (text := (sent.get("text") or "").strip())
     ]
     if lines:
-        text_parts.append("transcript:\n" + "\n".join(lines))
+        checklist_parts = list(digest_parts)
+        checklist_parts.append("transcript:\n" + "\n".join(lines))
+        checklist_text = "\n".join(checklist_parts)[:_TRANSCRIPT_CHAR_CEILING]
+    else:
+        # No sentences at all — the checklist has nothing beyond the digest.
+        checklist_text = digest_text
+
     return RawRecord(
         provider="fireflies",
         kind="meeting",
         external_id=str(t["id"]),
         title=t.get("title", ""),
-        text="\n".join(text_parts)[:_TRANSCRIPT_CHAR_CEILING],
+        text=digest_text,
+        checklist_text=checklist_text,
         properties={
             "participants": t.get("participants") or [],
             "keywords": s.get("keywords") or [],
@@ -349,12 +395,14 @@ def pull(
     until: Optional[datetime] = None,
     limit: int = _LIMIT,
 ) -> Iterator[RawRecord]:
-    """KG-ingest pull: distilled summary + bounded transcript → RawRecords.
+    """KG-ingest pull: free digest → `RawRecord.text`, digest+bounded
+    transcript → `RawRecord.checklist_text` (Config B — see `_record_from`).
 
     Requests `sentences` (via `_QUERY_KG_WITH_TRANSCRIPT`) so a transcript-only
-    fact reaches extraction — parity with Zoom/Meet. §6 (no raw dump) holds at
-    the persistence boundary: the transcript rides the transient `RawRecord.text`
-    into one extraction call and is never written to a table.
+    fact still reaches the directed-checklist pass, which is now the sole
+    full-transcript reader. §6 (no raw dump) holds at the persistence
+    boundary: the transcript rides the transient `RawRecord.checklist_text`
+    into one checklist call and is never written to a table.
 
     PAGINATED, and BOUNDED BY A CURSOR — both new on 2026-08-16, and the two
     halves of the same fix:

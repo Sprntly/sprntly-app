@@ -31,6 +31,16 @@ class RawRecord:
     text: str                # compact textual rendering for extraction
     properties: dict = field(default_factory=dict)   # structured fields (amounts, status…)
     timestamp: Optional[str] = None                   # ISO — provider-side updated/created
+    #: Config B (2026-08-26): the FULL-transcript-bearing text the directed-
+    #: checklist pass should read, when it differs from `.text` — the
+    #: checklist pass is the SOLE full-transcript reader; `.text` is a cheap
+    #: condensed main-pass input instead. `None` (every provider but
+    #: Fireflies) means "no separate view" — the runner falls back to
+    #: `.text`/`.render()` for the checklist pass too (see
+    #: `app.kg_ingest.runner._condensed_and_full_text`). Only ever read for
+    #: `_CALL_PROVIDERS` (fireflies/zoom/google_meet); every other provider's
+    #: checklist pass never runs, so this field is unused for them.
+    checklist_text: Optional[str] = None
 
     def render(self) -> str:
         """One-record rendering used inside extraction batches."""

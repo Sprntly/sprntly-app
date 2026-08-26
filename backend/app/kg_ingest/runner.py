@@ -33,10 +33,15 @@ import inspect
 import json
 import logging
 import os
+from dataclasses import replace
 from typing import Callable, Iterable
 
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes
-from app.graph.extractor import extract_document, run_checklist_pass
+from app.graph.extractor import (
+    extract_document,
+    run_checklist_pass,
+    summarize_call_transcript,
+)
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
     asana,
@@ -159,16 +164,74 @@ def _call_provider_reextraction_allowed(enterprise_id: str) -> bool:
     return enterprise_id in allowed
 
 
+def _condensed_and_full_text(
+    provider: str, rec: RawRecord, enterprise_id: str
+) -> tuple[str, str]:
+    """Return ``(main_pass_text, checklist_text)`` for one call-shaped record
+    — Config B (2026-08-26): the directed-checklist pass is the SOLE
+    full-transcript reader; the main open-extraction pass runs on a cheap
+    CONDENSED input instead. Reading the full transcript twice (once per
+    pass) was the main cost driver (~$0.20/call); this halves it
+    (measured ~$0.13/call Fireflies, ~$0.16/call Zoom/Meet) with recall
+    preserved, since nothing that used to reach the main pass's transcript
+    read is lost — it now reaches the checklist pass instead.
+
+    Fireflies condenses at the PULLER level: ``rec.text`` is already its
+    free digest (no LLM call needed — see ``fireflies._record_from``), and
+    ``rec.checklist_text`` carries the digest + full transcript combination
+    the checklist pass reads.
+
+    Zoom/Meet have no native digest, so ``rec.text`` IS the full transcript,
+    unchanged from the puller (``rec.checklist_text`` is unset for them — the
+    puller-level split only exists where it's free). A cheap
+    ``claude-haiku-4-5`` call condenses it for the main pass HERE; the
+    checklist pass then reads ``rec.text`` — the ORIGINAL, un-summarized
+    transcript — unmodified. Chosen over head-truncation, which would
+    degrade the main pass to opening-minutes-only.
+
+    Both branches wrap the chosen text through ``RawRecord.render()`` (a
+    fresh copy via ``dataclasses.replace`` — never mutates ``rec``) so both
+    passes keep the usual header/title/data context, not just bare text.
+    """
+    checklist_source = rec.checklist_text if rec.checklist_text is not None else rec.text
+    checklist_render = replace(rec, text=checklist_source).render()
+
+    if provider == "fireflies":
+        # Already condensed at the puller — no LLM call needed here.
+        return rec.render(), checklist_render
+
+    # zoom / google_meet: rec.text is the full transcript; derive a cheap
+    # Haiku summary for the main pass. Best-effort: a summarization failure
+    # must not fail the sync — degrade to the full transcript rather than an
+    # empty main pass (the checklist pass alone was never meant to be the
+    # ONLY signal source for a call).
+    try:
+        condensed = summarize_call_transcript(enterprise_id, rec.text)
+    except Exception:  # noqa: BLE001 — best-effort condensation only
+        logger.warning(
+            "kg-ingest: %s call summarization failed for %s/%s — falling "
+            "back to the full transcript for the main pass",
+            provider, enterprise_id, rec.external_id, exc_info=True,
+        )
+        condensed = rec.text
+    return replace(rec, text=condensed).render(), checklist_render
+
+
 def _extraction_units(
-    provider: str, fresh: list[RawRecord]
-) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None]]:
-    """Yield ``(doc_name, text, records, source_ref)`` — one per extraction pass.
+    provider: str, fresh: list[RawRecord], enterprise_id: str
+) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None, str | None]]:
+    """Yield ``(doc_name, text, records, source_ref, checklist_text)`` — one
+    per extraction pass.
 
     Call providers (``_CALL_PROVIDERS``) get ONE pass per call, with a
     ``source_ref`` = the call's ``(provider, external_id)`` so the extractor can
-    stamp ``kg_signal.source_id``. Every other provider keeps the existing
-    char-budget batching, with no ``source_ref`` (``source_id`` stays NULL,
-    unchanged).
+    stamp ``kg_signal.source_id``, PLUS Config B's condensed/full-transcript
+    split (see ``_condensed_and_full_text``): ``text`` is the CHEAP main-pass
+    input and ``checklist_text`` is the FULL transcript the directed-checklist
+    pass reads. Every other provider keeps the existing char-budget batching,
+    with no ``source_ref`` (``source_id`` stays NULL, unchanged) and
+    ``checklist_text`` left ``None`` — the checklist pass never runs on them
+    (see ``sync_provider``).
 
     The ``<provider>-sync-batch-<n>`` doc_name shape is DELIBERATELY preserved
     for both — ``call_digest`` identifies a call-provider signal by matching
@@ -179,12 +242,15 @@ def _extraction_units(
     """
     if provider in _CALL_PROVIDERS:
         for i, rec in enumerate(fresh):
-            yield (f"{provider}-sync-batch-{i}", rec.render(), [rec],
-                   (rec.provider, rec.external_id))
+            main_text, checklist_text = _condensed_and_full_text(
+                provider, rec, enterprise_id
+            )
+            yield (f"{provider}-sync-batch-{i}", main_text, [rec],
+                   (rec.provider, rec.external_id), checklist_text)
     else:
         for i, batch in enumerate(_batches(fresh)):
             yield (f"{provider}-sync-batch-{i}",
-                   "\n\n".join(r.render() for r in batch), batch, None)
+                   "\n\n".join(r.render() for r in batch), batch, None, None)
 
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
@@ -278,8 +344,8 @@ def sync_provider(
     from app.llm_errors import PROVIDER_LIMIT, classify_provider_error, user_message
 
     errors: list[str] = []
-    for i, (doc_name, text, unit_records, source_ref) in enumerate(
-            _extraction_units(provider, fresh)):
+    for i, (doc_name, text, unit_records, source_ref, checklist_text) in enumerate(
+            _extraction_units(provider, fresh, enterprise_id)):
         try:
             r = extract_document(
                 facade, enterprise_id,
@@ -312,18 +378,22 @@ def sync_provider(
                 totals[k] += r[k]
 
             # Directed-checklist second pass (call providers only) — a
-            # SEPARATE, directed LLM call over the same call text asking
-            # explicitly whether each of 11 high-value fact categories was
-            # discussed, lifting recall on those classes past what open
-            # extraction alone catches on a long call. Fully isolated: a
-            # checklist failure must never block the main extraction's
-            # ledger progress or force the whole unit to retry — it only
-            # costs this cycle's recall boost for this one call.
+            # SEPARATE, directed LLM call asking explicitly whether each
+            # high-value fact category was discussed, lifting recall on
+            # those classes past what open extraction alone catches on a
+            # long call. Config B: this pass reads the FULL transcript
+            # (`checklist_text`) while the main pass above ran on the cheap
+            # condensed `text` — see `_condensed_and_full_text`. Fully
+            # isolated: a checklist failure must never block the main
+            # extraction's ledger progress or force the whole unit to
+            # retry — it only costs this cycle's recall boost for this one
+            # call.
             if provider in _CALL_PROVIDERS:
                 try:
                     c = run_checklist_pass(
                         facade, enterprise_id,
-                        doc_name=doc_name, text=text, agent=f"ingest:{provider}",
+                        doc_name=doc_name, text=checklist_text,
+                        agent=f"ingest:{provider}",
                         origin="connector", source_ref=source_ref,
                     )
                     for k in ("signals", "themes", "skipped"):
