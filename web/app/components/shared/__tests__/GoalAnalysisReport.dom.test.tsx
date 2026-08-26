@@ -754,3 +754,97 @@ describe("an assumption every finding makes is stated once", () => {
     expect(document.body.textContent).toContain("no revenue data connected")
   })
 })
+
+describe("the finding is a card, not a sentence", () => {
+  // Apurva: make the document "display data in a more beautiful manner, so
+  // that the user is able to understand the wins". The heading used to be the
+  // whole sentence, so the one word a reader scans for sat mid-clause, in
+  // quotes, behind two numbers the chips repeat verbatim.
+  const CARD = {
+    ...SIZED,
+    statement: '25 claims across 2 accounts concern “AI tabletop generation” — for example, “x”.',
+    label: "AI tabletop generation",
+    example: "Northwind tailors scenarios by role and complexity",
+  }
+
+  it("leads with the theme and sets the quote as a quote", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [CARD] }} />)
+    const head = screen.getAllByTestId("goal-finding")[0]
+      .querySelector(".ga-finding-statement")!.textContent
+    expect(head).toBe("AI tabletop generation")
+    expect(head).not.toMatch(/claims across/)
+    expect(screen.getByTestId("goal-finding-example").textContent)
+      .toContain("Northwind tailors scenarios by role and complexity")
+  })
+
+  it("falls back to the sentence for a run stored before the theme existed", () => {
+    // An empty heading would be a worse regression than the run-on it replaced.
+    const old = { ...SIZED, statement: "9 claims concern export latency.", label: undefined }
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [old] }} />)
+    expect(screen.getAllByTestId("goal-finding")[0]
+      .querySelector(".ga-finding-statement")!.textContent)
+      .toContain("export latency")
+    expect(screen.queryByTestId("goal-finding-example")).toBeNull()
+  })
+
+  it("does not print the quote twice when the sentence is the heading", () => {
+    const old = {
+      ...SIZED, label: undefined,
+      statement: '4 claims concern “x” — for example, “the export times out”.',
+      example: "the export times out",
+    }
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [old] }} />)
+    const section = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    expect(section.split("the export times out").length - 1).toBe(1)
+  })
+})
+
+describe("the card leads with what to do", () => {
+  // Apurva: "we should start with a recommendation on how to solve this, this
+  // is only the issues, no suggestion on how to solve or what's the exact
+  // recommendation from it".
+  const withRec = (extra: unknown[], findings = [SIZED]) => ({
+    ...RUN, findings,
+    prioritisation: { ...(RUN.prioritisation ?? {}), findings_extra_by_rank: extra },
+  })
+
+  it("shows the recommendation above the counts, with its justification", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: {
+        action: "Route export tickets to the rendering on-call team",
+        because: "three accounts named export in a renewal call",
+      },
+    }]) as never} />)
+    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    expect(card).toContain("Route export tickets to the rendering on-call team")
+    expect(card).toContain("three accounts named export in a renewal call")
+    // It LEADS: above the counts, not a footnote under them.
+    expect(card.indexOf("Recommended.")).toBeLessThan(card.indexOf("medium confidence"))
+  })
+
+  it("renders nothing when a finding has no recommendation", () => {
+    // Only the top findings get one, and anything that failed a check was
+    // dropped rather than repaired. Absent is the normal case.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
+    expect(document.body.textContent).toContain("medium confidence")
+  })
+
+  it("does not render half a recommendation", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: { action: "Do the thing", because: "" },
+    }]) as never} />)
+    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
+    expect(document.body.textContent).not.toContain("Do the thing")
+  })
+
+  it("ignores extras that do not line up with the findings", () => {
+    // The merge is positional. Attaching one finding's recommendation to
+    // another is far worse than showing none.
+    render(<GoalAnalysisReport run={withRec(
+      [{ recommendation: { action: "A", because: "b" } }],
+      [SIZED, { ...SIZED, id: 2, statement: "second" }],
+    ) as never} />)
+    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
+  })
+})

@@ -25097,6 +25097,16 @@
   list-style: disc;
 }
 .ga-plan-step-items li { line-height: 1.5; opacity: 0.9; }
+/* The example claim, set as a quote rather than buried in the statement. */
+.ga-finding-example {
+  margin: 6px 0 0; padding: 0 0 0 10px;
+  border-left: 2px solid var(--border, #e5e5e5);
+  line-height: 1.5; opacity: 0.85;
+}
+/* The suggestion leads the card, so it gets the emphasis the counts used to. */
+.ga-finding-rec { margin: 6px 0 8px; }
+.ga-finding-rec p { margin: 0; line-height: 1.55; }
+.ga-finding-rec-why { opacity: 0.8; margin-top: 2px !important; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated

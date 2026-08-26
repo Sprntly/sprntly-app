@@ -1163,6 +1163,53 @@ def execute_run(
             "stopped_at_stage": r.stopped_at, "claim_ids": list(r.claim_ids),
         } for r in result.rejected]
 
+        # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
+        #
+        # AFTER the ranking, and that ordering is the invariant rather than a
+        # detail. `result.findings` is already sorted and every score is already
+        # frozen; nothing below is fed back into either. I2 says no LLM returns
+        # a score, a rank or a decision, and it still holds — this returns prose
+        # to hang beside a decision the engine already made on its own.
+        #
+        # TOTAL, like everything else on this path: a suggestion layer that
+        # failed must not cost a reader the findings that succeeded.
+        recs = {}
+        try:
+            from app.crucible.recommend import build_recommendations
+
+            recs = build_recommendations(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=result.findings,
+                claims=claims,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("crucible: recommendations skipped for run %s", run_id)
+
+        # CARRIED IN THE RUN'S OWN JSON, not in new columns on
+        # `crucible_findings`. Adding columns means a migration against the
+        # shared Supabase, which is a production change and not one to make
+        # without being asked; the meta blob is already where this run's plan
+        # lives and costs nothing to extend.
+        meta = dict(_meta_of(run_id, company_id))
+        meta["findings_extra"] = {
+            f.id: {
+                "label": f.label,
+                "example": f.example,
+                **({"recommendation": {
+                    "action": recs[f.id].action, "because": recs[f.id].because,
+                }} if f.id in recs else {}),
+            }
+            for f in result.findings
+        }
+        # Keyed by RANK as well, because the stored finding rows carry no id —
+        # the renderer reads them back positionally.
+        meta["findings_extra_by_rank"] = [
+            meta["findings_extra"][f.id] for f in result.findings
+        ]
+        runs_db.update(run_id, company_id, prioritisation=meta)
+
         runs_db.save_findings(run_id, company_id, rows, ledger)
         runs_db.update(
             run_id, company_id, status="ready",

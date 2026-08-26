@@ -490,7 +490,44 @@ def _finding_block(
     shared_weakest: bool = False, shared_cap: bool = False,
     shared_assumptions: bool = False,
 ) -> str:
-    out = [f"<h3>{rank}. {_esc_statement(finding)}</h3>"]
+    # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
+    # across 11 accounts concern “Sales Pipeline” — for example, “…”" — so the
+    # one word a reader scans for sat mid-clause, in quotes, behind two numbers
+    # that the chips on the next line repeat verbatim. Heading, chips, quote:
+    # each fact once, in the place it is looked for.
+    #
+    # FALLS BACK TO THE SENTENCE when there is no label, which is every run
+    # stored before this shipped and every fixture that predates it. A card with
+    # an empty heading would be a worse regression than the run-on it replaced.
+    label = (finding.get("label") or "").strip()
+    head = (
+        _esc_clipped(label, MAX_STATEMENT_CHARS) if label
+        else _esc_statement(finding)
+    )
+    out = [f"<h3>{rank}. {head}</h3>"]
+
+    # ── WHAT TO DO, FIRST. ─────────────────────────────────────────────────
+    #
+    # Apurva, on a real report: "this is only the issues, no suggestion on how
+    # to solve or what's the exact recommendation from it". So the suggestion
+    # leads the card and its justification sits directly under it — a reader
+    # who stops after two lines has the actionable half.
+    #
+    # ABSENT IS NORMAL, not an error. Only the top findings get one, and any
+    # suggestion that quoted a figure, promised an outcome or failed the lint
+    # was dropped rather than repaired. The card then reads exactly as it did
+    # before, which is a document that says nothing it cannot stand behind.
+    rec = _as_dict(finding.get("recommendation"))
+    action = (rec.get("action") or "").strip()
+    because = (rec.get("because") or "").strip()
+    if action and because:
+        out.append(_p(
+            f"<strong>Recommended.</strong> "
+            f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
+        ))
+        out.append(_p(
+            f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
+        ))
 
     meta = [_esc(_reach(finding))]
     band = (finding.get("confidence_band") or "").strip()
@@ -505,6 +542,20 @@ def _finding_block(
     if claims:
         meta.append(f"{claims} claim{'' if claims == 1 else 's'}")
     out.append(_p(" · ".join(meta)))
+
+    # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.
+    #
+    # Only when the heading is the label: with the sentence as the heading the
+    # quote is already inside it, and repeating it would be the duplication this
+    # whole pass is removing. `example` is empty whenever the statement fell
+    # back to its plain form, so this is silent exactly when there is nothing to
+    # show.
+    example = (finding.get("example") or "").strip()
+    if label and example:
+        out.append(
+            f"<blockquote>\u201c{_esc_clipped(example, MAX_STATEMENT_CHARS)}"
+            f"\u201d</blockquote>"
+        )
 
     confidence = _as_dict(finding.get("confidence"))
     # The weakest leg is the ACTIONABLE half of a confidence score: it says
@@ -1035,6 +1086,25 @@ def render_report_html(
     """
     findings = list(findings or [])
     ledger = list(ledger or [])
+    # ── THE THEME, THE QUOTE AND THE RECOMMENDATION, MERGED IN ONCE. ────────
+    #
+    # These three live in the run's own JSON rather than in columns on
+    # `crucible_findings`, because adding columns means a migration against the
+    # shared Supabase — a production change, and not one to make unasked.
+    #
+    # POSITIONAL, and safe to be: this function's own contract says the
+    # findings arrive in rank order and that the order is not recoverable from
+    # any column, so the list the route wrote and the list read back are the
+    # same sequence. Merging here rather than threading a second argument
+    # through four functions means every renderer downstream reads one dict and
+    # cannot disagree with another about what a finding said.
+    extra = _as_list(_as_dict(run.get("prioritisation")).get("findings_extra_by_rank"))
+    if extra and len(extra) == len(findings):
+        findings = [
+            {**f, **{k: v for k, v in _as_dict(x).items() if v}}
+            for f, x in zip(findings, extra)
+        ]
+    ledger = list(ledger)
     if plan is None:
         plan = _as_dict(_as_dict(run.get("prioritisation")).get("plan"))
     plan = _as_dict(plan)

@@ -628,6 +628,18 @@ export type GoalRun = {
 export type GoalFinding = {
   id: number
   statement: string
+  /** The theme alone. `statement` embeds it mid-clause behind two numbers the
+   *  chips repeat, so the card leads with this instead. Absent on runs stored
+   *  before it shipped — fall back to `statement`. */
+  label?: string
+  /** One claim in its source's own words, already linted as part of the
+   *  statement it came from. Empty when the statement had no example. */
+  example?: string
+  /** What to DO about this finding, and why — merged in from the run's meta.
+   *  Absent on most findings: only the top few get one, and any suggestion
+   *  that quoted a figure, promised an outcome or failed the lint was dropped
+   *  rather than repaired. */
+  recommendation?: { action: string; because: string }
   claim_ids: string[]
   adjudication: string | null
   /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
@@ -777,6 +789,16 @@ export type GoalRunDetail = GoalRun & {
     method_note?: string
     plan?: GoalRunPlan
     progress?: GoalRunProgress
+    /** Per-finding extras in RANK ORDER — the theme, the example quote and the
+     *  recommendation. Carried here rather than as columns on
+     *  `crucible_findings`, which would need a migration against the shared
+     *  Supabase. Merged into the findings positionally by the renderer, and
+     *  only when the lengths agree. */
+    findings_extra_by_rank?: {
+      label?: string
+      example?: string
+      recommendation?: { action: string; because: string }
+    }[]
   }
 }
 

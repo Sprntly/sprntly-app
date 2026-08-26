@@ -102,10 +102,36 @@ function ReportFinding({
 }) {
   return (
     <li className="ga-doc-finding" data-testid="goal-finding">
+      {/* THE THEME IS THE HEADING. It used to be the whole sentence — "30
+          claims across 11 accounts concern “Sales Pipeline” — for example, …"
+          — so the one word a reader scans for sat mid-clause, in quotes,
+          behind two numbers the chips on the next line repeat verbatim.
+          Heading, chips, quote: each fact once, where it is looked for.
+          FALLS BACK TO THE SENTENCE for runs stored before `label` shipped. An
+          empty heading would be a worse regression than the run-on. */}
       <div className="ga-doc-finding-head">
         <span className="ga-doc-rank" aria-hidden="true">{rank}</span>
-        <p className="ga-finding-statement">{f.statement}</p>
+        <p className="ga-finding-statement">
+          {(f.label || "").trim() || f.statement}
+        </p>
       </div>
+      {/* ── WHAT TO DO, FIRST. ────────────────────────────────────────────
+          Apurva: "this is only the issues, no suggestion on how to solve or
+          what's the exact recommendation from it". The suggestion leads and
+          its justification sits under it, so a reader who stops after two
+          lines has the actionable half.
+          ABSENT IS NORMAL: only the top findings get one, and anything that
+          quoted a figure, promised an outcome or failed the lint was dropped
+          rather than repaired. */}
+      {(f.recommendation?.action || "").trim()
+        && (f.recommendation?.because || "").trim() ? (
+        <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
+          <p><strong>Recommended.</strong> {f.recommendation!.action}</p>
+          <p className="ga-finding-rec-why">
+            <em>Why.</em> {f.recommendation!.because}
+          </p>
+        </div>
+      ) : null}
       <div className="ga-finding-meta">
         <Sized f={f} />
         {f.confidence_band ? (
@@ -125,6 +151,15 @@ function ReportFinding({
           </span>
         ) : null}
       </div>
+      {/* ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote. Only when the
+          heading is the label — with the sentence as the heading the quote is
+          already inside it, and repeating it is the duplication this pass
+          removes. */}
+      {(f.label || "").trim() && (f.example || "").trim() ? (
+        <blockquote className="ga-finding-example" data-testid="goal-finding-example">
+          “{f.example}”
+        </blockquote>
+      ) : null}
       {/* The weakest leg is the actionable half of a confidence score: it says
           what to go and find out, which a band on its own never does. */}
       {f.confidence?.weakest_leg_reason && !sharedWeakest ? (
@@ -182,7 +217,28 @@ export function GoalAnalysisReport({
   busy?: boolean
 }) {
   const plan: GoalRunPlan | undefined = run.prioritisation?.plan
-  const findings = run.findings ?? []
+  // ── THE THEME, THE QUOTE AND THE RECOMMENDATION, MERGED IN ONCE. ────────
+  //
+  // These three live in the run's own JSON rather than in columns on
+  // `crucible_findings` — adding columns means a migration against the shared
+  // Supabase, which is a production change. Mirrors `render_report_html`
+  // exactly, including the length check: the merge is POSITIONAL because the
+  // findings arrive in rank order, and attaching one finding's recommendation
+  // to another is far worse than showing none.
+  const findingsExtra = run.prioritisation?.findings_extra_by_rank
+  const findings = (() => {
+    const base = run.findings ?? []
+    if (!Array.isArray(findingsExtra) || findingsExtra.length !== base.length) {
+      return base
+    }
+    return base.map((f, i) => {
+      const x = (findingsExtra[i] ?? {}) as Record<string, unknown>
+      const kept = Object.fromEntries(
+        Object.entries(x).filter(([, v]) => Boolean(v)),
+      )
+      return { ...f, ...kept } as GoalFinding
+    })
+  })()
   const headline = findings[0]
   // THE PANEL IS A SECOND RENDERER OF THE SAME REPORT, and it is the one a
   // reader actually looks at — `report.py` renders the exported/editable

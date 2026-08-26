@@ -1057,3 +1057,133 @@ def test_one_finding_with_an_assumption_is_not_a_corpus_statement():
     html = render_report_html(_run(), findings)
     assert "same assumption" not in html
     assert html.count("seats") == 1
+
+
+# ─── The finding is a card, not a sentence ──────────────────────────────────
+
+
+def _as_meta(run: dict) -> dict:
+    """The run's existing prioritisation, so a test adding extras keeps the plan."""
+    return dict(run.get("prioritisation") or {})
+
+
+def _findings_html(html: str) -> str:
+    """Everything from the findings heading on.
+
+    The document has `<h3>` section headings of its own above this point, so a
+    test that reads "the first h3" reads the wrong one.
+    """
+    i = html.find("What the evidence says")
+    assert i != -1, "no findings section"
+    return html[i:]
+
+
+def test_the_heading_is_the_theme_and_the_counts_are_not_repeated_in_it():
+    """Apurva: make the document "display data in a more beautiful manner, so
+    that the user is able to understand the wins".
+
+    The heading used to be the whole sentence — "25 claims across 2 accounts
+    concern “AI tabletop exercise generation” — for example, …" — so the one
+    word a reader scans for sat mid-clause, in quotes, behind two numbers that
+    the chips on the very next line repeat verbatim."""
+    html = render_report_html(_run(), [_finding(
+        statement='25 claims across 2 accounts concern “AI tabletop generation” — for example, “x”.',
+        label="AI tabletop generation",
+        example="Northwind tailors scenarios by role and complexity",
+    )])
+    head = _findings_html(html).split("<h3>")[1].split("</h3>")[0]
+    assert head == "1. AI tabletop generation"
+    # The counts live in the chips, once.
+    assert "claims across" not in head
+    # The quote is set as a quote rather than trailing the heading.
+    assert "<blockquote>“Northwind tailors scenarios by role and complexity”" in html
+
+
+def test_a_finding_stored_before_the_theme_existed_still_has_a_heading():
+    """Every run stored before `label` shipped has none, and an empty heading
+    would be a worse regression than the run-on it replaced."""
+    html = render_report_html(_run(), [_finding(
+        statement="9 claims across 4 accounts concern “export latency”.",
+    )])
+    head = _findings_html(html).split("<h3>")[1].split("</h3>")[0]
+    assert "export latency" in head
+    # And no empty quote block appears for it.
+    assert "<blockquote>“”" not in html
+
+
+def test_the_quote_is_not_shown_twice_when_the_sentence_is_the_heading():
+    """With no label the sentence IS the heading, and it already contains the
+    example — printing the quote underneath would say it twice."""
+    html = render_report_html(_run(), [_finding(
+        statement='4 claims concern “x” — for example, “the export times out”.',
+        example="the export times out",
+    )])
+    # Scoped to the findings section: the headline above legitimately restates
+    # the top finding's sentence, which is a summary, not a repetition.
+    assert _findings_html(html).count("the export times out") == 1
+
+
+# ─── The card leads with what to do ─────────────────────────────────────────
+
+
+def test_the_recommendation_leads_the_card_and_carries_its_justification():
+    """Apurva: "we should start with a recommendation on how to solve this,
+    this is only the issues, no suggestion on how to solve"."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [{
+            "label": "export latency",
+            "recommendation": {
+                "action": "Route export tickets to the rendering on-call team",
+                "because": "three accounts named export in a renewal call",
+            },
+        }],
+    }
+    html = render_report_html(run, [_finding()])
+    body = _findings_html(html)
+
+    assert "Recommended." in body
+    assert "Route export tickets to the rendering on-call team" in body
+    assert "three accounts named export in a renewal call" in body
+    # It leads: the suggestion is above the counts, not a footnote under them.
+    assert body.index("Recommended.") < body.index("medium confidence")
+
+
+def test_a_finding_with_no_recommendation_renders_exactly_as_before():
+    """Only the top findings get one, and a suggestion that failed a check was
+    dropped rather than repaired. Absent is the normal case, not an error."""
+    html = render_report_html(_run(), [_finding()])
+    body = _findings_html(html)
+    assert "Recommended." not in body
+    assert "Why." not in body
+    # And the finding is still fully rendered.
+    assert "medium confidence" in body
+
+
+def test_half_a_recommendation_is_not_rendered():
+    """An action with no justification is the thing this feature replaces."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [
+            {"recommendation": {"action": "Do the thing", "because": ""}},
+        ],
+    }
+    html = render_report_html(run, [_finding()])
+    assert "Do the thing" not in html
+
+
+def test_extras_are_ignored_when_they_do_not_line_up_with_the_findings():
+    """The merge is positional. A length mismatch means the two lists are not
+    the same sequence, and attaching one finding's recommendation to another is
+    far worse than showing none."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [
+            {"recommendation": {"action": "A", "because": "b"}},
+        ],
+    }
+    html = render_report_html(run, [_finding(), _finding(statement="second")])
+    assert "Recommended." not in html
