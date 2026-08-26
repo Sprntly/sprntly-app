@@ -227,6 +227,53 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
     return "".join(out)
 
 
+def _headline_unsized_coverage(findings: list[dict]) -> str:
+    """How much of the unsized disclosure the headline has already made.
+
+    THE HEADLINE RUNS IMMEDIATELY ABOVE THE FINDINGS LEDE, and both were
+    written to disclose the same two facts — HOW MANY findings have no size,
+    and that a missing size is not a small one. In a real report that read:
+
+        …257 of these could not be sized at all, and a missing size is not a
+        small one — so this is the largest known size, not necessarily the
+        largest thing here.
+
+        Ranked by reach — how many accounts each theme touches, and 257 of them
+        could not be sized at all. An unsized theme sorts last without being
+        small: its size is unknown, not zero.
+
+    Two paragraphs, three lines apart, making the same point twice. Feedback:
+    "poorly formatted (not human readable), lots of irrelevant information".
+
+    THREE STATES, NOT TWO, and the third is the reason this is not a boolean.
+    The headline's branches do not all say the same amount:
+
+      "full"    — a SIZED top row. It names the count AND the caveat, so the
+                  lede has nothing left to add.
+      "caveat"  — an UNSIZED top row with sized rows below it. It says "a
+                  missing size is not a small one" and NEVER NAMES THE COUNT.
+                  A boolean here suppressed the whole lede clause and silently
+                  dropped "257 of them could not be sized" from the document —
+                  de-duplication quietly turning into data loss, which is the
+                  one thing this file exists to prevent.
+      "none"    — nothing anywhere could be sized. The headline says something
+                  else entirely and the lede is the only place the fact lives.
+
+    Both callers read THIS function rather than re-deriving the branch, because
+    the pair that drifted last time drifted precisely by each computing its own
+    version of the same fact.
+    """
+    if not findings:
+        return "none"
+    if not any(f.get("impact_value") is None for f in findings):
+        return "none"
+    if findings[0].get("impact_value") is not None:
+        return "full"
+    if any(f.get("impact_value") is not None for f in findings):
+        return "caveat"
+    return "none"
+
+
 def _headline_section(findings: list[dict]) -> str:
     out = ["<h2>The short version</h2>"]
     if not findings:
@@ -389,9 +436,46 @@ def _esc_statement(finding: dict) -> str:
 
 
 
+def _assumption_key(finding: dict) -> tuple:
+    """The assumed parameters of one finding, as a comparable value."""
+    return tuple(sorted(
+        ((a.get("name") or "").strip(), (a.get("basis") or "").strip())
+        for a in _as_list(finding.get("assumed_params"))
+        if isinstance(a, dict)
+    ))
+
+
+def _shared_assumptions(findings: list[dict]) -> tuple:
+    """The assumptions EVERY finding makes, or empty if they differ.
+
+    I8 requires an assumed parameter be disclosed where the number is read.
+    It does not require it be disclosed 279 times. On a corpus with no revenue
+    data connected every finding carries the identical line —
+
+        value_per_account: no revenue data connected; accounts weighted equally
+
+    — so a real report repeated that sentence on all 279 findings. That is not
+    disclosure, it is the noise the reader has to look past to find the
+    disclosures that ARE per-finding, and it is a large part of what "lots of
+    irrelevant information" meant.
+
+    Same shape as `_shared` above, and the same rule: only a single distinct
+    value across MORE THAN ONE finding is a statement about the corpus. The
+    moment two findings assume different things they both go back on their own
+    rows, where they belong.
+    """
+    if len(findings) < 2:
+        return ()
+    keys = {_assumption_key(f) for f in findings}
+    if len(keys) != 1:
+        return ()
+    return keys.pop()
+
+
 def _finding_block(
     finding: dict, rank: int, *,
     shared_weakest: bool = False, shared_cap: bool = False,
+    shared_assumptions: bool = False,
 ) -> str:
     out = [f"<h3>{rank}. {_esc_statement(finding)}</h3>"]
 
@@ -453,6 +537,12 @@ def _finding_block(
     # block reaching 41,745 characters, almost all of it here — I8 requires the
     # assumption be DISCLOSED, not reproduced at any length.
     assumed = [a for a in _as_list(finding.get("assumed_params")) if isinstance(a, dict)]
+    # Hoisted to the top of the section when every finding says the same thing;
+    # see `_shared_assumptions`. Suppressed HERE rather than emptied upstream so
+    # the finding row itself is untouched and the two renderers cannot disagree
+    # about what a finding assumed.
+    if shared_assumptions:
+        assumed = []
     if assumed:
         shown = assumed[:MAX_ASSUMED_PARAMS]
         out.append(_ul(
@@ -576,15 +666,30 @@ def _findings_section(
         return vals.pop() if len(vals) == 1 else ""
     shared_weakest = _shared("weakest_leg_reason")
     shared_cap = _shared("cap_reason")
+    # SAID ONCE, BY WHICHEVER SECTION GETS THERE FIRST — but only the part the
+    # headline actually said; see `_headline_unsized_coverage`. When it named
+    # the caveat without the count, the count is still this paragraph's to
+    # make.
+    covered = _headline_unsized_coverage(findings)
+    if unsized and covered == "full":
+        unsized_clause = ""
+    elif unsized and covered == "caveat":
+        unsized_clause = (
+            f", and {'one' if unsized == 1 else str(unsized)} of them could "
+            f"not be sized at all"
+        )
+    elif unsized:
+        unsized_clause = (
+            f", and {'one' if unsized == 1 else str(unsized)} of them could "
+            f"not be sized at all. An unsized theme sorts last without "
+            f"being small: its size is unknown, not zero"
+        )
+    else:
+        unsized_clause = ""
     if anything_sized:
         out.append(_p(
             "Ranked by reach — how many accounts each theme touches"
-            + (
-                f", and {'one' if unsized == 1 else str(unsized)} of them could "
-                f"not be sized at all. An unsized theme sorts last without "
-                f"being small: its size is unknown, not zero"
-                if unsized else ""
-            )
+            + unsized_clause
             + ". An authoritative disagreement is placed above everything that "
               "is not one, because two sources that may both speak "
               "contradicting each other is worth more than either of them "
@@ -634,12 +739,28 @@ def _findings_section(
             + _esc(shared_cap) + "."
         ))
 
+    shared_assumptions = _shared_assumptions(findings)
+    if shared_assumptions:
+        out.append(_p(
+            "<strong>Every finding below rests on the same assumption</strong>"
+            + ("s" if len(shared_assumptions) > 1 else "")
+            + ", so "
+            + ("they are" if len(shared_assumptions) > 1 else "it is")
+            + " stated here once rather than repeated on each of them:"
+        ))
+        out.append(_ul(
+            f"<strong>{_esc_clipped(name, MAX_PARAM_NAME_CHARS)}</strong>"
+            f": {_esc_clipped(basis, MAX_PARAM_BASIS_CHARS)}"
+            for name, basis in shared_assumptions[:MAX_ASSUMED_PARAMS]
+        ))
+
     full = findings[:full_cap]
     rest = findings[full_cap:]
     out.extend(
         _finding_block(
             f, i + 1,
             shared_weakest=bool(shared_weakest), shared_cap=bool(shared_cap),
+            shared_assumptions=bool(shared_assumptions),
         )
         for i, f in enumerate(full)
     )

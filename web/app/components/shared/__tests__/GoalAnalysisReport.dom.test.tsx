@@ -238,11 +238,33 @@ describe("what the ordering is allowed to claim", () => {
     expect(lede).not.toMatch(/same confidence band/i)
   })
 
-  it("says how many it could not size when the ranking is partial", () => {
+  it("says how many it could not size, once, when the ranking is partial", () => {
+    // THE DISCLOSURE MOVED, IT DID NOT GO. The headline and this lede both
+    // carried the count and the caveat, three lines apart, and a real report
+    // read "…257 of these could not be sized at all, and a missing size is not
+    // a small one" immediately above "…and 257 of them could not be sized at
+    // all. An unsized theme sorts last without being small". With a SIZED top
+    // row the headline says both, so the lede says neither.
     render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
+    const head = screen.getByTestId("goal-headline").textContent ?? ""
     const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-    expect(lede).toMatch(/one of them could not be sized at all/i)
-    expect(lede).toMatch(/its size is unknown, not zero/i)
+
+    expect(head).toMatch(/one of these could not be sized at all/i)
+    expect(head).toMatch(/is not a small one/i)
+    expect(lede).not.toMatch(/could not be sized at all/i)
+    expect(lede).not.toMatch(/its size is unknown, not zero/i)
+  })
+
+  it("still names the count when the headline states only the caveat", () => {
+    // THE CASE A BOOLEAN GOT WRONG. With an UNSIZED top row the headline says
+    // "a missing size is not a small one" and never names how many — so
+    // suppressing the whole lede clause drops the count out of the page.
+    render(<GoalAnalysisReport
+      run={{ ...RUN, findings: [UNSIZED, { ...UNSIZED, id: 99 }, SIZED] }} />)
+    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
+    expect(lede).toMatch(/2 of them could not be sized at all/i)
+    // And does not repeat the caveat the headline just made.
+    expect(lede).not.toMatch(/its size is unknown, not zero/i)
   })
 })
 
@@ -663,5 +685,45 @@ describe("a run where nothing survived", () => {
     // And no headline size is invented for a finding that does not exist.
     expect(screen.queryByTestId("goal-headline-sized")).toBeNull()
     expect(screen.queryByTestId("goal-headline-unsized")).toBeNull()
+  })
+})
+
+describe("an assumption every finding makes is stated once", () => {
+  // "lots of irrelevant information". On a corpus with no revenue connected
+  // every finding carries the identical "value_per_account: no revenue data
+  // connected; accounts weighted equally" — a real report printed it on all
+  // 279. That is not disclosure, it is what the reader has to look past to
+  // find the assumptions that ARE per-finding.
+  it("hoists it out of the findings and states it once", () => {
+    render(<GoalAnalysisReport
+      run={{ ...RUN, findings: [SIZED, { ...SIZED, id: 2, statement: "b" }] }} />)
+    const page = document.body.textContent ?? ""
+    expect(screen.getByTestId("goal-shared-assumptions")).toBeTruthy()
+    // Stated — not lost.
+    expect(page).toContain("value_per_account")
+    // Once.
+    expect(page.split("value_per_account").length - 1).toBe(1)
+  })
+
+  it("leaves assumptions that differ on their own findings", () => {
+    // The moment two findings assume different things the hoist is wrong: it
+    // would attribute one finding's assumption to every other.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [
+      SIZED,
+      { ...SIZED, id: 2, statement: "b",
+        assumed_params: [{ name: "value_per_account", basis: "cohort median" }] },
+    ] }} />)
+    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
+    const page = document.body.textContent ?? ""
+    expect(page).toContain("no revenue data connected")
+    expect(page).toContain("cohort median")
+  })
+
+  it("leaves a lone finding's assumption on itself", () => {
+    // Hoisting out of one finding moves the disclosure away from the number it
+    // qualifies, for no saving at all.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
+    expect(document.body.textContent).toContain("no revenue data connected")
   })
 })
