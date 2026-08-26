@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest"
 import { planNarrative } from "../goalPlanNarrative"
 
+/** Every step as one string — text plus any nested items. The steps carry
+ *  structure now, and most of these assertions are about WORDS rather than
+ *  about where the words sit. */
+const flat = (steps: ReturnType<typeof planNarrative>): string[] =>
+  steps.map((s) => [s.text, ...(s.items ?? [])].join(" "))
+
 const src = (source_type: string, label: string, signal_count: number) =>
   ({ source_type, label, signal_count, witnesses: "what people said" }) as never
 
@@ -22,7 +28,7 @@ const PLAN = {
 
 describe("the plan reads as an approach, not a form", () => {
   it("names the sources a reader would recognise, with the total", () => {
-    const steps = planNarrative(PLAN, new Set())
+    const steps = flat(planNarrative(PLAN, new Set()))
     expect(steps[0]).toContain("customer calls")
     expect(steps[0]).toContain("the tracker")
     expect(steps[0]).toContain("product analytics")
@@ -34,7 +40,7 @@ describe("the plan reads as an approach, not a form", () => {
     // THE WHOLE POINT OF PUTTING IT ABOVE THE CHECKBOXES. A narrative that
     // kept describing analytics after the reader unticked analytics would be
     // the most confidently wrong sentence on the card.
-    const steps = planNarrative(PLAN, new Set(["analytics"]))
+    const steps = flat(planNarrative(PLAN, new Set(["analytics"])))
     expect(steps[0]).not.toContain("product analytics")
     expect(steps[0]).toContain("customer calls")
     expect(steps[0]).toContain("500")      // 412 + 88
@@ -42,7 +48,7 @@ describe("the plan reads as an approach, not a form", () => {
   })
 
   it("says so plainly when everything is unticked", () => {
-    const steps = planNarrative(PLAN, new Set(["customer_voice", "project_mgmt", "analytics"]))
+    const steps = flat(planNarrative(PLAN, new Set(["customer_voice", "project_mgmt", "analytics"])))
     expect(steps[0]).toMatch(/read nothing/i)
   })
 
@@ -52,7 +58,7 @@ describe("the plan reads as an approach, not a form", () => {
     // cannot know what the findings are worth, and a figure quoted here would
     // be invention wearing the clothes of a promise. The size of the prize is
     // the report's to state, from evidence, afterwards.
-    const all = planNarrative(PLAN, new Set()).join(" ")
+    const all = flat(planNarrative(PLAN, new Set())).join(" ")
     expect(all).not.toMatch(/[$£€]\s?\d/)
     expect(all).not.toMatch(/\bARR\b(?!\s*closed)/)
     expect(all).not.toMatch(/\b\d+\s?%/)
@@ -63,47 +69,49 @@ describe("the plan reads as an approach, not a form", () => {
     // A reader who does not know the corroboration rules reads a short report
     // as a thin one. Saying them up front is what buys the short report its
     // credibility.
-    const steps = planNarrative(PLAN, new Set()).join(" ")
+    const steps = flat(planNarrative(PLAN, new Set())).join(" ")
     expect(steps).toMatch(/one account/i)
     expect(steps).toMatch(/one voice/i)
     expect(steps).toMatch(/not in a position to know/i)
   })
 
   it("measures against the adopted definition, and stays silent without one", () => {
-    expect(planNarrative({ ...PLAN, definition_adopted: true }, new Set()).join(" "))
+    expect(flat(planNarrative({ ...PLAN, definition_adopted: true }, new Set())).join(" "))
       .toContain("revenue means new ARR closed this quarter")
     // I9: a definition is adopted or elicited, never inferred. No definition,
     // no step claiming one.
-    const undefinedDef = planNarrative({ ...PLAN, definition_text: "  " }, new Set())
+    const undefinedDef = flat(planNarrative({ ...PLAN, definition_text: "  " }, new Set()))
     expect(undefinedDef.join(" ")).not.toMatch(/your own definition/i)
   })
 
   it("takes the deliverables from the planner rather than writing its own", () => {
-    const steps = planNarrative(PLAN, new Set()).join(" ")
+    const steps = flat(planNarrative(PLAN, new Set())).join(" ")
     expect(steps).toContain("ranked list of what is blocking this")
-    expect(steps).toContain("the evidence behind each one")
+    // VERBATIM, capital and all: several promises render as a LIST, and a list
+    // item is not a clause inside someone else's sentence.
+    expect(steps).toContain("The evidence behind each one")
     // Swap what the planner promised and the narrative must follow it.
-    const other = planNarrative(
+    const other = flat(planNarrative(
       { ...PLAN, will_produce: ["A one-line answer and nothing else"] }, new Set(),
-    ).join(" ")
+    )).join(" ")
     expect(other).toContain("one-line answer and nothing else")
     expect(other).not.toContain("ranked list")
   })
 
   it("counts the declared gaps and puts them last, as part of the approach", () => {
-    const steps = planNarrative(PLAN, new Set())
+    const steps = flat(planNarrative(PLAN, new Set()))
     const last = steps[steps.length - 1]
     expect(last).toMatch(/1 question is/)
     expect(last).toMatch(/cannot settle/i)
-    const two = planNarrative(
+    const two = flat(planNarrative(
       { ...PLAN, cannot_answer: [...PLAN.cannot_answer, { question: "q", because: "b", remedy: "r" }] },
       new Set(),
-    )
+    ))
     expect(two[two.length - 1]).toMatch(/2 questions are/)
   })
 
   it("leaves an acronym's capitals alone when folding a promise into a sentence", () => {
-    const steps = planNarrative({ ...PLAN, will_produce: ["ARR at risk, by account"] }, new Set())
+    const steps = flat(planNarrative({ ...PLAN, will_produce: ["ARR at risk, by account"] }, new Set()))
     expect(steps.join(" ")).toContain("ARR at risk")
   })
   it("points at an unsettled definition instead of printing it twice", () => {
@@ -111,8 +119,41 @@ describe("the plan reads as an approach, not a form", () => {
     // lines below the narrative. Quoting it here put the same sentence on the
     // card twice — the repetition the feedback asked us to cut, reintroduced
     // by the fix for the rest of it.
-    const steps = planNarrative(PLAN, new Set()).join(" ")
+    const steps = flat(planNarrative(PLAN, new Set())).join(" ")
     expect(steps).not.toContain("revenue means new ARR closed this quarter")
     expect(steps).toMatch(/confirm below/i)
+  })
+
+  it("keeps several promises as a list rather than one run-on sentence", () => {
+    // MEASURED ON A LIVE RUN. `will_produce` is short noun phrases in every
+    // fixture here and full sentences in production — five of them, joined
+    // with commas and an "and", made ONE 487-character step sitting between
+    // four others of 87 to 173. An unreadable paragraph in the middle of the
+    // thing whose whole purpose is being readable.
+    const real = {
+      ...PLAN,
+      will_produce: [
+        "Themes ranked by how much of your book they touch, each with the source documents it rests on",
+        "A considered-and-dropped list, with the reason each candidate died",
+        "Every degradation disclosed beside the findings it affects",
+        "Sizes stated in reach — how many accounts a theme touches, not how many points it will move the metric",
+        "Your revenue data is connected and will be read as evidence, but it cannot yet be turned into a point estimate — that is the next thing being built",
+      ],
+    }
+    const steps = planNarrative(real, new Set())
+    const give = steps.find((s) => s.text.startsWith("Give you"))!
+    expect(give.items).toHaveLength(5)
+    // The step's own sentence stays short; the promises hang under it.
+    expect(give.text.length).toBeLessThan(40)
+    for (const s of steps) expect(s.text.length).toBeLessThan(250)
+    // And each promise survives verbatim — nothing is summarised away.
+    expect(give.items).toContain(real.will_produce[4])
+  })
+
+  it("keeps a lone promise inline, where a list of one would be noise", () => {
+    const steps = planNarrative({ ...PLAN, will_produce: ["A ranked list"] }, new Set())
+    const give = steps.find((s) => s.text.startsWith("Give you"))!
+    expect(give.items).toBeUndefined()
+    expect(give.text).toBe("Give you a ranked list.")
   })
 })

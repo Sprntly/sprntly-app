@@ -1013,3 +1013,47 @@ def test_the_unsized_fact_survives_when_the_headline_cannot_carry_it():
     assert "Nothing in this reading could be sized" in html
     assert "nothing here could be sized" in html
     assert html.count("Could not be sized") == 2
+
+
+def test_the_hoist_fires_when_only_the_sized_findings_carry_an_assumption():
+    """THE SHAPE REAL DATA ACTUALLY HAS, and the reason the first version of
+    this never fired.
+
+    Asking whether EVERY finding carried the identical set sounded right and
+    was useless: a live run had 326 findings of which 30 were sized and carried
+    `value_per_account`, and 296 were unsized and carried nothing. An unsized
+    finding has no size to qualify, so it has no assumption — that is not
+    disagreement, and counting it as disagreement left the line repeated 30
+    times on the page written to de-duplicate it."""
+    sized = [_finding(statement=f"sized {i}", impact_value=3,
+                      assumed_params=[{"name": "value_per_account",
+                                       "basis": "no revenue data connected"}])
+             for i in range(4)]
+    unsized = [_finding(statement=f"unsized {i}", impact_value=None,
+                        assumed_params=[])
+               for i in range(9)]
+    html = render_report_html(_run(), sized + unsized)
+
+    assert html.count("value_per_account") == 1
+    # AND SAYS HOW MANY IT SPEAKS FOR. "Every finding below" is false here.
+    assert "4 of the findings below rest on the same assumption" in html
+    assert "Every finding below rests on the same assumption" not in html
+
+
+def test_it_still_says_every_when_it_really_is_every():
+    findings = [_finding(statement=f"f{i}") for i in range(3)]
+    html = render_report_html(_run(), findings)
+    assert "Every finding below rests on the same assumption" in html
+
+
+def test_one_finding_with_an_assumption_is_not_a_corpus_statement():
+    """A single carrier is not a pattern, and hoisting moves its disclosure
+    away from the number it qualifies for no saving at all."""
+    findings = [
+        _finding(statement="a", assumed_params=[{"name": "seats", "basis": "median"}]),
+        _finding(statement="b", assumed_params=[]),
+        _finding(statement="c", assumed_params=[]),
+    ]
+    html = render_report_html(_run(), findings)
+    assert "same assumption" not in html
+    assert html.count("seats") == 1

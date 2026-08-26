@@ -726,4 +726,31 @@ describe("an assumption every finding makes is stated once", () => {
     expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
     expect(document.body.textContent).toContain("no revenue data connected")
   })
+
+  it("fires when only the sized findings carry an assumption", () => {
+    // THE SHAPE REAL DATA HAS. A live run had 326 findings — 30 sized and
+    // carrying value_per_account, 296 unsized and carrying nothing. Asking
+    // whether EVERY finding matched never fired, so the line stayed repeated
+    // 30 times on the page written to de-duplicate it.
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [
+      SIZED,
+      { ...SIZED, id: 2, statement: "s2" },
+      { ...UNSIZED, id: 3, statement: "u1", assumed_params: [] },
+      { ...UNSIZED, id: 4, statement: "u2", assumed_params: [] },
+    ] }} />)
+    const page = document.body.textContent ?? ""
+    expect(page.split("value_per_account").length - 1).toBe(1)
+    // And says how many it speaks for, rather than claiming all of them.
+    expect(page).toContain("2 of the findings below rest on the same assumption")
+    expect(page).not.toContain("Every finding below rests on the same assumption")
+  })
+
+  it("does not hoist a single carrier", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [
+      SIZED,
+      { ...UNSIZED, id: 3, statement: "u1", assumed_params: [] },
+    ] }} />)
+    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
+    expect(document.body.textContent).toContain("no revenue data connected")
+  })
 })

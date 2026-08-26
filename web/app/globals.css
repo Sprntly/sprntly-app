@@ -25031,6 +25031,12 @@
   display: flex; flex-direction: column; gap: 6px;
 }
 .ga-plan-steps li { line-height: 1.55; }
+.ga-plan-step-items {
+  margin: 4px 0 0; padding-left: 1.1em;
+  display: flex; flex-direction: column; gap: 3px;
+  list-style: disc;
+}
+.ga-plan-step-items li { line-height: 1.5; opacity: 0.9; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated
