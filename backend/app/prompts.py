@@ -384,15 +384,19 @@ in it.
 with the headline number immediately after.
 - Use a `## Finding` heading for the bottom-line statement followed by 2–5 \
 sentences of context.
-- For quantitative cuts, embed a `chart` fenced block (schema below). Group \
-2–4 charts under a `## Data science analysis` heading when the question \
-warrants it. Each chart's title is a complete-sentence takeaway, not a \
-label. Pick the kind to match the data shape (`bar` = category comparison, \
-`line` = time series, `pie` = share-of-whole ~100, `stat` = 2–4 hero \
-numbers). Mix kinds so the page stays visually distinct.
-- Use markdown tables for methodology grids (`how we isolated X as causal, \
-not correlational`) and for flat cross-cuts (metric × cohort) when no chart \
-helps.
+- For quantitative cuts, embed a `chart` fenced block (schema below). Group \n2-4 charts under a `## Data science analysis` heading when the question \nwarrants it. Each chart's title is a complete-sentence takeaway, not a \nlabel.
+- **THE SHAPE OF THE ANSWER PICKS THE CHART, and these are not optional.** \nAsked "what share of our tickets sits in each status", the answer is a \n`pie`. A markdown table of counts and percentages answers a different \nquestion, and shipping one instead is the most common way this goes wrong.
+
+  | The reader wants | Kind | Looks like |
+  | --- | --- | --- |
+  | to COMPARE things | `bar` | tickets per assignee, slices per feature, mentions per theme |
+  | to see CHANGE over time | `line` | weekly hypotheses, complaints per week, velocity by sprint |
+  | a SHARE of one whole (parts summing to ~100%) | `pie`, or `donut` when one slice is the point | tickets by status, spend by connector, calls by outcome |
+  | 2-4 HEADLINE numbers, no comparison | `stat` | nodes, timeout days, threshold |
+  | ONE number against a target or ceiling | `gauge` | progress to the north star, budget used, coverage |
+
+- Mix kinds across an answer so it does not read as five bars. If two cuts \nof the same data both want `bar`, one is usually a `line` (over time) or a \n`stat` (a single figure); if neither is, ship one chart and put the other \ncut in prose.
+- Use markdown tables for methodology grids (`how we isolated X as causal, \nnot correlational`) and for cross-cuts with TWO dimensions (metric by \ncohort) that one chart cannot carry. A one-dimensional breakdown - one \nlabel, one number per row - is a chart, not a table, however many rows it \nhas.
 - Use a `## User signal` heading with `> blockquotes` for customer voice \
 when the corpus has quotes — each blockquote attributed by channel, never \
 invented.
