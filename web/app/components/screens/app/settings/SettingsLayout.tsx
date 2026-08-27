@@ -53,61 +53,101 @@ export type SettingsNavGroup = {
  * Grouped Settings nav per sprntly_Design-3 (2026-06-01 reset).
  * The order of groups and items here is the order they render.
  */
+/**
+ * THE NAV LISTS PANES; THE URL STILL NAMES LEAVES.
+ *
+ * Fifteen rows was a list you read rather than scanned, and the two worst
+ * offenders were Workspace (six) and Account (three) — rows that are each
+ * visited rarely and never together, which is exactly what a pane nav is for
+ * (`SettingsPaneNav`, lifted from the billing branch, where six stacked cards
+ * had the same problem).
+ *
+ * So a row like "Company" owns four `?section=` values and shows them as a
+ * nav beside its card. Critically it does NOT replace them: every id below is
+ * still a real section, still a working `/settings?section=` link, and still
+ * what `app_map.py` hands a customer who asks where to connect Jira. Six
+ * places in this app deep-link to `?section=connectors` and `?section=team`
+ * alone; a consolidation that broke those would be a worse nav than the long
+ * one.
+ *
+ * A row's `id` is its FIRST leaf, so clicking it lands on a URL that already
+ * existed and the row highlights for any leaf it owns (see `paneFor`).
+ */
+export const SETTINGS_PANES: { id: SettingsSectionId; label: string; leaves: SettingsSectionId[] }[] = [
+  { id: "profile", label: "Profile", leaves: ["profile", "comms-brief"] },
+  // What Sprntly KNOWS about the business — everything it reads before it
+  // writes a document.
+  {
+    id: "product-category",
+    label: "Company",
+    leaves: ["product-category", "company-profile", "business-context", "metrics"],
+  },
+  // How the team WORKS — who is in it, and how it decides.
+  { id: "team", label: "Team & process", leaves: ["team", "process"] },
+  { id: "connectors", label: "Integrations", leaves: ["connectors", "mcp"] },
+  { id: "billing", label: "Account", leaves: ["billing", "security", "admin"] },
+]
+
+/** The pane a `?section=` value belongs to, or null for one that stands alone
+ *  (Workspaces, Templates, Skills — single-view rows with no siblings). */
+export function paneFor(section: SettingsSectionId) {
+  return SETTINGS_PANES.find((p) => p.leaves.includes(section)) ?? null
+}
+
+/** The label a leaf shows INSIDE its pane's nav. The row label is the pane's
+ *  ("Company"); this is the view's own ("Product & Category"). */
+export const LEAF_LABELS: Record<string, string> = {
+  profile: "Profile",
+  "comms-brief": "Comms & Brief",
+  "product-category": "Product & Category",
+  "company-profile": "Company Profile",
+  "business-context": "Business Context",
+  metrics: "Metrics",
+  team: "Team & roles",
+  process: "Process & Planning",
+  connectors: "Connectors",
+  mcp: "MCP Access",
+  billing: "Billing",
+  security: "Security",
+  admin: "Admin",
+}
+
 export const SETTINGS_NAV: SettingsNavGroup[] = [
   {
     groupLabel: "You",
     items: [
       { id: "profile", label: "Profile", available: true },
-      // Comms & Brief also owns the workspace-level Top Insights filter (which
-      // insight types the brief surfaces) alongside delivery cadence.
-      { id: "comms-brief", label: "Comms & Brief", available: true },
-      // Multi-workspace (2026-07): manage the real workspaces rows.
+      // A container switcher, not a setting — it keeps its own row.
       { id: "workspaces", label: "Workspaces", available: true },
     ],
   },
   {
     groupLabel: "Workspace",
     items: [
-      { id: "product-category", label: "Product & Category", available: true },
-      // Registration-spec (2026-07) panes: the blue/settings-only company
-      // fields (mission, ICP, tone & voice…) and process choices.
-      { id: "company-profile", label: "Company Profile", available: true },
-      { id: "process", label: "Process & Planning", available: true },
-      // Onboarding v6: the metrics + definitions picked in the wizard's
-      // metrics step / define-metrics sub-flow, editable post-onboarding.
-      { id: "metrics", label: "Metrics", available: true },
-      { id: "business-context", label: "Business Context", available: true },
-      { id: "team", label: "Team & roles", available: true },
+      { id: "product-category", label: "Company", available: true },
+      { id: "team", label: "Team & process", available: true },
     ],
   },
   {
     groupLabel: "How Sprntly writes",
     items: [
-      // Panes, not doors. Both screens render embedded (no AppLayout of their
-      // own), so the settings nav stays on screen exactly as it does for
-      // Profile or Connectors. Their standalone routes still work — the
-      // command palette reaches them.
+      // Full screens rendered embedded, each with its own top bar — behind a
+      // shared pane nav they would stack two levels of chrome in one pane.
       { id: "templates", label: "Templates", available: true },
       { id: "skills", label: "Skills", available: true },
     ],
   },
   {
     groupLabel: "Data & Integrations",
-    items: [
-      { id: "connectors", label: "Connectors", available: true },
-      { id: "mcp", label: "MCP Access", available: true },
-    ],
+    items: [{ id: "connectors", label: "Integrations", available: true }],
   },
+  // NO Help GROUP HERE. Guide moves into Settings on
+  // feat/nav/bottom-rail-icons (PR #1375), which is still open; adding it here
+  // too would be inventing an id this branch's union does not have. Whichever
+  // lands second merges the two lists.
   {
     groupLabel: "Account",
-    items: [
-      { id: "billing", label: "Billing", available: true },
-      { id: "security", label: "Security", available: true },
-      // Owner/admin-only pane; the pane itself gates non-admins (the backend
-      // enforces the 403). Shown to all so admins can find it without a
-      // separate role fetch in the nav.
-      { id: "admin", label: "Admin", available: true },
-    ],
+    items: [{ id: "billing", label: "Account", available: true }],
   },
 ]
 
@@ -236,6 +276,77 @@ export function SettingsMessage({
   return (
     <div className={`settings-msg settings-msg-${kind}`} role="alert">
       {children}
+    </div>
+  )
+}
+
+export type SettingsPaneNavItem = {
+  id: string
+  label: string
+  /** Optional right-aligned value — a balance, a count. Keep it short. */
+  hint?: string
+}
+
+/**
+ * Split a settings pane into one visible card plus a nav beside it.
+ *
+ * The problem it solves: a pane like Billing had six stacked cards, so the
+ * whole surface was a long scroll and nothing was findable. Showing one card
+ * at a time and listing the rest turns "scroll until you see it" into "read
+ * the list, click the thing".
+ *
+ * NAVIGATION, NOT TABS — deliberately. These are separate views of one
+ * subject, the way a sidebar switches sections, so it is a `<nav>` with
+ * `aria-current`. Tab semantics would promise arrow-key traversal and a
+ * roving tabindex that this is not, and claiming a widget contract you do not
+ * honour is worse for a screen-reader user than plain links.
+ *
+ * CONTROLLED, and holds no router state, so a pane can drive it from
+ * `useState` (the common case), from a query param, or from anything else.
+ * Billing uses local state on purpose: Stripe returns the browser to the pane
+ * after checkout, and landing back on the overview — where the new plan and
+ * balance are — is the right destination, not wherever you were before.
+ */
+export function SettingsPaneNav({
+  items,
+  active,
+  onSelect,
+  label,
+  children,
+}: {
+  items: SettingsPaneNavItem[]
+  active: string
+  onSelect: (id: string) => void
+  /** Names the nav for assistive tech, e.g. "Billing sections". */
+  label: string
+  children: ReactNode
+}) {
+  return (
+    // The shell exists to be a container-query context: this is a shared
+    // primitive, so it adapts to the width it is actually given rather than to
+    // the viewport (the settings sidebar takes 228px of it, and a future pane
+    // may be narrower still).
+    <div className="setpane-shell">
+    <div className="setpane-split">
+      <div className="setpane-main">{children}</div>
+      <nav className="setpane-nav" aria-label={label}>
+        {items.map((item) => {
+          const on = item.id === active
+          return (
+            <button
+              key={item.id}
+              type="button"
+              className={`setpane-nav-item${on ? " active" : ""}`}
+              aria-current={on ? "page" : undefined}
+              onClick={() => onSelect(item.id)}
+            >
+              <span className="setpane-nav-label">{item.label}</span>
+              {item.hint && <span className="setpane-nav-hint">{item.hint}</span>}
+            </button>
+          )
+        })}
+      </nav>
+    </div>
     </div>
   )
 }
