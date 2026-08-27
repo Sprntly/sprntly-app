@@ -587,9 +587,9 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "content while keeping a real fact in the same transcript). "
         "Deterministic backstop: the unmarked facade-fixture tests in the "
         "same file (13-category kind mapping, grounding gate incl. the "
-        "reformatted-quote fix, source_call_id stamping, gated rollout, "
-        "runner wiring for both Fireflies' digest split and Zoom/Meet's "
-        "Haiku condensation) run in the fast lane on every PR."
+        "reformatted-quote fix, source_call_id stamping, runner wiring for "
+        "both Fireflies' digest split and Zoom/Meet's Haiku condensation) "
+        "run in the fast lane on every PR."
     ),
 }
 
