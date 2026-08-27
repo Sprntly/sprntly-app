@@ -197,8 +197,8 @@ def test_deep_transcript_fact_beyond_4000_chars_is_retained_in_checklist_text():
     """The failure mode from live verify: a fact stated deep in a long call —
     well past the old 4000-char head window, near the tail — must now appear
     in `RawRecord.checklist_text` (the directed-checklist pass's input).
-    Feed-full replaces head-truncation, so a USANA-scale call (the real one
-    is ~74k chars) keeps its deep asks."""
+    Feed-full replaces head-truncation, so a real long-briefing-scale call
+    (a real one is ~74k chars) keeps its deep asks."""
     # ~1000 filler sentences (~26k chars) push the real fact far past 4000.
     filler = [{"speaker_name": "Rep", "text": "Thanks, that all makes sense to me."}
               for _ in range(1000)]

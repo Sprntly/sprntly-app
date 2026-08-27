@@ -219,14 +219,14 @@ def test_quote_grounded_accepts_a_real_speaker_prefix_dropped_multi_sentence_quo
     speaker prefix dropped and the sentences joined by a space instead of a
     newline — the natural way a model quotes a contiguous remark."""
     source = (
-        "Carter Hayes: The base subscription comes with 50 seats and that's "
-        "thirty thousand dollars a year for fifty users.\n"
-        "Carter Hayes: As you go up in user count the price per seat goes "
+        "Jordan Lee: The base subscription comes with 75 seats and that's "
+        "forty-five thousand dollars a year for ninety users.\n"
+        "Jordan Lee: As you go up in user count the price per seat goes "
         "down significantly."
     )
     quote = (
-        "The base subscription comes with 50 seats and that's thirty "
-        "thousand dollars a year for fifty users. As you go up in user "
+        "The base subscription comes with 75 seats and that's thirty "
+        "thousand dollars a year for ninety users. As you go up in user "
         "count the price per seat goes down significantly."
     )
     assert ex._quote_is_grounded(quote, source) is True
@@ -239,10 +239,10 @@ def test_quote_grounded_accepts_reformatting_via_the_word_run_fallback():
     consecutive verbatim source words — the word-run fallback, not the
     flattened-substring check, is what saves this one."""
     source = (
-        "Carter Hayes: Well, the base plan is fifty seats.\n"
-        "Carter Hayes: And moving up from there the price drops."
+        "Jordan Lee: Well, the base plan is ninety seats.\n"
+        "Jordan Lee: And moving up from there the price drops."
     )
-    quote = "the base plan is fifty seats and moving up from there the price drops"
+    quote = "the base plan is ninety seats and moving up from there the price drops"
     # Not a literal substring of the flattened source (still carries "Well,"
     # and mid-sentence periods) — proves this is the word-run path, not (1)/(2).
     assert quote not in ex._flatten_transcript_lines(source).lower()
@@ -254,8 +254,8 @@ def test_quote_grounded_still_rejects_a_fabricated_quote_with_unrelated_content(
     all shares no consecutive word run with the source and is rejected by
     all three checks."""
     source = (
-        "Carter Hayes: The base subscription comes with 50 seats and that's "
-        "thirty thousand dollars a year for fifty users."
+        "Jordan Lee: The base subscription comes with 75 seats and that's "
+        "forty-five thousand dollars a year for ninety users."
     )
     quote = "the customer explicitly agreed to sign a three year exclusive contract"
     assert ex._quote_is_grounded(quote, source) is False
@@ -266,11 +266,11 @@ def test_quote_grounded_still_rejects_source_words_reordered_or_scattered():
     order-sensitive, not bag-of-words. Scrambling real source words into a
     new sentence must still be rejected."""
     source = (
-        "Carter Hayes: The base subscription comes with 50 seats and that's "
-        "thirty thousand dollars a year for fifty users."
+        "Jordan Lee: The base subscription comes with 75 seats and that's "
+        "forty-five thousand dollars a year for ninety users."
     )
     # Same vocabulary as the source, shuffled into a different claim/order.
-    quote = "fifty seats a year thirty thousand dollars base users subscription"
+    quote = "ninety seats a year forty-five thousand dollars base users subscription"
     assert ex._quote_is_grounded(quote, source) is False
 
 
@@ -279,31 +279,32 @@ def test_quote_grounded_short_quote_still_requires_a_full_match():
     match in FULL — the fallback never gets MORE lenient for a short claim.
     Dropping even one word ("already") from the middle of a short quote is
     enough to fail every check, same as a wholly unrelated claim."""
-    source = "Carter Hayes: We already have SOC2 in place."
+    source = "Jordan Lee: We already have SOC2 in place."
     assert ex._quote_is_grounded("we already have SOC2 in place", source) is True
     assert ex._quote_is_grounded("we have SOC2", source) is False
 
 
 def test_checklist_pass_mints_a_signal_for_a_real_reformatted_multi_line_quote(facade):
-    """End-to-end reproduction of the live-verify symptom (USANA 0/11): a
-    real, correctly-quoted multi-sentence checklist answer must actually
-    mint a signal now, not just pass the isolated grounding helper."""
+    """End-to-end reproduction of the live-verify symptom (a production
+    tenant minting ~0/11 checklist categories): a real, correctly-quoted
+    multi-sentence checklist answer must actually mint a signal now, not
+    just pass the isolated grounding helper."""
     source = (
-        "Carter Hayes: The base subscription comes with 50 seats and that's "
-        "thirty thousand dollars a year for fifty users.\n"
-        "Carter Hayes: As you go up in user count the price per seat goes "
+        "Jordan Lee: The base subscription comes with 75 seats and that's "
+        "forty-five thousand dollars a year for ninety users.\n"
+        "Jordan Lee: As you go up in user count the price per seat goes "
         "down significantly."
     )
     quote = (
-        "The base subscription comes with 50 seats and that's thirty "
-        "thousand dollars a year for fifty users. As you go up in user "
+        "The base subscription comes with 75 seats and that's thirty "
+        "thousand dollars a year for ninety users. As you go up in user "
         "count the price per seat goes down significantly."
     )
-    entries = [_entry("commercial", content="base plan is $30k/yr for 50 seats",
+    entries = [_entry("commercial", content="base plan is $45k/yr for 75 seats",
                        quote=quote)]
     result = _run_checklist(facade, entries, source)
     assert result["signals"] == 1
-    sig = _csig(facade, "base plan is $30k/yr for 50 seats")
+    sig = _csig(facade, "base plan is $45k/yr for 75 seats")
     assert sig is not None
     assert sig.kind == "commercial_term"
 
@@ -312,8 +313,8 @@ def test_checklist_pass_still_drops_a_fabricated_quote_end_to_end(facade):
     """Same end-to-end path, but a fabricated quote must still be dropped —
     the fix must not have widened the gate for content that was never said."""
     source = (
-        "Carter Hayes: The base subscription comes with 50 seats and that's "
-        "thirty thousand dollars a year for fifty users."
+        "Jordan Lee: The base subscription comes with 75 seats and that's "
+        "forty-five thousand dollars a year for ninety users."
     )
     entries = [_entry(
         "commercial", content="customer agreed to a 3-year exclusive deal",
@@ -341,20 +342,20 @@ def test_new_categories_mint_signals_with_the_grounding_contract(facade):
     """The two new categories go through the exact same grounded-write path
     as the original 11 — no special-casing."""
     entries = [
-        _entry("customer_environment", content="China plant runs on Alibaba Cloud",
-               quote="our China plant actually runs on Alibaba Cloud"),
-        _entry("partnership_commercial", content="Markel partnership drives referrals",
-               quote="the Markel partnership has been driving referrals"),
+        _entry("customer_environment", content="EU manufacturing site runs on AWS Frankfurt",
+               quote="our EU manufacturing site actually runs on AWS Frankfurt"),
+        _entry("partnership_commercial", content="Meridian Partners referral drives leads",
+               quote="the Meridian Partners referral has been driving leads"),
     ]
     text = (
-        "Rep: our China plant actually runs on Alibaba Cloud.\n"
-        "Rep: the Markel partnership has been driving referrals."
+        "Rep: our EU manufacturing site actually runs on AWS Frankfurt.\n"
+        "Rep: the Meridian Partners referral has been driving leads."
     )
     result = _run_checklist(facade, entries, text)
     assert result["signals"] == 2
-    env_sig = _csig(facade, "China plant runs on Alibaba Cloud")
+    env_sig = _csig(facade, "EU manufacturing site runs on AWS Frankfurt")
     assert env_sig is not None and env_sig.kind == "finding"
-    partner_sig = _csig(facade, "Markel partnership drives referrals")
+    partner_sig = _csig(facade, "Meridian Partners referral drives leads")
     assert partner_sig is not None and partner_sig.kind == "commercial_term"
 
 

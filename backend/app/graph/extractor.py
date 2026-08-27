@@ -552,7 +552,7 @@ _CHECKLIST_CATEGORIES: tuple[tuple[str, str, str, str, str, str, bool], ...] = (
     ("stakeholders", "Stakeholders / buying committee — who is involved in the decision",
      "finding", "stakeholders", "AFFECTS", "communication", False),
     ("customer_environment", "Customer environment — infrastructure / tech-stack / "
-     "deployment / hosting (e.g. \"China plant runs on Alibaba Cloud\")",
+     "deployment / hosting (e.g. \"our EU site runs on AWS Frankfurt\")",
      "finding", "customer environment", "AFFECTS", "customer_voice", True),
     ("partnership_commercial", "Partnerships / ecosystem / secondary commercial notes "
      "(e.g. a named reseller or ecosystem partnership)",
@@ -643,7 +643,7 @@ last quarter" is REAL — report it as discussed."""
 # space instead of a newline. That quote is genuine — but a literal substring
 # check on the raw, still-prefixed/newline-joined source rejects it on
 # FORMATTING, not on truth, which is why the checklist pass was minting
-# almost nothing in production (USANA 0/11, Agnico 2/11, TIB 1/11) despite
+# almost nothing in production across several real tenant calls despite
 # the model behaving correctly. `_flatten_transcript_lines` reproduces that
 # same, harmless transformation on the SOURCE so the grounding check compares
 # like with like.

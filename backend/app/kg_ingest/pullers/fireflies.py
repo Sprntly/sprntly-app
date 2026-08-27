@@ -78,14 +78,14 @@ _DIGEST_LIMIT = 300
 _QUOTES_PER_CALL = 60
 
 # DEFENSIVE ceiling on the in-memory extraction text — deliberately NOT a
-# head bound. A transcript-only fact can sit anywhere in the call (on the
-# real 1,064-sentence USANA briefing the deep asks land at sentence
+# head bound. A transcript-only fact can sit anywhere in the call (on a real
+# 1,064-sentence customer briefing the deep asks land at sentence
 # ~125/270/940, ~22k chars in), so a small head window silently loses them —
 # the whole point of transcript-read. Fireflies therefore feeds the FULL
 # transcript per call, and this ceiling exists ONLY to stop a pathological
 # multi-hour call from blowing the model's context window.
 #
-# Sizing: that real USANA call renders to ~74k chars (~18.5k tokens) in FULL.
+# Sizing: that real call renders to ~74k chars (~18.5k tokens) in FULL.
 # 200k chars (~50k tokens at ~4 chars/token) clears it ~2.7x — so every normal
 # long call fits entirely — while staying ~25% of claude-sonnet-4-6's ~200k
 # token context, leaving ample headroom for the (now guardrail-extended) system
@@ -281,7 +281,7 @@ def _record_from(t: dict) -> RawRecord:
         This is condensed AT THE PULLER, no summarization call needed.
       * `.checklist_text` — the digest FIRST, then the FULL speaker-
         attributed transcript (every sentence, not a head window — a
-        transcript-only fact can sit deep in the call, on the real USANA
+        transcript-only fact can sit deep in the call, on a real customer
         briefing the deep asks land ~22k chars in). This is what the
         directed-checklist pass reads; it is now the SOLE full-transcript
         reader (see `app.kg_ingest.runner`). The only cap is the defensive
