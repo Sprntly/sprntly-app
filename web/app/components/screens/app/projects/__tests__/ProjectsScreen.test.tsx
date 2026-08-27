@@ -300,12 +300,12 @@ describe("Sidebar — Projects rail entry", () => {
     vi.unstubAllEnvs()
   })
 
-  it("Projects coexists with Artifacts and Ideation; clicking it navigates to the 'projects' screen", () => {
+  it("Projects coexists with Artifacts and Backlog; clicking it navigates to the 'projects' screen", () => {
     vi.stubEnv("NEXT_PUBLIC_PROJECTS_ENABLED", "1")
     render(React.createElement(Sidebar))
     expect(screen.getByLabelText("Projects")).toBeTruthy()
     expect(screen.getByLabelText("Artifacts")).toBeTruthy()
-    expect(screen.getByLabelText("Ideation")).toBeTruthy()
+    expect(screen.getByLabelText("Backlog")).toBeTruthy()
     fireEvent.click(screen.getByLabelText("Projects"))
     expect(goTo).toHaveBeenCalledWith("projects")
   })

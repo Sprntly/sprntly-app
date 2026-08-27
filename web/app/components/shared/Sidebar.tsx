@@ -286,7 +286,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
             palette entry are all untouched. */}
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="projects" icon={<IconFolder size={18} />} label="Projects" />
-        <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
+        <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Backlog" />
         {/* NO Templates or Skills ITEMS. Both moved into Settings (see
             `SETTINGS_NAV`'s "How Sprntly writes" group): they are things a
             workspace sets up once and returns to, which is what Settings is

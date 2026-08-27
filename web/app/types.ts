@@ -112,7 +112,7 @@ const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
   sources: "Sources",
   tickets: "Project Management",
   prototype: "Prototype",
-  ideation: "Ideation",
+  ideation: "Backlog",
   templates: "Templates",
   skills: "Skills",
   projects: "Projects",

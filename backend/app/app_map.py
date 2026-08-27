@@ -50,7 +50,7 @@ NAV: list[tuple[str, str, str]] = [
      "is found — click one to open it"),
     ("Projects", "/projects",
      "the projects this user belongs to, each with its own chat and tasks"),
-    ("Ideation", "/ideation",
+    ("Backlog", "/backlog",
      "the ranked idea list — proposed ideas and completed ones; a PRD can be "
      "generated straight from an idea"),
     # BOTH MOVED INTO SETTINGS (2026-08-27) and are no longer on the left rail.
