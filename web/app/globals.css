@@ -2049,7 +2049,7 @@
 
   /* New design nav-brand accent dot. */
   .sb-rail-logo-dot {
-    color: var(--accent);
+    color: var(--nav-accent);
   }
 
   .sb-rail-expand {
@@ -2364,7 +2364,7 @@
     background: linear-gradient(
       to right,
       transparent 0,
-      var(--nav-hover-solid, #16211b) 12px
+      var(--nav-hover-solid, #3A3E40) 12px
     );
     transition: opacity 0.12s;
   }
@@ -2395,8 +2395,10 @@
 
   .sb-chat-item:hover .sb-chat-dot {
     opacity: 1;
-    background: var(--accent);
-    border-color: var(--accent);
+    /* The RAIL's accent. The page accent is black, and a black dot on a black
+       rail is the same invisible-button bug the New chat pill had. */
+    background: var(--nav-accent);
+    border-color: var(--nav-accent);
   }
 
   .sb-chats-all {
@@ -2471,12 +2473,12 @@
     left: 2px;
     width: 2px;
     height: 100%;
-    background: var(--accent);
+    background: var(--nav-accent);
     opacity: 0.85;
   }
 
   body.is-sidebar-resizing .sb-resizer-grip {
-    background: var(--accent);
+    background: var(--nav-accent);
     opacity: 1;
   }
 

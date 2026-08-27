@@ -75,6 +75,17 @@ describe("the brand's own pairs", () => {
     expect(contrast(token("nav-accent-ink"), token("nav-accent"))).toBeGreaterThanOrEqual(4.5)
   })
 
+  it("nothing on the rail is painted with the PAGE accent", () => {
+    // The nav's own CSS was written when the accent was green, which showed up
+    // fine on a dark rail. Black does not. Every accent inside the rail's
+    // block — the logo dot, the chat-row dot, the resize grip — has to be
+    // `--nav-accent`, and this is the check that a future rail feature
+    // reaching for `--accent` out of habit fails on.
+    const rail = CSS.slice(CSS.indexOf(".sb-rail-logo"), CSS.indexOf(".sb-chats-all"))
+    expect(rail).not.toMatch(/background:\s*var\(--accent\)/)
+    expect(rail).not.toMatch(/color:\s*var\(--accent\)/)
+  })
+
   it("a hover on the rail is a step you can SEE", () => {
     // "Every hover grey" only means something if the grey registers. Two
     // earlier values (#1C1F22, #2B2F32) sat 1.2:1 and 1.4:1 off the rail —
