@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useRef, useState, type ReactNode } from "react"
+import { Suspense, useCallback, useRef, useState } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import { publicPath } from "../../../lib/public-path"
 import { AppLayout } from "./AppLayout"
@@ -29,8 +29,8 @@ import {
   SETTINGS_NAV,
   SETTINGS_PANES,
   SettingsPaneBar,
-  SettingsPaneNav,
   paneFor,
+  type SettingsNavItem,
   type SettingsSectionId,
 } from "./settings/SettingsLayout"
 
@@ -96,47 +96,6 @@ function isRowActive(section: SettingsSectionId, rowId: SettingsSectionId): bool
   if (section === rowId) return true
   const pane = paneFor(rowId)
   return !!pane && pane.leaves.includes(section)
-}
-
-/**
- * The pane's sub-nav, wrapped around WHATEVER chrome that section brings.
- *
- * It sits at the shell level, not inside each pane, and that is the whole
- * point. Panes are not built alike: some own a sticky bar and their own
- * padding (`FULL_BLEED_SECTIONS`), some get the shell's `.pset` wrapper, and
- * Metrics has neither. With the nav inside them, it started wherever that
- * pane's chrome happened to leave room — top for Metrics, pushed down past a
- * sticky bar and a save button for Product & Category and Company Profile. The
- * rail is a property of the PANE GROUP, so it hangs off the group, and every
- * section under it now begins at the same line.
- *
- * A single-view row (Workspaces, Templates, Skills) renders bare — a one-item
- * nav is furniture.
- */
-function PaneShell({
-  section,
-  onSelect,
-  children,
-}: {
-  section: SettingsSectionId
-  onSelect: (id: SettingsSectionId) => void
-  children: ReactNode
-}) {
-  const pane = paneFor(section)
-  if (!pane || pane.leaves.length < 2) return <>{children}</>
-  return (
-    <SettingsPaneNav
-      label={`${pane.label} sections`}
-      active={section}
-      onSelect={(id) => onSelect(id as SettingsSectionId)}
-      items={pane.leaves.map((leaf) => ({
-        id: leaf,
-        label: LEAF_LABELS[leaf] ?? leaf,
-      }))}
-    >
-      {children}
-    </SettingsPaneNav>
-  )
 }
 
 function isKnownSectionId(value: string): value is SettingsSectionId {
@@ -305,6 +264,100 @@ function NavIcon({ id }: { id: SettingsSectionId }) {
   }
 }
 
+/**
+ * A nav row, and - when it owns a pane - the dropdown of that pane's views.
+ *
+ * The consolidation was right: fifteen flat rows was a list you read rather
+ * than scanned. Putting the survivors in a nav on the RIGHT was not. It split
+ * navigation across two edges of the screen, so reaching "MCP Access" meant
+ * picking a row on the left and then discovering a second rail on the far
+ * side you had no reason to look at. Everything you can navigate to now lives
+ * in one column, and a row opens to show it.
+ *
+ * Clicking a closed row opens it and goes to its first view. Clicking the row
+ * you are already inside only shuts the drawer - you stay where you are, so
+ * the nav can be tidied without navigating anywhere.
+ */
+function NavRow({
+  item,
+  section,
+  open,
+  onToggle,
+  onSelect,
+}: {
+  item: SettingsNavItem
+  section: SettingsSectionId
+  open: boolean
+  onToggle: (id: SettingsSectionId | null) => void
+  onSelect: (id: SettingsSectionId) => void
+}) {
+  const pane = paneFor(item.id)
+  // A row only opens for the pane it NAMES, and only when that pane holds
+  // more than one view - a one-item dropdown is furniture.
+  const leaves = pane && pane.id === item.id && pane.leaves.length > 1 ? pane.leaves : null
+  const active = isRowActive(section, item.id)
+
+  return (
+    <>
+      <button
+        type="button"
+        className={`setx-nav-item ${active ? "active" : ""} ${!item.available ? "soon" : ""}`}
+        data-testid={`settings-nav-${item.id}`}
+        aria-expanded={leaves ? open : undefined}
+        onClick={() => {
+          if (!item.available) return
+          if (!leaves) return onSelect(item.id)
+          onToggle(open ? null : item.id)
+          // Opening a row you are not in also takes you there; shutting the
+          // one you ARE in must not navigate.
+          if (!active) onSelect(item.id)
+        }}
+      >
+        <NavIcon id={item.id} />
+        <span className="setx-nav-item-label">{item.label}</span>
+        {!item.available && <span className="setx-nav-badge">Soon</span>}
+        {leaves && (
+          <svg
+            className="setx-nav-chev"
+            width="13"
+            height="13"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden
+          >
+            <path d="M6 9l6 6 6-6" />
+          </svg>
+        )}
+      </button>
+      {leaves && (
+        <div className="setx-nav-sub" data-open={open}>
+          <div className="setx-nav-sub-inner" role="group" aria-label={`${item.label} sections`}>
+            {leaves.map((leaf) => (
+              <button
+                key={leaf}
+                type="button"
+                className={`setx-nav-subitem${section === leaf ? " active" : ""}`}
+                data-testid={`settings-nav-leaf-${leaf}`}
+                aria-current={section === leaf ? "page" : undefined}
+                // A shut drawer is not in the tab order - otherwise the
+                // keyboard walks through rows nobody can see.
+                tabIndex={open ? undefined : -1}
+                onClick={() => onSelect(leaf)}
+              >
+                {LEAF_LABELS[leaf] ?? leaf}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
 function SettingsContent() {
   const searchParams = useSearchParams()
   const router = useRouter()
@@ -332,6 +385,23 @@ function SettingsContent() {
 
   function setSection(id: SettingsSectionId) {
     router.replace(`/settings?section=${id}`, { scroll: false })
+  }
+
+  // WHICH ROW IS OPEN. A pane's views live under their row in this rail now,
+  // not in a second nav on the right, so one row is expanded at a time and it
+  // defaults to the one you are inside.
+  //
+  // `section` comes from the URL, and the URL changes without remounting this
+  // component - a command-palette jump to `?section=mcp` has to open
+  // Integrations on the way in. So the open row FOLLOWS the active pane
+  // (React's documented adjust-state-during-render pattern), while still
+  // being a drawer you can shut by hand.
+  const activePaneId = paneFor(section)?.id ?? null
+  const [openId, setOpenId] = useState<SettingsSectionId | null>(activePaneId)
+  const [lastPaneId, setLastPaneId] = useState<SettingsSectionId | null>(activePaneId)
+  if (lastPaneId !== activePaneId) {
+    setLastPaneId(activePaneId)
+    setOpenId(activePaneId)
   }
 
   const handleSignOut = useCallback(async () => {
@@ -389,17 +459,14 @@ function SettingsContent() {
                     <span className="setx-nav-item-label">{item.label}</span>
                   </a>
                 ) : (
-                  <button
+                  <NavRow
                     key={item.id}
-                    type="button"
-                    className={`setx-nav-item ${isRowActive(section, item.id) ? "active" : ""} ${!item.available ? "soon" : ""}`}
-                    data-testid={`settings-nav-${item.id}`}
-                    onClick={() => item.available && setSection(item.id)}
-                  >
-                    <NavIcon id={item.id} />
-                    <span className="setx-nav-item-label">{item.label}</span>
-                    {!item.available && <span className="setx-nav-badge">Soon</span>}
-                  </button>
+                    item={item}
+                    section={section}
+                    open={openId === item.id}
+                    onToggle={setOpenId}
+                    onSelect={setSection}
+                  />
                 ))}
                 {/* Sign out rides at the foot of the Account group, per the
                     design — an action, not a section (never in SETTINGS_NAV). */}
@@ -429,25 +496,23 @@ function SettingsContent() {
             sticky title bar, plus the padded body unless the pane ships its
             own (.set-pane). Their save buttons stay inline in the cards. */}
         <div className="setx-main">
-          <PaneShell section={section} onSelect={setSection}>
-            {FULL_BLEED_SECTIONS.has(section) ? (
+          {FULL_BLEED_SECTIONS.has(section) ? (
               <SettingsPanel section={section} />
-            ) : (
-              <div className="pset">
-                <SettingsPaneBar
-                  title={paneFor(section)?.label ?? sectionLabel}
-                  meta={identityMeta}
-                />
-                {SELF_PADDED_SECTIONS.has(section) ? (
+          ) : (
+            <div className="pset">
+              <SettingsPaneBar
+                title={LEAF_LABELS[section] ?? sectionLabel}
+                meta={identityMeta}
+              />
+              {SELF_PADDED_SECTIONS.has(section) ? (
+                <SettingsPanel section={section} />
+              ) : (
+                <div className="pset-body">
                   <SettingsPanel section={section} />
-                ) : (
-                  <div className="pset-body">
-                    <SettingsPanel section={section} />
-                  </div>
-                )}
-              </div>
-            )}
-          </PaneShell>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </AppLayout>
