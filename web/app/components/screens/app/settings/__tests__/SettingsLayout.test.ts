@@ -2,10 +2,15 @@ import { readFileSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
-import { SETTINGS_NAV } from "../SettingsLayout"
+import { LEAF_LABELS, SETTINGS_NAV, SETTINGS_PANES } from "../SettingsLayout"
 
 describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
-  it("has the design-3 groups, plus the ones the left rail handed over", () => {
+  it("is a short list of panes, not a long list of settings", () => {
+    // Fifteen rows was a list you read rather than scanned. The two worst were
+    // Workspace (six) and Account (three) — rows visited rarely and never
+    // together, which is exactly what a pane nav is for. Guide arrived from
+    // the left rail in the same window, so the ceiling counts it.
+    expect(SETTINGS_NAV.flatMap((g) => g.items).length).toBeLessThanOrEqual(10)
     expect(SETTINGS_NAV.map((g) => g.groupLabel)).toEqual([
       "You",
       "Workspace",
@@ -70,59 +75,71 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     }
   })
 
-  it("You group contains Profile, Comms & Brief, and Workspaces", () => {
-    const you = SETTINGS_NAV.find((g) => g.groupLabel === "You")!
-    expect(you.items.map((i) => i.id)).toEqual([
-      "profile",
-      "comms-brief",
-      "workspaces",
-    ])
+  it("LOSES NOTHING — every setting that existed is still reachable", () => {
+    // The whole risk of a consolidation. A pane owns its leaves; a standalone
+    // row is its own. Between them they must still cover every section the
+    // flat nav had, or a setting became unreachable to anyone who did not
+    // already know its URL.
+    const BEFORE: string[] = [
+      "profile", "comms-brief", "workspaces",
+      "product-category", "company-profile", "process", "metrics",
+      "business-context", "team",
+      "templates", "skills",
+      "connectors", "mcp",
+      "billing", "security", "admin",
+    ]
+    const reachable = new Set<string>(
+      SETTINGS_NAV.flatMap((g) => g.items).flatMap((row) => {
+        const pane = SETTINGS_PANES.find((p) => p.id === row.id)
+        return pane ? pane.leaves : [row.id]
+      }),
+    )
+    expect(BEFORE.filter((id) => !reachable.has(id))).toEqual([])
   })
 
-  it("Workspace group contains Product & Category, Company Profile, Process & Planning, Metrics, Business Context, Team & roles", () => {
-    const ws = SETTINGS_NAV.find((g) => g.groupLabel === "Workspace")!
-    expect(ws.items.map((i) => i.id)).toEqual([
-      "product-category",
-      "company-profile",
-      "process",
-      "metrics",
-      "business-context",
-      "team",
-    ])
+  it("keeps every `?section=` link working — a row's id is one of its leaves", () => {
+    // Six places in this app deep-link to `?section=connectors` and
+    // `?section=team`, and app_map hands those links to customers. A row named
+    // after an id that is not a real section would land them on Profile.
+    for (const pane of SETTINGS_PANES) {
+      expect(pane.leaves, `${pane.label} has no leaves`).not.toHaveLength(0)
+      expect(pane.leaves[0], `${pane.label}'s row id is not its first leaf`).toBe(pane.id)
+    }
   })
 
-  it("Data & Integrations group contains Connectors and MCP Access", () => {
-    const dat = SETTINGS_NAV.find((g) => g.groupLabel === "Data & Integrations")!
-    expect(dat.items.map((i) => i.id)).toEqual(["connectors", "mcp"])
+  it("no section belongs to two panes", () => {
+    // `paneFor` returns the first match, so an id in two panes would resolve
+    // arbitrarily and highlight the wrong row.
+    const seen = SETTINGS_PANES.flatMap((p) => p.leaves)
+    expect(new Set(seen).size).toBe(seen.length)
   })
 
-  it("Account group contains Billing, Security, and Admin", () => {
-    const acct = SETTINGS_NAV.find((g) => g.groupLabel === "Account")!
-    expect(acct.items.map((i) => i.id)).toEqual(["billing", "security", "admin"])
+  it("names every leaf it shows in a pane nav", () => {
+    // The row label is the pane's ("Company"); the sub-nav needs the view's
+    // own ("Product & Category"). A missing one renders a raw id.
+    for (const leaf of SETTINGS_PANES.flatMap((p) => p.leaves)) {
+      expect(LEAF_LABELS[leaf], `no label for "${leaf}"`).toBeTruthy()
+    }
   })
 
-  it("uses the design-3 human labels", () => {
-    const allItems = SETTINGS_NAV.flatMap((g) => g.items)
-    const byId = Object.fromEntries(allItems.map((i) => [i.id, i.label]))
+  it("uses pane labels on the rows, and the view's own name inside", () => {
+    const byId = Object.fromEntries(
+      SETTINGS_NAV.flatMap((g) => g.items).map((i) => [i.id, i.label]),
+    )
     expect(byId).toEqual({
       profile: "Profile",
-      "comms-brief": "Comms & Brief",
-      "product-category": "Product & Category",
-      "company-profile": "Company Profile",
-      process: "Process & Planning",
-      metrics: "Metrics",
-      "business-context": "Business Context",
       workspaces: "Workspaces",
-      team: "Team & roles",
-      connectors: "Connectors",
-      mcp: "MCP Access",
-      billing: "Billing",
-      security: "Security",
-      admin: "Admin",
+      "product-category": "Company",
+      team: "Team & process",
       templates: "Templates",
       skills: "Skills",
+      connectors: "Integrations",
+      billing: "Account",
       guide: "Guide",
     })
+    // …and the leaf keeps its own name where it is actually shown.
+    expect(LEAF_LABELS["product-category"]).toBe("Product & Category")
+    expect(LEAF_LABELS.billing).toBe("Billing")
   })
 
   it("does not surface dormant ids (strategic, flags), old ids (workspace, kpi, notifications), or the removed Goals & metrics / Prototypes panes", () => {

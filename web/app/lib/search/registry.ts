@@ -1,5 +1,7 @@
 import {
+  LEAF_LABELS,
   SETTINGS_NAV,
+  SETTINGS_PANES,
   type SettingsSectionId,
 } from "../../components/screens/app/settings/SettingsLayout"
 import type { SearchItem } from "./types"
@@ -132,23 +134,56 @@ export const STATIC_PAGE_ITEMS: SearchItem[] = [
   },
 ]
 
-/** One palette item per visible settings pane, derived from SETTINGS_NAV. */
+/**
+ * One palette item per settings VIEW — every leaf, not every nav row.
+ *
+ * The nav consolidated: "Connectors" and "MCP Access" are now views inside a
+ * row called "Integrations", and "Metrics" inside one called "Company". Built
+ * from rows, this palette would have offered "Integrations" and nothing
+ * matching a search for "connectors" — so a person who knows exactly what
+ * they want would type its name and be told it does not exist. Search should
+ * reach a thing by ITS name, whatever the nav decided to call the drawer it
+ * lives in.
+ *
+ * The breadcrumb carries the pane, so a result still says where it lives:
+ * Settings › Data & Integrations › Connectors.
+ */
 export function buildSettingsItems(): SearchItem[] {
   const items: SearchItem[] = []
   for (const group of SETTINGS_NAV) {
     for (const nav of group.items) {
       if (!nav.available) continue
-      const path = `/settings?section=${nav.id}`
-      items.push({
-        id: `settings:${nav.id}`,
-        group: "settings",
-        title: nav.label,
-        breadcrumb: ["Settings", group.groupLabel],
-        url: path,
-        keywords: SETTINGS_KEYWORDS[nav.id] ?? [],
-        iconId: "settings",
-        action: { kind: "path", path },
-      })
+      // A row that opens somewhere else (Guide → the docs site) is not a
+      // `?section=`; it is searchable as itself, at its own href.
+      if (nav.href) {
+        items.push({
+          id: `settings:${nav.id}`,
+          group: "settings",
+          title: nav.label,
+          breadcrumb: ["Settings", group.groupLabel],
+          url: nav.href,
+          keywords: SETTINGS_KEYWORDS[nav.id] ?? [],
+          iconId: "settings",
+          action: { kind: "path", path: nav.href },
+        })
+        continue
+      }
+      const pane = SETTINGS_PANES.find((p) => p.id === nav.id)
+      const leaves = pane ? pane.leaves : [nav.id]
+      for (const leaf of leaves) {
+        const path = `/settings?section=${leaf}`
+        items.push({
+          id: `settings:${leaf}`,
+          group: "settings",
+          // The VIEW's own name — "Connectors", not "Integrations".
+          title: LEAF_LABELS[leaf] ?? nav.label,
+          breadcrumb: ["Settings", group.groupLabel],
+          url: path,
+          keywords: SETTINGS_KEYWORDS[leaf] ?? [],
+          iconId: "settings",
+          action: { kind: "path", path },
+        })
+      }
     }
   }
   return items
