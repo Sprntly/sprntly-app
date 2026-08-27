@@ -190,7 +190,7 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     for (const label of [
       "New chat",
       "Top Insights",
-      "Ideation",
+      "Backlog",
       "Settings",
       "Feedback",
     ]) {
@@ -231,9 +231,9 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("renders the Ideation rail icon (restored to the nav)", () => {
+  it("renders the Backlog rail icon (named Ideation until 2026-08-27)", () => {
     render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Ideation"))
+    fireEvent.click(screen.getByLabelText("Backlog"))
     expect(goTo).toHaveBeenCalledWith("ideation")
   })
 

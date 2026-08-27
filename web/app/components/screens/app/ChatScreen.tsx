@@ -631,7 +631,7 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   const importing = (source.kind === "resume" && source.origin !== "task") || source.kind === "importDoc"
   const fromTask = (source.kind === "resume" && source.origin === "task") || source.kind === "generateTask"
   const withTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
-  // An Ideation idea is NOT this week's top insight — it's one of the items the
+  // A Backlog idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
   // WHERE the View PRD button actually lands, which differs by open kind and
@@ -656,7 +656,7 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
     : withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
-    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
+    ? "Framing this Backlog idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
     : fromTask
       ? "Generating a PRD for that — it'll open in the panel on the right when ready."
       : importing
