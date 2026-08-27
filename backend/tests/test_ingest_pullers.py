@@ -1263,15 +1263,24 @@ def test_global_record_valve_holds(monkeypatch):
     assert len(list(zoom.pull("co-1"))) == 4
 
 
-def test_text_is_capped_under_the_runner_batch_budget(monkeypatch):
-    """A record that blew the 6000-char batch budget would be split across
-    batches mid-sentence and both halves would lose their context."""
-    from app.kg_ingest.runner import _BATCH_CHAR_BUDGET
-
+def test_zoom_full_transcript_is_retained_under_the_shared_ceiling(monkeypatch):
+    """Zoom is a call-shaped provider (`_CALL_PROVIDERS`), extracted ONE CALL
+    PER DOCUMENT — it is never batched alongside another record, so the old
+    "must fit under the runner's shared batch budget" premise does not hold
+    (and hasn't since Zoom became call-shaped). The real invariant is the
+    shared defensive ceiling (`_TEXT_CHARS` == `TRANSCRIPT_CHAR_CEILING`): a
+    normal long call is retained IN FULL — that is the whole point of
+    transcript-read, a fact stated deep in the call must not be truncated
+    away — and only a pathological transcript past the ceiling would ever be
+    trimmed. This replaces the prior assertion that the record fit under
+    `_BATCH_CHAR_BUDGET` (6000), which raising the ceiling from 4000 to
+    `TRANSCRIPT_CHAR_CEILING` (200,000) makes false by construction; that
+    assertion's premise (batching) never applied to a call-shaped provider
+    in the first place."""
     ctx = _zctx(user_ids=["u1"])
     long_vtt = "WEBVTT\n\n" + "\n\n".join(
         f"{i}\n00:00:0{i % 10}.000 --> 00:00:0{(i + 1) % 10}.000\n"
-        f"Sam Lee: {'word ' * 40}"
+        f"Sam Lee: line-marker-{i} {'word ' * 40}"
         for i in range(200)
     )
     zoom, _ = _zstub(
@@ -1279,7 +1288,9 @@ def test_text_is_capped_under_the_runner_batch_budget(monkeypatch):
     )
     r = list(zoom.pull("co-1"))[0]
     assert len(r.text) <= zoom._TEXT_CHARS
-    assert len(r.render()) < _BATCH_CHAR_BUDGET
+    # Well under the ceiling (~40k chars of dialogue) → nothing truncated; the
+    # LAST line — deep in the call — survives, not just the head.
+    assert "line-marker-199" in r.text
 
 
 def test_a_deleted_recording_mid_sync_skips_without_failing(monkeypatch):
@@ -1688,20 +1699,28 @@ def test_every_ready_transcript_on_a_conference_is_read(monkeypatch):
     ]
 
 
-def test_text_is_capped_under_the_runner_batch_budget_meet(monkeypatch):
-    """A record that blew the 6000-char batch budget would be split across
-    batches mid-sentence and both halves would lose their context."""
-    from app.kg_ingest.runner import _BATCH_CHAR_BUDGET
-
+def test_meet_full_transcript_is_retained_under_the_shared_ceiling(monkeypatch):
+    """Meet is a call-shaped provider (`_CALL_PROVIDERS`), extracted ONE CALL
+    PER DOCUMENT — it is never batched alongside another record, so the old
+    "must fit under the runner's shared batch budget" premise does not hold
+    (and hasn't since Meet became call-shaped). The real invariant is the
+    shared defensive ceiling (`_TEXT_CHARS` == `TRANSCRIPT_CHAR_CEILING`): a
+    normal long call is retained IN FULL — that is the whole point of
+    transcript-read — and only a pathological transcript past the ceiling
+    would ever be trimmed. Replaces the prior `_BATCH_CHAR_BUDGET` (6000)
+    assertion, which raising the ceiling from 4000 to `TRANSCRIPT_CHAR_CEILING`
+    (200,000) makes false by construction; that assertion's premise
+    (batching) never applied to a call-shaped provider in the first place."""
     long_entries = [
         {"participant": "conferenceRecords/c1/participants/p1",
-         "text": "word " * 60}
-        for _ in range(200)
+         "text": f"line-marker-{i} " + "word " * 60}
+        for i in range(200)
     ]
     gm, _ = _gmstub(monkeypatch, _gmctx(), entries=long_entries)
     r = list(gm.pull("co-1"))[0]
     assert len(r.text) <= gm._TEXT_CHARS
-    assert len(r.render()) < _BATCH_CHAR_BUDGET
+    # Well under the ceiling → nothing truncated; the LAST entry survives.
+    assert "line-marker-199" in r.text
 
 
 def test_global_record_valve_holds_meet(monkeypatch):

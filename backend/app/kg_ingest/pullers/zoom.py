@@ -64,7 +64,7 @@ from app.connectors.zoom_oauth import (
     sync_windows,
     transcript_file_from,
 )
-from app.kg_ingest.types import RawRecord
+from app.kg_ingest.types import TRANSCRIPT_CHAR_CEILING, RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -83,13 +83,17 @@ _MAX_RECORDINGS_PER_HOST = 50
 #: bounds the catch-up after a long outage, so a connector paused for a year
 #: resumes with the last quarter rather than twelve windows per host.
 _MAX_WINDOWS = 3
-#: Per-record extraction budget. Under the runner's 6000-char batch budget
-#: (_BATCH_CHAR_BUDGET) so one record always fits in one batch — a transcript
-#: that blew the budget would be split across batches mid-sentence and both
-#: halves would lose their context. An hour-long call is ~50,000 characters, so
-#: this genuinely truncates; the first 4,000 characters of a call are where the
-#: agenda and the customer's actual complaint live.
-_TEXT_CHARS = 4000
+#: Per-record extraction ceiling — a DEFENSIVE bound, not a head-truncation
+#: window. Zoom is a call-shaped provider (`_CALL_PROVIDERS`), extracted ONE
+#: CALL PER DOCUMENT, so this never shares a batch with another record. The
+#: prior 4,000-char head bound genuinely truncated an hour-long call
+#: (~50,000 characters) — and a fact stated only in the transcript can sit
+#: anywhere in the call, not just the first few minutes, so a small head
+#: window silently loses exactly the facts transcript-read exists to
+#: capture (closes Zoom's latent Loss-A, same finding as Fireflies).
+#: Shared with Fireflies/Meet (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`)
+#: so the three providers can't drift apart on it.
+_TEXT_CHARS = TRANSCRIPT_CHAR_CEILING
 #: Global safety valve. The content-hash ledger makes RE-syncs free, but the
 #: FIRST sync pays the LLM for everything: 100 hosts x 50 recordings x 3 windows
 #: is 15,000 calls, i.e. thousands of extraction batches on day one. Lower than

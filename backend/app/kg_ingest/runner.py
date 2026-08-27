@@ -32,10 +32,16 @@ import hashlib
 import inspect
 import json
 import logging
+import os
+from dataclasses import replace
 from typing import Callable, Iterable
 
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes
-from app.graph.extractor import extract_document
+from app.graph.extractor import (
+    extract_document,
+    run_checklist_pass,
+    summarize_call_transcript,
+)
 from app.graph.facade import GraphFacade
 from app.kg_ingest.pullers import (
     asana,
@@ -123,17 +129,113 @@ _DOCUMENT_PROVIDERS: frozenset[str] = frozenset({"uploads", "confluence"})
 #: provider keeps batching unchanged — see ``_extraction_units``.
 _CALL_PROVIDERS: frozenset[str] = frozenset({"fireflies", "zoom", "google_meet"})
 
+#: Env var honored by `_call_provider_reextraction_allowed` — a comma-separated
+#: tenant (enterprise_id) allowlist gating the call-provider pipeline
+#: (transcript-read + directed-checklist pass) rollout. See that function's
+#: docstring for the off-by-default-safe contract.
+REEXTRACT_ALLOWLIST_ENV = "KG_CALL_REEXTRACT_ALLOWLIST"
+
+
+def _call_provider_reextraction_allowed(enterprise_id: str) -> bool:
+    """Gated-rollout guard for `_CALL_PROVIDERS` (fireflies/zoom/google_meet).
+
+    Reads a comma-separated tenant allowlist from `REEXTRACT_ALLOWLIST_ENV`
+    (`KG_CALL_REEXTRACT_ALLOWLIST`):
+
+      * Unset / empty (the default): no restriction. Every tenant's
+        call-provider sync proceeds exactly as this code is written — the env
+        var has zero effect until someone sets it. Deploying this change with
+        the var absent behaves identically to not having this guard at all.
+      * Set: ONLY the listed enterprise_ids proceed. Every other tenant's
+        call-provider sync for this tick is SKIPPED, not errored — the
+        all-tenant scheduler simply retries it on its next pass, so a
+        narrowed allowlist pauses rather than fails those tenants.
+
+    Exists to let the FIRST re-extraction sweep after full-transcript-read +
+    the directed-checklist pass ships be scoped to one tenant, then widened,
+    rather than firing uncontrolled across every enterprise the moment the
+    ledger busts (see the module docstring's COST GATE section for why a
+    content change busts the ledger).
+    """
+    raw = os.environ.get(REEXTRACT_ALLOWLIST_ENV, "").strip()
+    if not raw:
+        return True
+    allowed = {e.strip() for e in raw.split(",") if e.strip()}
+    return enterprise_id in allowed
+
+
+def _condensed_and_full_text(
+    provider: str, rec: RawRecord, enterprise_id: str
+) -> tuple[str, str]:
+    """Return ``(main_pass_text, checklist_text)`` for one call-shaped record
+    — Config B (2026-08-26): the directed-checklist pass is the SOLE
+    full-transcript reader; the main open-extraction pass runs on a cheap
+    CONDENSED input instead. Reading the full transcript twice (once per
+    pass) was the main cost driver (~$0.20/call); this cuts it — measured
+    ~$0.13/call for Fireflies. Zoom/Meet's first cut only reached ~$0.2086
+    (a too-dense Haiku summary re-inflated the main pass's own extraction
+    cost); `extractor.summarize_call_transcript` was tightened to a short
+    theme-only gist on 2026-08-26 — TARGET ~$0.15-0.16/call, pending
+    re-measurement, not yet confirmed live. Recall is preserved either way:
+    nothing that used to reach the main pass's transcript read is lost — it
+    now reaches the checklist pass instead.
+
+    Fireflies condenses at the PULLER level: ``rec.text`` is already its
+    free digest (no LLM call needed — see ``fireflies._record_from``), and
+    ``rec.checklist_text`` carries the digest + full transcript combination
+    the checklist pass reads.
+
+    Zoom/Meet have no native digest, so ``rec.text`` IS the full transcript,
+    unchanged from the puller (``rec.checklist_text`` is unset for them — the
+    puller-level split only exists where it's free). A cheap
+    ``claude-haiku-4-5`` call condenses it for the main pass HERE; the
+    checklist pass then reads ``rec.text`` — the ORIGINAL, un-summarized
+    transcript — unmodified. Chosen over head-truncation, which would
+    degrade the main pass to opening-minutes-only.
+
+    Both branches wrap the chosen text through ``RawRecord.render()`` (a
+    fresh copy via ``dataclasses.replace`` — never mutates ``rec``) so both
+    passes keep the usual header/title/data context, not just bare text.
+    """
+    checklist_source = rec.checklist_text if rec.checklist_text is not None else rec.text
+    checklist_render = replace(rec, text=checklist_source).render()
+
+    if provider == "fireflies":
+        # Already condensed at the puller — no LLM call needed here.
+        return rec.render(), checklist_render
+
+    # zoom / google_meet: rec.text is the full transcript; derive a cheap
+    # Haiku summary for the main pass. Best-effort: a summarization failure
+    # must not fail the sync — degrade to the full transcript rather than an
+    # empty main pass (the checklist pass alone was never meant to be the
+    # ONLY signal source for a call).
+    try:
+        condensed = summarize_call_transcript(enterprise_id, rec.text)
+    except Exception:  # noqa: BLE001 — best-effort condensation only
+        logger.warning(
+            "kg-ingest: %s call summarization failed for %s/%s — falling "
+            "back to the full transcript for the main pass",
+            provider, enterprise_id, rec.external_id, exc_info=True,
+        )
+        condensed = rec.text
+    return replace(rec, text=condensed).render(), checklist_render
+
 
 def _extraction_units(
-    provider: str, fresh: list[RawRecord]
-) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None]]:
-    """Yield ``(doc_name, text, records, source_ref)`` — one per extraction pass.
+    provider: str, fresh: list[RawRecord], enterprise_id: str
+) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None, str | None]]:
+    """Yield ``(doc_name, text, records, source_ref, checklist_text)`` — one
+    per extraction pass.
 
     Call providers (``_CALL_PROVIDERS``) get ONE pass per call, with a
     ``source_ref`` = the call's ``(provider, external_id)`` so the extractor can
-    stamp ``kg_signal.source_id``. Every other provider keeps the existing
-    char-budget batching, with no ``source_ref`` (``source_id`` stays NULL,
-    unchanged).
+    stamp ``kg_signal.source_id``, PLUS Config B's condensed/full-transcript
+    split (see ``_condensed_and_full_text``): ``text`` is the CHEAP main-pass
+    input and ``checklist_text`` is the FULL transcript the directed-checklist
+    pass reads. Every other provider keeps the existing char-budget batching,
+    with no ``source_ref`` (``source_id`` stays NULL, unchanged) and
+    ``checklist_text`` left ``None`` — the checklist pass never runs on them
+    (see ``sync_provider``).
 
     The ``<provider>-sync-batch-<n>`` doc_name shape is DELIBERATELY preserved
     for both — ``call_digest`` identifies a call-provider signal by matching
@@ -144,12 +246,15 @@ def _extraction_units(
     """
     if provider in _CALL_PROVIDERS:
         for i, rec in enumerate(fresh):
-            yield (f"{provider}-sync-batch-{i}", rec.render(), [rec],
-                   (rec.provider, rec.external_id))
+            main_text, checklist_text = _condensed_and_full_text(
+                provider, rec, enterprise_id
+            )
+            yield (f"{provider}-sync-batch-{i}", main_text, [rec],
+                   (rec.provider, rec.external_id), checklist_text)
     else:
         for i, batch in enumerate(_batches(fresh)):
             yield (f"{provider}-sync-batch-{i}",
-                   "\n\n".join(r.render() for r in batch), batch, None)
+                   "\n\n".join(r.render() for r in batch), batch, None, None)
 
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
@@ -187,6 +292,20 @@ def sync_provider(
     if provider not in PULLERS:
         raise ValueError(f"No puller for provider {provider!r}")
     puller, _, hint = PULLERS[provider]
+
+    # Gated rollout (call providers only) — see
+    # `_call_provider_reextraction_allowed`. Checked before pulling anything:
+    # a non-allowlisted tenant's sync for this provider is a no-op for this
+    # tick, retried by the scheduler once the allowlist widens.
+    if provider in _CALL_PROVIDERS and not _call_provider_reextraction_allowed(
+            enterprise_id):
+        logger.info(
+            "kg-ingest: skipping %s sync for %s — not on the %s allowlist "
+            "(gated rollout; widen the allowlist to include this tenant)",
+            provider, enterprise_id, REEXTRACT_ALLOWLIST_ENV,
+        )
+        return {"records": 0, "deduped": 0, "batches": 0, "signals": 0,
+                "themes": 0, "skipped": 0, "errors": [], "gated": True}
 
     if records is None:
         # A puller that declares `enterprise_id` gets the tenant id so it can
@@ -229,8 +348,8 @@ def sync_provider(
     from app.llm_errors import PROVIDER_LIMIT, classify_provider_error, user_message
 
     errors: list[str] = []
-    for i, (doc_name, text, unit_records, source_ref) in enumerate(
-            _extraction_units(provider, fresh)):
+    for i, (doc_name, text, unit_records, source_ref, checklist_text) in enumerate(
+            _extraction_units(provider, fresh, enterprise_id)):
         try:
             r = extract_document(
                 facade, enterprise_id,
@@ -261,6 +380,34 @@ def sync_provider(
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):
                 totals[k] += r[k]
+
+            # Directed-checklist second pass (call providers only) — a
+            # SEPARATE, directed LLM call asking explicitly whether each
+            # high-value fact category was discussed, lifting recall on
+            # those classes past what open extraction alone catches on a
+            # long call. Config B: this pass reads the FULL transcript
+            # (`checklist_text`) while the main pass above ran on the cheap
+            # condensed `text` — see `_condensed_and_full_text`. Fully
+            # isolated: a checklist failure must never block the main
+            # extraction's ledger progress or force the whole unit to
+            # retry — it only costs this cycle's recall boost for this one
+            # call.
+            if provider in _CALL_PROVIDERS:
+                try:
+                    c = run_checklist_pass(
+                        facade, enterprise_id,
+                        doc_name=doc_name, text=checklist_text,
+                        agent=f"ingest:{provider}",
+                        origin="connector", source_ref=source_ref,
+                    )
+                    for k in ("signals", "themes", "skipped"):
+                        totals[k] += c[k]
+                except Exception:  # noqa: BLE001 — additive pass, never blocking
+                    logger.warning(
+                        "kg-ingest: checklist pass failed for %s/%s doc=%s",
+                        provider, enterprise_id, doc_name, exc_info=True,
+                    )
+
             # Only a unit that made it through extraction is recorded — a
             # failed unit keeps its hashes out of the ledger and is simply
             # re-extracted on the next sync.

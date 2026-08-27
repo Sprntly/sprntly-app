@@ -247,6 +247,13 @@ def test_runner_stamps_owner_person_id_for_a_call_provider(facade, monkeypatch):
         return {"signals": 1, "themes": 0, "skipped": 0}
 
     monkeypatch.setattr(runner, "extract_document", fake_extract)
+    # This test is about owner-resolution wiring off extract_document's
+    # output, not the directed-checklist second pass — stub it to a no-op so
+    # the fireflies (call-provider) sync never reaches a real LLM call.
+    monkeypatch.setattr(
+        runner, "run_checklist_pass",
+        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
 

@@ -9,6 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Optional
 
+#: Shared DEFENSIVE ceiling on the in-memory extraction text one call-shaped
+#: provider (fireflies / zoom / google_meet) hands to a single extraction
+#: call. NOT a head-truncation window: a high-value fact can sit anywhere in
+#: a long call — deep asks on a real 1,064-sentence call landed ~22k chars
+#: in — so these providers feed the FULL transcript (their own
+#: summary/agenda first, where they have one) and this exists only to stop a
+#: pathological multi-hour call from blowing the model's context window.
+#: 200k chars ~= 50k tokens, ~25% of claude-sonnet-4-6's ~200k-token context,
+#: leaving ample headroom for the system prompt, schema and output. One
+#: shared constant so the three providers can't silently drift apart on it.
+TRANSCRIPT_CHAR_CEILING = 200_000
+
 
 @dataclass
 class RawRecord:
@@ -19,6 +31,16 @@ class RawRecord:
     text: str                # compact textual rendering for extraction
     properties: dict = field(default_factory=dict)   # structured fields (amounts, status…)
     timestamp: Optional[str] = None                   # ISO — provider-side updated/created
+    #: Config B (2026-08-26): the FULL-transcript-bearing text the directed-
+    #: checklist pass should read, when it differs from `.text` — the
+    #: checklist pass is the SOLE full-transcript reader; `.text` is a cheap
+    #: condensed main-pass input instead. `None` (every provider but
+    #: Fireflies) means "no separate view" — the runner falls back to
+    #: `.text`/`.render()` for the checklist pass too (see
+    #: `app.kg_ingest.runner._condensed_and_full_text`). Only ever read for
+    #: `_CALL_PROVIDERS` (fireflies/zoom/google_meet); every other provider's
+    #: checklist pass never runs, so this field is unused for them.
+    checklist_text: Optional[str] = None
 
     def render(self) -> str:
         """One-record rendering used inside extraction batches."""
