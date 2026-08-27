@@ -20,6 +20,7 @@ from app.graph.embeddings import embed_texts
 from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.graph.types import SIGNAL_SOURCE_TYPES, Entity, Relationship, Signal
+from app.llm import DEFAULT_MODEL, build_json_kwargs, parse_tool_response
 
 logger = logging.getLogger(__name__)
 
@@ -291,12 +292,61 @@ def extract_document(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="extract_document",
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
-        input=(f"source system: {source_hint}\n" if source_hint else "")
-              + f"<document name={doc_name!r}>\n{text}\n</document>",
+        input=_extract_input(doc_name, text, source_hint),
         json_schema=_EXTRACT_SCHEMA,
         skill=resolved_skill_id,
     )
-    items = result.output.get("signals", [])
+    return _finish_extract(
+        facade, enterprise_id, result.output,
+        doc_name=doc_name, origin=origin,
+        source_type_default=source_type_default,
+        force_source_type=force_source_type,
+        provenance_extra=provenance_extra,
+        resolved_skill_id=resolved_skill_id,
+        triage_category=triage_category,
+        source_ref=source_ref,
+        tau_high=tau_high, tau_low=cfg["resolution"]["tau_low"],
+    )
+
+
+def _extract_input(doc_name: str, text: str, source_hint: str | None) -> str:
+    """The exact `input` string `extract_document`'s live call sends to
+    `llm_call` — factored out so `build_extract_request` (the batch-authoring
+    counterpart, see below) builds identically-shaped input without
+    duplicating the string assembly."""
+    return (
+        (f"source system: {source_hint}\n" if source_hint else "")
+        + f"<document name={doc_name!r}>\n{text}\n</document>"
+    )
+
+
+def _finish_extract(
+    facade: GraphFacade,
+    enterprise_id: str,
+    output: dict,
+    *,
+    doc_name: str,
+    origin: str | None,
+    source_type_default: str | None,
+    force_source_type: str | None,
+    provenance_extra: dict[str, object] | None,
+    resolved_skill_id: str | None,
+    triage_category: str | None,
+    source_ref: tuple[str, str] | None,
+    tau_high: float,
+    tau_low: float,
+) -> dict:
+    """The part of `extract_document` that runs AFTER the model responds:
+    parse `output` (an `llm_call(...).output` dict — a plain `{"signals": [...]}`
+    dict either from a live `LLMResult` or from `parse_extract_response`
+    parsing a batched Message the same way) into signals via the shared
+    `_write_items` write path.
+
+    Factored out so `extract_document`'s live call and the batch-authoring
+    `parse_extract_response` (below) share this EXACT tail — one function,
+    used by both, so the two paths cannot silently diverge in how a model
+    response becomes signals."""
+    items = output.get("signals", [])
     if not items:
         return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
@@ -326,7 +376,71 @@ def extract_document(
         triage_category=triage_category, prompt_version=PROMPT_VERSION,
         force_source_type=force_source_type,
         source_type_default=source_type_default,
-        tau_high=tau_high, tau_low=cfg["resolution"]["tau_low"],
+        tau_high=tau_high, tau_low=tau_low,
+    )
+
+
+def build_extract_request(*, doc_name: str, text: str,
+                          source_hint: str | None = None) -> dict:
+    """Build the `messages.create` kwargs for one `extract_document` main-pass
+    call, for a caller assembling a BULK batch (many requests handed to
+    `app.llm_batch.run_batch` directly — e.g. a KG backfill CLI) rather than
+    calling `extract_document` live.
+
+    This is the exact construction the live path sends: `extract_document`'s
+    own `llm_call(...)` resolves to `app.llm.call_json`, which itself now
+    calls `app.llm.build_json_kwargs` — the SAME function this calls — so a
+    batched request and a live call for identical arguments are
+    byte-identical. Neither can drift because there is only one function
+    building the params.
+
+    Deliberately narrow: no `skill_id` / no non-default `model` — every
+    current caller (the Fireflies KG backfill CLI; Fireflies has no
+    `PROVIDER_SKILLS` entry) needs neither. A future provider whose batch
+    backfill DOES need a bound skill or a non-default model should extend
+    this rather than build kwargs by hand.
+    """
+    return build_json_kwargs(
+        system=_SYSTEM,
+        user=_extract_input(doc_name, text, source_hint),
+        model=DEFAULT_MODEL,
+        schema=_EXTRACT_SCHEMA,
+    )
+
+
+def parse_extract_response(
+    facade: GraphFacade,
+    enterprise_id: str,
+    message,
+    *,
+    doc_name: str,
+    origin: str | None = None,
+    source_type_default: str | None = None,
+    force_source_type: str | None = None,
+    provenance_extra: dict[str, object] | None = None,
+    source_ref: tuple[str, str] | None = None,
+) -> dict:
+    """Parse one batched `Message` (the main extraction pass — a request
+    `build_extract_request` built, run through `app.llm_batch.run_batch`) into
+    signals, through the EXACT same `_finish_extract` tail `extract_document`'s
+    live call uses.
+
+    No `skill_id` / `triage_category`: a request `build_extract_request` built
+    never carries a skill (see its docstring), and triage — a PRE-extraction
+    filter — has already run (or been deliberately skipped) before the
+    request was ever built, so there is nothing to re-apply here."""
+    output = parse_tool_response(message, _EXTRACT_SCHEMA)
+    cfg = resolve_config(enterprise_id)
+    return _finish_extract(
+        facade, enterprise_id, output,
+        doc_name=doc_name, origin=origin,
+        source_type_default=source_type_default,
+        force_source_type=force_source_type,
+        provenance_extra=provenance_extra,
+        resolved_skill_id=None,
+        triage_category=None,
+        source_ref=source_ref,
+        tau_high=cfg["resolution"]["tau_high"], tau_low=cfg["resolution"]["tau_low"],
     )
 
 
@@ -793,10 +907,42 @@ def run_checklist_pass(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="extract_checklist",
         prompt_version=CHECKLIST_PROMPT_VERSION, system=_CHECKLIST_SYSTEM,
-        input=f"<document name={doc_name!r}>\n{text}\n</document>",
+        input=_checklist_input(doc_name, text),
         json_schema=_CHECKLIST_SCHEMA,
     )
-    checklist = result.output.get("checklist", [])
+    return _finish_checklist(
+        facade, enterprise_id, result.output,
+        doc_name=doc_name, text=text, origin=origin,
+        provenance_extra=provenance_extra, source_ref=source_ref,
+    )
+
+
+def _checklist_input(doc_name: str, text: str) -> str:
+    """The exact `input` string `run_checklist_pass`'s live call sends to
+    `llm_call` — factored out so `build_checklist_request` builds identically
+    shaped input without duplicating the string assembly."""
+    return f"<document name={doc_name!r}>\n{text}\n</document>"
+
+
+def _finish_checklist(
+    facade: GraphFacade,
+    enterprise_id: str,
+    output: dict,
+    *,
+    doc_name: str,
+    text: str,
+    origin: str | None,
+    provenance_extra: dict[str, object] | None,
+    source_ref: tuple[str, str] | None,
+) -> dict:
+    """The part of `run_checklist_pass` that runs AFTER the model responds:
+    the grounding gate + item-building + `_write_items` write, factored out
+    so the live call and the batch-authoring `parse_checklist_response`
+    (below) share this EXACT tail. `text` is the full transcript the grounding
+    check (`_quote_is_grounded`) verifies each `verbatim_quote` against — the
+    same text the request was built from (`build_checklist_request`) or the
+    live call sent (`run_checklist_pass`)."""
+    checklist = output.get("checklist", [])
 
     by_key = {c[0]: c for c in _CHECKLIST_CATEGORIES}
     items: list[dict] = []
@@ -863,6 +1009,46 @@ def run_checklist_pass(
         provenance_extra=provenance_extra, resolved_skill_id=None,
         triage_category=None, prompt_version=CHECKLIST_PROMPT_VERSION,
         tau_high=cfg["resolution"]["tau_high"], tau_low=cfg["resolution"]["tau_low"],
+    )
+
+
+def build_checklist_request(*, doc_name: str, text: str) -> dict:
+    """Build the `messages.create` kwargs for one `run_checklist_pass` call,
+    for a caller assembling a BULK batch (see `build_extract_request`'s
+    docstring — same rationale, same "cannot drift" guarantee via
+    `app.llm.build_json_kwargs`). The checklist pass never takes a bound skill
+    or a non-default model (see `run_checklist_pass`'s own `llm_call`), so
+    this needs no equivalent parameters."""
+    return build_json_kwargs(
+        system=_CHECKLIST_SYSTEM,
+        user=_checklist_input(doc_name, text),
+        model=DEFAULT_MODEL,
+        schema=_CHECKLIST_SCHEMA,
+    )
+
+
+def parse_checklist_response(
+    facade: GraphFacade,
+    enterprise_id: str,
+    message,
+    *,
+    doc_name: str,
+    text: str,
+    origin: str | None = None,
+    provenance_extra: dict[str, object] | None = None,
+    source_ref: tuple[str, str] | None = None,
+) -> dict:
+    """Parse one batched `Message` (the checklist pass — a request
+    `build_checklist_request` built, run through `app.llm_batch.run_batch`)
+    into signals, through the EXACT same `_finish_checklist` tail
+    `run_checklist_pass`'s live call uses. `text` MUST be the same full
+    transcript the request was built from — it is what the grounding check
+    verifies each quote against."""
+    output = parse_tool_response(message, _CHECKLIST_SCHEMA)
+    return _finish_checklist(
+        facade, enterprise_id, output,
+        doc_name=doc_name, text=text, origin=origin,
+        provenance_extra=provenance_extra, source_ref=source_ref,
     )
 
 

@@ -688,3 +688,79 @@ def test_true_duplicate_write_is_still_tolerated_as_a_skip(facade):
         out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
     assert out["skipped"] == 1
     assert out["signals"] == 0
+
+
+# ── build_extract_request / parse_extract_response: the batch-authoring seam ─
+#
+# extract_document's live path is now build (input string + gateway.llm_call)
+# -> parse (_finish_extract). These prove the standalone
+# build_extract_request/parse_extract_response pair — used by a caller
+# assembling a BULK batch (e.g. the KG backfill CLI) rather than calling
+# extract_document live — composes to the EXACT SAME facade outcome as the
+# live/sync inline path, for the identical model output. This is the "cannot
+# drift" proof the refactor's docstrings claim.
+
+
+def test_build_and_parse_extract_compose_to_the_same_result_as_the_live_path(facade):
+    items = [
+        _item("build/parse parity fact", "customer_voice"),
+        _kind_item("Jane owns SOW by Friday", "finding", source_type="communication",
+                   theme="SOW", properties={"owner": "Jane Doe", "due": "Friday",
+                                            "status": "open"}),
+    ]
+
+    # 1) The LIVE path, unchanged: extract_document -> llm_call (mocked).
+    with patch.object(ex, "llm_call", return_value=_llm_result(items)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        live_result = ex.extract_document(facade, "ent-live", doc_name="calls.md",
+                                          text="doc body")
+
+    # 2) The BATCH-authoring path: build the request kwargs, simulate the
+    # model returning the SAME items as a raw tool-use Message, then parse.
+    from types import SimpleNamespace
+
+    kwargs = ex.build_extract_request(doc_name="calls.md", text="doc body")
+    assert kwargs["model"] == ex.DEFAULT_MODEL
+    assert kwargs["tools"][0]["input_schema"] == ex._EXTRACT_SCHEMA
+    assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_response"}
+
+    fake_message = SimpleNamespace(content=[
+        SimpleNamespace(type="tool_use", name="submit_response",
+                        input={"signals": items}),
+    ])
+    with patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        batch_result = ex.parse_extract_response(
+            facade, "ent-batch", fake_message, doc_name="calls.md",
+        )
+
+    # signal_ids are content-keyed by enterprise_id (uuid5), so the two runs'
+    # ids legitimately differ (different enterprise_id) — compare everything
+    # else, then verify the id SETS independently below via the facade.
+    assert {k: v for k, v in batch_result.items() if k != "signal_ids"} == \
+           {k: v for k, v in live_result.items() if k != "signal_ids"}
+
+    import uuid
+    live_ids = {str(uuid.uuid5(ex._NS, f"ent-live|{it['content']}")) for it in items}
+    batch_ids = {str(uuid.uuid5(ex._NS, f"ent-batch|{it['content']}")) for it in items}
+    live_signals = facade.get_signals("ent-live", list(live_ids))
+    batch_signals = facade.get_signals("ent-batch", list(batch_ids))
+    assert len(live_signals) == len(batch_signals) == len(items)
+    live_by_content = {s.content: s for s in live_signals.values()}
+    batch_by_content = {s.content: s for s in batch_signals.values()}
+    for content in live_by_content:
+        assert live_by_content[content].kind == batch_by_content[content].kind
+        assert live_by_content[content].source_type == batch_by_content[content].source_type
+        assert live_by_content[content].properties == batch_by_content[content].properties
+
+
+def test_build_extract_request_carries_source_hint_and_doc_name(facade):
+    """The batch build path renders the same `<document name=...>` envelope
+    (+ optional source_hint line) the live path's input string does."""
+    kwargs = ex.build_extract_request(doc_name="calls.md", text="hello world",
+                                      source_hint="fireflies transcripts")
+    user_content = kwargs["messages"][0]["content"]
+    assert "source system: fireflies transcripts" in user_content
+    assert "<document name='calls.md'>" in user_content
+    assert "hello world" in user_content
