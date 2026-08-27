@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useRef, useState } from "react"
+import { Suspense, useCallback, useRef, useState, type ReactNode } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import { publicPath } from "../../../lib/public-path"
 import { AppLayout } from "./AppLayout"
@@ -25,8 +25,12 @@ import { ConnectorsSettings } from "./settings/ConnectorsSettings"
 import { McpSettings } from "./settings/McpSettings"
 import { TeamSettings } from "./settings/TeamSettings"
 import {
+  LEAF_LABELS,
   SETTINGS_NAV,
+  SETTINGS_PANES,
   SettingsPaneBar,
+  SettingsPaneNav,
+  paneFor,
   type SettingsSectionId,
 } from "./settings/SettingsLayout"
 
@@ -84,12 +88,69 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
   }
 }
 
+/** True when this nav ROW should read as current — which is any leaf of the
+ *  pane it opens, not just the leaf it happens to be named after. Without
+ *  this, opening Metrics would leave "Company" unhighlighted and the nav would
+ *  claim you were nowhere. */
+function isRowActive(section: SettingsSectionId, rowId: SettingsSectionId): boolean {
+  if (section === rowId) return true
+  const pane = paneFor(rowId)
+  return !!pane && pane.leaves.includes(section)
+}
+
+/**
+ * The pane's sub-nav, wrapped around WHATEVER chrome that section brings.
+ *
+ * It sits at the shell level, not inside each pane, and that is the whole
+ * point. Panes are not built alike: some own a sticky bar and their own
+ * padding (`FULL_BLEED_SECTIONS`), some get the shell's `.pset` wrapper, and
+ * Metrics has neither. With the nav inside them, it started wherever that
+ * pane's chrome happened to leave room — top for Metrics, pushed down past a
+ * sticky bar and a save button for Product & Category and Company Profile. The
+ * rail is a property of the PANE GROUP, so it hangs off the group, and every
+ * section under it now begins at the same line.
+ *
+ * A single-view row (Workspaces, Templates, Skills) renders bare — a one-item
+ * nav is furniture.
+ */
+function PaneShell({
+  section,
+  onSelect,
+  children,
+}: {
+  section: SettingsSectionId
+  onSelect: (id: SettingsSectionId) => void
+  children: ReactNode
+}) {
+  const pane = paneFor(section)
+  if (!pane || pane.leaves.length < 2) return <>{children}</>
+  return (
+    <SettingsPaneNav
+      label={`${pane.label} sections`}
+      active={section}
+      onSelect={(id) => onSelect(id as SettingsSectionId)}
+      items={pane.leaves.map((leaf) => ({
+        id: leaf,
+        label: LEAF_LABELS[leaf] ?? leaf,
+      }))}
+    >
+      {children}
+    </SettingsPaneNav>
+  )
+}
+
 function isKnownSectionId(value: string): value is SettingsSectionId {
-  const allIds = SETTINGS_NAV.flatMap((g) => g.items).map((i) => i.id)
-  // Include the dormant IDs so /settings?section=strategic still renders
-  // its pane (the URL works; just nothing in the sidebar links to it).
+  const rowIds = SETTINGS_NAV.flatMap((g) => g.items).map((i) => i.id)
+  // EVERY LEAF, not just the rows. Consolidating the nav made most sections
+  // sub-views of a pane — `mcp`, `security`, `metrics` and the rest are no
+  // longer rows — and a check built from rows alone called them unknown and
+  // fell through to Profile. So clicking MCP Access put `?section=mcp` in the
+  // URL and rendered somebody's profile, and the same for every leaf. The
+  // nav's shape is a presentation choice; what is RENDERABLE is not.
+  const leafIds = SETTINGS_PANES.flatMap((p) => p.leaves)
+  // Dormant ids keep working by URL (nothing links to them).
   const dormantIds: SettingsSectionId[] = ["strategic", "flags"]
-  return ([...allIds, ...dormantIds] as string[]).includes(value)
+  return ([...rowIds, ...leafIds, ...dormantIds] as string[]).includes(value)
 }
 
 /**
@@ -331,7 +392,7 @@ function SettingsContent() {
                   <button
                     key={item.id}
                     type="button"
-                    className={`setx-nav-item ${section === item.id ? "active" : ""} ${!item.available ? "soon" : ""}`}
+                    className={`setx-nav-item ${isRowActive(section, item.id) ? "active" : ""} ${!item.available ? "soon" : ""}`}
                     data-testid={`settings-nav-${item.id}`}
                     onClick={() => item.available && setSection(item.id)}
                   >
@@ -368,23 +429,25 @@ function SettingsContent() {
             sticky title bar, plus the padded body unless the pane ships its
             own (.set-pane). Their save buttons stay inline in the cards. */}
         <div className="setx-main">
-          {FULL_BLEED_SECTIONS.has(section) ? (
-            <SettingsPanel section={section} />
-          ) : (
-            <div className="pset">
-              <SettingsPaneBar
-                title={sectionLabel}
-                meta={identityMeta}
-              />
-              {SELF_PADDED_SECTIONS.has(section) ? (
-                <SettingsPanel section={section} />
-              ) : (
-                <div className="pset-body">
+          <PaneShell section={section} onSelect={setSection}>
+            {FULL_BLEED_SECTIONS.has(section) ? (
+              <SettingsPanel section={section} />
+            ) : (
+              <div className="pset">
+                <SettingsPaneBar
+                  title={paneFor(section)?.label ?? sectionLabel}
+                  meta={identityMeta}
+                />
+                {SELF_PADDED_SECTIONS.has(section) ? (
                   <SettingsPanel section={section} />
-                </div>
-              )}
-            </div>
-          )}
+                ) : (
+                  <div className="pset-body">
+                    <SettingsPanel section={section} />
+                  </div>
+                )}
+              </div>
+            )}
+          </PaneShell>
         </div>
       </div>
     </AppLayout>
