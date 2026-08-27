@@ -25452,6 +25452,10 @@
 .ga-finding-rec { margin: 6px 0 8px; }
 .ga-finding-rec p { margin: 0; line-height: 1.55; }
 .ga-finding-rec-why { opacity: 0.8; margin-top: 2px !important; }
+/* The appendix: found and ranked like the rest, set aside for THIS goal. */
+.ga-doc-aside { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border, #e5e5e5); }
+.ga-doc-aside-list { margin: 8px 0 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 5px; }
+.ga-doc-aside-list li { line-height: 1.5; opacity: 0.85; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated

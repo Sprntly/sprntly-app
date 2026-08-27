@@ -1187,3 +1187,78 @@ def test_extras_are_ignored_when_they_do_not_line_up_with_the_findings():
     }
     html = render_report_html(run, [_finding(), _finding(statement="second")])
     assert "Recommended." not in html
+
+
+# ─── The goal-relevance gate, in the document ───────────────────────────────
+
+
+def _with_aside(run: dict, reasons: list) -> dict:
+    run = dict(run)
+    run["prioritisation"] = {**dict(run.get("prioritisation") or {}),
+                             "set_aside_by_rank": reasons}
+    return run
+
+
+def test_a_set_aside_finding_leaves_the_main_list_and_keeps_its_reason():
+    """Apurva ruled for a goal-relevance gate: a run for "grow revenue by 5%"
+    led with three descriptions of the company's own product, because the order
+    is how many accounts mentioned a theme."""
+    findings = [_finding(statement="a", label="export latency"),
+                _finding(statement="b", label="our own platform features")]
+    html = render_report_html(
+        _with_aside(_run(), [None, "describes our own product, not a problem"]),
+        findings)
+
+    body = _findings_html(html)
+    assert "export latency" in body
+    # It moved, and it took its reason with it.
+    assert "Considered and set aside" in html
+    assert "describes our own product, not a problem" in html
+
+
+def test_the_funnel_is_stated_before_the_findings():
+    """The first thing a filtered list owes its reader. A filtered list that
+    does not say it was filtered is the more confident-looking of the two, and
+    the less honest."""
+    findings = [_finding(statement=f"f{i}", label=f"theme {i}") for i in range(4)]
+    html = render_report_html(
+        _with_aside(_run(), [None, "off-topic", "off-topic", None]), findings)
+
+    assert "4 themes were found. 2 bear on this goal." in html
+    assert html.index("bear on this goal") < html.index("What the evidence says")
+
+
+def test_no_funnel_when_nothing_was_set_aside():
+    """A funnel with one step is not a funnel, and "4 of 4" is noise."""
+    findings = [_finding(statement=f"f{i}") for i in range(4)]
+    html = render_report_html(_with_aside(_run(), [None] * 4), findings)
+    assert "bear on this goal" not in html
+    assert "Considered and set aside" not in html
+
+
+def test_a_length_mismatch_sets_nothing_aside():
+    """The split is positional. Setting aside the WRONG finding is far worse
+    than setting none aside."""
+    findings = [_finding(statement="a"), _finding(statement="b")]
+    html = render_report_html(_with_aside(_run(), ["off-topic"]), findings)
+    assert "Considered and set aside" not in html
+
+
+def test_the_headline_describes_the_kept_findings_not_all_of_them():
+    """The summary must agree with the list under it. A headline computed over
+    findings the reader cannot see would name a theme that appears nowhere."""
+    # DISTINCT STATEMENTS, because the headline renders the STATEMENT — an
+    # earlier version of this test asserted on the label and passed against its
+    # own mutation, which is a test that checks nothing.
+    findings = [
+        _finding(statement="our platform supports scenario building",
+                 label="ours", impact_value=99),
+        _finding(statement="renewals stall on the parts flow",
+                 label="theirs", impact_value=2),
+    ]
+    html = render_report_html(
+        _with_aside(_run(), ["describes our own product", None]), findings)
+
+    head = html[html.index("The short version"):html.index("What the evidence says")]
+    assert "renewals stall on the parts flow" in head
+    assert "our platform supports scenario building" not in head

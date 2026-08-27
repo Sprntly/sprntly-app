@@ -794,6 +794,11 @@ export type GoalRunDetail = GoalRun & {
      *  `crucible_findings`, which would need a migration against the shared
      *  Supabase. Merged into the findings positionally by the renderer, and
      *  only when the lengths agree. */
+    /** Per-finding relevance verdicts in RANK ORDER: the reason a finding does
+     *  NOT bear on the goal, or null. Split at render, so a finding judged
+     *  irrelevant MOVES to an appendix with its reason rather than being
+     *  dropped — a wrong verdict has to stay recoverable. */
+    set_aside_by_rank?: (string | null)[]
     findings_extra_by_rank?: {
       label?: string
       example?: string

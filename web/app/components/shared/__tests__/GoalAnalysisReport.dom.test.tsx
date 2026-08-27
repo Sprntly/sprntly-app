@@ -848,3 +848,54 @@ describe("the card leads with what to do", () => {
     expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
   })
 })
+
+describe("the goal-relevance gate, in the panel", () => {
+  // Apurva ruled for a gate after a run for "grow revenue by 5%" led with three
+  // descriptions of the company's OWN product — the order is how many accounts
+  // mentioned a theme, and what gets mentioned most on a sales call is the
+  // vendor's own demo.
+  const withAside = (reasons: (string | null)[], findings: unknown[]) => ({
+    ...RUN, findings,
+    prioritisation: { ...(RUN.prioritisation ?? {}), set_aside_by_rank: reasons },
+  })
+
+  const A = { ...SIZED, id: 1, statement: "renewals stall", label: "renewals" }
+  const B = { ...SIZED, id: 2, statement: "our platform does X", label: "our platform" }
+
+  it("moves a set-aside finding to the appendix, with its reason", () => {
+    render(<GoalAnalysisReport run={withAside(
+      [null, "describes our own product, not a customer problem"], [A, B]) as never} />)
+
+    const main = screen.getAllByTestId("goal-finding").map(n => n.textContent).join(" ")
+    expect(main).toContain("renewals")
+    expect(main).not.toContain("our platform")
+    // Moved, not deleted — and it took its reason with it.
+    const aside = screen.getByTestId("goal-set-aside").textContent ?? ""
+    expect(aside).toContain("our platform")
+    expect(aside).toContain("describes our own product, not a customer problem")
+  })
+
+  it("states the funnel before the findings", () => {
+    // A filtered list that does not say it was filtered is the more
+    // confident-looking of the two, and the less honest.
+    render(<GoalAnalysisReport run={withAside([null, "off-topic"], [A, B]) as never} />)
+    const funnel = screen.getByTestId("goal-funnel").textContent ?? ""
+    expect(funnel).toContain("2 themes were found")
+    expect(funnel).toContain("1 bear on this goal")
+  })
+
+  it("says nothing when nothing was set aside", () => {
+    render(<GoalAnalysisReport run={withAside([null, null], [A, B]) as never} />)
+    expect(screen.queryByTestId("goal-funnel")).toBeNull()
+    expect(screen.queryByTestId("goal-set-aside")).toBeNull()
+    expect(screen.getAllByTestId("goal-finding")).toHaveLength(2)
+  })
+
+  it("sets nothing aside when the lists do not line up", () => {
+    // The split is positional. Setting aside the WRONG finding is far worse
+    // than setting none aside.
+    render(<GoalAnalysisReport run={withAside(["off-topic"], [A, B]) as never} />)
+    expect(screen.queryByTestId("goal-set-aside")).toBeNull()
+    expect(screen.getAllByTestId("goal-finding")).toHaveLength(2)
+  })
+})

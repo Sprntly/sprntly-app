@@ -1191,6 +1191,47 @@ def execute_run(
             "stopped_at_stage": r.stopped_at, "claim_ids": list(r.claim_ids),
         } for r in result.rejected]
 
+        # ── WHICH OF THEM BEAR ON THE GOAL THAT WAS ASKED. ─────────────
+        #
+        # The ranking orders by how many accounts mention a theme, so a run for
+        # "grow revenue by 5%" led with three descriptions of the company's own
+        # product: what gets mentioned most on a sales call is the vendor's own
+        # demo. The report conceded the gap in as many words — "nothing here was
+        # filtered or ranked by it" — and this is that filter.
+        #
+        # NOTHING IS DROPPED FROM THE ROW SET. Every finding is still stored and
+        # still rendered; a set-aside one moves to an appendix carrying the
+        # reason. Storing only the survivors would destroy the record a wrong
+        # verdict has to be recoverable from.
+        #
+        # BY RANK, because the stored rows carry no id and the renderer reads
+        # them back positionally.
+        set_aside_by_rank: list = [None] * len(result.findings)
+        try:
+            from app.crucible.relevance import judge_relevance, partition
+
+            verdicts = judge_relevance(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=result.findings,
+            )
+            _, aside = partition(result.findings, verdicts)
+            reason_of = {f.id: reason for f, reason in aside}
+            set_aside_by_rank = [
+                reason_of.get(f.id) for f in result.findings
+            ]
+        except Exception:  # noqa: BLE001 — a gate that failed keeps everything
+            logger.exception("crucible: relevance gate skipped for run %s", run_id)
+
+        # AND THE SUGGESTIONS GO TO THE ONES THAT SURVIVED IT. Recommending an
+        # action for a theme the gate just judged irrelevant would spend the
+        # reader's attention on the thing they were told to ignore.
+        relevant = [
+            f for f, reason in zip(result.findings, set_aside_by_rank)
+            if reason is None
+        ]
+
         # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
         #
         # AFTER the ranking, and that ordering is the invariant rather than a
@@ -1209,7 +1250,7 @@ def execute_run(
                 enterprise_id=company_id,
                 goal_text=goal_text,
                 definition_text=definition_text,
-                findings=result.findings,
+                findings=relevant,
                 claims=claims,
             )
         except Exception:  # noqa: BLE001
@@ -1233,6 +1274,11 @@ def execute_run(
         }
         # Keyed by RANK as well, because the stored finding rows carry no id —
         # the renderer reads them back positionally.
+        # THE FUNNEL, SAID IN NUMBERS THE RENDERER CAN QUOTE. How many were
+        # considered and how many bear on the goal is the first thing Apurva's
+        # reference memo states, and it is the thing a filtered list has to
+        # disclose or it reads as the whole picture.
+        meta["set_aside_by_rank"] = list(set_aside_by_rank)
         meta["findings_extra_by_rank"] = [
             meta["findings_extra"][f.id] for f in result.findings
         ]

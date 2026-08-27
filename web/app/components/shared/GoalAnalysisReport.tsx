@@ -225,8 +225,19 @@ export function GoalAnalysisReport({
   // exactly, including the length check: the merge is POSITIONAL because the
   // findings arrive in rank order, and attaching one finding's recommendation
   // to another is far worse than showing none.
+  // ── THE GOAL-RELEVANCE GATE. ──────────────────────────────────────────
+  //
+  // `set_aside_by_rank[i]` is the reason finding `i` does not bear on the goal,
+  // or null. Split HERE rather than at write time so every finding stays in the
+  // row set: a verdict that was wrong is recoverable, and the appendix below
+  // carries the reason so the filter is arguable rather than silent.
+  //
+  // Length-guarded like the extras: a mismatch means the two lists are not the
+  // same sequence, and setting aside the WRONG finding is far worse than
+  // setting none aside.
+  const asideRaw = run.prioritisation?.set_aside_by_rank
   const findingsExtra = run.prioritisation?.findings_extra_by_rank
-  const findings = (() => {
+  const allFindings = (() => {
     const base = run.findings ?? []
     if (!Array.isArray(findingsExtra) || findingsExtra.length !== base.length) {
       return base
@@ -239,6 +250,15 @@ export function GoalAnalysisReport({
       return { ...f, ...kept } as GoalFinding
     })
   })()
+  const asideReasons: (string | null)[] =
+    Array.isArray(asideRaw) && asideRaw.length === allFindings.length
+      ? asideRaw
+      : allFindings.map(() => null)
+  const findings = allFindings.filter((_, i) => !asideReasons[i])
+  const setAside = allFindings
+    .map((f, i) => [f, asideReasons[i]] as const)
+    .filter(([, r]) => Boolean(r))
+
   const headline = findings[0]
   // THE PANEL IS A SECOND RENDERER OF THE SAME REPORT, and it is the one a
   // reader actually looks at — `report.py` renders the exported/editable
@@ -491,6 +511,25 @@ export function GoalAnalysisReport({
       </section>
 
       {/* ── 3. The short version ─────────────────────────────────────────── */}
+      {/* ── THE FUNNEL, BEFORE ANYTHING IS SHOWN. ─────────────────────────
+          The first thing a filtered list owes its reader. A filtered list that
+          does not say it was filtered is the more confident-looking of the two,
+          and the less honest. Silent when nothing was set aside — a funnel with
+          one step is not a funnel. */}
+      {setAside.length ? (
+        <section className="ga-doc-section" data-testid="goal-funnel">
+          <h2 className="ga-doc-h2">What bears on this goal</h2>
+          <p className="ga-doc-lede">
+            <strong>
+              {allFindings.length} themes were found. {findings.length} bear on
+              this goal.
+            </strong>{" "}
+            The other {setAside.length} are listed at the end with the reason
+            each was set aside — they are not gone, and a theme set aside for
+            this goal may be the answer to a different one.
+          </p>
+        </section>
+      ) : null}
       <section className="ga-doc-section" data-testid="goal-headline">
         <h2 className="ga-doc-h2">The short version</h2>
         {headline ? (
@@ -662,6 +701,32 @@ export function GoalAnalysisReport({
               />
             ))}
           </ol>
+          {/* ── CONSIDERED AND SET ASIDE. ───────────────────────────────────
+              NOT A DELETION. Each of these was found, corroborated and ranked
+              exactly like the findings above; what changed is that it does not
+              answer the question that was asked. The reason beside each is what
+              makes the filter arguable — a reader who disagrees can see precisely
+              what was judged and say so. */}
+          {setAside.length ? (
+            <div className="ga-doc-aside" data-testid="goal-set-aside">
+              <h3 className="ga-doc-h3">
+                Considered and set aside for this goal ({setAside.length})
+              </h3>
+              <p className="ga-doc-note">
+                Each of these was found and ranked like the findings above. They
+                are here because they do not bear on the goal as you defined it,
+                not because the evidence was weak.
+              </p>
+              <ul className="ga-doc-aside-list">
+                {setAside.map(([f, reason]) => (
+                  <li key={f.id}>
+                    <strong>{(f.label || "").trim() || f.statement}</strong>
+                    {" — "}{reason}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
         </section>
       ) : null}
 

@@ -227,6 +227,68 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
     return "".join(out)
 
 
+def _funnel_section(considered: int, kept: int) -> str:
+    """How many themes were found, and how many bear on the goal.
+
+    THE FIRST THING A FILTERED LIST OWES ITS READER. Apurva's reference memo
+    opens "Twelve initiatives can move revenue. Two are high confidence. One is
+    the recommendation." — the funnel is stated before anything is shown, so
+    the reader knows the list below is a selection rather than the whole
+    picture. A filtered list that does not say it was filtered is the more
+    confident-looking of the two, and the less honest.
+
+    Silent when nothing was set aside: a funnel with one step is not a funnel,
+    and a line saying "329 of 329" is noise.
+    """
+    if kept >= considered or considered <= 0:
+        return ""
+    aside = considered - kept
+    return "".join([
+        "<h2>What bears on this goal</h2>",
+        _p(
+            f"<strong>{considered} themes were found. {kept} bear on this "
+            f"goal.</strong> The other {aside} are listed at the end with the "
+            f"reason each was set aside — they are not gone, and a theme set "
+            f"aside for this goal may be the answer to a different one."
+        ),
+    ])
+
+
+def _set_aside_section(pairs: list) -> str:
+    """The themes that did not bear on the goal, and why — the memo's appendix.
+
+    NOT A DELETION. Every one of these was found, corroborated and ranked
+    exactly like the findings above; what changed is that it does not answer
+    the question that was asked. Printing the reason beside each is what makes
+    the filter arguable: a reader who disagrees can see precisely what was
+    judged and say so.
+    """
+    if not pairs:
+        return ""
+    out = [
+        f"<h2>Considered and set aside for this goal ({len(pairs)})</h2>",
+        _p(
+            "Each of these was found and ranked like the findings above. They "
+            "are here because they do not bear on the goal as you defined it, "
+            "not because the evidence was weak."
+        ),
+    ]
+    shown = pairs[:MAX_OVERFLOW_ROWS]
+    out.append(_ul(
+        f"<strong>{_esc_clipped((f.get('label') or '').strip() or _statement_text(f), MAX_PARAM_NAME_CHARS)}</strong>"
+        f" — {_esc_clipped(reason, MAX_PARAM_BASIS_CHARS)}"
+        for f, reason in shown
+    ))
+    if len(pairs) > len(shown):
+        # NO SILENT CAPS. A list that stops without saying so reads as the
+        # whole set.
+        out.append(_p(
+            f"and {len(pairs) - len(shown)} further themes set aside, not "
+            f"listed here because the document has a size limit"
+        ))
+    return "".join(out)
+
+
 def _headline_unsized_coverage(findings: list[dict]) -> str:
     """How much of the unsized disclosure the headline has already made.
 
@@ -1098,6 +1160,20 @@ def render_report_html(
     # same sequence. Merging here rather than threading a second argument
     # through four functions means every renderer downstream reads one dict and
     # cannot disagree with another about what a finding said.
+    # ── THE GOAL-RELEVANCE GATE, APPLIED AT RENDER. ────────────────────────
+    #
+    # `set_aside_by_rank[i]` is the reason finding `i` does not bear on the
+    # goal, or None. Splitting HERE rather than at write time keeps every
+    # finding in the row set: a verdict that was wrong is recoverable, and a
+    # reader who wants the whole list still has one.
+    #
+    # POSITIONAL, and guarded by length like the extras below — a mismatch
+    # means the two lists are not the same sequence, and setting aside the
+    # wrong finding is far worse than setting none aside.
+    _aside_reasons = _as_list(_as_dict(run.get("prioritisation")).get("set_aside_by_rank"))
+    if len(_aside_reasons) != len(findings):
+        _aside_reasons = [None] * len(findings)
+
     extra = _as_list(_as_dict(run.get("prioritisation")).get("findings_extra_by_rank"))
     if extra and len(extra) == len(findings):
         findings = [
@@ -1109,14 +1185,21 @@ def render_report_html(
         plan = _as_dict(_as_dict(run.get("prioritisation")).get("plan"))
     plan = _as_dict(plan)
 
+    # Split once, after the extras are merged, so both halves carry their
+    # themes, quotes and recommendations.
+    kept = [f for f, r in zip(findings, _aside_reasons) if not r]
+    set_aside = [(f, r) for f, r in zip(findings, _aside_reasons) if r]
+
     goal = (run.get("goal_text") or "").strip()
     def _assemble(full_cap: int, overflow_cap: int) -> str:
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
             _definition_section(run, plan),
             _what_was_read_section(run, plan),
-            _headline_section(findings),
-            _findings_section(findings, full_cap, overflow_cap),
+            _funnel_section(len(findings), len(kept)),
+            _headline_section(kept),
+            _findings_section(kept, full_cap, overflow_cap),
+            _set_aside_section(set_aside),
             _hypotheses_section(plan),
             _ledger_section(ledger),
             _limits_section(plan),
