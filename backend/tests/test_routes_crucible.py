@@ -1992,3 +1992,53 @@ def test_approving_unchanged_leaves_the_proposal_exactly_as_shown(ctx):
     shown = _prioritisation(body["id"])["plan"]["definition_text"]
     ctx.client.post(f"/v1/crucible/{body['id']}/approve", json={})
     assert _prioritisation(body["id"])["plan"]["definition_text"] == shown
+
+
+def test_the_report_is_published_before_any_model_is_asked_anything():
+    """THE BUG THAT ACTUALLY BIT, and it is about ORDER rather than errors.
+
+    The relevance gate and the recommendations ran ABOVE `save_findings`, so
+    everything the deterministic pipeline computed in seconds sat unsaved and
+    invisible behind four sequential model calls. On staging a 149-finding run
+    hung thirteen minutes past its last narration line showing nothing, with no
+    error to show — because there was no error. Both layers caught exceptions
+    and neither had any notion of time.
+
+    Asserted on the SOURCE ORDER, because that is the property: findings saved
+    and the run marked ready before either enrichment is reached.
+    """
+    import ast
+    import inspect
+
+    from app.routes import crucible as routes
+
+    tree = ast.parse(inspect.cleandoc(inspect.getsource(routes.execute_run)))
+    marks: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        src = ast.unparse(node)
+        if "save_findings" in src:
+            marks.append(("save", node.lineno))
+        elif 'status="ready"' in src or "status='ready'" in src:
+            marks.append(("ready", node.lineno))
+        elif "judge_relevance" in src:
+            marks.append(("gate", node.lineno))
+        elif "build_recommendations" in src:
+            marks.append(("recommend", node.lineno))
+
+    order = [name for name, _ in sorted(marks, key=lambda m: m[1])]
+    for required in ("save", "ready", "gate", "recommend"):
+        assert required in order, f"{required} not found in execute_run"
+
+    assert order.index("save") < order.index("gate"), (
+        "the findings must be saved before the relevance gate is asked "
+        f"anything — order was {order}"
+    )
+    assert order.index("ready") < order.index("gate"), (
+        "the run must be READY before the gate runs; the panel polls on it, so "
+        f"enriching first keeps the reader on a spinner — order was {order}"
+    )
+    assert order.index("ready") < order.index("recommend"), (
+        f"the run must be READY before recommendations — order was {order}"
+    )

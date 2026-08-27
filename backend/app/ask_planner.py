@@ -189,13 +189,22 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     routing-accuracy query over the pair measures nothing. `edit_artifact`
 #     landed in #1316 without a bump and `analyse_goal` in #1321 without one
 #     either; both are covered by this bump rather than left uncounted.
+#   v14: `analyse_goal` learned that a goal asked AS A QUESTION is still a goal.
+#     v13 taught the action with imperative examples ("increase revenue by 5%",
+#     "reduce churn") and then drew the exclusion at "A GOAL IS NOT A QUESTION
+#     ABOUT A METRIC" — a line between statements and questions rather than
+#     between reporting a number and changing one. Observed live: "How to grow
+#     revenue by 5%" routed to `answer` and reached the DS agent, while "How can
+#     we grow revenue by 5%" routed correctly, which is a distinction no user
+#     could be expected to make. A v13 row and a v14 row answer the question
+#     differently for every interrogative goal, so they must not be pooled.
 #   v13: the where/what line inside `list_artifacts`. "Where on Sprntly do I
 #     find my created PRDs" is a request to be shown around the app, and it
 #     used to compete with the library listing; the answer path now holds the
 #     product's screen map (app/app_map.py), so a v13 row sends those to
 #     `answer` where a v12 row could reasonably have listed. Same menu, but a
 #     different question is being asked of it, so the two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v13"
+_PROMPT_VERSION = "ask-planner-v14"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -852,12 +861,17 @@ or wants an answer.
   `answer` with include_projects=true.
 - analyse_goal — a business GOAL the user wants MOVED: "increase revenue by
   5%", "reduce churn", "improve activation this quarter", "get retention up".
+  ASKED AS A QUESTION IS STILL A GOAL, and this is the most common way people
+  phrase one: "how to grow revenue by 5%", "how do we reduce churn?", "how can
+  we improve activation?", "what can we do about retention?", "ways to grow
+  revenue". All of these are `analyse_goal`.
   Set `task` to the goal in the USER'S OWN WORDS, including any number they
   gave ("increase revenue by 5%", not "revenue"). The number is part of the
   goal and Goal Analysis asks about it.
-  A GOAL IS NOT A QUESTION ABOUT A METRIC. "what is our churn?", "how did
-  revenue move last quarter?", "show me activation" all REPORT a number and
-  are `answer`. This action is for wanting the number to CHANGE.
+  THE LINE IS REPORT versus CHANGE, not statement versus question. "what is our
+  churn?", "how did revenue move last quarter?", "show me activation" ask what a
+  number IS or WAS — they REPORT, and they are `answer`. "how do we reduce
+  churn?" asks how to CHANGE it, and that is this action however it is phrased.
   Choose it even when you could attempt an answer yourself. Goal Analysis
   stops and asks what the metric means, states what it will read, and runs
   only once the user approves — a goal answered directly skips the

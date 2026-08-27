@@ -166,3 +166,79 @@ def test_one_bad_chunk_does_not_lose_the_others():
     kept, aside = partition(findings, out)
     assert [f.id for f, _ in aside] == ["later"]
     assert len(kept) == mod.CHUNK
+
+
+def test_the_gate_stops_asking_at_its_deadline():
+    """LATENCY IS A FAILURE MODE, AND ONLY ERRORS WERE GUARDED.
+
+    Every call was wrapped in a try, which was called failing open. It is not:
+    a call that never returns raises nothing. On staging a 149-finding run sat
+    thirteen minutes past its last narration line with its findings computed,
+    unsaved and invisible — no error, because there was no error.
+
+    Past the deadline the gate stops asking and everything unjudged is kept,
+    the same direction every other failure here resolves in.
+    """
+    import app.crucible.relevance as mod
+    import app.graph.gateway as gw
+
+    calls = {"n": 0}
+    clock = {"t": 0.0}
+
+    def slow(**kw):
+        calls["n"] += 1
+        clock["t"] += mod.DEADLINE_SECONDS  # each call burns the whole budget
+
+        class _R:
+            output = {"verdicts": []}
+        return _R()
+
+    findings = [_f(f"f{i}") for i in range(mod.CHUNK * 3)]
+    real, off, mono = gw.llm_call, mod._offline, mod.time.monotonic
+    try:
+        gw.llm_call = slow
+        mod._offline = lambda: False
+        mod.time.monotonic = lambda: clock["t"]
+        out = mod.judge_relevance(enterprise_id="e", goal_text="g",
+                                  definition_text="d", findings=findings)
+    finally:
+        gw.llm_call, mod._offline, mod.time.monotonic = real, off, mono
+
+    # It asked once, then the budget was gone. It did not ask three times.
+    assert calls["n"] == 1
+    # And nothing it never judged was set aside.
+    kept, aside = partition(findings, out)
+    assert len(kept) == len(findings)
+    assert aside == []
+
+
+def test_the_deadline_is_checked_before_a_call_not_after():
+    """A budget tested only on the way out still pays for the call that broke
+    it. With the budget already spent, the gate must make NO call at all."""
+    import app.crucible.relevance as mod
+    import app.graph.gateway as gw
+
+    calls = {"n": 0}
+
+    def counted(**kw):
+        calls["n"] += 1
+
+        class _R:
+            output = {"verdicts": []}
+        return _R()
+
+    real, off, mono = gw.llm_call, mod._offline, mod.time.monotonic
+    t = {"v": 0.0}
+    try:
+        gw.llm_call = counted
+        mod._offline = lambda: False
+        # Time jumps past the deadline between the budget being set and the
+        # first chunk being asked for.
+        seq = iter([0.0] + [mod.DEADLINE_SECONDS + 1.0] * 20)
+        mod.time.monotonic = lambda: next(seq, mod.DEADLINE_SECONDS + 1.0)
+        mod.judge_relevance(enterprise_id="e", goal_text="g",
+                            definition_text="d", findings=[_f("a")])
+    finally:
+        gw.llm_call, mod._offline, mod.time.monotonic = real, off, mono
+
+    assert calls["n"] == 0

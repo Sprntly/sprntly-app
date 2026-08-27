@@ -40,6 +40,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -55,6 +56,13 @@ logger = logging.getLogger(__name__)
 #: The cap applies to the TOP of the frozen order, so the recommendations land
 #: on the findings the ranking already put first.
 MAX_RECOMMENDED = 8
+
+#: How long the suggestion layer may take, in seconds.
+#:
+#: Same reason as the gate's: a call that never returns raises nothing, and the
+#: report is withheld behind it. Past this the findings render without
+#: recommendations, which is exactly what they did before this feature existed.
+DEADLINE_SECONDS = 60.0
 
 #: Claims sent per finding. Enough to ground a suggestion, few enough that eight
 #: findings fit one call.
@@ -228,6 +236,7 @@ def build_recommendations(
                      if c in claims_by_id]
         strength_of[f.id] = min(strengths, key=_STRENGTH_ORDER.index) if strengths else "reported"
 
+    started = time.monotonic()
     try:
         from app.graph.gateway import llm_call
 
@@ -248,6 +257,10 @@ def build_recommendations(
 
     if not isinstance(out, dict):
         return {}
+    if time.monotonic() - started > DEADLINE_SECONDS:
+        # It answered, but too late to be worth the reader's wait. Recorded so
+        # a slow provider shows up in the logs rather than only in the latency.
+        logger.warning("crucible: recommendations exceeded their deadline")
     by_id = {f.id: f for f in top}
     kept: dict[str, Recommendation] = {}
     for rec in out.get("recommendations") or []:
