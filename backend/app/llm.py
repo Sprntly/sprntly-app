@@ -690,6 +690,77 @@ def _unwrap_response_envelope(out, schema):
     return inner
 
 
+def build_json_kwargs(
+    *,
+    system: str,
+    user: str,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 16000,
+    schema: dict | None = None,
+    user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
+    temperature: float | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """Build the exact `messages.create` kwargs `call_json` sends — model,
+    max_tokens, system, messages, and (when `schema` is given) the forced
+    `submit_response` tool + `tool_choice`.
+
+    `call_json` calls this and hands the result straight to
+    `_create_maybe_batched`, so a LIVE `call_json(...)` call and a BATCHED
+    request built from the same arguments (e.g.
+    `app.llm_batch.BatchRequest(custom_id, build_json_kwargs(...))`) are
+    byte-identical params — the same "cannot drift" guarantee
+    `_build_base_kwargs` already gives the sync/per-call-batch seam inside
+    `_create_maybe_batched`, one layer up: a caller assembling a BULK batch
+    (many `BatchRequest`s handed to `app.llm_batch.run_batch` directly, rather
+    than the one-request-per-call `batch=True` opt-in below) uses this same
+    function so its requests can never diverge from what the live path would
+    have sent.
+    """
+    kwargs: dict = _build_base_kwargs(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
+        temperature=temperature,
+    )
+    if timeout is not None:
+        # Per-request read-timeout override (an SDK request option) — used for
+        # long generations that exceed the client default.
+        kwargs["timeout"] = timeout
+    if schema is not None:
+        kwargs["tools"] = [{
+            "name": "submit_response",
+            "description": "Submit the structured response. All fields required.",
+            "input_schema": schema,
+        }]
+        kwargs["tool_choice"] = {"type": "tool", "name": "submit_response"}
+    return kwargs
+
+
+def parse_tool_response(msg, schema: dict | None) -> dict:
+    """Extract the structured dict from a forced `submit_response` tool-use
+    Message — the same parsing `call_json`'s schema branch applies to a live
+    response.
+
+    Shared so a BATCHED result (one of the raw Anthropic `Message` objects
+    `app.llm_batch.run_batch` returns, keyed by `custom_id`) parses IDENTICALLY
+    to the live path; only the transport differs, never the interpretation of
+    the response. Raises the same 502 `HTTPException` `call_json` would for a
+    response that never invoked the tool.
+    """
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "submit_response":
+            out = dict(block.input) if not isinstance(block.input, dict) else block.input
+            return _unwrap_response_envelope(out, schema)
+    raise HTTPException(
+        502, "LLM did not invoke the structured response tool"
+    )
+
+
 def call_json(
     *,
     system: str,
@@ -735,25 +806,18 @@ def call_json(
     prompt is also substantial (>1000 chars), it gets the same treatment.
     """
     client = get_client()
-    base_kwargs: dict = _build_base_kwargs(
-        model=model,
-        max_tokens=max_tokens,
+    base_kwargs: dict = build_json_kwargs(
         system=system,
         user=user,
+        model=model,
+        max_tokens=max_tokens,
+        schema=schema,
         user_cacheable_prefix=user_cacheable_prefix,
         cache_ttl=cache_ttl,
         temperature=temperature,
+        timeout=timeout,
     )
-    if timeout is not None:
-        # Per-request read-timeout override (an SDK request option) — used for
-        # long generations that exceed the client default.
-        base_kwargs["timeout"] = timeout
     if schema is not None:
-        tool = {
-            "name": "submit_response",
-            "description": "Submit the structured response. All fields required.",
-            "input_schema": schema,
-        }
         msg = _create_maybe_batched(
             client,
             batch=batch,
@@ -763,17 +827,9 @@ def call_json(
             background=background,
             on_json_delta=on_json_delta,
             **base_kwargs,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "submit_response"},
         )
         _capture_meta(meta_out, msg, model)
-        for block in msg.content:
-            if block.type == "tool_use" and block.name == "submit_response":
-                out = dict(block.input) if not isinstance(block.input, dict) else block.input
-                return _unwrap_response_envelope(out, schema)
-        raise HTTPException(
-            502, "LLM did not invoke the structured response tool"
-        )
+        return parse_tool_response(msg, schema)
 
     msg = _create_maybe_batched(
         client, batch=batch, label=batch_label, batch_deadline_s=batch_deadline_s,

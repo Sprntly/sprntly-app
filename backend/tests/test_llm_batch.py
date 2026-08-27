@@ -195,6 +195,41 @@ def test_metering_failure_never_breaks_the_batch(batched, monkeypatch):
     assert out is not None and set(out) == {"a"}
 
 
+def test_one_bad_message_does_not_drop_metering_for_the_rest(batched, monkeypatch):
+    """Live-verify (2026-08-27): a 4-result batch metered only 3 of 4 rows —
+    the per-message loop in `_meter_results` had no isolation, so one raising
+    message aborted metering for every message after it. Each message must be
+    isolated, matching the module's own fail-soft contract."""
+    import app.llm_metering as metering
+
+    seen: list[str] = []
+
+    def flaky(*, message, **kw):  # noqa: ARG001
+        if message.model == "boom-model":
+            raise RuntimeError("this one message failed to meter")
+        seen.append(message.model)
+
+    monkeypatch.setattr(metering, "record_external_usage", flaky)
+    fake = _FakeBatches([
+        _result("a", _msg(model="ok-1")),
+        _result("b", _msg(model="boom-model")),
+        _result("c", _msg(model="ok-2")),
+        _result("d", _msg(model="ok-3")),
+    ])
+    batched(fake)
+    out = llm_batch.run_batch([
+        BatchRequest("a", {}), BatchRequest("b", {}),
+        BatchRequest("c", {}), BatchRequest("d", {}),
+    ])
+    # The batch RESULT is unaffected either way (metering never blocks work) —
+    # the point here is specifically that metering itself didn't drop siblings.
+    assert out is not None and set(out) == {"a", "b", "c", "d"}
+    assert seen == ["ok-1", "ok-2", "ok-3"], (
+        "the one bad message must not have stopped the OTHER three from "
+        "being metered"
+    )
+
+
 def test_cost_multiplier_halves_the_estimate(monkeypatch):
     """The discount lands on the PRICE, never the token counts — the counts are
     ground truth and must stay re-rateable."""

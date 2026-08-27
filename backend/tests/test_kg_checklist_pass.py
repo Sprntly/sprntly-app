@@ -200,6 +200,65 @@ def test_empty_checklist_output_writes_nothing(facade):
     assert result == {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
 
+# ── build_checklist_request / parse_checklist_response: batch-authoring seam ─
+#
+# Same proof as the main pass (see test_kg_extractor.py): the standalone
+# build/parse pair — used by a caller assembling a BULK batch rather than
+# calling run_checklist_pass live — composes to the EXACT SAME facade outcome
+# as the live/sync inline path for identical model output.
+
+
+def test_build_and_parse_checklist_compose_to_the_same_result_as_the_live_path(facade):
+    quote = "we're paying fifty thousand a year for this platform"
+    text = f"Buyer: {quote}."
+    entries = [_entry("commercial", content="priced at $50k/yr", quote=quote)]
+
+    with patch.object(ex, "llm_call", return_value=_checklist_llm_result(entries)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        live_result = ex.run_checklist_pass(facade, "ent-c-live", doc_name="call.md",
+                                            text=text)
+
+    kwargs = ex.build_checklist_request(doc_name="call.md", text=text)
+    assert kwargs["model"] == ex.DEFAULT_MODEL
+    assert kwargs["tools"][0]["input_schema"] == ex._CHECKLIST_SCHEMA
+
+    from types import SimpleNamespace
+
+    fake_message = SimpleNamespace(content=[
+        SimpleNamespace(type="tool_use", name="submit_response",
+                        input={"checklist": entries}),
+    ])
+    with patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        batch_result = ex.parse_checklist_response(
+            facade, "ent-c-batch", fake_message, doc_name="call.md", text=text,
+        )
+
+    # signal_ids are content-keyed by enterprise_id (uuid5), so the two runs'
+    # ids legitimately differ (different enterprise_id) — compare everything
+    # else, then verify each run's own signal independently below.
+    assert {k: v for k, v in batch_result.items() if k != "signal_ids"} == \
+           {k: v for k, v in live_result.items() if k != "signal_ids"}
+
+    live_sig = facade.get_signal(
+        "ent-c-live", str(uuid.uuid5(ex._NS, "ent-c-live|priced at $50k/yr")))
+    batch_sig = facade.get_signal(
+        "ent-c-batch", str(uuid.uuid5(ex._NS, "ent-c-batch|priced at $50k/yr")))
+    assert live_sig is not None and batch_sig is not None
+    assert live_sig.kind == batch_sig.kind == "commercial_term"
+
+
+def test_build_checklist_request_renders_the_full_text_given(facade):
+    """The batch build path is handed the FULL transcript text (the checklist
+    pass's caller-supplied `text`, same contract as the live call) — never a
+    condensed one."""
+    kwargs = ex.build_checklist_request(doc_name="call.md", text="the full transcript body")
+    user_content = kwargs["messages"][0]["content"]
+    assert "<document name='call.md'>" in user_content
+    assert "the full transcript body" in user_content
+
+
 def test_quote_grounded_helper_normalizes_whitespace_and_case():
     assert ex._quote_is_grounded("Hello   World",
                                   "text before hello world after") is True

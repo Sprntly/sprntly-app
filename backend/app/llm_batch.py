@@ -212,6 +212,13 @@ def _meter_results(messages, *, started_at: float) -> None:
     read on the dashboard as a mysterious drop in volume rather than a saving.
 
     Fail-soft, matching `llm_metering._record`: metering never breaks the work.
+    Per-message isolated (live-verify, 2026-08-27): one bad message used to
+    abort the whole loop, so a 4-result batch silently metered only the rows
+    before the first failure (3 of 4, observed live). `get_client`/
+    `key_mode_of` failing is still fatal to the WHOLE batch (nothing can be
+    metered without a client), so that stays in the outer try; only the
+    per-message `record_external_usage` call is isolated so one bad message
+    can't drop its siblings.
     """
     try:
         from app.llm import get_client
@@ -219,13 +226,19 @@ def _meter_results(messages, *, started_at: float) -> None:
 
         key_mode = key_mode_of(get_client())
         for msg in messages:
-            record_external_usage(
-                key_mode=key_mode,
-                provider=PROVIDER_ANTHROPIC,
-                model=getattr(msg, "model", None),
-                message=msg,
-                started_at=started_at,
-                cost_multiplier=BATCH_COST_MULTIPLIER,
-            )
+            try:
+                record_external_usage(
+                    key_mode=key_mode,
+                    provider=PROVIDER_ANTHROPIC,
+                    model=getattr(msg, "model", None),
+                    message=msg,
+                    started_at=started_at,
+                    cost_multiplier=BATCH_COST_MULTIPLIER,
+                )
+            except Exception:  # noqa: BLE001 — one bad message must not drop the rest
+                logger.exception(
+                    "llm-batch usage metering failed for one result (continuing "
+                    "with the rest)"
+                )
     except Exception:  # noqa: BLE001 — metering is never allowed to surface
         logger.exception("llm-batch usage metering failed (continuing)")
