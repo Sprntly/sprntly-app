@@ -25,14 +25,18 @@ shared prod+staging incremental cursor (``kg_last_synced_until`` on the
 connection row) — see ``app.kg_ingest.pullers.fireflies.pull``. Running this
 can never desynchronize the regular scheduled sync.
 
-BATCH-FIRST, SYNC-FALLBACK: every call's main pass + checklist pass (the same
-per-call split ``app.kg_ingest.runner.sync_provider`` uses for Fireflies) is
-submitted as ONE bulk `app.llm_batch.run_batch` call — half the live price,
-and off the shared interactive concurrency gate. If batching is off, the
-company key isn't Anthropic, or the batch API errors, `run_batch` returns
-`None` for the WHOLE submission and this script falls back to the existing
-SYNCHRONOUS extraction path per call (correctness over cost) — never a
-partial/silent loss.
+BATCH-FIRST, SYNC-FALLBACK, CHUNKED: every call's main pass + checklist pass
+(the same per-call split ``app.kg_ingest.runner.sync_provider`` uses for
+Fireflies) is submitted as a bulk `app.llm_batch.run_batch` call — half the
+live price, and off the shared interactive concurrency gate. Calls are
+processed in chunks of ``CHUNK_SIZE`` (one `run_batch` submission per chunk,
+each waited on for up to ``--batch-deadline-hours``) rather than one giant
+batch, so a stalled or slow chunk only falls back to synchronous extraction
+for ITS calls, not the whole run. If batching is off, the company key isn't
+Anthropic, the batch API errors, or a chunk's deadline passes, `run_batch`
+returns `None` for that chunk and this script falls back to the existing
+SYNCHRONOUS extraction path for that chunk's calls (correctness over cost) —
+never a partial/silent loss.
 
 IDEMPOTENT: the content-hash ledger (``app.db.kg_ingest_ledger``) dedups
 already-extracted calls exactly like a normal sync, so re-running this is
@@ -72,6 +76,28 @@ from app.kg_ingest.types import RawRecord  # noqa: E402
 from app.llm_batch import BatchRequest, BATCH_COST_MULTIPLIER, run_batch  # noqa: E402
 from app.llm_keys import company_llm_key  # noqa: E402
 from app.usage_context import feature_for_agent, usage_scope  # noqa: E402
+
+#: How many CALLS (each = 2 requests, main + checklist) go into one bulk
+#: `run_batch` submission. Live-verify (2026-08-27) submitted 798 requests
+#: (399 calls) as ONE batch; chunking bounds the blast radius of a stalled or
+#: slow submission — if one chunk misses its deadline, only THAT chunk falls
+#: back to sync, not the whole run — and keeps each individual `messages.batches.create`
+#: call comfortably small. Not a hard API ceiling (Anthropic's own limit is
+#: far higher); this is a robustness choice, not a workaround for a real cap.
+CHUNK_SIZE = 250
+
+#: Generous default wait for one chunk's batch to finish before falling back
+#: to sync for that chunk. `app.llm_batch.DEFAULT_DEADLINE_S` (900s / 15 min)
+#: is sized for the tiny, single-request callers `gateway.llm_call`'s
+#: `batch=True` opt-in makes — NOT for a bulk backfill chunk of up to
+#: `CHUNK_SIZE` calls. Live-verify's first real run submitted 798 requests as
+#: one batch, missed the 15-minute default, and silently fell back to
+#: full-price SEQUENTIAL sync extraction for all 399 calls — exactly the slow/
+#: expensive path this tool exists to avoid. The Batches API's own SLA is 24h;
+#: bulk batches this size routinely take tens of minutes to a couple of hours,
+#: so 4h is generous headroom without being unbounded. Overridable per run via
+#: `--batch-deadline-hours` for an operator backfilling a very large history.
+DEFAULT_BATCH_DEADLINE_HOURS = 4.0
 
 logger = logging.getLogger("backfill_fireflies_kg")
 
@@ -249,26 +275,76 @@ def _run_sync_fallback(
     return tally, extracted
 
 
-def _submit_batch(enterprise_id: str, requests: list[BatchRequest]) -> dict | None:
-    """`run_batch(requests)`, ATTRIBUTED — live-verify (2026-08-27) found the
-    CLI calling `run_batch` bare left every batched usage row unattributed:
-    `app.llm_metering.record_external_usage` reads the acting company off
-    `app.llm_keys.current_company_id()` and the feature/operation label off
-    `app.usage_context`'s scope, both ContextVars that are normally bound by
-    `gateway.llm_call`'s own `with company_llm_key(enterprise_id), usage_scope(...)`
-    block — which this CLI, calling `run_batch` directly rather than through
-    the gateway, never enters. Unwrapped, `run_batch` still records usage
-    ROWS (0.5x cost_multiplier is correct either way) but with company/feature
-    both `None`/unattributed, invisible on any per-company or per-feature cost
+def _submit_batch(
+    enterprise_id: str, requests: list[BatchRequest], *,
+    deadline_s: float = DEFAULT_BATCH_DEADLINE_HOURS * 3600,
+) -> dict | None:
+    """`run_batch(requests, deadline_s=deadline_s)`, ATTRIBUTED — live-verify
+    (2026-08-27) found the CLI calling `run_batch` bare left every batched
+    usage row unattributed: `app.llm_metering.record_external_usage` reads
+    the acting company off `app.llm_keys.current_company_id()` and the
+    feature/operation label off `app.usage_context`'s scope, both ContextVars
+    that are normally bound by `gateway.llm_call`'s own
+    `with company_llm_key(enterprise_id), usage_scope(...)` block — which this
+    CLI, calling `run_batch` directly rather than through the gateway, never
+    enters. Unwrapped, `run_batch` still records usage ROWS (0.5x
+    cost_multiplier is correct either way) but with company/feature both
+    `None`/unattributed, invisible on any per-company or per-feature cost
     view. This binds the SAME two context managers `llm_call` uses, with the
     SAME `feature_for_agent(_AGENT)` mapping every other extraction call this
     tool makes resolves to (see `_AGENT`), so batched spend lands in the
     identical company + feature bucket the sync-fallback path's calls would.
+
+    `deadline_s` defaults to the generous `DEFAULT_BATCH_DEADLINE_HOURS`, NOT
+    `app.llm_batch.DEFAULT_DEADLINE_S` (900s/15min, sized for a single-request
+    caller) — see that constant's module-level comment. Always passed
+    explicitly by `_process_chunk` below; the default here only covers a
+    caller that invokes this directly (e.g. a test).
     """
     with company_llm_key(enterprise_id), usage_scope(
         feature=feature_for_agent(_AGENT), operation="kg_backfill"
     ):
-        return run_batch(requests, label="kg-backfill:fireflies")
+        return run_batch(requests, label="kg-backfill:fireflies", deadline_s=deadline_s)
+
+
+def _chunks(items: list, size: int):
+    """Yield successive `size`-length slices of `items` (the last one short).
+    Plain index slicing — no `RawRecord` identity is copied or mutated, so
+    `id(rec)`-keyed structures (the ledger `hashes` dict) stay valid across
+    chunks."""
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _process_chunk(
+    facade: GraphFacade, enterprise_id: str, chunk: list[RawRecord],
+    hashes: dict[int, str], deadline_s: float,
+) -> tuple[dict, set[str], bool]:
+    """Submit ONE chunk's calls as one bulk batch and write its results —
+    the per-chunk unit of work `main`'s loop drives. Returns
+    `(tally, extracted, used_batch)`; `used_batch` is False when this chunk
+    fell back to sync (batching off / API error / THIS CHUNK's deadline),
+    which only affects this chunk, never the others — the whole point of
+    chunking (see `CHUNK_SIZE`'s module-level comment)."""
+    requests, unit_by_id = _build_batch_requests(chunk, enterprise_id)
+    logger.info(
+        "submitting %d request(s) for a %d-call chunk (deadline=%.0fs)",
+        len(requests), len(chunk), deadline_s,
+    )
+    results = _submit_batch(enterprise_id, requests, deadline_s=deadline_s)
+    if results is None:
+        logger.warning(
+            "run_batch returned None for this chunk (batching disabled / "
+            "non-Anthropic key / API error / deadline) — falling back to "
+            "the existing SYNC path for just these %d call(s), at the live "
+            "not batch rate", len(chunk),
+        )
+        tally, extracted = _run_sync_fallback(facade, enterprise_id, chunk, hashes)
+        return tally, extracted, False
+    tally, extracted = _run_batched(
+        facade, enterprise_id, chunk, hashes, unit_by_id, results,
+    )
+    return tally, extracted, True
 
 
 def _run_batched(
@@ -335,6 +411,11 @@ def main(argv: list[str] | None = None) -> int:
                     help="max calls to pull; default 500")
     ap.add_argument("--run", action="store_true",
                     help="actually execute (default is a read-only dry run)")
+    ap.add_argument("--batch-deadline-hours", type=float,
+                    default=DEFAULT_BATCH_DEADLINE_HOURS,
+                    help="how long to wait for one chunk's batch to finish "
+                         "before falling back to sync for that chunk, in "
+                         f"hours; default {DEFAULT_BATCH_DEADLINE_HOURS}")
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -394,30 +475,41 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     facade = GraphFacade()
-    requests, unit_by_id = _build_batch_requests(fresh, enterprise_id)
-    logger.info("submitting %d request(s) as ONE bulk batch (%d calls x 2 passes)",
-               len(requests), len(fresh))
-    results = _submit_batch(enterprise_id, requests)
+    deadline_s = args.batch_deadline_hours * 3600
+    chunks = list(_chunks(fresh, CHUNK_SIZE))
+    logger.info(
+        "processing %d call(s) as %d chunk(s) of up to %d call(s) each "
+        "(batch deadline %.1fh per chunk)",
+        len(fresh), len(chunks), CHUNK_SIZE, args.batch_deadline_hours,
+    )
 
-    if results is None:
-        logger.warning(
-            "run_batch returned None (batching disabled / non-Anthropic key / "
-            "API error / deadline) — falling back to the existing SYNC path "
-            "per call (correctness over cost, at the live not batch rate)"
+    tally = {"signals": 0, "themes": 0, "skipped": 0}
+    extracted: set[str] = set()
+    any_batch = any_fallback = False
+    for i, chunk in enumerate(chunks):
+        logger.info("chunk %d/%d — %d call(s)", i + 1, len(chunks), len(chunk))
+        chunk_tally, chunk_extracted, used_batch = _process_chunk(
+            facade, enterprise_id, chunk, hashes, deadline_s,
         )
-        tally, extracted = _run_sync_fallback(facade, enterprise_id, fresh, hashes)
-        used_batch = False
+        _accumulate(tally, chunk_tally)
+        extracted |= chunk_extracted
+        if used_batch:
+            any_batch = True
+        else:
+            any_fallback = True
+
+    if any_batch and any_fallback:
+        transport = "mixed (some chunks batched, some fell back to sync)"
+    elif any_batch:
+        transport = "batch"
     else:
-        tally, extracted = _run_batched(
-            facade, enterprise_id, fresh, hashes, unit_by_id, results,
-        )
-        used_batch = True
+        transport = "sync-fallback"
 
     logger.info(
         "done — calls=%d extracted=%d signals=%d themes=%d skipped=%d "
         "transport=%s",
         len(fresh), len(extracted), tally["signals"], tally["themes"],
-        tally["skipped"], "batch" if used_batch else "sync-fallback",
+        tally["skipped"], transport,
     )
     return 0
 

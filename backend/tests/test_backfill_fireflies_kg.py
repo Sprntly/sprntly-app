@@ -326,3 +326,163 @@ def test_batched_results_route_through_parse_not_sync(mod, monkeypatch):
     assert sync_calls == [], "the sync fallback must not run when run_batch succeeds"
     assert set(parse_calls) == {"extract", "checklist"}
     assert len(recorded) == 1
+
+
+# ── batch deadline: generous, not the 900s single-request default ────────
+#
+# Live-verify (2026-08-27): the first real run submitted 798 requests as ONE
+# batch using `run_batch`'s bare 900s/15min default (sized for a single
+# request), missed it, and silently fell back to full-price sequential sync
+# for all 399 calls. `_submit_batch` must always pass an explicit, generous
+# deadline — never the bare default.
+
+
+def test_submit_batch_passes_a_generous_deadline_by_default(mod, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(mod, "run_batch",
+                        lambda requests, **kw: seen.update(kw) or None)
+    mod._submit_batch("ent-x", [])
+    assert seen["deadline_s"] > 900, (
+        "must be well above run_batch's bare single-request default")
+    assert seen["deadline_s"] == mod.DEFAULT_BATCH_DEADLINE_HOURS * 3600
+
+
+def test_main_threads_batch_deadline_hours_through_to_run_batch(mod, monkeypatch):
+    """`--batch-deadline-hours` actually reaches `run_batch`'s `deadline_s`,
+    not just the module-level default."""
+    records = [_rec("FF1")]
+    monkeypatch.setattr(mod, "_fetch_api_key", lambda *_a, **_k: "api-key")
+    monkeypatch.setattr(mod.fireflies, "pull", lambda *a, **k: iter(records))
+    monkeypatch.setattr(mod, "seen_hashes", lambda *_a, **_k: set())
+    monkeypatch.setattr(mod, "GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+
+    seen_deadlines = []
+
+    def fake_run_batch(requests, **kw):
+        seen_deadlines.append(kw.get("deadline_s"))
+        return None  # falls back to sync — irrelevant to what we're proving
+
+    monkeypatch.setattr(mod, "run_batch", fake_run_batch)
+    monkeypatch.setattr(mod, "extract_document",
+                        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0,
+                                         "signal_ids": []})
+    monkeypatch.setattr(mod, "run_checklist_pass",
+                        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0,
+                                         "signal_ids": []})
+
+    rc = mod.main(["--company", "ent-x", "--run", "--batch-deadline-hours", "8"])
+    assert rc == 0
+    assert seen_deadlines == [8 * 3600]
+
+
+def test_default_batch_deadline_is_hours_not_the_bare_llm_batch_default(mod, monkeypatch):
+    """The CLI's default must be measured in HOURS and comfortably clear
+    `app.llm_batch.DEFAULT_DEADLINE_S` (900s) — the exact gap live-verify
+    found."""
+    from app import llm_batch as llm_batch_mod
+    assert mod.DEFAULT_BATCH_DEADLINE_HOURS * 3600 > llm_batch_mod.DEFAULT_DEADLINE_S
+
+
+# ── chunking: a large call set splits into multiple bulk submissions ─────
+#
+# CHUNK_SIZE bounds one `run_batch` submission's blast radius: if one chunk
+# stalls or misses its deadline, only ITS calls fall back to sync, not the
+# whole run. These pin that a call set bigger than one chunk actually DOES
+# split into multiple `run_batch` calls, and that results reassemble
+# correctly (custom_id -> call/pass mapping holds independently per chunk).
+
+
+def test_large_call_set_splits_into_multiple_run_batch_submissions(mod, monkeypatch):
+    monkeypatch.setattr(mod, "CHUNK_SIZE", 2)
+    records = [_rec(f"FF{i}") for i in range(5)]  # 5 calls, chunk size 2 -> 3 chunks
+    monkeypatch.setattr(mod, "_fetch_api_key", lambda *_a, **_k: "api-key")
+    monkeypatch.setattr(mod.fireflies, "pull", lambda *a, **k: iter(records))
+    monkeypatch.setattr(mod, "seen_hashes", lambda *_a, **_k: set())
+    monkeypatch.setattr(mod, "GraphFacade", lambda *a, **k: object())
+    recorded = []
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: recorded.append(a))
+
+    submissions = []
+
+    def fake_run_batch(requests, **kw):
+        submissions.append([r.custom_id for r in requests])
+        # Every request in THIS submission "succeeds" — echo an empty-content
+        # message per custom_id so parse_*_response has something to parse.
+        return {r.custom_id: SimpleNamespace(content=[]) for r in requests}
+
+    monkeypatch.setattr(mod, "run_batch", fake_run_batch)
+
+    parsed = []
+
+    def fake_parse_extract_response(facade, enterprise_id, message, *, doc_name, **kw):
+        parsed.append(("extract", doc_name))
+        return {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    def fake_parse_checklist_response(facade, enterprise_id, message, *, doc_name, **kw):
+        parsed.append(("checklist", doc_name))
+        return {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    monkeypatch.setattr(mod, "parse_extract_response", fake_parse_extract_response)
+    monkeypatch.setattr(mod, "parse_checklist_response", fake_parse_checklist_response)
+
+    rc = mod.main(["--company", "ent-x", "--run"])
+
+    assert rc == 0
+    # 5 calls / chunk size 2 -> 3 submissions (2, 2, 1 calls -> 4, 4, 2 requests).
+    assert len(submissions) == 3
+    assert [len(s) for s in submissions] == [4, 4, 2]
+    # Every call's two requests round-tripped back to the RIGHT call/pass,
+    # independently within its own chunk's submission.
+    assert len(parsed) == 10  # 5 calls x 2 passes
+    assert {p[1] for p in parsed} == {f"fireflies-backfill-FF{i}" for i in range(5)}
+    assert len(recorded) == 5, "every call's ledger hash advanced exactly once"
+
+
+def test_one_stalled_chunk_falls_back_without_affecting_other_chunks(mod, monkeypatch):
+    """The whole point of chunking: chunk 2 misses its deadline (`run_batch`
+    returns None for it) and falls back to sync, while chunk 1 (already
+    batched) is completely unaffected."""
+    monkeypatch.setattr(mod, "CHUNK_SIZE", 1)
+    records = [_rec("FF1"), _rec("FF2")]
+    monkeypatch.setattr(mod, "_fetch_api_key", lambda *_a, **_k: "api-key")
+    monkeypatch.setattr(mod.fireflies, "pull", lambda *a, **k: iter(records))
+    monkeypatch.setattr(mod, "seen_hashes", lambda *_a, **_k: set())
+    monkeypatch.setattr(mod, "GraphFacade", lambda *a, **k: object())
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+
+    call_n = {"n": 0}
+
+    def fake_run_batch(requests, **kw):
+        call_n["n"] += 1
+        if call_n["n"] == 1:
+            return {r.custom_id: SimpleNamespace(content=[]) for r in requests}
+        return None  # second chunk "stalls"
+
+    monkeypatch.setattr(mod, "run_batch", fake_run_batch)
+    monkeypatch.setattr(mod, "parse_extract_response",
+                        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0,
+                                         "signal_ids": []})
+    monkeypatch.setattr(mod, "parse_checklist_response",
+                        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0,
+                                         "signal_ids": []})
+    sync_calls = []
+    monkeypatch.setattr(
+        mod, "extract_document",
+        lambda *a, doc_name, **k: sync_calls.append(("extract", doc_name)) or
+        {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
+    monkeypatch.setattr(
+        mod, "run_checklist_pass",
+        lambda *a, doc_name, **k: sync_calls.append(("checklist", doc_name)) or
+        {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
+
+    rc = mod.main(["--company", "ent-x", "--run"])
+
+    assert rc == 0
+    # Chunk 1 (FF1) went through the batch/parse path — no sync call for it.
+    assert not any("FF1" in c[1] for c in sync_calls)
+    # Chunk 2 (FF2) fell back to sync.
+    assert sync_calls == [("extract", "fireflies-backfill-FF2"),
+                          ("checklist", "fireflies-backfill-FF2")]
