@@ -8,15 +8,25 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
   it("is a short list of panes, not a long list of settings", () => {
     // Fifteen rows was a list you read rather than scanned. The two worst were
     // Workspace (six) and Account (three) — rows visited rarely and never
-    // together, which is exactly what a pane nav is for.
-    expect(SETTINGS_NAV.flatMap((g) => g.items).length).toBeLessThanOrEqual(9)
+    // together, which is exactly what a pane nav is for. Guide arrived from
+    // the left rail in the same window, so the ceiling counts it.
+    expect(SETTINGS_NAV.flatMap((g) => g.items).length).toBeLessThanOrEqual(10)
     expect(SETTINGS_NAV.map((g) => g.groupLabel)).toEqual([
       "You",
       "Workspace",
       "How Sprntly writes",
       "Data & Integrations",
+      "Help",
       "Account",
     ])
+  })
+
+  it("Guide is a link out, not a pane", () => {
+    // It came off the left rail with Settings and Feedback. It is the public
+    // docs site — outside the authenticated app — so it is an anchor with an
+    // href rather than a `?section=`, and it is the ONLY row like that.
+    const doors = SETTINGS_NAV.flatMap((g) => g.items).filter((i) => i.href)
+    expect(doors.map((i) => [i.id, i.href])).toEqual([["guide", "/docs"]])
   })
 
   it("carries Templates and Skills as panes of its own", () => {
@@ -56,7 +66,9 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SettingsScreen.tsx"),
       "utf8",
     )
-    for (const item of SETTINGS_NAV.flatMap((g) => g.items)) {
+    // A row with an `href` is a door OUT (Guide → the public docs site). It
+    // has no pane and needs no case; the screen renders an anchor for it.
+    for (const item of SETTINGS_NAV.flatMap((g) => g.items).filter((i) => !i.href)) {
       expect(source, `no renderSection case for "${item.id}"`).toContain(
         `case "${item.id}":`,
       )
@@ -68,7 +80,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
     // row is its own. Between them they must still cover every section the
     // flat nav had, or a setting became unreachable to anyone who did not
     // already know its URL.
-    const BEFORE = [
+    const BEFORE: string[] = [
       "profile", "comms-brief", "workspaces",
       "product-category", "company-profile", "process", "metrics",
       "business-context", "team",
@@ -76,7 +88,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       "connectors", "mcp",
       "billing", "security", "admin",
     ]
-    const reachable = new Set(
+    const reachable = new Set<string>(
       SETTINGS_NAV.flatMap((g) => g.items).flatMap((row) => {
         const pane = SETTINGS_PANES.find((p) => p.id === row.id)
         return pane ? pane.leaves : [row.id]
@@ -123,6 +135,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       skills: "Skills",
       connectors: "Integrations",
       billing: "Account",
+      guide: "Guide",
     })
     // …and the leaf keeps its own name where it is actually shown.
     expect(LEAF_LABELS["product-category"]).toBe("Product & Category")

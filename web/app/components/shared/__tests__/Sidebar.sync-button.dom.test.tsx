@@ -13,8 +13,13 @@
 //   - failed     → failed tint, click retries
 //   - no company → disabled (nothing to sync against yet)
 //
-// The user row around it must STAY display-only: the button is deliberately
-// the row's single interactive element (sign-out lives in Settings → Account).
+// The user row's IDENTITY chrome must stay display-only. The row carries three
+// actions now — sync, feedback, settings, moved down from the bottom rail block
+// — but the avatar and name are inert, and sign-out lives in Settings → Account
+// rather than behind a click on your own face.
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import * as React from "react"
 import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -91,7 +96,7 @@ describe("Sidebar — sync-your-data button", () => {
   it("renders in the user row and passes the active company to the status hook", () => {
     const { container } = render(React.createElement(Sidebar, { activeCompany: "acme" }))
     const btn = screen.getByTestId("sidebar-sync")
-    expect(container.querySelector(".sb-rail-user .sb-sync-btn")).toBe(btn)
+    expect(container.querySelector(".sb-rail-user .sb-rail-actions .sb-sync-btn")).toBe(btn)
     expect(hookCompanyArg).toBe("acme")
   })
 
@@ -165,9 +170,54 @@ describe("Sidebar — sync-your-data button", () => {
     expect(container.querySelector(".sb-rail-user .sb-sync-btn")).toBeTruthy()
   })
 
-  it("the user row gains no OTHER interactive element (avatar/name stay display-only)", () => {
+  it("the row's interactive elements are its three ACTIONS, and nothing else", () => {
+    // This used to assert exactly one — the sync button — and the intent it
+    // protects is that the IDENTITY chrome stays display-only: the avatar and
+    // name were once a sign-out target, and clicking your own face to sign out
+    // is how people sign out by accident.
+    //
+    // Feedback and Settings joined the row deliberately (they came off the
+    // bottom rail block), so the count moved. The invariant did not: name the
+    // three, and prove the avatar and username are still inert.
     const { container } = render(React.createElement(Sidebar, { activeCompany: "acme" }))
     const row = container.querySelector(".sb-rail-user")!
-    expect(row.querySelectorAll("button, a").length).toBe(1)
+    const actions = row.querySelector(".sb-rail-actions")!
+
+    // Three actions, in the order they read left to right.
+    expect(Array.from(actions.querySelectorAll("button, a")).map(
+      (el) => el.getAttribute("aria-label"),
+    )).toEqual(["Sync your data", "Feedback", "Settings"])
+
+    // And they are ALL of the row's interactive elements — nothing has been
+    // added beside them.
+    expect(row.querySelectorAll("button, a").length).toBe(3)
+
+    for (const selector of [".sb-rail-avatar", ".sb-rail-username"]) {
+      const el = row.querySelector(selector)!
+      expect(el.tagName.toLowerCase(), `${selector} became interactive`).toBe("span")
+      expect(el.closest("button, a")).toBeNull()
+    }
+  })
+
+  it("the initials chip is a fixed circle — the NAME is what truncates", () => {
+    // The reported bug: as the row ran out of room the "FT" chip squashed into
+    // an oval. A flex child defaults to `flex-shrink: 1`, so the 32px box gave
+    // way before the text did — and a squashed box with `border-radius: 50%`
+    // is not a circle. jsdom computes no layout, so this asserts the RULE.
+    const css = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "globals.css"),
+      "utf8",
+    )
+    const avatar = /^\s*\.sb-rail-avatar \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+    expect(avatar, ".sb-rail-avatar rule not found").not.toBe("")
+    expect(avatar).toMatch(/flex:\s*none/)
+    expect(avatar).toMatch(/width:\s*32px/)
+    expect(avatar).toMatch(/height:\s*32px/)
+
+    // …and the name is the flexible one, so it takes whatever is left and
+    // ellipsizes into it as the rail is dragged.
+    const username = /^\s*\.sb-rail-username \{([^}]*)\}/m.exec(css)?.[1] ?? ""
+    expect(username).toMatch(/text-overflow:\s*ellipsis/)
+    expect(username).toMatch(/min-width:\s*0/)
   })
 })

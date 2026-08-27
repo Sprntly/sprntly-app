@@ -185,13 +185,12 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
 
   // Workbench is deliberately absent from this list — it is hidden on a product
   // call (2026-08-07), guarded by the "Workbench (hidden)" suite above.
-  it("renders New chat, Top Insights, Guide, Settings + Feedback", () => {
+  it("renders New chat and Top Insights; Settings and Feedback moved to the identity row", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
       "Top Insights",
       "Ideation",
-      "Guide",
       "Settings",
       "Feedback",
     ]) {
@@ -213,17 +212,13 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Skills")).toBeNull()
   })
 
-  it("Guide is an anchor to the public /docs site (not a goTo screen), opening safely in a new tab", () => {
-    render(React.createElement(Sidebar))
-    const guide = screen.getByTestId("sidebar-guide-link") as HTMLAnchorElement
-    expect(guide.tagName).toBe("A")
-    expect(guide.getAttribute("href")).toBe("/docs")
-    expect(guide.getAttribute("target")).toBe("_blank")
-    expect(guide.getAttribute("rel")).toBe("noopener noreferrer")
-    // It navigates via the anchor, never through the SPA screen router.
-    fireEvent.click(guide)
-    expect(goTo).not.toHaveBeenCalled()
-    expect(goToNewChat).not.toHaveBeenCalled()
+  it("no longer carries a Guide link — it moved into Settings", () => {
+    // Guide is the public docs site, and Settings is already where the
+    // read-about-it surfaces live. The rail's bottom block is gone entirely:
+    // its three rows are two icons in the identity row plus this move.
+    render(<Sidebar />)
+    expect(screen.queryByTestId("sidebar-guide-link")).toBeNull()
+    expect(screen.queryByLabelText("Guide")).toBeNull()
   })
 
   it("no longer renders a Sources rail item (hidden from the rail; screen + route kept)", () => {
