@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -69,6 +70,8 @@ from app.kg_ingest.runner import _condensed_and_full_text, _content_hash, token_
 from app.kg_ingest.pullers import fireflies  # noqa: E402
 from app.kg_ingest.types import RawRecord  # noqa: E402
 from app.llm_batch import BatchRequest, BATCH_COST_MULTIPLIER, run_batch  # noqa: E402
+from app.llm_keys import company_llm_key  # noqa: E402
+from app.usage_context import feature_for_agent, usage_scope  # noqa: E402
 
 logger = logging.getLogger("backfill_fireflies_kg")
 
@@ -78,6 +81,13 @@ logger = logging.getLogger("backfill_fireflies_kg")
 #: doing the wrong thing.
 SUPPORTED_PROVIDERS: frozenset[str] = frozenset({"fireflies"})
 
+#: The `agent` label every extraction call this tool makes is attributed
+#: under — the SAME string on both transports (batch's usage_scope below AND
+#: the sync-fallback's extract_document/run_checklist_pass calls) so the two
+#: paths land in the same feature bucket rather than splitting cost
+#: attribution by which transport happened to run.
+_AGENT = "kg-backfill:fireflies"
+
 #: Live (non-batch), measured Config-B cost for ONE Fireflies call's two
 #: passes (main + checklist) — see `app.kg_ingest.runner`'s
 #: `_condensed_and_full_text` docstring ("measured ~$0.13/call for
@@ -86,6 +96,21 @@ SUPPORTED_PROVIDERS: frozenset[str] = frozenset({"fireflies"})
 #: measurement, not a live token count — the actual cost is only known once
 #: `--run` is fired and metering records the real usage.
 _MEASURED_LIVE_COST_PER_CALL_USD = 0.13
+
+#: The real Anthropic Batches API rejects any `custom_id` outside
+#: `^[a-zA-Z0-9_-]{1,64}$` — discovered live (2026-08-27): the original
+#: `"<external_id>:main"` / `":checklist"` separator 400s the WHOLE batch
+#: submission ("String should match pattern"), which `run_batch` treats as a
+#: hard failure and silently falls back to full-price sync for every call,
+#: not just the offending one. `-` replaces `:` as the separator (verified
+#: live), and `_CUSTOM_ID_UNSAFE_RE` sanitizes the external_id defensively —
+#: Fireflies ids are alphanumeric in practice, but a batch is all-or-nothing,
+#: so a single stray character must never be able to take the whole
+#: submission down silently.
+_CUSTOM_ID_UNSAFE_RE = re.compile(r"[^a-zA-Z0-9_-]")
+_MAIN_SUFFIX = "-main"
+_CHECKLIST_SUFFIX = "-checklist"
+_MAX_CUSTOM_ID_LEN = 64
 
 
 def _parse_since_days(raw: str) -> int:
@@ -102,6 +127,32 @@ def _estimate_dry_run_cost(n_calls: int) -> float:
     + checklist pass each), at the batch (0.5x live) rate. See
     `_MEASURED_LIVE_COST_PER_CALL_USD`."""
     return n_calls * _MEASURED_LIVE_COST_PER_CALL_USD * BATCH_COST_MULTIPLIER
+
+
+def _custom_id_prefix(external_id: str) -> str:
+    """A `custom_id`-safe prefix for one call's two batch requests. See
+    `_CUSTOM_ID_UNSAFE_RE`'s module-level comment for why this exists.
+
+    Strips any character outside `[a-zA-Z0-9_-]` (replaced with `_`) and caps
+    the length so `<prefix><_CHECKLIST_SUFFIX>` — the longer of the two
+    suffixes — never exceeds `_MAX_CUSTOM_ID_LEN`. Logs loudly when it had to
+    change anything: Fireflies ids are alphanumeric in practice, so this
+    should be a no-op every real time it runs, and a silent change here is
+    exactly the kind of thing that quietly starts colliding two different
+    calls onto the same custom_id.
+    """
+    safe = _CUSTOM_ID_UNSAFE_RE.sub("_", external_id)
+    max_prefix_len = _MAX_CUSTOM_ID_LEN - len(_CHECKLIST_SUFFIX)
+    truncated = safe[:max_prefix_len]
+    if truncated != external_id:
+        logger.warning(
+            "fireflies external_id %r is not custom_id-safe as-is — "
+            "sanitized to %r for this batch. In the unlikely event two "
+            "external_ids sanitize to the same prefix their custom_ids "
+            "would collide; investigate if that ever shows up.",
+            external_id, truncated,
+        )
+    return truncated
 
 
 def _fetch_api_key(enterprise_id: str) -> str:
@@ -124,8 +175,13 @@ def _build_batch_requests(
     `(pass_name, record, doc_name, pass_text)` — everything
     `parse_extract_response` / `parse_checklist_response` need once
     `run_batch` returns results keyed the same way. `custom_id` is
-    `<call_external_id>:<pass>` (`pass` is `"main"` or `"checklist"`), unique
-    per call since Fireflies external_ids are themselves unique.
+    `<custom_id_prefix><_MAIN_SUFFIX|_CHECKLIST_SUFFIX>` — see
+    `_custom_id_prefix` — unique per call since Fireflies external_ids are
+    themselves unique. The "round trip" (batch result -> which call/pass it
+    belongs to) is a plain dict lookup on the FULL `custom_id` string
+    (`unit_by_id[custom_id]`, in `_run_batched` below) — nothing anywhere
+    parses or splits the id back apart, so it holds regardless of what
+    separator/characters the id itself is made of.
     """
     requests: list[BatchRequest] = []
     unit_by_id: dict[str, tuple[str, RawRecord, str, str]] = {}
@@ -134,8 +190,9 @@ def _build_batch_requests(
             "fireflies", rec, enterprise_id
         )
         doc_name = f"fireflies-backfill-{rec.external_id}"
-        main_id = f"{rec.external_id}:main"
-        checklist_id = f"{rec.external_id}:checklist"
+        prefix = _custom_id_prefix(rec.external_id)
+        main_id = f"{prefix}{_MAIN_SUFFIX}"
+        checklist_id = f"{prefix}{_CHECKLIST_SUFFIX}"
         requests.append(BatchRequest(
             main_id, build_extract_request(doc_name=doc_name, text=main_text),
         ))
@@ -174,13 +231,13 @@ def _run_sync_fallback(
         try:
             r = extract_document(
                 facade, enterprise_id, doc_name=doc_name, text=main_text,
-                agent="kg-backfill:fireflies", origin="connector",
+                agent=_AGENT, origin="connector",
                 source_ref=source_ref,
             )
             _accumulate(tally, r)
             c = run_checklist_pass(
                 facade, enterprise_id, doc_name=doc_name, text=checklist_text,
-                agent="kg-backfill:fireflies", origin="connector",
+                agent=_AGENT, origin="connector",
                 source_ref=source_ref,
             )
             _accumulate(tally, c)
@@ -190,6 +247,28 @@ def _run_sync_fallback(
             logger.exception("sync-fallback extraction failed for call %s",
                              rec.external_id)
     return tally, extracted
+
+
+def _submit_batch(enterprise_id: str, requests: list[BatchRequest]) -> dict | None:
+    """`run_batch(requests)`, ATTRIBUTED — live-verify (2026-08-27) found the
+    CLI calling `run_batch` bare left every batched usage row unattributed:
+    `app.llm_metering.record_external_usage` reads the acting company off
+    `app.llm_keys.current_company_id()` and the feature/operation label off
+    `app.usage_context`'s scope, both ContextVars that are normally bound by
+    `gateway.llm_call`'s own `with company_llm_key(enterprise_id), usage_scope(...)`
+    block — which this CLI, calling `run_batch` directly rather than through
+    the gateway, never enters. Unwrapped, `run_batch` still records usage
+    ROWS (0.5x cost_multiplier is correct either way) but with company/feature
+    both `None`/unattributed, invisible on any per-company or per-feature cost
+    view. This binds the SAME two context managers `llm_call` uses, with the
+    SAME `feature_for_agent(_AGENT)` mapping every other extraction call this
+    tool makes resolves to (see `_AGENT`), so batched spend lands in the
+    identical company + feature bucket the sync-fallback path's calls would.
+    """
+    with company_llm_key(enterprise_id), usage_scope(
+        feature=feature_for_agent(_AGENT), operation="kg_backfill"
+    ):
+        return run_batch(requests, label="kg-backfill:fireflies")
 
 
 def _run_batched(
@@ -318,7 +397,7 @@ def main(argv: list[str] | None = None) -> int:
     requests, unit_by_id = _build_batch_requests(fresh, enterprise_id)
     logger.info("submitting %d request(s) as ONE bulk batch (%d calls x 2 passes)",
                len(requests), len(fresh))
-    results = run_batch(requests, label="kg-backfill:fireflies")
+    results = _submit_batch(enterprise_id, requests)
 
     if results is None:
         logger.warning(

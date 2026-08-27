@@ -114,23 +114,69 @@ def test_batch_request_assembly_builds_one_request_per_pass_with_correct_custom_
     requests, unit_by_id = mod._build_batch_requests(records, "ent-x")
 
     custom_ids = {r.custom_id for r in requests}
-    assert custom_ids == {"FF1:main", "FF1:checklist", "FF2:main", "FF2:checklist"}
+    assert custom_ids == {"FF1-main", "FF1-checklist", "FF2-main", "FF2-checklist"}
     assert len(requests) == 4
 
     # Each request's params are what build_extract_request/build_checklist_request
     # produce — a real messages.create-shaped dict with the model + schema tool.
     by_id = {r.custom_id: r.params for r in requests}
     from app.graph import extractor as ex
-    assert by_id["FF1:main"]["tools"][0]["input_schema"] == ex._EXTRACT_SCHEMA
-    assert by_id["FF1:checklist"]["tools"][0]["input_schema"] == ex._CHECKLIST_SCHEMA
-    assert "tool_choice" in by_id["FF1:main"]
-    assert "tool_choice" in by_id["FF1:checklist"]
+    assert by_id["FF1-main"]["tools"][0]["input_schema"] == ex._EXTRACT_SCHEMA
+    assert by_id["FF1-checklist"]["tools"][0]["input_schema"] == ex._CHECKLIST_SCHEMA
+    assert "tool_choice" in by_id["FF1-main"]
+    assert "tool_choice" in by_id["FF1-checklist"]
 
     # unit_by_id carries what parse_*_response needs to write the result back.
-    assert unit_by_id["FF1:main"][0] == "main"
-    assert unit_by_id["FF1:checklist"][0] == "checklist"
-    assert unit_by_id["FF1:main"][1].external_id == "FF1"
-    assert unit_by_id["FF1:main"][2] == "fireflies-backfill-FF1"
+    assert unit_by_id["FF1-main"][0] == "main"
+    assert unit_by_id["FF1-checklist"][0] == "checklist"
+    assert unit_by_id["FF1-main"][1].external_id == "FF1"
+    assert unit_by_id["FF1-main"][2] == "fireflies-backfill-FF1"
+
+
+def test_custom_ids_are_pattern_valid_for_the_real_batches_api(mod):
+    """The real Anthropic Batches API rejects a `custom_id` outside
+    `^[a-zA-Z0-9_-]{1,64}$` (discovered live: the original `:` separator
+    400s the WHOLE batch submission). Every generated id must match that
+    pattern, and never exceed 64 characters."""
+    import re
+    pattern = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+    records = [_rec("FF1"), _rec("FF-with-a-dash_and_1234"),
+               _rec("x" * 80)]  # pathologically long external_id
+    requests, _unit_by_id = mod._build_batch_requests(records, "ent-x")
+    for r in requests:
+        assert pattern.match(r.custom_id), f"{r.custom_id!r} is not custom_id-safe"
+        assert ":" not in r.custom_id
+
+
+def test_custom_ids_round_trip_back_to_the_correct_call_and_pass(mod):
+    """The batch result -> (call, pass) lookup is a dict lookup on the FULL
+    custom_id (`unit_by_id[custom_id]`) — proves it holds for every request
+    built, not just the two IDs asserted by name elsewhere."""
+    records = [_rec("FF1"), _rec("FF2"), _rec("FF3")]
+    requests, unit_by_id = mod._build_batch_requests(records, "ent-x")
+    assert len(requests) == 6
+    for r in requests:
+        pass_name, rec, _doc_name, _text = unit_by_id[r.custom_id]
+        assert pass_name in ("main", "checklist")
+        assert r.custom_id == f"{rec.external_id}{'-main' if pass_name == 'main' else '-checklist'}"
+
+
+def test_custom_id_prefix_sanitizes_an_unsafe_external_id(mod, caplog):
+    """A stray disallowed character must never silently corrupt/collide a
+    custom_id — it is sanitized AND logged loudly, since Fireflies ids are
+    alphanumeric in practice and this should never fire for real data."""
+    with caplog.at_level("WARNING", logger="backfill_fireflies_kg"):
+        prefix = mod._custom_id_prefix("ff:weird/id with spaces")
+    import re
+    assert re.match(r"^[a-zA-Z0-9_-]+$", prefix)
+    assert any("not custom_id-safe" in r.message for r in caplog.records)
+
+
+def test_custom_id_prefix_is_unchanged_for_a_safe_external_id(mod, caplog):
+    with caplog.at_level("WARNING", logger="backfill_fireflies_kg"):
+        prefix = mod._custom_id_prefix("FF-1234_abc")
+    assert prefix == "FF-1234_abc"
+    assert not any("not custom_id-safe" in r.message for r in caplog.records)
 
 
 def test_batch_main_pass_gets_the_digest_checklist_pass_gets_the_full_transcript(mod):
@@ -139,12 +185,57 @@ def test_batch_main_pass_gets_the_digest_checklist_pass_gets_the_full_transcript
     records = [_rec("FF1")]
     requests, _unit_by_id = mod._build_batch_requests(records, "ent-x")
     by_id = {r.custom_id: r.params for r in requests}
-    main_user = by_id["FF1:main"]["messages"][0]["content"]
-    checklist_user = by_id["FF1:checklist"]["messages"][0]["content"]
+    main_user = by_id["FF1-main"]["messages"][0]["content"]
+    checklist_user = by_id["FF1-checklist"]["messages"][0]["content"]
     assert "transcript:" not in main_user
     assert "transcript:" in checklist_user
     assert "full text FF1" in checklist_user
     assert "full text FF1" not in main_user
+
+
+# ── _submit_batch binds company_llm_key + usage_scope around run_batch ────
+#
+# Live-verify (2026-08-27) found the CLI calling `run_batch` bare left every
+# batched usage row unattributed: `record_external_usage` reads the acting
+# company off `app.llm_keys.current_company_id()` and the feature/operation
+# label off `app.usage_context.current_scope()`, both ContextVars that
+# `gateway.llm_call` normally binds and this CLI, calling `run_batch`
+# directly, never entered.
+
+
+def test_submit_batch_binds_company_and_usage_scope_around_run_batch(mod, monkeypatch):
+    from app.llm_keys import current_company_id
+    from app.usage_context import current_scope
+
+    seen = {}
+
+    def spy_run_batch(requests, **kw):
+        seen["company_id"] = current_company_id()
+        seen["scope"] = current_scope()
+        return {"r0": "ignored"}
+
+    monkeypatch.setattr(mod, "run_batch", spy_run_batch)
+
+    # Outside the call, nothing is bound — proves the binding is scoped to
+    # the call, not a process-wide side effect leaking from an earlier test.
+    assert current_company_id() is None
+
+    mod._submit_batch("ent-x", [])
+
+    assert seen["company_id"] == "ent-x"
+    assert seen["scope"].feature not in (None, "unattributed")
+    assert seen["scope"].operation == "kg_backfill"
+
+    # And the binding is unwound again after the call.
+    assert current_company_id() is None
+
+
+def test_submit_batch_feature_matches_the_sync_fallback_agents_bucket(mod):
+    """Batch and sync-fallback attribute to the SAME feature bucket (see
+    `_AGENT`) — cost/feature reporting must not split by which transport a
+    given run happened to take."""
+    from app.usage_context import feature_for_agent
+    assert feature_for_agent(mod._AGENT) not in (None, "unattributed")
 
 
 # ── run_batch -> None fallback routes to the existing sync path ──────────
