@@ -33,6 +33,10 @@ vi.mock("../../../context/WorkspaceContext", () => ({
 const submit = vi.fn().mockResolvedValue({ id: "fb-1", type: "feature_request", email_sent: true })
 vi.mock("../../../lib/api", () => ({
   feedbackApi: { submit: (...args: unknown[]) => submit(...args) },
+  // The nav's recent-chats section reads this. Empty: these tests are about
+  // the Feedback affordance, and an empty list renders no chats section at
+  // all, which keeps the DOM they query unchanged.
+  conversationsApi: { list: () => Promise.resolve({ conversations: [] }) },
 }))
 
 import { Sidebar } from "../Sidebar"

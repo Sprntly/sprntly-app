@@ -103,6 +103,11 @@
     --app-shell-header-min: 82px;
     /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
+    /* The LIVE width, moved by dragging the sidebar's right edge (see
+       lib/sidebarWidth.ts, which writes this property on the root element and
+       remembers it). Defaults to the shipped width, so a browser that has
+       never been dragged in renders exactly as before. */
+    --sidebar-w: var(--sidebar-rail-expanded-min);
 
     /* Scrollbars — see the quiet-scrollbar block below. The gutter is a fixed
        width in BOTH states; only the thumb's colour changes. */
@@ -1168,7 +1173,7 @@
 
   /* Expanded (default): content clears the 220px rail. */
   .app:not(.app--sidebar-collapsed) .main-column {
-    padding-left: var(--sidebar-rail-expanded-min);
+    padding-left: var(--sidebar-w);
   }
 
   /* Collapsed: content clears the 60px icon rail. */
@@ -1717,9 +1722,9 @@
   /* ── Rail layout (expanded) ── shares the .sb-rail-* markup with the collapsed
      rail; widening to 220px and left-aligning the items reveals inline labels. */
   .sidebar.sidebar--expanded {
-    width: var(--sidebar-rail-expanded-min);
-    min-width: var(--sidebar-rail-expanded-min);
-    max-width: var(--sidebar-rail-expanded-min);
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    max-width: var(--sidebar-w);
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1894,11 +1899,22 @@
     align-items: stretch;
   }
 
+  /* SHORTER THAN THE COLLAPSED RAIL'S 42px SQUARES, on purpose. Collapsed,
+     each item is an icon and 42px is the touch target. Expanded, it is a row
+     of text, and at 42px the nine of them filled half the sidebar — which is
+     the space the threads now need. 34px still clears the 30px an icon plus
+     its padding wants. */
   .sidebar--expanded .sb-rail-item {
     width: 100%;
+    height: 34px;
     justify-content: flex-start;
     gap: 10px;
     padding: 0 12px;
+  }
+
+  .sidebar--expanded .sb-rail-new,
+  .sidebar--expanded .sb-rail-search {
+    height: 34px;
   }
 
   .sidebar--expanded .sb-rail-item.active::before {
@@ -2175,9 +2191,278 @@
     opacity: 1;
   }
 
+  /* ── Recent chats ─────────────────────────────────────────────────────
+     The list scrolls on its own rather than pushing the bottom row (Guide,
+     Settings, Feedback, the workspace switcher) off the sidebar. `min-height:
+     0` is what actually allows that inside a flex column — without it the
+     list refuses to shrink below its content and the overflow lands on the
+     whole sidebar instead. */
+  /* A screen rendered as a Settings pane (Templates, Skills).
+     FULL WIDTH, deliberately: both are listed in `FULL_BLEED_SECTIONS`, so
+     they escape `.pset-body`'s 860px cap. Their card grids are
+     `repeat(auto-fill, minmax(280px, 1fr))` — given the whole pane they lay
+     out three across, and under the cap they could only ever manage two with
+     the right third of the pane left empty. */
+  .settings-embedded {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .sb-chats {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1 1 auto;
+    width: 100%;
+    margin-top: 10px;
+  }
+
+  .sb-chats-head {
+    padding: 0 10px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--nav-text);
+    opacity: 0.55;
+  }
+
+  /* A hairline above the section, so the threads read as their own region
+     rather than as more nav items in a longer list. */
+  .sb-chats::before {
+    content: "";
+    display: block;
+    height: 1px;
+    margin: 0 10px 10px;
+    background: var(--nav-text);
+    opacity: 0.12;
+  }
+
+  .sb-chats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    min-height: 0;
+    scrollbar-width: thin;
+  }
+
+  .sb-chat-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--nav-text);
+    font-size: 13px;
+    line-height: 1.3;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-chat-title {
+    /* One line, always. A wrapped title turns the list into paragraphs and
+       twenty rows into forty. `min-width: 0` is what actually lets a flex
+       child ellipsize — without it it refuses to shrink below its text. */
+    min-width: 0;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* OVER the end of the title, not beside it. Beside it, an always-present
+     "25 Aug, 11:56" would take a third of a 220px row away from the titles
+     even while invisible — layout does not care about opacity. Absolute, with
+     the row's own hover colour behind it, it costs nothing until it is wanted.
+
+     Only on the row under the pointer, and on keyboard focus: twenty stamps
+     down the side of the nav is a column of noise competing with the titles;
+     one, on the row you are looking at, is the answer to "which of these four
+     is which". */
+  .sb-chat-when {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    padding-left: 14px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    color: var(--nav-text);
+    background: linear-gradient(
+      to right,
+      transparent 0,
+      var(--nav-hover-solid, #16211b) 12px
+    );
+    transition: opacity 0.12s;
+  }
+
+  .sb-chat-item {
+    position: relative;
+  }
+
+  .sb-chat-item:hover .sb-chat-when,
+  .sb-chat-item:focus-visible .sb-chat-when {
+    opacity: 0.72;
+  }
+
+  .sb-chat-dot {
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    opacity: 0.45;
+    transition: opacity 0.12s, background 0.12s;
+  }
+
+  .sb-chat-item:hover {
+    background: var(--nav-hover-bg, rgba(255, 255, 255, 0.07));
+    color: var(--nav-text-hover);
+  }
+
+  .sb-chat-item:hover .sb-chat-dot {
+    opacity: 1;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .sb-chats-all {
+    flex: none;
+    padding: 8px 10px;
+    margin-top: 4px;
+    border-radius: 8px;
+    font-weight: 500;
+    border: none;
+    background: none;
+    color: var(--nav-text);
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    opacity: 0.75;
+  }
+
+  .sb-chats-all:hover {
+    opacity: 1;
+    color: var(--nav-text-hover);
+    background: var(--nav-hover-bg, rgba(255, 255, 255, 0.07));
+  }
+
+  /* ── The draggable edge ───────────────────────────────────────────────
+     6px of grab area sitting half over the sidebar's edge and half past it,
+     which is what makes it findable without a visible gutter eating layout.
+     It draws nothing until you are on it. */
+  .sb-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    z-index: 30;
+    cursor: col-resize;
+    background: transparent;
+    /* The handle must never scroll away from the edge it resizes. */
+    touch-action: none;
+  }
+
+  /* The always-there grip: a short bar at mid-height, faint enough to read as
+     an edge rather than a border, and the only standing hint that the nav can
+     be pulled. */
+  .sb-resizer-grip {
+    position: absolute;
+    top: 50%;
+    left: 2px;
+    width: 2px;
+    height: 28px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: var(--nav-text);
+    opacity: 0.28;
+    transition: opacity 0.12s, height 0.12s, background 0.12s;
+    pointer-events: none;
+  }
+
+  .sb-resizer:hover .sb-resizer-grip,
+  .sb-resizer:focus-visible .sb-resizer-grip {
+    opacity: 0.9;
+    height: 46px;
+  }
+
+  /* Dragging: the whole edge lights up, so the thing being moved is the thing
+     under the cursor. */
+  .sb-resizer:hover::after,
+  .sb-resizer:focus-visible::after,
+  body.is-sidebar-resizing .sb-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 2px;
+    width: 2px;
+    height: 100%;
+    background: var(--accent);
+    opacity: 0.85;
+  }
+
+  body.is-sidebar-resizing .sb-resizer-grip {
+    background: var(--accent);
+    opacity: 1;
+  }
+
+  /* Reusing the rail's tooltip, moved to hang off the EDGE rather than off an
+     icon 54px into the rail. */
+  .sb-resizer-tip {
+    left: 14px;
+  }
+
+  .sb-resizer:hover .sb-resizer-tip,
+  .sb-resizer:focus-visible .sb-resizer-tip {
+    opacity: 1;
+  }
+
+  /* …but never mid-drag: a label following the cursor while you are trying to
+     see where the edge lands is in the way. */
+  body.is-sidebar-resizing .sb-resizer-tip {
+    opacity: 0 !important;
+  }
+
+  .sb-resizer:focus-visible {
+    outline: none;
+  }
+
+  /* While dragging: no width easing anywhere (the sidebar AND the main column
+     it pushes), or the layout arrives 200ms after the cursor. And no text
+     selection, or a fast drag selects the whole nav on the way past. */
+  body.is-sidebar-resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+
+  body.is-sidebar-resizing .sidebar,
+  body.is-sidebar-resizing .main-column {
+    transition: none !important;
+  }
+
   .sb-rail-spacer {
     flex: 1 1 auto;
     min-height: 12px;
+  }
+
+  /* When the chats list is there, IT takes the free space — the spacer's whole
+     job was to push the bottom row down, and two growing siblings would split
+     the room between them, leaving the list half as tall for no reason. */
+  .sb-chats + .sb-rail-spacer {
+    flex: 0 0 auto;
   }
 
   .sb-rail-bottom {

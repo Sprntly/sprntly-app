@@ -1,14 +1,62 @@
+import { readFileSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
 import { describe, expect, it } from "vitest"
 import { SETTINGS_NAV } from "../SettingsLayout"
 
 describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
-  it("has exactly 4 groups in the design-3 order", () => {
+  it("has the design-3 groups, plus the one Templates and Skills moved into", () => {
     expect(SETTINGS_NAV.map((g) => g.groupLabel)).toEqual([
       "You",
       "Workspace",
+      "How Sprntly writes",
       "Data & Integrations",
       "Account",
     ])
+  })
+
+  it("carries Templates and Skills as panes of its own", () => {
+    // They came off the main nav — both are set-up-once-and-return-to, which
+    // is what Settings is for. They render EMBEDDED (no AppLayout of their
+    // own), so the settings nav stays on screen the way it does for every
+    // other row; a screen bringing its own layout would draw a second sidebar
+    // over this one.
+    const group = SETTINGS_NAV.find((g) => g.groupLabel === "How Sprntly writes")!
+    expect(group.items.map((i) => i.id)).toEqual(["templates", "skills"])
+    expect(group.items.every((i) => i.available)).toBe(true)
+  })
+
+  it("gives Templates and Skills the full pane width", () => {
+    // `.pset-body` caps a pane at 860px. Their card grids are
+    // `repeat(auto-fill, minmax(280px, 1fr))`, so under that cap they lay out
+    // two across with the right third of the pane empty — and the screen's
+    // generic pane bar stacks a second header over the one each already draws.
+    // Both are fixed by the same list.
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SettingsScreen.tsx"),
+      "utf8",
+    )
+    const block = source.slice(
+      source.indexOf("const FULL_BLEED_SECTIONS"),
+      source.indexOf("])", source.indexOf("const FULL_BLEED_SECTIONS")),
+    )
+    expect(block).toContain('"templates"')
+    expect(block).toContain('"skills"')
+  })
+
+  it("every row is a section the screen can actually render", () => {
+    // A nav row whose id has no case in `renderSection` falls through to
+    // Profile: the row highlights and the pane beside it shows somebody's
+    // account settings.
+    const source = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SettingsScreen.tsx"),
+      "utf8",
+    )
+    for (const item of SETTINGS_NAV.flatMap((g) => g.items)) {
+      expect(source, `no renderSection case for "${item.id}"`).toContain(
+        `case "${item.id}":`,
+      )
+    }
   })
 
   it("You group contains Profile, Comms & Brief, and Workspaces", () => {
@@ -60,6 +108,8 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       billing: "Billing",
       security: "Security",
       admin: "Admin",
+      templates: "Templates",
+      skills: "Skills",
     })
   })
 

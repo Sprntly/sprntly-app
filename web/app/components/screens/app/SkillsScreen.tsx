@@ -37,7 +37,7 @@
 // The view layer (SkillsView) is pure and prop-driven so it can be
 // markup-tested without the API; SkillsScreen owns state, API, and navigation.
 
-import { Suspense, useEffect, useMemo, useState } from "react"
+import { Suspense, useEffect, useMemo, useState, type ReactNode } from "react"
 import { useSearchParams } from "next/navigation"
 import {
   IconAlertTriangle,
@@ -412,7 +412,7 @@ export function SkillsView({
   )
 }
 
-function SkillsScreenContent() {
+function SkillsScreenContent({ embedded = false }: { embedded?: boolean }) {
   const { goTo, setPendingOndemandDraft, showToast } = useNavigation()
   const searchParams = useSearchParams()
   const [customSkills, setCustomSkills] = useState<CustomSkillInfo[]>([])
@@ -749,7 +749,7 @@ function SkillsScreenContent() {
   return (
     // hideChromeStrip: the surface has its own .skl-top title bar, so the
     // main-column chrome strip would just duplicate "Skills" above it.
-    <AppLayout mainClassName="main--skills" hideChromeStrip>
+    <Shell embedded={embedded}>
       <SkillsView
         customSkills={visibleCustom}
         customError={customError}
@@ -797,16 +797,34 @@ function SkillsScreenContent() {
         onDiscoverGithub={(repo, opts) => skillsApi.discoverGithub(repo, opts)}
         onImportGithub={onImportGithub}
       />
+    </Shell>
+  )
+}
+
+/**
+ * The page chrome, or none.
+ *
+ * This screen has two homes: its own route (`/skills`, reached from the command
+ * palette) and a pane inside Settings, where it moved when Skills and Templates
+ * left the main nav. Embedded it must NOT bring an `AppLayout` — that would put
+ * a second sidebar and a second chrome strip inside the one Settings already
+ * draws, and the settings nav would disappear behind it.
+ */
+function Shell({ embedded, children }: { embedded: boolean; children: ReactNode }) {
+  if (embedded) return <div className="settings-embedded">{children}</div>
+  return (
+    <AppLayout mainClassName="main--skills" hideChromeStrip>
+      {children}
     </AppLayout>
   )
 }
 
-export function SkillsScreen() {
+export function SkillsScreen({ embedded = false }: { embedded?: boolean } = {}) {
   // useSearchParams (the ?q= deep link) needs a Suspense boundary in Next 15 —
   // same pattern as SettingsScreen.
   return (
-    <Suspense fallback={<AppLayout mainClassName="main--skills" hideChromeStrip><p>Loading skills…</p></AppLayout>}>
-      <SkillsScreenContent />
+    <Suspense fallback={<Shell embedded={embedded}><p>Loading skills…</p></Shell>}>
+      <SkillsScreenContent embedded={embedded} />
     </Suspense>
   )
 }
