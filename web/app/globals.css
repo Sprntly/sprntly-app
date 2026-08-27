@@ -12458,6 +12458,81 @@
     cursor: not-allowed;
   }
 
+  /* ---- The pane dropdown ------------------------------------------------
+     A row that owns several views opens under itself. The height animates via
+     `grid-template-rows: 0fr -> 1fr`, which is the one way to transition to a
+     content height nobody has to hardcode — a max-height guess either clips a
+     four-item drawer or makes a two-item one crawl open against dead space. */
+  .setx-nav-chev {
+    flex: none;
+    transition: transform 0.18s ease;
+  }
+
+  .setx-nav-item[aria-expanded="true"] .setx-nav-chev {
+    transform: rotate(180deg);
+  }
+
+  .setx-nav-sub {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.18s ease;
+  }
+
+  .setx-nav-sub[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  .setx-nav-sub-inner {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    /* The rail the views hang from — it reads as one group and lines the
+       labels up under the parent row's icon. */
+    margin: 0 0 0 19px;
+    padding-left: 10px;
+    border-left: 1px solid var(--line);
+  }
+
+  .setx-nav-sub[data-open="true"] .setx-nav-sub-inner {
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+
+  .setx-nav-subitem {
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-3);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .setx-nav-subitem:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .setx-nav-subitem.active {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--surface-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .setx-nav-sub,
+    .setx-nav-chev {
+      transition: none;
+    }
+  }
+
   .setx-nav-badge {
     font-size: 10px;
     text-transform: uppercase;
@@ -25674,41 +25749,6 @@
    one; using the primitive is the whole opt-in. */
 .pset-body:has(.setpane-shell) {
   max-width: none;
-}
-
-/* The rail hangs off the PANE GROUP, at the shell level — not inside whichever
-   chrome a section happens to bring. Panes are not built alike: some own a
-   sticky bar and their own padding, some get the shell's `.pset` wrapper, and
-   Metrics has neither. Nested inside them the rail started wherever that
-   pane's chrome left room — level with the top on Metrics, pushed down past a
-   sticky bar and a save button on Product & Category. Out here every section
-   under one row begins at the same line.
-
-   `.setx-main` already scrolls, so the split fills it and the rail sticks to
-   the top of the scroll rather than to the viewport. */
-.setx-main > .setpane-shell {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-.setx-main > .setpane-shell > .setpane-split {
-  min-height: 100%;
-  gap: 32px;
-  padding: 0 0 0 4px;
-}
-
-/* The pane keeps its own scroll and its own chrome; only the rail is shared. */
-.setx-main > .setpane-shell > .setpane-split > .setpane-main {
-  max-width: none;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
-
-.setx-main > .setpane-shell > .setpane-split > .setpane-nav {
-  top: 20px;
-  margin-top: 20px;
-  padding-right: 20px;
 }
 
 .setpane-shell {
