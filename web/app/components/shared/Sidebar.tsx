@@ -23,11 +23,10 @@ import {
   resumeConversation,
   useChatsList,
 } from "../../lib/recentChats"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
-import { publicPath } from "../../lib/public-path"
 
 interface SidebarProps {
   activeCompany?: string
@@ -306,55 +305,36 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
 
       <div className="sb-rail-spacer" />
 
-      {/* Bottom icons — Guide + Settings + Feedback (Sign out lives in Settings → Account). */}
-      <div className="sb-rail-bottom">
-        {/* Guide links out to the public docs site (/docs), which lives outside
-            the authenticated SPA — so it's a real anchor, not a goTo() screen.
-            Opens in a new tab to preserve the user's in-app session. */}
-        <a
-          href={publicPath("/docs")}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="sb-rail-item"
-          title="Guide"
-          aria-label="Guide"
-          data-testid="sidebar-guide-link"
-        >
-          <IconBook2 size={18} />
-          <span className="sb-rail-label">Guide</span>
-          <span className="nav-tooltip">Guide</span>
-        </a>
-        <RailItem screen="settings" icon={<IconSettings size={18} />} label="Settings" />
-        <button
-          type="button"
-          className="sb-rail-item"
-          title="Feedback"
-          aria-label="Feedback"
-          onClick={() => setFeedbackOpen(true)}
-        >
-          <IconMessagePlus size={18} />
-          <span className="sb-rail-label">Feedback</span>
-          <span className="nav-tooltip">Feedback</span>
-        </button>
-      </div>
+      {/* NO BOTTOM NAV BLOCK. Guide, Settings and Feedback used to be three
+          full rows here, above the divider. Settings and Feedback are icons in
+          the identity row below now, beside Sync — three actions on one line
+          instead of three lines — and Guide moved into Settings itself, where
+          the rest of the read-about-it surfaces already live. */}
       <div className="divider-nav" />
 
       {/* User identity row — the avatar/name are display only (signing out
           moved to Settings → Account; no sign-out affordance on icon or
           avatar click). The sync button is the one interactive element. */}
+      {/* ONE ROW: avatar, name, then sync / feedback / settings.
+
+          WHAT GIVES WAY IS THE NAME. The initials chip is a fixed 32px circle
+          (`flex: none` — without it the row squashed it into an oval when
+          space ran out), and the three actions keep their size too. The name
+          takes whatever is left and ellipsizes into it, so dragging the rail
+          wider reveals more of it and narrower reveals less. Its full value is
+          on the hover title of both the chip and the name. */}
       <div className="sb-rail-user">
         <span className="sb-rail-avatar" title={displayName}>
           {initials}
         </span>
-        <span className="sb-rail-username">{displayName}</span>
-        {/* Sync-your-data lives here so it's reachable from EVERY screen in
-            both rail modes: expanded, the username's ellipsis truncation
-            (min-width: 0) keeps this pinned visible on the right however long
-            the name is; collapsed, the avatar and name are CSS-hidden and this
-            is the user row's ONLY visible element (product call 2026-08-13 —
-            identity chrome earns no rail slot, an action does). The row around
-            it stays a display-only identity chip — this button is the only
-            interactive element in it. */}
+        <span className="sb-rail-username" title={displayName}>{displayName}</span>
+        <div className="sb-rail-actions">
+        {/* Sync, feedback, settings — reachable from EVERY screen in both rail
+            modes, which is why they live here rather than in the scrolling nav
+            above (product call 2026-08-13: identity chrome earns no rail slot,
+            an action does). Collapsed, the avatar and name are CSS-hidden and
+            these three are the whole footer. The row's identity half stays
+            display-only: none of these is the avatar or the name. */}
         <button
           type="button"
           className={`sb-sync-btn${syncRunning ? " sb-sync-btn--running" : ""}${showCompleted ? " sb-sync-btn--done" : ""}${syncFailed ? " sb-sync-btn--failed" : ""}`}
@@ -370,6 +350,33 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           {showCompleted ? <IconCheck size={15} /> : <IconRefresh size={15} />}
           <span className="nav-tooltip">{syncTitle}</span>
         </button>
+        {/* Feedback, then Settings — left to right: sync, feedback, settings.
+            Settings sits last because it is the one you reach for on purpose;
+            sync leads because it is the one that reports a state you might
+            need to act on. */}
+        <button
+          type="button"
+          className="sb-rail-action"
+          title="Feedback"
+          aria-label="Feedback"
+          data-testid="sidebar-feedback"
+          onClick={() => setFeedbackOpen(true)}
+        >
+          <IconMessagePlus size={15} />
+          <span className="nav-tooltip">Feedback</span>
+        </button>
+        <button
+          type="button"
+          className={`sb-rail-action${currentScreen === "settings" ? " active" : ""}`}
+          title="Settings"
+          aria-label="Settings"
+          data-testid="sidebar-settings"
+          onClick={() => goTo("settings")}
+        >
+          <IconSettings size={15} />
+          <span className="nav-tooltip">Settings</span>
+        </button>
+        </div>
       </div>
 
       <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />

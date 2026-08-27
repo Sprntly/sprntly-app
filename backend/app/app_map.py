@@ -68,7 +68,9 @@ NAV: list[tuple[str, str, str]] = [
      "custom skill — invoke one in chat by typing / followed by its name. "
      "Found under Settings -> Skills; no longer on the left rail"),
     ("Guide", "/docs",
-     "the written How-To Guide — long-form walkthroughs, outside the app shell"),
+     "the written How-To Guide — long-form walkthroughs, outside the app "
+     "shell. Reached from Settings -> Guide (it left the left rail with "
+     "Settings and Feedback); opens in a new tab"),
     ("Settings", "/settings",
      "everything about the account, workspace and integrations — the panes "
      "listed below"),

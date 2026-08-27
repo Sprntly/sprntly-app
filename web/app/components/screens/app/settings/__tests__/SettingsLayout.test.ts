@@ -5,14 +5,23 @@ import { describe, expect, it } from "vitest"
 import { SETTINGS_NAV } from "../SettingsLayout"
 
 describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
-  it("has the design-3 groups, plus the one Templates and Skills moved into", () => {
+  it("has the design-3 groups, plus the ones the left rail handed over", () => {
     expect(SETTINGS_NAV.map((g) => g.groupLabel)).toEqual([
       "You",
       "Workspace",
       "How Sprntly writes",
       "Data & Integrations",
+      "Help",
       "Account",
     ])
+  })
+
+  it("Guide is a link out, not a pane", () => {
+    // It came off the left rail with Settings and Feedback. It is the public
+    // docs site — outside the authenticated app — so it is an anchor with an
+    // href rather than a `?section=`, and it is the ONLY row like that.
+    const doors = SETTINGS_NAV.flatMap((g) => g.items).filter((i) => i.href)
+    expect(doors.map((i) => [i.id, i.href])).toEqual([["guide", "/docs"]])
   })
 
   it("carries Templates and Skills as panes of its own", () => {
@@ -52,7 +61,9 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       join(dirname(fileURLToPath(import.meta.url)), "..", "..", "SettingsScreen.tsx"),
       "utf8",
     )
-    for (const item of SETTINGS_NAV.flatMap((g) => g.items)) {
+    // A row with an `href` is a door OUT (Guide → the public docs site). It
+    // has no pane and needs no case; the screen renders an anchor for it.
+    for (const item of SETTINGS_NAV.flatMap((g) => g.items).filter((i) => !i.href)) {
       expect(source, `no renderSection case for "${item.id}"`).toContain(
         `case "${item.id}":`,
       )
@@ -110,6 +121,7 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       admin: "Admin",
       templates: "Templates",
       skills: "Skills",
+      guide: "Guide",
     })
   })
 
