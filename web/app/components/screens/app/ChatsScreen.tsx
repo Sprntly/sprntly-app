@@ -6,6 +6,12 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { useAuth } from "../../../lib/auth"
 import {
+  cachedChats,
+  chatsCacheKey,
+  hasCachedChats,
+  setCachedChats,
+} from "../../../lib/recentChats"
+import {
   conversationsApi,
   briefApi,
   type ConversationRecord,
@@ -442,7 +448,10 @@ export function ChatsListView({
 // All chats renders the LAST loaded list instantly while the refetch runs in
 // the background and swaps in fresh data. In-memory only — a full page reload
 // starts clean with the skeleton.
-const chatsListCache = new Map<string, ConversationRecord[]>()
+// The list cache moved to `lib/recentChats` when the sidebar started showing
+// these same threads. Two caches would mean two fetches per navigation and,
+// worse, two answers that can disagree — a chat in the nav that the screen
+// behind it does not list.
 const briefEntryCache = new Map<string, BriefEntry | null>()
 
 export function ChatsScreen() {
@@ -452,11 +461,11 @@ export function ChatsScreen() {
   const auth = useAuth()
   const [search, setSearch] = useState("")
   const authUserId = auth.kind === "authed" ? auth.user.id : "anon"
-  const cacheKey = `${authUserId}:${activeCompany ?? "__none__"}`
+  const cacheKey = chatsCacheKey(authUserId, activeCompany ?? null)
   const [dbChats, setDbChats] = useState<ConversationRecord[]>(
-    () => chatsListCache.get(cacheKey) ?? [],
+    () => cachedChats(cacheKey) ?? [],
   )
-  const [loaded, setLoaded] = useState(() => chatsListCache.has(cacheKey))
+  const [loaded, setLoaded] = useState(() => hasCachedChats(cacheKey))
 
   // ── Current Top Insights brief (drives the always-pinned top entry) ──
   // The brief is a workspace-shared artifact (unlike chats), so its cache
@@ -470,13 +479,13 @@ export function ChatsScreen() {
   // when fresh data lands. Re-runs when the company changes.
   useEffect(() => {
     let cancelled = false
-    if (chatsListCache.has(cacheKey)) {
-      setDbChats(chatsListCache.get(cacheKey)!)
+    if (hasCachedChats(cacheKey)) {
+      setDbChats(cachedChats(cacheKey)!)
       setLoaded(true)
     }
     conversationsApi.list().then((res) => {
       if (cancelled) return
-      chatsListCache.set(cacheKey, res.conversations)
+      setCachedChats(cacheKey, res.conversations)
       setDbChats(res.conversations)
       setLoaded(true)
     }).catch(() => { if (!cancelled) setLoaded(true) })
@@ -570,7 +579,7 @@ export function ChatsScreen() {
       conversationsApi.remove(dbId).catch(() => {})
       setDbChats((prev) => {
         const next = prev.filter((c) => c.id !== dbId)
-        chatsListCache.set(cacheKey, next)
+        setCachedChats(cacheKey, next)
         return next
       })
     }
@@ -583,7 +592,7 @@ export function ChatsScreen() {
       conversationsApi.update(dbId, { pinned: !current }).catch(() => {})
       setDbChats((prev) => {
         const next = prev.map((c) => c.id === dbId ? { ...c, pinned: !current } : c)
-        chatsListCache.set(cacheKey, next)
+        setCachedChats(cacheKey, next)
         return next
       })
     }

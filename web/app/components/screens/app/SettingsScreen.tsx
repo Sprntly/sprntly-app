@@ -5,6 +5,8 @@ import { useSearchParams, useRouter } from "next/navigation"
 import { AppLayout } from "./AppLayout"
 import { useAuth } from "../../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
+import { TemplatesScreen } from "./TemplatesScreen"
+import { SkillsScreen } from "./SkillsScreen"
 import { ProfileSettings } from "./settings/ProfileSettings"
 import { WorkspaceSettings } from "./settings/WorkspaceSettings"
 import { CompanyProfileSettings } from "./settings/CompanyProfileSettings"
@@ -65,6 +67,13 @@ function SettingsPanel({ section }: { section: SettingsSectionId }) {
       return <FeatureFlagsSettings />
     case "team":
       return <TeamSettings />
+    // Templates and Skills moved here off the main nav. Rendered EMBEDDED, so
+    // they bring no AppLayout of their own — a second sidebar inside this one
+    // would hide the settings nav, which is the whole reason they are panes.
+    case "templates":
+      return <TemplatesScreen embedded />
+    case "skills":
+      return <SkillsScreen embedded />
     case "connectors":
       return <ConnectorsSettings />
     case "mcp":
@@ -103,6 +112,14 @@ const FULL_BLEED_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
   // Owns its own pset bar so the "New workspace" action can live in the
   // sticky header (Profile-pane pattern).
   "workspaces",
+  // Templates and Skills are whole screens rendered as panes, and they need
+  // the full width for two reasons. Their card grids are
+  // `repeat(auto-fill, minmax(280px, 1fr))`, so inside `.pset-body`'s 860px
+  // cap they could only ever lay out two across with the rest of the pane
+  // empty. And each already draws its own title bar, so the screen's generic
+  // one stacked a second "Templates · name · email" header above it.
+  "templates",
+  "skills",
 ])
 
 /** Panes that carry their own padded shell (`.set-pane`) — the screen adds
@@ -291,8 +308,8 @@ function SettingsContent() {
                     key={item.id}
                     type="button"
                     className={`setx-nav-item ${section === item.id ? "active" : ""} ${!item.available ? "soon" : ""}`}
+                    data-testid={`settings-nav-${item.id}`}
                     onClick={() => item.available && setSection(item.id)}
-                    disabled={!item.available}
                   >
                     <NavIcon id={item.id} />
                     <span className="setx-nav-item-label">{item.label}</span>

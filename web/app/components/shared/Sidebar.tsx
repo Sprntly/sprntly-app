@@ -1,12 +1,28 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
+import {
+  SIDEBAR_DEFAULT_WIDTH,
+  SIDEBAR_MAX_WIDTH,
+  SIDEBAR_MIN_WIDTH,
+  applySidebarWidth,
+  clampSidebarWidth,
+  loadSidebarWidth,
+  saveSidebarWidth,
+} from "../../lib/sidebarWidth"
+import {
+  chatsCacheKey,
+  chatStamp,
+  recentChats,
+  resumeConversation,
+  useChatsList,
+} from "../../lib/recentChats"
 import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { FeedbackModal } from "./FeedbackModal"
@@ -120,6 +136,9 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
 
   return (
     <aside className={`sidebar ${sidebarCollapsed ? "sidebar--collapsed" : "sidebar--expanded"}`}>
+      {/* Drag the right edge. Only when expanded: collapsed, the rail is a
+          fixed strip of icons and there is no width to choose. */}
+      {!sidebarCollapsed && <SidebarResizer />}
       {/* Logo + workspace switcher + expand/collapse toggle */}
       <div className="sb-rail-header">
         <div
@@ -261,29 +280,29 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           <span className="nav-tooltip">Workbench</span>
         </button> */}
         <RailItem screen="brief" icon={<IconSparkles size={18} />} label="Top Insights" />
-        <RailItem screen="chats" icon={<IconHistory size={18} />} label="Chat history" />
+        {/* NO "Chat history" ITEM. The threads themselves are in the nav now
+            (see `RecentChats` below), and its last row is the door to the full
+            history screen — a second door one row above it, leading to the same
+            place, is just a longer nav. The screen, its route and the command
+            palette entry are all untouched. */}
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="projects" icon={<IconFolder size={18} />} label="Projects" />
         <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
-        {/* Templates is back on the rail with artifact formats — the screen now
-            decides what every PRD, ticket and engineering spec Sprntly writes
-            LOOKS like, not only which finished examples it reads for voice.
-            That is a setting a PM sets up once and returns to, so it needs a
-            door of its own; while the screen was exemplars-only there was
-            nothing on it worth navigating to and the item stayed commented
-            out. Label stays "Templates" — the route, ScreenId,
-            MAIN_CHROME_TITLE, PATH_TO_SCREEN and the command palette all say
-            it, and renaming here alone would put the rail out of sync with the
-            URL and the palette. */}
-        <RailItem screen="templates" icon={<IconBookmark size={18} />} label="Templates" />
-        {/* Skills is back on the rail with Custom Skills (PRD 1854) — the
-            library is now a real user surface (upload + invoke), not just a
-            catalog. Sources stays hidden (screen/route/backends intact). */}
-        <RailItem screen="skills" icon={<IconWand size={18} />} label="Skills" />
+        {/* NO Templates or Skills ITEMS. Both moved into Settings (see
+            `SETTINGS_NAV`'s "How Sprntly writes" group): they are things a
+            workspace sets up once and returns to, which is what Settings is
+            for, and the nav they left is now carrying the threads instead.
+            Their screens, routes, ScreenIds and command-palette entries are
+            all unchanged — only the door moved. */}
         {/* <RailItem screen="sources" icon={<IconSources />} label="Sources" /> */}
         {/* <RailItem screen="prototype" icon={<IconPrompt size={18} />} label="Prototype" /> */}
         {/* <RailItem screen="tickets" icon={<IconLayoutKanban size={18} />} label="Project Management" /> */}
       </div>
+
+      {/* Recent threads, then the way to all of them. Only when the sidebar is
+          expanded: collapsed it is a 42px icon rail, and a column of truncated
+          chat titles has nowhere to go in it. */}
+      {!sidebarCollapsed && <RecentChats activeCompany={activeCompany ?? null} />}
 
       <div className="sb-rail-spacer" />
 
@@ -372,6 +391,174 @@ function relTimeAgo(iso: string | null): string | null {
   const hours = Math.floor(mins / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.floor(hours / 24)}d ago`
+}
+
+/**
+ * The sidebar's draggable right edge.
+ *
+ * The drag writes straight to the CSS custom property rather than to React
+ * state: a pointermove fires at screen refresh rate, and re-rendering the whole
+ * sidebar (nav, twenty chat rows, the workspace switcher) on each one is how a
+ * resize handle ends up feeling like it is dragging through mud. React owns
+ * WHETHER the handle exists; the browser owns where the edge is while it moves.
+ *
+ * `setPointerCapture` is what makes the drag survive the pointer leaving the
+ * 6px handle — without it, moving faster than the layout can follow drops the
+ * drag, which is exactly what happens on the first fast pull.
+ */
+function SidebarResizer() {
+  const ref = useRef<HTMLDivElement | null>(null)
+  // The live width during a drag, so the keyboard path and the pointer path
+  // share one notion of "where it is now" without reading layout back.
+  const widthRef = useRef<number>(SIDEBAR_DEFAULT_WIDTH)
+
+  // Restore before paint, or the sidebar renders at its default width and
+  // visibly snaps to the remembered one.
+  useLayoutEffect(() => {
+    const stored = loadSidebarWidth()
+    widthRef.current = stored
+    applySidebarWidth(stored)
+  }, [])
+
+  const setWidth = (px: number) => {
+    const next = clampSidebarWidth(px)
+    widthRef.current = next
+    applySidebarWidth(next)
+    return next
+  }
+
+  const onPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    // Left button only: a right-click here belongs to the context menu.
+    if (e.button !== 0) return
+    e.preventDefault()
+    const el = ref.current
+    el?.setPointerCapture(e.pointerId)
+    // Kills the sidebar's own width transition for the duration — a 200ms ease
+    // on every pointermove is a sidebar that lags the cursor.
+    document.body.classList.add("is-sidebar-resizing")
+
+    const onMove = (ev: PointerEvent) => {
+      // The sidebar is pinned to the left edge, so its width IS the pointer's
+      // x. No offset bookkeeping, and no drift when the drag starts a pixel or
+      // two off-centre in the handle.
+      setWidth(ev.clientX)
+    }
+    const onUp = (ev: PointerEvent) => {
+      el?.releasePointerCapture(ev.pointerId)
+      document.body.classList.remove("is-sidebar-resizing")
+      el?.removeEventListener("pointermove", onMove)
+      el?.removeEventListener("pointerup", onUp)
+      el?.removeEventListener("pointercancel", onUp)
+      saveSidebarWidth(widthRef.current)
+    }
+    el?.addEventListener("pointermove", onMove)
+    el?.addEventListener("pointerup", onUp)
+    // A cancelled pointer (a system gesture, a lost window) must clean up too,
+    // or the body keeps the resizing class and the transition never comes back.
+    el?.addEventListener("pointercancel", onUp)
+  }
+
+  // Arrow keys move it too. A control that can only be operated by dragging a
+  // 6px target is a control some people simply do not have.
+  const onKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    const step = e.shiftKey ? 32 : 8
+    if (e.key === "ArrowLeft") {
+      e.preventDefault()
+      saveSidebarWidth(setWidth(widthRef.current - step))
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault()
+      saveSidebarWidth(setWidth(widthRef.current + step))
+    }
+  }
+
+  return (
+    <div
+      ref={ref}
+      className="sb-resizer"
+      data-testid="sidebar-resizer"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize sidebar"
+      aria-valuemin={SIDEBAR_MIN_WIDTH}
+      aria-valuemax={SIDEBAR_MAX_WIDTH}
+      tabIndex={0}
+      onPointerDown={onPointerDown}
+      onKeyDown={onKeyDown}
+    >
+      {/* A grip, not a bare hit-area. An invisible 6px target is a feature
+          nobody finds: the bar sits at mid-height where a hand reaches for it,
+          faint until the pointer is near, and the tooltip names the gesture. */}
+      <span className="sb-resizer-grip" aria-hidden />
+      <span className="nav-tooltip sb-resizer-tip">Drag to resize</span>
+    </div>
+  )
+}
+
+/**
+ * The threads themselves, in the nav.
+ *
+ * WHY THE NAV AND NOT A SCREEN. Chat history used to be one icon among nine,
+ * and every return to a thread was two navigations: open the screen, find the
+ * row. The work people come back to IS their chats, so the nav shows them —
+ * twenty of them, most recent first — and keeps a single row at the bottom for
+ * the rest.
+ *
+ * Twenty is the cap because the list has to end somewhere above the fold on a
+ * laptop and below the point where the nav stops being useful. Past that,
+ * "View all chats" is the same screen it always was.
+ */
+function RecentChats({ activeCompany }: { activeCompany: string | null }) {
+  const { goTo } = useNavigation()
+  const auth = useAuth()
+  // Signed out, there is nothing to list and nothing to ask for — the route is
+  // authed. Null rather than an "anon" key, so no request is made at all.
+  const key =
+    auth.kind === "authed" ? chatsCacheKey(auth.user.id, activeCompany) : null
+  const { chats, loaded } = useChatsList(key)
+  const rows = recentChats(chats)
+
+  // Nothing yet, and nothing to say about it: a nav section announcing "no
+  // chats" to someone who has not had one is noise in the one place that has
+  // to stay scannable. The section simply is not there until there is a thread
+  // in it. `loaded` keeps the header from flashing in before the list lands.
+  if (!loaded || rows.length === 0) return null
+
+  return (
+    <div className="sb-chats" data-testid="sidebar-recent-chats">
+      <div className="sb-chats-head">Chats</div>
+      <div className="sb-chats-list">
+        {rows.map((chat) => (
+          <button
+            key={chat.id}
+            type="button"
+            className="sb-chat-item"
+            // The full title, for the row that truncates to one line.
+            title={chat.title}
+            data-testid={`sidebar-chat-${chat.id}`}
+            onClick={() => resumeConversation(chat, () => goTo("chat"))}
+          >
+            {/* A marker per row. Twenty left-aligned strings of different
+                lengths read as a wall; a fixed dot gives every title the same
+                starting line and the list a rhythm. */}
+            <span className="sb-chat-dot" aria-hidden />
+            <span className="sb-chat-title">{chat.title}</span>
+            {/* When it was asked. A title is the first message verbatim, so
+                the same question asked twice gives two identical rows — this
+                is what tells them apart. */}
+            <span className="sb-chat-when">{chatStamp(chat.created_at)}</span>
+          </button>
+        ))}
+      </div>
+      <button
+        type="button"
+        className="sb-chats-all"
+        data-testid="sidebar-view-all-chats"
+        onClick={() => goTo("chats")}
+      >
+        View all chats
+      </button>
+    </div>
+  )
 }
 
 function ChevronIcon({ collapsed }: { collapsed: boolean }) {

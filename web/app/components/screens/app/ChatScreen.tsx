@@ -8,6 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
+import { RESUME_EVENT } from "../../../lib/recentChats"
 // `crucibleOn` gates Goal Analysis. `dispatchChatIntent` / `useChatIntentExecutors`
 // that main re-adds here are already owned by the shared engine (useConversation),
 // so they are NOT reintroduced into this wrapper.
@@ -2674,6 +2675,15 @@ export function ChatScreen() {
   }, [openTab, showToast, hydratePrdThread])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
+  // Re-check when a thread is opened from somewhere that is NOT a route change
+  // — the sidebar's chat list, which can be clicked while this surface is
+  // already mounted and active. Without this the baton was written and never
+  // read, and the click did nothing.
+  useEffect(() => {
+    const onResume = () => checkResume()
+    window.addEventListener(RESUME_EVENT, onResume)
+    return () => window.removeEventListener(RESUME_EVENT, onResume)
+  }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
   useEffect(() => {
     if (currentScreen === "chat") {

@@ -38,7 +38,7 @@
 // The view layer (TemplatesView) is a pure, prop-driven component so it can be
 // markup-tested without the API; TemplatesScreen owns the state + API calls.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import {
   IconAward,
   IconBookmark,
@@ -229,7 +229,7 @@ export function TemplatesView({
   )
 }
 
-export function TemplatesScreen() {
+export function TemplatesScreen({ embedded = false }: { embedded?: boolean } = {}) {
   const [templates, setTemplates] = useState<CompanyTemplate[]>([])
   const [loading, setLoading] = useState(true)
   const [uploading, setUploading] = useState(false)
@@ -319,7 +319,7 @@ export function TemplatesScreen() {
     // emptier "Templates" above it. It was tolerable while two sections shared
     // the page and neither owned the page name; with §2 hidden, the section
     // header IS the page header.
-    <AppLayout mainClassName="main--templates" hideChromeStrip>
+    <Shell embedded={embedded}>
       <div className="tplpage">
         <ArtifactFormatsSection />
         {/* §2 "Examples we learn from" — HIDDEN, not deleted (owner, 2026-08-06).
@@ -348,6 +348,24 @@ export function TemplatesScreen() {
         />
         */}
       </div>
+    </Shell>
+  )
+}
+
+/**
+ * The page chrome, or none.
+ *
+ * This screen has two homes: its own route (`/templates`, reached from the
+ * command palette) and a pane inside Settings, where it moved when Templates
+ * and Skills left the main nav. Embedded it must NOT bring an `AppLayout` —
+ * that would put a second sidebar and a second chrome strip inside the one
+ * Settings already draws, and the settings nav would disappear behind it.
+ */
+function Shell({ embedded, children }: { embedded: boolean; children: ReactNode }) {
+  if (embedded) return <div className="settings-embedded">{children}</div>
+  return (
+    <AppLayout mainClassName="main--templates" hideChromeStrip>
+      {children}
     </AppLayout>
   )
 }
