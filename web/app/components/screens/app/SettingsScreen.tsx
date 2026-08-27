@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useRef, useState } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
+import { publicPath } from "../../../lib/public-path"
 import { AppLayout } from "./AppLayout"
 import { useAuth } from "../../../lib/auth"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
@@ -226,6 +227,14 @@ function NavIcon({ id }: { id: SettingsSectionId }) {
           <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
         </svg>
       )
+    case "guide":
+      // An open book — the one row here that leaves the app.
+      return (
+        <svg {...p}>
+          <path d="M3 5.5A1.5 1.5 0 0 1 4.5 4H9a3 3 0 0 1 3 3v13a2.5 2.5 0 0 0-2.5-2.5H3z" />
+          <path d="M21 5.5A1.5 1.5 0 0 0 19.5 4H15a3 3 0 0 0-3 3v13a2.5 2.5 0 0 1 2.5-2.5H21z" />
+        </svg>
+      )
     default:
       return (
         <svg {...p}>
@@ -303,7 +312,22 @@ function SettingsContent() {
             {SETTINGS_NAV.map((group) => (
               <div key={group.groupLabel} className="setx-nav-group">
                 <div className="setx-nav-group-label">{group.groupLabel}</div>
-                {group.items.map((item) => (
+                {group.items.map((item) => item.href ? (
+                  /* A door out — Guide, the public docs site. An anchor, not a
+                     button: it leaves the app, and middle-click / open-in-new-
+                     tab have to work the way they do on any link. */
+                  <a
+                    key={item.id}
+                    href={publicPath(item.href)}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="setx-nav-item"
+                    data-testid={`settings-nav-${item.id}`}
+                  >
+                    <NavIcon id={item.id} />
+                    <span className="setx-nav-item-label">{item.label}</span>
+                  </a>
+                ) : (
                   <button
                     key={item.id}
                     type="button"

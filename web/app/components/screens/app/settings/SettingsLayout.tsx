@@ -36,12 +36,23 @@ export type SettingsSectionId =
   // each screen renders embedded, without its own layout.
   | "templates"
   | "skills"
+  // Not a pane at all — an anchor to the public docs site. See
+  // `SettingsNavItem.href`.
+  | "guide"
 
 export type SettingsNavItem = {
   id: SettingsSectionId
   label: string
   /** False renders the item disabled with a "Soon" badge. */
   available: boolean
+  /** A row that opens somewhere ELSE rather than swapping the pane beside it.
+   *
+   *  One row uses it: Guide, which is the public docs site living outside the
+   *  authenticated app. It came off the left rail with Settings and Feedback,
+   *  and it belongs here — Settings is already where the read-about-it
+   *  surfaces are. It is NOT a `?section=` pane and has no component; the
+   *  screen renders an anchor for it. */
+  href?: string
 }
 
 export type SettingsNavGroup = {
@@ -96,6 +107,14 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     items: [
       { id: "connectors", label: "Connectors", available: true },
       { id: "mcp", label: "MCP Access", available: true },
+    ],
+  },
+  {
+    groupLabel: "Help",
+    items: [
+      // Opens in a new tab, so an in-progress session is never navigated away
+      // from to read a how-to.
+      { id: "guide", label: "Guide", available: true, href: "/docs" },
     ],
   },
   {
