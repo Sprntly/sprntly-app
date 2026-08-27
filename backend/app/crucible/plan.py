@@ -119,6 +119,15 @@ class RunPlan:
     definition_source: str = ""
     definition_note: str = ""
     definition_adopted: bool = False
+    #: HOW THE SURVIVORS GET ORDERED, said before the run rather than
+    #: discovered in the output.
+    #:
+    #: RICE by default, on Apurva's call. The `prioritize` skill's own checklist
+    #: says a framework should be "chosen with a reason, not defaulted to RICE"
+    #: — the reason here is that it is the one the reader asked for, and naming
+    #: it in the plan is what makes it a choice they can override rather than a
+    #: convention they discover afterwards.
+    framework: str = "RICE"
 
     def to_json(self) -> dict:
         return {
@@ -134,6 +143,7 @@ class RunPlan:
             "definition_source": self.definition_source,
             "definition_note": self.definition_note,
             "definition_adopted": self.definition_adopted,
+            "framework": self.framework,
         }
 
 
@@ -274,6 +284,7 @@ def build_plan(
     definition_source: str = "",
     definition_note: str = "",
     definition_adopted: bool = False,
+    framework: str = "RICE",
 ) -> RunPlan:
     """What this run will try to establish, where it will look, and what it
     will not be able to tell you."""
@@ -293,4 +304,5 @@ def build_plan(
         definition_source=definition_source,
         definition_note=definition_note,
         definition_adopted=definition_adopted,
+        framework=framework or "RICE",
     )

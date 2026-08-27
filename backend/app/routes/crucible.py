@@ -1307,6 +1307,11 @@ def execute_run(
             f.id: {
                 "label": f.label,
                 "example": f.example,
+                # RICE's Impact term is read from the kinds of claim behind a
+                # finding, so the renderer needs them. Carried here for the same
+                # reason as the label: adding a column to `crucible_findings`
+                # means a migration against the shared Supabase.
+                "claim_types": sorted(set(f.confidence_inputs.claim_types)),
                 **({"recommendation": {
                     "action": recs[f.id].action, "because": recs[f.id].because,
                 }} if f.id in recs else {}),

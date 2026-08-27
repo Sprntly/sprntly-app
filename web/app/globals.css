@@ -25456,6 +25456,12 @@
 .ga-doc-aside { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border, #e5e5e5); }
 .ga-doc-aside-list { margin: 8px 0 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 5px; }
 .ga-doc-aside-list li { line-height: 1.5; opacity: 0.85; }
+/* The scoring table. Wide content scrolls in its own box, never the page. */
+.ga-rice-scroll { overflow-x: auto; margin-top: 8px; }
+.ga-rice { border-collapse: collapse; width: 100%; font-size: 13px; }
+.ga-rice th, .ga-rice td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border, #e5e5e5); }
+.ga-rice th { font-weight: 600; opacity: 0.7; white-space: nowrap; }
+.ga-rice td { vertical-align: top; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated

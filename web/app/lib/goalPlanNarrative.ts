@@ -38,7 +38,7 @@ export type PlanStep = {
 export function planNarrative(
   plan: Pick<GoalRunPlan,
     "sources" | "definition_text" | "will_produce" | "cannot_answer"
-    | "definition_adopted">,
+    | "definition_adopted" | "framework">,
   excluded: ReadonlySet<string>,
 ): PlanStep[] {
   const kept = (plan.sources ?? []).filter((s) => !excluded.has(s.source_type))
@@ -82,6 +82,29 @@ export function planNarrative(
       text: plan.definition_adopted
         ? `Judge what survives against your own definition: “${plan.definition_text.trim()}”.`
         : "Judge what survives against your own definition of the metric, which you confirm below.",
+    })
+  }
+
+  // 3b. HOW THE SURVIVORS GET ORDERED, named before the run.
+  //
+  // Apurva: "in the initial plan that we are going to output, we should
+  // highlight that we are using the RICE framework." A ranking method
+  // discovered in the output is a convention; one stated in the plan is a
+  // choice, and the reader can say no to it while the gate is still open.
+  //
+  // The terms are spelled out because RICE's letters carry assumptions this
+  // corpus cannot all satisfy — effort in particular is not in the data, and
+  // saying so here is cheaper than explaining it under a table later.
+  const framework = (plan.framework || "").trim()
+  if (framework) {
+    steps.push({
+      text: `Rank what survives with ${framework}:`,
+      items: [
+        "Reach — how many of your accounts the theme touches, counted",
+        "Impact — how directly it bears on the metric, read from the kind of claim behind it",
+        "Confidence — the band the evidence earns, not a guess",
+        "Effort — not in your connected data, so the ranking is by reach × impact × confidence until you supply one",
+      ],
     })
   }
 
