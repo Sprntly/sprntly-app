@@ -1,6 +1,6 @@
 "use client"
 
-import { Suspense, useCallback, useRef, useState } from "react"
+import { Suspense, useCallback, useRef, useState, type ReactNode } from "react"
 import { useSearchParams, useRouter } from "next/navigation"
 import { publicPath } from "../../../lib/public-path"
 import { AppLayout } from "./AppLayout"
@@ -98,19 +98,32 @@ function isRowActive(section: SettingsSectionId, rowId: SettingsSectionId): bool
   return !!pane && pane.leaves.includes(section)
 }
 
-/** A pane's content plus, when it has siblings, the nav that switches between
- *  them. A single-view row (Workspaces, Templates, Skills) renders bare — a
- *  one-item nav is furniture. */
-function PaneBody({
+/**
+ * The pane's sub-nav, wrapped around WHATEVER chrome that section brings.
+ *
+ * It sits at the shell level, not inside each pane, and that is the whole
+ * point. Panes are not built alike: some own a sticky bar and their own
+ * padding (`FULL_BLEED_SECTIONS`), some get the shell's `.pset` wrapper, and
+ * Metrics has neither. With the nav inside them, it started wherever that
+ * pane's chrome happened to leave room — top for Metrics, pushed down past a
+ * sticky bar and a save button for Product & Category and Company Profile. The
+ * rail is a property of the PANE GROUP, so it hangs off the group, and every
+ * section under it now begins at the same line.
+ *
+ * A single-view row (Workspaces, Templates, Skills) renders bare — a one-item
+ * nav is furniture.
+ */
+function PaneShell({
   section,
   onSelect,
+  children,
 }: {
   section: SettingsSectionId
   onSelect: (id: SettingsSectionId) => void
+  children: ReactNode
 }) {
   const pane = paneFor(section)
-  const body = <SettingsPanel section={section} />
-  if (!pane || pane.leaves.length < 2) return body
+  if (!pane || pane.leaves.length < 2) return <>{children}</>
   return (
     <SettingsPaneNav
       label={`${pane.label} sections`}
@@ -121,7 +134,7 @@ function PaneBody({
         label: LEAF_LABELS[leaf] ?? leaf,
       }))}
     >
-      {body}
+      {children}
     </SettingsPaneNav>
   )
 }
@@ -416,25 +429,25 @@ function SettingsContent() {
             sticky title bar, plus the padded body unless the pane ships its
             own (.set-pane). Their save buttons stay inline in the cards. */}
         <div className="setx-main">
-          {FULL_BLEED_SECTIONS.has(section) ? (
-            // A full-bleed pane draws its own chrome, so it also draws its own
-            // sub-nav — the shell has no padded body to hang one in.
-            <PaneBody section={section} onSelect={setSection} />
-          ) : (
-            <div className="pset">
-              <SettingsPaneBar
-                title={paneFor(section)?.label ?? sectionLabel}
-                meta={identityMeta}
-              />
-              {SELF_PADDED_SECTIONS.has(section) ? (
-                <PaneBody section={section} onSelect={setSection} />
-              ) : (
-                <div className="pset-body">
-                  <PaneBody section={section} onSelect={setSection} />
-                </div>
-              )}
-            </div>
-          )}
+          <PaneShell section={section} onSelect={setSection}>
+            {FULL_BLEED_SECTIONS.has(section) ? (
+              <SettingsPanel section={section} />
+            ) : (
+              <div className="pset">
+                <SettingsPaneBar
+                  title={paneFor(section)?.label ?? sectionLabel}
+                  meta={identityMeta}
+                />
+                {SELF_PADDED_SECTIONS.has(section) ? (
+                  <SettingsPanel section={section} />
+                ) : (
+                  <div className="pset-body">
+                    <SettingsPanel section={section} />
+                  </div>
+                )}
+              </div>
+            )}
+          </PaneShell>
         </div>
       </div>
     </AppLayout>

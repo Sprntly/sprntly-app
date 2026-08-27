@@ -25672,6 +25672,41 @@
   max-width: none;
 }
 
+/* The rail hangs off the PANE GROUP, at the shell level — not inside whichever
+   chrome a section happens to bring. Panes are not built alike: some own a
+   sticky bar and their own padding, some get the shell's `.pset` wrapper, and
+   Metrics has neither. Nested inside them the rail started wherever that
+   pane's chrome left room — level with the top on Metrics, pushed down past a
+   sticky bar and a save button on Product & Category. Out here every section
+   under one row begins at the same line.
+
+   `.setx-main` already scrolls, so the split fills it and the rail sticks to
+   the top of the scroll rather than to the viewport. */
+.setx-main > .setpane-shell {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.setx-main > .setpane-shell > .setpane-split {
+  min-height: 100%;
+  gap: 32px;
+  padding: 0 0 0 4px;
+}
+
+/* The pane keeps its own scroll and its own chrome; only the rail is shared. */
+.setx-main > .setpane-shell > .setpane-split > .setpane-main {
+  max-width: none;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.setx-main > .setpane-shell > .setpane-split > .setpane-nav {
+  top: 20px;
+  margin-top: 20px;
+  padding-right: 20px;
+}
+
 .setpane-shell {
   container-type: inline-size;
   container-name: setpane;

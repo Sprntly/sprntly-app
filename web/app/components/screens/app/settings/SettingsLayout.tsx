@@ -152,10 +152,6 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
     groupLabel: "Data & Integrations",
     items: [{ id: "connectors", label: "Integrations", available: true }],
   },
-  // NO Help GROUP HERE. Guide moves into Settings on
-  // feat/nav/bottom-rail-icons (PR #1375), which is still open; adding it here
-  // too would be inventing an id this branch's union does not have. Whichever
-  // lands second merges the two lists.
   {
     groupLabel: "Help",
     items: [
