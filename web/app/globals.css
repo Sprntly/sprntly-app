@@ -2960,8 +2960,8 @@
   }
 
   .main.main--reading .prd-chart {
-    margin: 12px 0 16px;
-    padding: 14px 14px;
+    margin: 16px 0 20px;
+    padding: 14px 2px 2px;
   }
 
   .main.main--reading .prd-foot {
@@ -4954,12 +4954,21 @@
   }
 
   /* PRD infographics — bar / line / pie / stat / gauge charts rendered inline */
+  /* A FIGURE IN THE PROSE, not a widget parked in it. The card — border, fill,
+     radius — was doing the work that white space and a caption do better: it
+     boxed the chart off from the sentence that introduces it, which is the one
+     thing a reader needs to connect. What is left is air, a hairline to mark
+     where the prose stops, and the marks themselves carrying the colour.
+
+     The chrome the skill calls recessive is the chrome AROUND the data, not
+     the data. */
   .prd-chart {
-    margin: 16px 0 22px;
-    padding: 16px 18px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface-2);
+    margin: 22px 0 26px;
+    padding: 18px 2px 4px;
+    border: none;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: none;
   }
 
   .prd-chart-title {
@@ -5003,15 +5012,126 @@
   }
 
   .prd-bar-track {
-    height: 22px;
+    /* Capped, not filling its slot: the leftover is air, which is what keeps a
+       stack of bars readable as a ranking rather than as a block. */
+    height: 20px;
     background: var(--surface-3);
     border-radius: 6px;
     overflow: hidden;
   }
 
+  /* ── Chart motion ─────────────────────────────────────────────────────
+     Every mark below reveals off ONE flag — `[data-revealed]` on the figure,
+     set by an IntersectionObserver when the card is actually scrolled into
+     view (see `useRevealed`). Charts render inside a streaming reply, so a
+     mount-time animation would play against half a dataset in a card nobody
+     is looking at yet.
+
+     The resting state is the FINISHED chart. Everything here is an override
+     that applies only while `data-revealed="false"` — so a browser with no
+     observer, a test, or a printed page shows real data rather than an empty
+     frame. Decoration must never be load-bearing for reading the numbers. */
+
+  /* Bars grow from the baseline. */
+  .prd-chart[data-revealed="false"] .prd-bar-fill {
+    width: 0 !important;
+  }
+
+  .prd-bar-fill {
+    transition: width 620ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  /* The line draws itself, left to right. `pathLength: 1` on the element makes
+     the dash a fraction of the path, so shape does not change the duration. */
+  .prd-line-path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 760ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-path {
+    stroke-dashoffset: 1;
+  }
+
+  /* Dots land after the line reaches them, each carrying a 2px ring in the
+     surface colour so a marker sitting on the line, a gridline or a neighbour
+     still reads as its own mark. */
+  .prd-line-dot {
+    stroke: var(--surface-2);
+    stroke-width: 2;
+    opacity: 1;
+    transition: opacity 240ms ease;
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-dot {
+    opacity: 0;
+  }
+
+  /* Slices scale up from the centre of the ring, in order. */
+  .prd-pie-slice {
+    transform-origin: center;
+    transform: scale(1);
+    opacity: 1;
+    /* `fill-opacity` carries the DIM (hover), `opacity` carries the REVEAL.
+       Two rules on one property fight the moment someone hovers mid-reveal. */
+    transition: transform 460ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      opacity 300ms ease, fill-opacity 140ms ease;
+  }
+
+  /* The slice being read lifts a little out of the ring. */
+  .prd-pie-slice[data-active="true"] {
+    transform: scale(1.03);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-pie-slice {
+    transform: scale(0.86);
+    opacity: 0;
+  }
+
+  /* The gauge sweeps from empty. */
+  .prd-gauge-value {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 700ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-gauge-value {
+    stroke-dashoffset: 1;
+  }
+
+  /* Stat tiles rise. */
+  .prd-stat {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 320ms ease, transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-stat {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  /* ASKED FOR LESS MOTION MEANS NONE. `useRevealed` already returns revealed
+     on the first render under this query, so nothing should animate — this is
+     the belt to that braces: any mark that slips through has its transition
+     removed rather than slowed. */
+  @media (prefers-reduced-motion: reduce) {
+    .prd-bar-fill,
+    .prd-line-path,
+    .prd-line-dot,
+    .prd-pie-slice,
+    .prd-gauge-value,
+    .prd-stat {
+      transition: none !important;
+    }
+  }
+
   .prd-bar-fill {
     height: 100%;
-    border-radius: 6px;
+    /* Rounded at the DATA end, square at the baseline — a bar rounded at both
+       ends reads as floating, and at 0 it would show a lozenge where there is
+       no data. */
+    border-radius: 0 4px 4px 0;
     transition: width 0.3s ease;
   }
 
@@ -5058,11 +5178,87 @@
   }
 
   .prd-pie-legend li {
+    display: block;
+  }
+
+  /* The legend row is the keyboard's way into the ring, so it is a real
+     button: full width, its own hover and focus states, and the same
+     highlight the slice gets. */
+  .prd-pie-legend-row {
     display: grid;
     grid-template-columns: 12px 1fr auto;
     gap: 8px;
     align-items: center;
+    width: 100%;
+    padding: 4px 6px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: 12.5px;
+    text-align: left;
+    cursor: default;
+    transition: background 0.12s;
+  }
+
+  .prd-pie-legend-row:hover,
+  .prd-pie-legend-row[data-active="true"] {
+    background: var(--surface-3);
+  }
+
+  .prd-pie-legend-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .prd-pie-pct {
+    color: var(--muted);
+  }
+
+  /* The ring and its readout share one stacking context so the centre figure
+     sits in the hole rather than beside it. */
+  .prd-pie-ring {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+
+  .prd-pie-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    pointer-events: none;
+    text-align: center;
+    /* Inside a 88px hole — anything wider than this wraps into the ring. */
+    padding: 0 26px;
+  }
+
+  .prd-pie-center-val {
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .prd-pie-center-lbl {
+    font-size: 10.5px;
+    line-height: 1.2;
+    color: var(--muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  /* Pointing at a slice is reading, not clicking. */
+  .prd-pie-slice {
+    cursor: default;
   }
 
   .prd-pie-swatch {
@@ -10688,6 +10884,21 @@
     padding: 10px 12px;
     overflow-x: auto;
     margin: 0.7em 0;
+  }
+
+  /* A CHART IS NOT A CODE BLOCK. It arrives as a fenced ```chart block, so the
+     markdown renderer wraps it in <pre> and it inherited all of the chrome
+     above — a bordered, tinted, padded box — and then drew its own card inside
+     that. Two frames around one figure, which is what "it looks some way"
+     was. The fence is a transport detail; strip it and let the figure be the
+     only container. */
+  .ai-bar-reply-answer pre:has(.prd-chart) {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
   }
 
   .ai-bar-reply-answer pre code {

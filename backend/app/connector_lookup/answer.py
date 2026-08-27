@@ -60,6 +60,46 @@ MAX_ITERS_CEILING = 10
 #: stop firing and the model is told to answer from what it already has.
 WALL_CLOCK_BUDGET_S = 75
 
+#: The chart contract, shared verbatim with the plain-ask path.
+#:
+#: ONE SCHEMA, TWO PROMPTS, on purpose. `InlineChart.tsx` parses this block and
+#: refuses anything that does not match, so a second dialect here would render
+#: as a fence full of JSON in the middle of an answer. The kinds and the field
+#: names belong to the RENDERER, not to this file — `ASK_SYSTEM` in
+#: app/prompts.py carries the same block plus the fuller form heuristic.
+_CHART_CONTRACT = (
+    "\nEmbed a chart as a fenced code block with language `chart` (no other "
+    "language) and a JSON body matching exactly:\n\n"
+    "```chart\n"
+    '{\n'
+    '  "kind": "bar" | "line" | "pie" | "donut" | "stat" | "gauge",\n'
+    '  "title": "Complete-sentence takeaway as the title",\n'
+    '  "subtitle": "optional source line",\n'
+    '  "data": [{"label": "string", "value": <number-or-string>}]\n'
+    '}\n'
+    "```\n\n"
+    "Which kind: `bar` to compare things, `line` for change over time, `pie` "
+    "(or `donut`) for a share of one whole, `stat` for 2-4 headline numbers, "
+    "`gauge` for one number against a target. Every value must come from a "
+    "tool result you actually read — never fill a chart out to make it look "
+    "complete. Always close the fence with ``` on its own line.\n"
+)
+
+
+#: How to PRESENT what the tools returned — appended last by `_build_system`,
+#: after every adapter block, because that is the only position where it wins.
+_PRESENTATION = (
+    "\n## Presenting the answer\n"
+    "A COUNT PER THING IS A CHART, not a table. This path answers the most "
+    "chart-shaped questions in the product — tickets per status, issues per "
+    "assignee, messages per channel, commits per author — so a breakdown gets "
+    "a chart and the prose says what it means. Keep a markdown table for "
+    "cross-cuts with two dimensions (status BY assignee) that one chart cannot "
+    "carry, and for lists that are not counts at all.\n"
+    + _CHART_CONTRACT
+)
+
+
 _SYSTEM_HEAD = (
     "You are a product-management assistant with LIVE, read-only access to the "
     "tools the user has connected to Sprntly. Answer by FETCHING the real data "
@@ -74,7 +114,7 @@ _SYSTEM_HEAD = (
     "covers part of the data — never imply you read all of it.\n"
     "- When several sources are available, say WHICH source each fact came "
     "from.\n"
-    "- Be concise and concrete.\n\n"
+    "- Be concise and concrete.\n"
     "Follow-ups often never repeat what they are about (\"who said that?\", "
     "\"and the rest of it\"). Resolve the reference from the conversation above "
     "rather than searching blind.\n"
@@ -256,6 +296,15 @@ def _build_system(
             "\nSeveral sources are connected. Prefer the one the question names; "
             "when a fact could come from either, attribute it explicitly."
         )
+    # LAST, and that position is the fix. This started life as a bullet inside
+    # `_SYSTEM_HEAD` and did nothing: the head is the FIRST of a dozen parts,
+    # and every adapter block after it describes how to present that source's
+    # data. "Tickets per status" and "issues per assignee" both came back as
+    # markdown tables from a prompt that had already been told to draw a chart —
+    # the adapter simply spoke more recently and more specifically. A rule about
+    # the SHAPE OF THE ANSWER belongs after everything about where the data came
+    # from, so it is the last thing read before the model writes.
+    parts.append(_PRESENTATION)
     return "\n".join(parts)
 
 
@@ -444,6 +493,16 @@ def answer(
             system_prompt = (
                 system_text + "\n## Sprntly knowledge graph\n" + kg_module().SYSTEM
             )
+        # THE VERBATIM PATH NEEDS THIS TOO, and finding out why took two rebuilds.
+        # An adapter with a tuned prompt (Jira, today) never touches
+        # `_build_system`, so a presentation rule added there reaches only the
+        # multi-source path. "What share of our open tickets sits in each
+        # status?" is answered HERE — it came back as a markdown table from an
+        # image that already carried the rule, because the rule was in the other
+        # branch of this `if`. Appended last for the same reason it is last over
+        # there: it is about the shape of the ANSWER, so it belongs after
+        # everything about where the data came from.
+        system_prompt += "\n" + _PRESENTATION
     else:
         system_prompt = _build_system(
             connected,
