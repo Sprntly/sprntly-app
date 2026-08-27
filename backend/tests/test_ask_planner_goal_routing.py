@@ -125,3 +125,60 @@ def test_the_capability_line_rides_the_uncached_input_not_the_system_block():
         keyword_prior="", history=None, goal_analysis_available=False,
     )
     assert "Goal Analysis is not available" in built
+
+
+# ─── A goal asked as a question is still a goal ─────────────────────────────
+
+
+def _menu() -> str:
+    """The action menu the planner shows the model."""
+    import inspect
+
+    from app import ask_planner
+
+    import re
+
+    src = inspect.getsource(ask_planner)
+    i = src.index("- analyse_goal —")
+    # WHITESPACE-NORMALISED: the menu is wrapped prose, so a phrasing the model
+    # reads as one clause ("how can we improve activation") is split across two
+    # lines with indentation in the source. Asserting on the raw text checks
+    # where the line breaks fall, which is not the property.
+    return re.sub(r"\s+", " ", src[i:src.index("- generate_tickets", i)])
+
+
+def test_the_menu_teaches_that_an_interrogative_goal_is_a_goal():
+    """OBSERVED LIVE, and the distinction was one no user could be expected to
+    make: "How to grow revenue by 5%" routed to `answer` and reached the DS
+    agent, while "How can we grow revenue by 5%" routed correctly.
+
+    v13 taught the action with imperative examples and then drew the exclusion
+    at "A GOAL IS NOT A QUESTION ABOUT A METRIC" — a line between statements and
+    questions rather than between REPORTING a number and CHANGING one. The
+    question form is the most common way a PM phrases a goal.
+    """
+    menu = _menu().lower()
+    for phrasing in ("how to grow revenue", "how do we reduce churn",
+                     "how can we improve activation", "what can we do about"):
+        assert phrasing in menu, f"the menu no longer teaches {phrasing!r}"
+
+
+def test_the_menu_still_sends_a_REPORTING_question_to_answer():
+    """The exclusion has to survive the widening. "what is our churn?" asks
+    what a number IS; it is not a goal, and routing it to Goal Analysis would
+    put a definition gate in front of a lookup."""
+    menu = _menu().lower()
+    assert "what is our churn" in menu
+    assert "how did revenue move last quarter" in menu
+    # And the line is drawn on report-versus-change, not on punctuation.
+    assert "report" in menu and "change" in menu
+
+
+def test_the_prompt_version_moved_with_the_menu():
+    """`_PROMPT_VERSION` pools rows for routing-accuracy queries. A v13 row and
+    a v14 row answer differently for every interrogative goal, so pooling them
+    would measure nothing — the file's own rule is that anything altering what
+    the prompt ASKS bumps."""
+    from app.ask_planner import _PROMPT_VERSION
+
+    assert _PROMPT_VERSION == "ask-planner-v14"

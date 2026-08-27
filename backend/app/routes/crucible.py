@@ -1191,6 +1191,31 @@ def execute_run(
             "stopped_at_stage": r.stopped_at, "claim_ids": list(r.claim_ids),
         } for r in result.rejected]
 
+        runs_db.save_findings(run_id, company_id, rows, ledger)
+        # READY THE MOMENT THE ANALYSIS EXISTS. The panel polls on this, so
+        # leaving it until after the enrichment kept the reader on the spinner
+        # for the whole of it — which is what actually happened on staging.
+        runs_db.update(
+            run_id, company_id, status="ready",
+            finished_at=datetime.now(timezone.utc).isoformat(),
+            coverage_notes=_coverage_notes(stats, result.stats),
+        )
+
+        # ── THE REPORT IS PUBLISHED BEFORE ANYTHING IS ASKED OF A MODEL. ────
+        #
+        # The gate and the suggestions used to run HERE, above the save, and
+        # that was the mistake: everything the deterministic pipeline computed
+        # in seconds sat unsaved and invisible behind four sequential model
+        # calls. On staging a 149-finding run hung for thirteen minutes past its
+        # last narration line, showing nothing, with no error to show — because
+        # there was no error. Both layers "failed open" on exceptions and
+        # neither had any notion of TIME, which is the failure mode that
+        # actually bit.
+        #
+        # Saved first, enriched second. A reader gets the analysis as soon as it
+        # exists; the selection and the suggestions land when they land, and if
+        # they never land the document is exactly what it was before either
+        # feature existed.
         # ── WHICH OF THEM BEAR ON THE GOAL THAT WAS ASKED. ─────────────
         #
         # The ranking orders by how many accounts mention a theme, so a run for
@@ -1284,12 +1309,6 @@ def execute_run(
         ]
         runs_db.update(run_id, company_id, prioritisation=meta)
 
-        runs_db.save_findings(run_id, company_id, rows, ledger)
-        runs_db.update(
-            run_id, company_id, status="ready",
-            finished_at=datetime.now(timezone.utc).isoformat(),
-            coverage_notes=_coverage_notes(stats, result.stats),
-        )
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))

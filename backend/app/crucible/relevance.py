@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import sys
+import time
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
@@ -50,6 +51,20 @@ logger = logging.getLogger(__name__)
 #: and one quote — so a chunk this size stays well inside the input budget while
 #: keeping the number of calls small on a 300-finding run.
 CHUNK = 60
+
+#: How long the whole gate may take, in seconds.
+#:
+#: A DEADLINE, BECAUSE LATENCY IS A FAILURE MODE AND I ONLY GUARDED ERRORS.
+#: The first version wrapped every call in a try and called that failing open.
+#: It is not: a call that never returns raises nothing, so the run sat past the
+#: last narration line with its findings computed, unsaved and invisible, and
+#: from the reader's side a gate that eventually succeeds after ten minutes is
+#: indistinguishable from one that died. Observed on staging — a 149-finding run
+#: hung for thirteen minutes behind three sequential calls.
+#:
+#: Past this the gate stops asking and everything still unjudged is KEPT, which
+#: is the same direction every other failure here resolves in.
+DEADLINE_SECONDS = 75.0
 
 #: The most findings the gate will judge at all.
 #:
@@ -204,7 +219,16 @@ def judge_relevance(
 
     verdicts: dict[str, Verdict] = {}
     judged = list(findings)[:MAX_JUDGED]
+    deadline = time.monotonic() + DEADLINE_SECONDS
     for i in range(0, len(judged), CHUNK):
+        # CHECKED BEFORE EACH CALL, not after. A budget tested only on the way
+        # out still pays for the call that broke it.
+        if time.monotonic() >= deadline:
+            logger.warning(
+                "crucible: relevance gate hit its %ss deadline after %s of %s "
+                "findings; the rest are kept", DEADLINE_SECONDS, i, len(judged),
+            )
+            break
         chunk = judged[i:i + CHUNK]
         try:
             verdicts.update(_judge_chunk(
