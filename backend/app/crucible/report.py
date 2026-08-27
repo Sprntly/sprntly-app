@@ -227,6 +227,113 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
     return "".join(out)
 
 
+#: How many rows the scoring table shows. The reference memo scores two options
+#: and lists the rest in an appendix; a table of 149 rows is not a table.
+MAX_RICE_ROWS = 10
+
+
+def _rice_section(findings: list[dict], framework: str) -> str:
+    """The ranking, and the arithmetic behind it — the memo's §04.
+
+    THE SKILL'S OUTPUT SPEC, followed: "The main artifact is always the ranked
+    list … accompanied by a 'how we scored it' table so the ranking is
+    reviewable, never a black box", with "every input marked real vs
+    [ASSUMPTION]" and "a sensitivity note naming the 1-2 items whose rank flips
+    on a shaky input".
+
+    THE TABLE DOES NOT SET THE ORDER. `_rank` froze that before this ran; these
+    rows are rendered in the order they arrive. A scoring table that re-sorted
+    would be the prioritisation step mutating the ranking, which is I10.
+    """
+    from app.crucible.rice import EFFORT_ABSENT, RICE_INPUTS, rice_for, sensitivity
+
+    if not findings or not framework:
+        return ""
+    rows = [
+        rice_for(
+            label=(f.get("label") or "").strip() or _statement_text(f),
+            # `impact_value`, the SAME field `_reach` reads. Taking it from
+            # the nested `impact` dict instead let the table disagree with the
+            # sentence three inches above it about whether a finding was sized.
+            reach=f.get("impact_value"),
+            reach_unit=(f.get("currency") or "accounts"),
+            claim_types=[str(t) for t in _as_list(f.get("claim_types"))],
+            confidence_band=(f.get("confidence_band") or ""),
+        )
+        for f in findings[:MAX_RICE_ROWS]
+    ]
+    if not rows:
+        return ""
+
+    out = [f"<h2>How this was ranked ({_esc(framework)})</h2>"]
+    # WHAT EACH TERM MEANS HERE, because RICE's letters carry assumptions this
+    # corpus cannot all satisfy and a reader who assumes the standard ones will
+    # misread the table.
+    out.append(_ul([
+        "<strong>Reach</strong> — how many of your accounts the theme touches. "
+        "Counted, not estimated.",
+        "<strong>Impact</strong> — how directly it bears on the metric, read "
+        "from the kind of claim behind it: something blocked outranks something "
+        "asked for, which outranks something described. "
+        "<em>That ordering is ours, not your data's.</em>",
+        "<strong>Confidence</strong> — the band the evidence earned, lowered "
+        "once for each input this table could not fill.",
+        f"<strong>Effort</strong> — <em>{EFFORT_ABSENT}</em>. Nothing in your "
+        "connected sources carries a person-month, and inventing one would put "
+        "a number in front of you that no evidence supports.",
+    ]))
+
+    body = "".join(
+        "<tr>"
+        f"<td>{_esc_clipped(r.label, MAX_PARAM_NAME_CHARS)}</td>"
+        f"<td>{'—' if r.reach is None else f'{r.reach:g} {_esc(r.reach_unit)}'}</td>"
+        f"<td>{r.impact:g}</td>"
+        f"<td>{_esc(r.confidence_band)}</td>"
+        f"<td>{_esc(EFFORT_ABSENT)}</td>"
+        f"<td>{'—' if r.score is None else f'{r.score:.1f}'}</td>"
+        f"<td>{r.inputs_present} of {len(RICE_INPUTS)}</td>"
+        "</tr>"
+        for r in rows
+    )
+    out.append(
+        "<table><thead><tr>"
+        "<th>Theme</th><th>Reach</th><th>Impact</th><th>Confidence</th>"
+        "<th>Effort</th><th>Score</th><th>Inputs</th>"
+        "</tr></thead><tbody>" + body + "</tbody></table>"
+    )
+
+    # EVERY ROW IS SCORED ON THE SAME MISSING TERM, so say what that costs
+    # rather than leaving the reader to wonder what the score would have been.
+    # KEYED ON EFFORT ALONE. `scored_without_effort` also requires a reach, so
+    # a single unsized row made this false and swallowed the sentence for a
+    # table where nobody had supplied effort at all.
+    if all(not r.effort for r in rows):
+        out.append(_p(
+            "No effort estimate was supplied for any of these, so the score is "
+            "reach × impact × confidence. That is not a gap in the ranking: an "
+            "effort applied equally to every row divides them all by the same "
+            "number and cannot change their order. It would change the order "
+            "only once the estimates differ from each other."
+        ))
+    # NO SILENT CAPS. A table that stops at ten without saying so reads as the
+    # whole ranking, and the rule this file applies everywhere else is that a
+    # bound is stated where it bites.
+    if len(findings) > len(rows):
+        out.append(_p(
+            f"The {len(findings) - len(rows)} findings below these are ranked "
+            f"in the list that follows, but not scored out here — a table this "
+            f"long stops being one."
+        ))
+    flips = sensitivity(rows)
+    if flips:
+        out.append(_p(
+            "<strong>Sensitive to an estimate we do not have:</strong> "
+            + _esc(", ".join(flips))
+            + " — where their effort lands decides where they sit."
+        ))
+    return "".join(out)
+
+
 def _funnel_section(considered: int, kept: int) -> str:
     """How many themes were found, and how many bear on the goal.
 
@@ -1197,6 +1304,7 @@ def render_report_html(
             _definition_section(run, plan),
             _what_was_read_section(run, plan),
             _funnel_section(len(findings), len(kept)),
+            _rice_section(kept, str(plan.get("framework") or "")),
             _headline_section(kept),
             _findings_section(kept, full_cap, overflow_cap),
             _set_aside_section(set_aside),

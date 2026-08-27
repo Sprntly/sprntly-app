@@ -718,6 +718,10 @@ export type GoalRunPlan = {
   definition_note?: string
   /** False until a person has said yes to `definition_text`. */
   definition_adopted?: boolean
+  /** How the surviving findings get ordered. RICE by default; named in the
+   *  plan so it is a choice the reader can override rather than a convention
+   *  they discover in the output. */
+  framework?: string
 }
 
 /** What the run has decided so far, written as it goes.

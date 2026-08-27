@@ -899,3 +899,77 @@ describe("the goal-relevance gate, in the panel", () => {
     expect(screen.getAllByTestId("goal-finding")).toHaveLength(2)
   })
 })
+
+describe("the RICE table in the panel", () => {
+  // TWO RENDERERS OF ONE RANKING. The document grew a scoring table and the
+  // panel did not, which would have shipped a feature the reader never sees —
+  // the panel is what is open while the document is a thing you save.
+  const withRice = (findings: unknown[]) => ({
+    ...RUN, findings,
+    // MERGED, not replaced: the panel's "what was read" section reads
+    // `plan.total_signals`, so a fixture that swaps the whole plan out crashes
+    // the render before the table is reached.
+    prioritisation: {
+      ...(RUN.prioritisation ?? {}),
+      plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), framework: "RICE" },
+    },
+  })
+  const F = (id: number, label: string, reach: number | null, types: string[]) => ({
+    ...SIZED, id, label, statement: `${label} stmt`,
+    impact_value: reach, claim_types: types,
+  })
+
+  it("shows every term and names the one it cannot fill", () => {
+    render(<GoalAnalysisReport run={withRice([F(1, "blocked", 5, ["constraint"])]) as never} />)
+    const t = screen.getByTestId("goal-rice").textContent ?? ""
+    for (const h of ["Reach", "Impact", "Confidence", "Effort", "Score", "Inputs"]) {
+      expect(t).toContain(h)
+    }
+    expect(t).toContain("person-month")
+    // NAMED IN THE CELL, not merely in the key above it. Asserting the word
+    // appears anywhere passed against a mutation that filled the cell with "1"
+    // — a table quietly supplying the one number nothing supports.
+    const effortCells = [...screen.getByTestId("goal-rice")
+      .querySelectorAll("tbody tr")].map(r => r.querySelectorAll("td")[4]?.textContent)
+    expect(effortCells).toEqual(["Unquantified"])
+  })
+
+  it("scores a blocker above a bigger theme that only describes", () => {
+    // THE POINT OF SCORING AT ALL. Reach alone put commentary above blocked
+    // revenue.
+    render(<GoalAnalysisReport run={withRice([
+      F(1, "chatter", 11, ["mechanism"]),
+      F(2, "blocked", 5, ["constraint"]),
+    ]) as never} />)
+    const cells = [...screen.getByTestId("goal-rice").querySelectorAll("tbody tr")]
+      .map(r => [...r.querySelectorAll("td")].map(c => c.textContent))
+    const chatter = Number(cells[0][5])
+    const blocked = Number(cells[1][5])
+    expect(blocked).toBeGreaterThan(chatter)
+  })
+
+  it("renders an unsized finding as no score, never zero", () => {
+    render(<GoalAnalysisReport run={withRice([F(1, "unsized", null, ["preference"])]) as never} />)
+    const cells = [...screen.getByTestId("goal-rice").querySelectorAll("tbody td")]
+      .map(c => c.textContent)
+    expect(cells).toContain("—")
+    expect(cells).not.toContain("0.0")
+  })
+
+  it("does not reorder the findings", () => {
+    // `_rank` froze the order; a table that re-sorted would be the
+    // prioritisation step mutating the ranking (I10).
+    render(<GoalAnalysisReport run={withRice([
+      F(1, "first", 1, ["mechanism"]),
+      F(2, "second", 50, ["constraint"]),
+    ]) as never} />)
+    const rows = [...screen.getByTestId("goal-rice").querySelectorAll("tbody tr")]
+      .map(r => r.querySelector("td")?.textContent)
+    expect(rows).toEqual(["first", "second"])
+  })
+
+  it("says nothing when no framework is set", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-rice")).toBeNull()
+  })
+})

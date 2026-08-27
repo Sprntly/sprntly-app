@@ -156,4 +156,27 @@ describe("the plan reads as an approach, not a form", () => {
     expect(give.items).toBeUndefined()
     expect(give.text).toBe("Give you a ranked list.")
   })
+  it("names the ranking framework in the plan, before the run", () => {
+    // Apurva: "in the initial plan that we are going to output, we should
+    // highlight that we are using the RICE framework." A ranking method
+    // discovered in the output is a convention; one stated in the plan is a
+    // choice the reader can still say no to.
+    const steps = planNarrative({ ...PLAN, framework: "RICE" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect(rank).toBeTruthy()
+    expect(rank.items).toBeTruthy()
+    const terms = (rank.items ?? []).join(" ")
+    expect(terms).toMatch(/Reach/)
+    expect(terms).toMatch(/Impact/)
+    expect(terms).toMatch(/Confidence/)
+    // AND THAT EFFORT IS NOT IN THE DATA. RICE's letters carry an assumption
+    // this corpus cannot satisfy, and saying so in the plan is cheaper than
+    // explaining it under a table afterwards.
+    expect(terms).toMatch(/not in your connected data/i)
+  })
+
+  it("says nothing about ranking when no framework was set", () => {
+    const steps = planNarrative({ ...PLAN, framework: "" } as never, new Set())
+    expect(steps.find((s) => /RICE|Rank what survives/.test(s.text))).toBeUndefined()
+  })
 })

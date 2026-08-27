@@ -40,6 +40,7 @@
  * and a component that also owned an async lifecycle would be one nobody could
  * test those rules against without a server.
  */
+import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
@@ -235,6 +236,7 @@ export function GoalAnalysisReport({
   // Length-guarded like the extras: a mismatch means the two lists are not the
   // same sequence, and setting aside the WRONG finding is far worse than
   // setting none aside.
+  const framework = (run.prioritisation?.plan?.framework || "").trim()
   const asideRaw = run.prioritisation?.set_aside_by_rank
   const findingsExtra = run.prioritisation?.findings_extra_by_rank
   const allFindings = (() => {
@@ -511,6 +513,72 @@ export function GoalAnalysisReport({
       </section>
 
       {/* ── 3. The short version ─────────────────────────────────────────── */}
+      {/* ── HOW THIS WAS RANKED. ───────────────────────────────────────
+          The skill's output spec: the ranked list is the deliverable, and it
+          ships WITH a "how we scored it" table so the ranking is reviewable
+          rather than a black box — every input marked real or assumed, and the
+          one we cannot fill named rather than filled.
+          The table NEVER re-sorts: `_rank` froze the order before any of this
+          ran, and a scoring table that reordered would be the prioritisation
+          step mutating the ranking (I10). */}
+      {framework && findings.length ? (
+        <section className="ga-doc-section" data-testid="goal-rice">
+          <h2 className="ga-doc-h2">How this was ranked ({framework})</h2>
+          <ul className="ga-doc-note">
+            <li><strong>Reach</strong> — how many of your accounts the theme
+              touches. Counted, not estimated.</li>
+            <li><strong>Impact</strong> — how directly it bears on the metric,
+              read from the kind of claim behind it: something blocked outranks
+              something asked for, which outranks something described.{" "}
+              <em>That ordering is ours, not your data&rsquo;s.</em></li>
+            <li><strong>Confidence</strong> — the band the evidence earned.</li>
+            <li><strong>Effort</strong> — <em>{EFFORT_ABSENT}</em>. Nothing in
+              your connected sources carries a person-month, and inventing one
+              would put a number in front of you that no evidence supports.</li>
+          </ul>
+          <div className="ga-rice-scroll">
+            <table className="ga-rice">
+              <thead>
+                <tr>
+                  <th>Theme</th><th>Reach</th><th>Impact</th>
+                  <th>Confidence</th><th>Effort</th><th>Score</th><th>Inputs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {findings.slice(0, MAX_RICE_ROWS).map((f) => {
+                  const r = riceFor(f)
+                  return (
+                    <tr key={f.id}>
+                      <td>{r.label}</td>
+                      <td>{r.reach === null ? "—" : `${r.reach} ${r.reachUnit}`}</td>
+                      <td>{r.impact}</td>
+                      <td>{r.confidenceBand}</td>
+                      <td>{EFFORT_ABSENT}</td>
+                      <td>{r.score === null ? "—" : r.score.toFixed(1)}</td>
+                      <td>{r.inputsPresent} of {RICE_INPUT_COUNT}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {/* NO SILENT CAPS. */}
+          {findings.length > MAX_RICE_ROWS ? (
+            <p className="ga-doc-note">
+              The {findings.length - MAX_RICE_ROWS} findings below these are
+              ranked in the list that follows, but not scored out here — a table
+              this long stops being one.
+            </p>
+          ) : null}
+          <p className="ga-doc-note">
+            No effort estimate was supplied for any of these, so the score is
+            reach × impact × confidence. That is not a gap in the ranking: an
+            effort applied equally to every row divides them all by the same
+            number and cannot change their order.
+          </p>
+        </section>
+      ) : null}
+
       {/* ── THE FUNNEL, BEFORE ANYTHING IS SHOWN. ─────────────────────────
           The first thing a filtered list owes its reader. A filtered list that
           does not say it was filtered is the more confident-looking of the two,

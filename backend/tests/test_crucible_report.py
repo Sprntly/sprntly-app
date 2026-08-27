@@ -1262,3 +1262,100 @@ def test_the_headline_describes_the_kept_findings_not_all_of_them():
     head = html[html.index("The short version"):html.index("What the evidence says")]
     assert "renewals stall on the parts flow" in head
     assert "our platform supports scenario building" not in head
+
+
+# ─── RICE: the ranking, and the arithmetic behind it ────────────────────────
+
+
+def _rice_run(framework: str = "RICE") -> dict:
+    run = _run()
+    run["prioritisation"] = {"plan": {"framework": framework,
+                                      "definition_text": "d", "sources": []}}
+    return run
+
+
+def _rice_html(html: str) -> str:
+    i = html.index("How this was ranked")
+    return html[i:html.index("The short version", i)]
+
+
+def test_the_table_shows_every_term_and_marks_the_one_it_cannot_fill():
+    """The skill's output spec: a "how we scored it" table so the ranking is
+    reviewable, never a black box, with every input marked real vs
+    [ASSUMPTION]."""
+    findings = [_finding(statement="a", label="blocked", impact_value=5,
+                         claim_types=["constraint"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+
+    for header in ("Reach", "Impact", "Confidence", "Effort", "Score", "Inputs"):
+        assert header in body
+    # NAMED IN THE CELL, not merely mentioned in the key above it. Asserting
+    # the word appears anywhere passed against a mutation that filled the cell
+    # with "1" and left the definitions untouched — a table that quietly
+    # supplies the one number nothing supports.
+    assert "<td>Unquantified</td>" in body
+    assert "person-month" in body
+
+
+def test_a_blocker_outranks_a_bigger_theme_that_only_describes():
+    """THE POINT OF SCORING AT ALL. Reach alone put commentary above blocked
+    revenue: a theme mentioned on eleven accounts outranked the one blocker in
+    the list. Impact read from the claim type is what separates them."""
+    findings = [
+        _finding(statement="a", label="chatter", impact_value=11,
+                 claim_types=["mechanism"]),
+        _finding(statement="b", label="blocked", impact_value=5,
+                 claim_types=["constraint"]),
+    ]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    scores = [float(x) for x in re.findall(r"<td>(\d+\.\d)</td>", body)]
+    assert len(scores) == 2
+    assert scores[1] > scores[0], "the blocker must outscore the chatter"
+
+
+def test_an_unsized_finding_scores_nothing_rather_than_zero():
+    """I3 again, in the place it would be easiest to lose: a table cell."""
+    findings = [_finding(statement="a", label="unsized", impact_value=None,
+                         claim_types=["preference"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "<td>—</td>" in body
+    assert "<td>0.0</td>" not in body
+
+
+def test_it_says_why_a_missing_effort_does_not_change_the_order():
+    """An effort applied equally to every row is a common divisor. Saying so is
+    the derived form of the reference memo's "cheapness is not the constraint
+    here" — and it stops a reader discounting the whole table for a gap that
+    cannot have moved it."""
+    findings = [_finding(statement="a", label="x", impact_value=5,
+                         claim_types=["constraint"]),
+                _finding(statement="b", label="y", impact_value=None,
+                         claim_types=["preference"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "cannot change their order" in body
+
+
+def test_no_framework_means_no_table():
+    findings = [_finding(statement="a", label="x", impact_value=5)]
+    html = render_report_html(_rice_run(framework=""), findings)
+    assert "How this was ranked" not in html
+
+
+def test_the_table_does_not_reorder_the_findings():
+    """`_rank` froze the order before this ran. A scoring table that re-sorted
+    would be the prioritisation step mutating the ranking, which is I10."""
+    findings = [_finding(statement="a", label="first", impact_value=1,
+                         claim_types=["mechanism"]),
+                _finding(statement="b", label="second", impact_value=50,
+                         claim_types=["constraint"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert body.index("first") < body.index("second")
+
+
+def test_the_table_says_when_it_stopped_short():
+    """NO SILENT CAPS. A table that stops at ten without saying so reads as the
+    whole ranking — the rule this file applies everywhere else."""
+    findings = [_finding(statement=f"f{i}", label=f"t{i}", impact_value=i + 1,
+                         claim_types=["mechanism"]) for i in range(14)]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "4 findings below these" in body
