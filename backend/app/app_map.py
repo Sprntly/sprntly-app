@@ -33,13 +33,16 @@ from __future__ import annotations
 # not documentation, and the Guide at /docs is where the long form lives.
 NAV: list[tuple[str, str, str]] = [
     ("Home", "/",
-     "the chat itself — ask a question, or start a new chat from the pencil "
-     "icon at the top of the left rail"),
+     "the chat itself — ask a question, or start a new chat from the 'New "
+     "chat' button at the top of the left rail"),
     ("Top Insights", "/brief",
      "this week's findings, refreshed on a schedule; which insight types "
      "appear is set in Settings -> Comms & Brief"),
     ("Chat history", "/history",
-     "every past chat in this workspace; a thread reopens where it left off"),
+     "every past chat in this workspace; a thread reopens where it left off. "
+     "The left rail lists the most recent chats directly — click one to "
+     "reopen it, or 'View all chats' at the foot of that list to reach this "
+     "screen"),
     ("Artifacts", "/artifacts",
      "EVERY document Sprntly has generated for this workspace, with filter "
      "tabs: All, Reports, PRDs, Prototypes, Evidence, Tickets, Documents. "
@@ -50,13 +53,20 @@ NAV: list[tuple[str, str, str]] = [
     ("Ideation", "/ideation",
      "the ranked idea list — proposed ideas and completed ones; a PRD can be "
      "generated straight from an idea"),
+    # BOTH MOVED INTO SETTINGS (2026-08-27) and are no longer on the left rail.
+    # Their own routes still work and the command palette still reaches them,
+    # so they stay here — but Settings is where a person now finds them, and
+    # the pane entries below are the link to hand over. Same shape as Team,
+    # which is a screen AND a pane.
     ("Templates", "/templates",
      "upload your own PRD, ticket or engineering-spec FORMAT and choose which "
      "one is active (the active format is applied to every new document of "
-     "that kind), alongside the gold-standard examples"),
+     "that kind), alongside the gold-standard examples. Found under "
+     "Settings -> Templates; no longer on the left rail"),
     ("Skills", "/skills",
      "the PM methods the chat can run, and where a team uploads its own "
-     "custom skill — invoke one in chat by typing / followed by its name"),
+     "custom skill — invoke one in chat by typing / followed by its name. "
+     "Found under Settings -> Skills; no longer on the left rail"),
     ("Guide", "/docs",
      "the written How-To Guide — long-form walkthroughs, outside the app shell"),
     ("Settings", "/settings",
@@ -86,6 +96,15 @@ SETTINGS: list[tuple[str, str, str]] = [
     ("Business Context", "business-context", "the strategic lens applied to the work"),
     ("Team & roles", "team",
      "invite people, and set each person's job and access level"),
+    # The two panes Templates and Skills became when they left the left rail.
+    # They render INSIDE Settings, so this link — not /templates — is the one
+    # that lands somebody where they can also see the rest of their settings.
+    ("Templates", "templates",
+     "the FORMAT every new PRD, ticket set or engineering spec is written in "
+     "— upload your team's own and choose which one is active"),
+    ("Skills", "skills",
+     "the PM methods the chat can run, and where a team uploads its own "
+     "custom skill — invoke one in chat by typing / followed by its name"),
     ("Connectors", "connectors",
      "connect and disconnect Google Drive, GitHub, Figma, Jira, Confluence, "
      "ClickUp, Asana, HubSpot, Slack, Zoom and the rest — this is where a "

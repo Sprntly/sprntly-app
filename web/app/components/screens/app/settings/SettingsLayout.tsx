@@ -31,6 +31,11 @@ export type SettingsSectionId =
   // Dormant (kept for component-file compatibility, not linked)
   | "strategic"
   | "flags"
+  // Moved off the main nav (2026-08-27): a workspace sets these up once and
+  // returns to them, which is what Settings is for. Real `?section=` panes —
+  // each screen renders embedded, without its own layout.
+  | "templates"
+  | "skills"
 
 export type SettingsNavItem = {
   id: SettingsSectionId
@@ -73,6 +78,17 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
       { id: "metrics", label: "Metrics", available: true },
       { id: "business-context", label: "Business Context", available: true },
       { id: "team", label: "Team & roles", available: true },
+    ],
+  },
+  {
+    groupLabel: "How Sprntly writes",
+    items: [
+      // Panes, not doors. Both screens render embedded (no AppLayout of their
+      // own), so the settings nav stays on screen exactly as it does for
+      // Profile or Connectors. Their standalone routes still work — the
+      // command palette reaches them.
+      { id: "templates", label: "Templates", available: true },
+      { id: "skills", label: "Skills", available: true },
     ],
   },
   {
