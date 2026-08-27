@@ -91,6 +91,7 @@ import {
   SIDEBAR_MAX_WIDTH,
   SIDEBAR_MIN_WIDTH,
 } from "../../../lib/sidebarWidth"
+import { chatsCacheKey, setCachedChats } from "../../../lib/recentChats"
 
 beforeEach(() => {
   goTo.mockClear()
@@ -105,6 +106,21 @@ beforeEach(() => {
   workspacesState = []
   activeWorkspaceState = null
   orgRoleState = null
+  // EMPTY THE SHARED CHATS CACHE. `useChatsList` is stale-while-revalidate
+  // over a module-global Map, and mocking at the API boundary (above) is what
+  // exercises that — so the three threads one test seeded are still cached
+  // when the next one mounts, and render on its FIRST frame, before its own
+  // fetch lands. That is what turned "says nothing at all when there are no
+  // threads" red on CI while it passed here: locally the mocked list is an
+  // already-resolved promise that wins the race, and on a loaded runner it
+  // does not. Reproduced by resolving the mock a few ms late, which fails
+  // four of these tests, including with CI's exact "…(3)" stale rows.
+  //
+  // Seeded empty rather than deleted because that is what the existing
+  // exports offer, and the two are equivalent here: an empty cache renders
+  // nothing either way, and every test that wants rows awaits the section.
+  setCachedChats(chatsCacheKey("u-1", "acme"), [])
+  setCachedChats(chatsCacheKey("u-1", null), [])
 })
 afterEach(() => cleanup())
 
