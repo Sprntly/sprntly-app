@@ -138,12 +138,27 @@ def test_pull_requests_transcript_and_is_window_scoped():
 
 
 def test_kg_query_requests_the_free_richer_digest_fields():
-    """The richer Fireflies digest fields (gist/outline/topics_discussed/
-    tasks/questions) cost nothing extra — same API call — and enrich the
-    main pass's condensed input for better themes."""
-    for field in ("gist", "outline", "topics_discussed", "tasks", "questions"):
+    """The richer Fireflies digest fields (gist/outline/topics_discussed)
+    cost nothing extra — same API call — and enrich the main pass's
+    condensed input for better themes."""
+    for field in ("gist", "outline", "topics_discussed"):
         assert field in fireflies._QUERY_KG_WITH_TRANSCRIPT, (
             f"KG-ingest query should request the free {field!r} digest field")
+
+
+def test_kg_query_does_not_request_invalid_summary_fields():
+    """Regression guard: `tasks` and `questions` are NOT valid fields on
+    Fireflies' GraphQL `Summary` type — requesting them makes the whole
+    query fail with a 400, so no transcripts are ever fetched. This unit
+    test only guards against re-adding these two specific known-bad
+    fields (their absence was verified live against the real Fireflies
+    API out-of-band); it is not a substitute for a live-API check of the
+    full schema."""
+    assert "tasks" not in fireflies._QUERY_KG_WITH_TRANSCRIPT
+    assert "questions" not in fireflies._QUERY_KG_WITH_TRANSCRIPT
+    for field in ("gist", "outline", "topics_discussed"):
+        assert field in fireflies._QUERY_KG_WITH_TRANSCRIPT
+    assert "sentences" in fireflies._QUERY_KG_WITH_TRANSCRIPT
 
 
 def test_main_pass_text_is_digest_only_even_with_sentences():
