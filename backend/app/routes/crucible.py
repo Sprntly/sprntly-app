@@ -1192,6 +1192,22 @@ def execute_run(
         } for r in result.rejected]
 
         runs_db.save_findings(run_id, company_id, rows, ledger)
+        # ENRICHMENT IS COMING, AND THE CLIENT HAS TO BE TOLD SO.
+        #
+        # `GoalAnalysisTab`'s poller treats "ready" as TERMINAL, so publishing
+        # the report first — which is what stops the reader waiting on four
+        # model calls — also stops the client listening before the gate and the
+        # recommendations land. They were written to a row nobody read again:
+        # the analysis appeared, and the suggestions never did.
+        #
+        # This flag is the whole handshake. It goes up BEFORE `ready` so there
+        # is no window where the panel can see a ready run without knowing more
+        # is coming, and it comes down in the same write that publishes the
+        # results — so "pending" is never left true by a path that finished.
+        meta = dict(_meta_of(run_id, company_id))
+        meta["enrichment_pending"] = True
+        runs_db.update(run_id, company_id, prioritisation=meta)
+
         # READY THE MOMENT THE ANALYSIS EXISTS. The panel polls on this, so
         # leaving it until after the enrichment kept the reader on the spinner
         # for the whole of it — which is what actually happened on staging.
@@ -1303,6 +1319,11 @@ def execute_run(
         # considered and how many bear on the goal is the first thing Apurva's
         # reference memo states, and it is the thing a filtered list has to
         # disclose or it reads as the whole picture.
+        # DOWN IN THE SAME WRITE THAT PUBLISHES THE RESULTS. Clearing it
+        # separately leaves a window where the panel has stopped polling and
+        # the verdicts are not there yet — the exact bug this flag exists to
+        # close, one write narrower.
+        meta["enrichment_pending"] = False
         meta["set_aside_by_rank"] = list(set_aside_by_rank)
         meta["findings_extra_by_rank"] = [
             meta["findings_extra"][f.id] for f in result.findings

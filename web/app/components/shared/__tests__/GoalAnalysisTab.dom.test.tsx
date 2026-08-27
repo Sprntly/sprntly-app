@@ -161,6 +161,52 @@ describe("polling", () => {
     expect(get.mock.calls.length).toBe(calls)
   })
 
+  it("keeps polling a READY run while its enrichment is still coming", async () => {
+    // THE REGRESSION THIS CLOSES. Publishing the report before the gate and the
+    // recommendations is what stops the reader waiting on four model calls —
+    // but `ready` is TERMINAL here, so that fix stopped the panel listening
+    // before the results landed. They were written to a row nobody read again:
+    // the analysis appeared and the suggestions never did.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9_500)
+    expect(get.mock.calls.length).toBeGreaterThan(calls)
+  })
+
+  it("stops the moment the enrichment lands", async () => {
+    // The flag comes down in the same write that publishes the verdicts, so
+    // the tick that sees the results is the tick that stops.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: false },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(get.mock.calls.length).toBe(calls)
+  })
+
+  it("gives up on a pending enrichment rather than spinning forever", async () => {
+    // A backend that died mid-enrichment leaves the flag up. Unbounded, this
+    // would poll for the life of the tab.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    await vi.advanceTimersByTimeAsync(4 * 60 * 1000)
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(get.mock.calls.length).toBe(calls)
+  })
+
   it("keeps polling while the run is still working", async () => {
     // The control the old pair was missing entirely: a test that fails if
     // polling stops when it should not.

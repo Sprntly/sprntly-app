@@ -2042,3 +2042,53 @@ def test_the_report_is_published_before_any_model_is_asked_anything():
     assert order.index("ready") < order.index("recommend"), (
         f"the run must be READY before recommendations — order was {order}"
     )
+
+
+def test_the_run_announces_that_enrichment_is_still_coming():
+    """THE HANDSHAKE, AND THE REGRESSION IT CLOSES.
+
+    Publishing the report before the gate and the recommendations is what stops
+    the reader waiting on four model calls. But `ready` is TERMINAL for the
+    panel's poller, so that same fix stopped the client listening before the
+    results landed — they were written to a row nobody read again. The analysis
+    appeared and the suggestions never did, which is exactly what Apurva saw.
+
+    Asserted on source order: the flag must go UP before `ready`, so there is no
+    window where a panel can see a ready run without knowing more is coming, and
+    DOWN in the write that publishes the results rather than in one of its own.
+    """
+    import ast
+    import inspect
+
+    from app.routes import crucible as routes
+
+    src = inspect.cleandoc(inspect.getsource(routes.execute_run))
+    tree = ast.parse(src)
+
+    up = down = ready = results = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            t = ast.unparse(node)
+            flat = t.replace('"', "'")
+            if "enrichment_pending'] = True" in flat:
+                up = node.lineno
+            elif "enrichment_pending'] = False" in flat:
+                down = node.lineno
+            elif "set_aside_by_rank'] =" in flat:
+                results = node.lineno
+        if isinstance(node, ast.Call):
+            # `ast.unparse` normalises quotes, so match on the normalised form
+            # rather than on how the source happens to be written.
+            if "status='ready'" in ast.unparse(node).replace('"', "'"):
+                ready = node.lineno
+
+    assert up and down and ready and results, (up, down, ready, results)
+    assert up < ready, "the flag must be raised before the run is marked ready"
+    assert down > ready, "the flag comes down after the enrichment, not before"
+    # Cleared in the same write that publishes the verdicts: clearing it
+    # separately leaves a window where the panel stopped and the results are
+    # not there yet.
+    assert abs(down - results) <= 3, (
+        f"the flag is cleared {abs(down - results)} lines from the results; "
+        "it must be the same write"
+    )

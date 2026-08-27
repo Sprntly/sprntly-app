@@ -61,6 +61,19 @@ const GATE_POLL_MS = 15_000
 //: which is honest about the fact that nothing is watching any more.
 const GATE_POLL_CEILING_MS = 30 * 60 * 1000
 
+//: How long to keep polling a READY run whose enrichment is still coming.
+//:
+//: THE REPORT IS PUBLISHED BEFORE THE GATE AND THE RECOMMENDATIONS RUN, so the
+//: reader is not held behind four model calls. That fix moved the enrichment to
+//: AFTER `status: "ready"` — and `ready` is terminal here, so the panel stopped
+//: listening before the results landed and wrote them to a row nobody read
+//: again. The analysis appeared; the suggestions never did.
+//:
+//: Bounded, because a backend that died mid-enrichment leaves the flag up
+//: forever and an unbounded poll would spin for the life of the tab. The server
+//: budgets 75s for the gate and 60s for the suggestions, so this is those plus
+//: room for a slow write.
+
 //: Statuses where the run is waiting on a PERSON, not on work.
 const HUMAN_GATES = new Set(["awaiting_confirmation", "awaiting_approval"])
 
@@ -82,6 +95,8 @@ const POLL_UNREACHABLE = "__unreachable__"
  *  describing the membership it lost is the same defect as a report claiming
  *  a ranking it does not have: the next reader trusts the prose over the
  *  three words below it. */
+const ENRICH_POLL_CEILING_MS = 3 * 60 * 1000
+
 const TERMINAL = new Set([
   // A GATE IS NO LONGER TERMINAL FOR THIS PANEL. Both gates moved to the chat
   // thread, so the click that releases them happens somewhere this component
@@ -175,12 +190,20 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [docNote, setDocNote] = useState<string | null>(null)
   const autoOpened = useRef(false)
 
+  const enrichmentPending = useRef(false)
   const load = useCallback(async () => {
     try {
       const detail = await goalAnalysisApi.get(runId)
       failures.current = 0
       setError(null)              // a recovered poll clears the warning
       setRun(detail)
+      // Read off the row every tick rather than latched once: the server turns
+      // it off in the same write that publishes the results, so the tick that
+      // sees the results is the tick that stops.
+      enrichmentPending.current = Boolean(
+        (detail as { prioritisation?: { enrichment_pending?: boolean } })
+          .prioritisation?.enrichment_pending,
+      )
       return detail.status
     } catch {
       failures.current += 1
@@ -218,9 +241,21 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     // silently reclassify a gated run as an ungated one; it keeps the cadence
     // and the clock the last KNOWN status established.
     let atGate = false
+    let enrichWaitedMs = 0
     const tick = async () => {
       const status = await load()
-      if (!live || TERMINAL.has(String(status))) return
+      if (!live) return
+      // A READY RUN IS NOT DONE WHILE ITS ENRICHMENT IS STILL COMING. Keep
+      // polling on the working cadence until the server clears the flag, or
+      // until the ceiling — a backend that died mid-enrichment must not leave
+      // this spinning for the life of the tab.
+      if (String(status) === "ready" && enrichmentPending.current
+          && enrichWaitedMs < ENRICH_POLL_CEILING_MS) {
+        enrichWaitedMs += POLL_MS
+        timer = setTimeout(tick, POLL_MS)
+        return
+      }
+      if (TERMINAL.has(String(status))) return
       if (status !== POLL_UNREACHABLE) atGate = HUMAN_GATES.has(String(status))
       if (atGate) {
         gateWaitedMs += GATE_POLL_MS
