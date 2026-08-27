@@ -267,7 +267,7 @@ export function DocumentEditor({
           background: var(--surface-2, #F4F1EA); border-radius: 8px;
           padding: 12px 14px; overflow-x: auto;
         }
-        [data-doc-editor] .tiptap a { color: var(--accent, #179463); }
+        [data-doc-editor] .tiptap a { color: var(--accent, #17191A); }
         /* Tables. The browser's default is a borderless grid that reads as
            columns of loose text, so the rules that matter are the separators
            and the header weight — the same treatment the docs site gives a
@@ -588,7 +588,7 @@ function Btn({
         ...S.btn,
         ...style,
         background: active ? "var(--accent-alpha-10, rgba(23,148,99,0.10))" : "transparent",
-        color: active ? "var(--accent, #179463)" : "var(--ink, #1A1A17)",
+        color: active ? "var(--accent, #17191A)" : "var(--ink, #1A1A17)",
       }}
       dangerouslySetInnerHTML={{ __html: label }}
     />

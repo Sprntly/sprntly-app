@@ -88,7 +88,7 @@ function badgeFor(type: string): ArtifactBadge {
 }
 
 const ARTIFACT_BADGE: Record<ArtifactItem["type"], ArtifactBadge> = {
-  prd:        { label: "PRD",       bg: "#DBF1E7", color: "#0E6E49" },
+  prd:        { label: "PRD",       bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)" },
   prototype:  { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence:   { label: "EVIDENCE",  bg: "#FEF0E6", color: "#B45309" },
   report:     { label: "REPORT",    bg: "#EDE9FE", color: "#6D28D9" },
@@ -402,8 +402,8 @@ export function ArtifactsView({
               style={{
                 fontSize: 12.5, fontWeight: 600, padding: "5px 13px", borderRadius: 16,
                 cursor: "pointer", whiteSpace: "nowrap",
-                border: `1px solid ${active ? "var(--accent, #179463)" : "var(--line, #E8E6E0)"}`,
-                background: active ? "var(--accent, #179463)" : "var(--surface, #fff)",
+                border: `1px solid ${active ? "var(--accent, #17191A)" : "var(--line, #E8E6E0)"}`,
+                background: active ? "var(--accent, #17191A)" : "var(--surface, #fff)",
                 color: active ? "#fff" : "var(--ink-2, #5A5853)",
               }}
             >
@@ -862,7 +862,7 @@ export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
               fontSize: 13, fontWeight: 600, padding: "7px 16px", borderRadius: 8,
               border: "none", whiteSpace: "nowrap",
               cursor: importing || !activeCompany ? "default" : "pointer",
-              background: "var(--accent, #179463)", color: "#fff",
+              background: "var(--accent, #17191A)", color: "#fff",
               opacity: importing || !activeCompany ? 0.6 : 1,
               display: "flex", alignItems: "center", gap: 6,
             }}

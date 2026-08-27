@@ -438,13 +438,13 @@ const S: Record<string, React.CSSProperties> = {
   },
   conflictBtnPrimary: {
     fontSize: 12.5, fontWeight: 600, padding: "6px 12px", borderRadius: 6,
-    border: "none", background: "var(--accent, #179463)", color: "#fff",
+    border: "none", background: "var(--accent, #17191A)", color: "#fff",
     cursor: "pointer",
   },
   body: { fontSize: 15, lineHeight: 1.7, color: "var(--ink, #1A1A17)" },
   muted: { fontSize: 13.5, color: "var(--ink-3, #8C8A84)" },
   link: {
     border: "none", background: "none", padding: 0, cursor: "pointer",
-    fontSize: 13.5, color: "var(--accent, #179463)", fontWeight: 600,
+    fontSize: 13.5, color: "var(--accent, #17191A)", fontWeight: 600,
   },
 }

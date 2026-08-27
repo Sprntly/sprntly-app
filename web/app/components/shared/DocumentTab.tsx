@@ -413,7 +413,7 @@ const S: Record<string, React.CSSProperties> = {
   },
   btnPrimary: {
     fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 6,
-    border: "none", background: "var(--accent, #179463)", color: "#fff", cursor: "pointer",
+    border: "none", background: "var(--accent, #17191A)", color: "#fff", cursor: "pointer",
   },
   // The bar sits above the document and STAYS there: `position: sticky` against
   // the panel's own scroll container, so scrolling the text does not scroll the

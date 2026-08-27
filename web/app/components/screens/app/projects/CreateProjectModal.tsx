@@ -59,7 +59,7 @@ export type ArtifactsLoadState = "loading" | "ready" | "error"
  *  declared Deliverables for this ticket, so the small lookup is
  *  re-duplicated here rather than imported). */
 const BADGE: Record<ProjectArtifactType, { label: string; bg: string; color: string }> = {
-  prd: { label: "PRD", bg: "#DBF1E7", color: "#0E6E49" },
+  prd: { label: "PRD", bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)" },
   prototype: { label: "PROTOTYPE", bg: "#DBEAFE", color: "#1E40AF" },
   evidence: { label: "EVIDENCE", bg: "#FEF0E6", color: "#B45309" },
   report: { label: "REPORT", bg: "#EDE9FE", color: "#6D28D9" },

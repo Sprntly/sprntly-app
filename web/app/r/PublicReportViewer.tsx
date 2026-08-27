@@ -75,7 +75,7 @@ export function PublicReportView({
             fontSize: 13, fontWeight: 600, padding: "8px 16px", borderRadius: 8,
             border: "none", whiteSpace: "nowrap",
             cursor: downloading ? "default" : "pointer",
-            background: "var(--accent, #179463)", color: "#fff",
+            background: "var(--accent, #17191A)", color: "#fff",
             opacity: downloading ? 0.6 : 1,
           }}
         >
@@ -243,7 +243,7 @@ export function PublicReportViewer() {
             style={{
               width: "100%", fontSize: 13, fontWeight: 600, padding: "9px 16px",
               borderRadius: 8, border: "none", color: "#fff",
-              background: "var(--accent, #179463)",
+              background: "var(--accent, #17191A)",
               cursor: phase.busy || !passcode ? "default" : "pointer",
               opacity: phase.busy || !passcode ? 0.6 : 1,
             }}
