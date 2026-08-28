@@ -123,6 +123,27 @@ Examples:
 If unsure whether an event is real or simulated, extract it and set its reality_confidence lower, rather than dropping it."""
 
 
+class MalformedLLMResultError(ValueError):
+    """Raised when a parsed LLM result (live or batched) isn't the
+    dict/list shape `_finish_extract`/`_finish_checklist` need to write it.
+
+    Live-verify (2026-08-27, a 400-call bulk backfill): one batched result's
+    structured output had ``signals`` come back as a bare string instead of
+    a list of signal dicts — the schema-forced tool call still returns a
+    dict envelope, but a value INSIDE it can still be the wrong shape.
+    Iterating a string yields its characters, so the un-guarded write path
+    hit ``AttributeError: 'str' object has no attribute 'get'`` deep inside
+    the per-item loop — an opaque crash rather than a diagnosable skip.
+
+    A subclass of ``ValueError`` (not a bare ``Exception``) so it is still
+    caught by every existing per-call ``except Exception`` isolation
+    upstream (``app.kg_ingest.runner.sync_provider``, the backfill CLI's
+    ``_run_batched``/``_run_sync_fallback``) — the call is skipped and its
+    ledger hash is never recorded, so it is retried on the next run, exactly
+    like any other real write failure. The only change is the diagnosis: a
+    named, clearly-logged error instead of a bare AttributeError."""
+
+
 def _is_duplicate_signal(exc: Exception) -> bool:
     """True iff `exc` is the benign "this exact signal id already exists" that
     content-keyed idempotency EXPECTS on a re-sync — a primary-key /
@@ -345,8 +366,31 @@ def _finish_extract(
     Factored out so `extract_document`'s live call and the batch-authoring
     `parse_extract_response` (below) share this EXACT tail — one function,
     used by both, so the two paths cannot silently diverge in how a model
-    response becomes signals."""
+    response becomes signals.
+
+    Raises `MalformedLLMResultError` (never a bare `AttributeError`) when
+    `output` isn't a dict or `output["signals"]` isn't a list — see that
+    class's docstring. Every existing caller's per-call isolation already
+    catches this as a skip-and-retry."""
+    if not isinstance(output, dict):
+        logger.warning(
+            "extraction result for doc=%s is not a dict-shaped LLM output "
+            "(got %s) — skipping this pass", doc_name, type(output).__name__,
+        )
+        raise MalformedLLMResultError(
+            f"extraction result for doc={doc_name!r} is not a dict-shaped "
+            f"LLM output (got {type(output).__name__}) — skipping this pass"
+        )
     items = output.get("signals", [])
+    if not isinstance(items, list):
+        logger.warning(
+            "extraction result for doc=%s has a non-list 'signals' value "
+            "(got %s) — skipping this pass", doc_name, type(items).__name__,
+        )
+        raise MalformedLLMResultError(
+            f"extraction result for doc={doc_name!r} has a non-list "
+            f"'signals' value (got {type(items).__name__}) — skipping this pass"
+        )
     if not items:
         return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
@@ -474,6 +518,23 @@ def _write_items(
     since a checklist batch mixes categories in one call unlike a normal
     document's uniform `provenance_extra`); every pre-existing caller's items
     never carry that key, so behaviour there is unchanged."""
+    if not items:
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    # Defense in depth: `_finish_extract` guarantees `items` itself is a
+    # list (see MalformedLLMResultError), but an individual ELEMENT could
+    # still be the wrong shape (e.g. the model's `signals` array mixing a
+    # real object with a stray string). Drop just that element rather than
+    # letting `i["theme"]` / `i["content"]` below take an AttributeError/
+    # TypeError and lose every OTHER well-formed item in the same response.
+    malformed = [i for i in items if not isinstance(i, dict)]
+    if malformed:
+        logger.warning(
+            "dropping %d malformed (non-dict) signal item(s) for "
+            "enterprise=%s doc=%s: %r",
+            len(malformed), enterprise_id, doc_name, malformed,
+        )
+        items = [i for i in items if isinstance(i, dict)]
     if not items:
         return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
@@ -941,12 +1002,42 @@ def _finish_checklist(
     (below) share this EXACT tail. `text` is the full transcript the grounding
     check (`_quote_is_grounded`) verifies each `verbatim_quote` against — the
     same text the request was built from (`build_checklist_request`) or the
-    live call sent (`run_checklist_pass`)."""
+    live call sent (`run_checklist_pass`).
+
+    Raises `MalformedLLMResultError` (never a bare `AttributeError`) when
+    `output` isn't a dict or `output["checklist"]` isn't a list — see that
+    class's docstring — and skips (with a log line, not a raise) any
+    individual `checklist` entry that isn't a dict itself, so one malformed
+    category answer doesn't drop the rest of a real checklist response."""
+    if not isinstance(output, dict):
+        logger.warning(
+            "checklist result for doc=%s is not a dict-shaped LLM output "
+            "(got %s) — skipping this pass", doc_name, type(output).__name__,
+        )
+        raise MalformedLLMResultError(
+            f"checklist result for doc={doc_name!r} is not a dict-shaped "
+            f"LLM output (got {type(output).__name__}) — skipping this pass"
+        )
     checklist = output.get("checklist", [])
+    if not isinstance(checklist, list):
+        logger.warning(
+            "checklist result for doc=%s has a non-list 'checklist' value "
+            "(got %s) — skipping this pass", doc_name, type(checklist).__name__,
+        )
+        raise MalformedLLMResultError(
+            f"checklist result for doc={doc_name!r} has a non-list "
+            f"'checklist' value (got {type(checklist).__name__}) — skipping this pass"
+        )
 
     by_key = {c[0]: c for c in _CHECKLIST_CATEGORIES}
     items: list[dict] = []
     for entry in checklist:
+        if not isinstance(entry, dict):
+            logger.warning(
+                "checklist pass: dropping malformed (non-dict) checklist "
+                "entry %r for doc=%s", entry, doc_name,
+            )
+            continue
         category = entry.get("category")
         if category not in _CHECKLIST_CATEGORY_KEYS:
             logger.warning(

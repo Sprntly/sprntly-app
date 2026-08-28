@@ -229,6 +229,184 @@ def test_active_signals_filter_by_source_type(facade):
     assert only_rev[0].source_type == "revenue"
 
 
+# ---------- write_signal: transient statement_timeout (57014) retry ----------
+#
+# Live-verify (2026-08-27): a bulk backfill wrote ~250 calls' signals into
+# kg_signal in a tight window and 23 of those inserts failed with Postgres
+# 57014 (statement_timeout cancellation) — a transient burst-load failure,
+# not a real data problem. `write_signal`'s insert now retries a couple of
+# times on exactly this error before giving up.
+
+
+class _FakeAPIError(Exception):
+    """Mirrors the shape `_is_statement_timeout`/`_is_duplicate_signal`
+    check: a `.code` attribute (supabase-py's `postgrest.exceptions.APIError`
+    shape) plus a message."""
+
+    def __init__(self, code: str, message: str):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+class _FlakyInsertClient:
+    """A minimal stand-in for `self._client` that fails `.table(...).insert(
+    ...).execute()` the first `fail_times` calls, then succeeds. Records
+    every call so tests can assert exactly how many attempts were made."""
+
+    def __init__(self, fail_times: int, exc_factory):
+        self.fail_times = fail_times
+        self.calls = 0
+        self._exc_factory = exc_factory
+
+    def table(self, name):
+        return _FlakyTable(self, name)
+
+
+class _FlakyTable:
+    def __init__(self, client: _FlakyInsertClient, name: str):
+        self._client = client
+        self._name = name
+
+    def insert(self, row):
+        return _FlakyExecutor(self._client, row)
+
+
+class _FlakyExecutor:
+    def __init__(self, client: _FlakyInsertClient, row: dict):
+        self._client = client
+        self._row = row
+
+    def execute(self):
+        from types import SimpleNamespace
+
+        self._client.calls += 1
+        if self._client.calls <= self._client.fail_times:
+            raise self._client._exc_factory()
+        return SimpleNamespace(data=[self._row])
+
+
+def _no_sleep(monkeypatch):
+    """Never actually wait in a test — assert-worthy: if code under test
+    slept when it should not have, this raises instead of silently passing
+    (a bare no-op lambda would hide that bug)."""
+    import app.graph.facade as facade_mod
+    monkeypatch.setattr(facade_mod.time, "sleep", lambda s: None)
+
+
+def test_write_signal_retries_transient_statement_timeout_and_succeeds(
+    monkeypatch, isolated_settings,
+):
+    from app.graph import GraphFacade, Signal
+
+    _no_sleep(monkeypatch)
+    client = _FlakyInsertClient(
+        fail_times=1,
+        exc_factory=lambda: _FakeAPIError(
+            "57014", "canceling statement due to statement timeout"),
+    )
+    facade = GraphFacade(client=client)
+    sig = Signal(enterprise_id="ent-A", source_type="revenue",
+                 kind="finding", content="retried fact")
+
+    result = facade.write_signal("ent-A", sig)
+
+    assert result is sig
+    assert client.calls == 2, "one failed attempt, one successful retry"
+
+
+def test_write_signal_persistent_timeout_still_raises_after_retries_exhausted(
+    monkeypatch, isolated_settings,
+):
+    """The degrade-gracefully half of the contract: a PERSISTENT (not
+    transient) timeout still surfaces after retries are exhausted — the
+    existing per-call isolation upstream (graph.extractor's write loop /
+    the backfill CLI's per-call try/except) is what actually skips the call
+    and leaves its ledger hash unrecorded so it retries next run; this
+    wrapper must not swallow the failure itself."""
+    from app.graph import GraphFacade, Signal
+    from app.graph.facade import _WRITE_RETRY_ATTEMPTS
+
+    _no_sleep(monkeypatch)
+    client = _FlakyInsertClient(
+        fail_times=999,
+        exc_factory=lambda: _FakeAPIError(
+            "57014", "canceling statement due to statement timeout"),
+    )
+    facade = GraphFacade(client=client)
+    sig = Signal(enterprise_id="ent-A", source_type="revenue",
+                 kind="finding", content="never recovers")
+
+    with pytest.raises(_FakeAPIError) as exc_info:
+        facade.write_signal("ent-A", sig)
+
+    assert exc_info.value.code == "57014"
+    assert client.calls == _WRITE_RETRY_ATTEMPTS, (
+        "must try exactly the configured number of attempts, not loop forever")
+
+
+def test_write_signal_happy_path_single_write_no_retry_no_sleep(
+    monkeypatch, isolated_settings,
+):
+    """The common case (a normal single-record write, e.g. the live sync
+    path) must not get slower: exactly one insert call, and no sleep at
+    all — proven by making `time.sleep` raise if it is ever called."""
+    import app.graph.facade as facade_mod
+    from app.graph import GraphFacade, Signal
+
+    def _fail_if_called(_delay):
+        raise AssertionError("happy-path write_signal must never sleep")
+
+    monkeypatch.setattr(facade_mod.time, "sleep", _fail_if_called)
+    client = _FlakyInsertClient(
+        fail_times=0,
+        exc_factory=lambda: _FakeAPIError("57014", "unused"),
+    )
+    facade = GraphFacade(client=client)
+    sig = Signal(enterprise_id="ent-A", source_type="revenue",
+                 kind="finding", content="happy path fact")
+
+    facade.write_signal("ent-A", sig)
+
+    assert client.calls == 1
+
+
+def test_write_signal_non_timeout_error_is_not_retried(monkeypatch, isolated_settings):
+    """A real duplicate-key (23505) or any other non-timeout failure must
+    surface on the FIRST attempt, unchanged — the retry is narrowly scoped
+    to 57014 only, never a blanket "retry every write error" policy."""
+    import app.graph.facade as facade_mod
+    from app.graph import GraphFacade, Signal
+
+    def _fail_if_called(_delay):
+        raise AssertionError("a non-timeout error must not trigger a retry/backoff")
+
+    monkeypatch.setattr(facade_mod.time, "sleep", _fail_if_called)
+    client = _FlakyInsertClient(
+        fail_times=999,
+        exc_factory=lambda: _FakeAPIError(
+            "23505", "duplicate key value violates unique constraint"),
+    )
+    facade = GraphFacade(client=client)
+    sig = Signal(enterprise_id="ent-A", source_type="revenue",
+                 kind="finding", content="duplicate fact")
+
+    with pytest.raises(_FakeAPIError) as exc_info:
+        facade.write_signal("ent-A", sig)
+
+    assert exc_info.value.code == "23505"
+    assert client.calls == 1, "must not retry a non-timeout error"
+
+
+def test_is_statement_timeout_recognizes_code_and_text_not_other_errors():
+    from app.graph.facade import _is_statement_timeout
+
+    assert _is_statement_timeout(_FakeAPIError("57014", "canceling statement due to statement timeout"))
+    assert _is_statement_timeout(Exception("canceling statement due to statement timeout"))
+    assert not _is_statement_timeout(_FakeAPIError("23505", "duplicate key value"))
+    assert not _is_statement_timeout(Exception("invalid input syntax for type uuid"))
+
+
 # ---------- active_signals: ordering, limit, column list (page-cap defect) ----------
 
 def _seed_raw_signals(db, enterprise_id: str, n: int, id_prefix: str = "s",

@@ -200,6 +200,51 @@ def test_empty_checklist_output_writes_nothing(facade):
     assert result == {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
 
+# ── malformed batch-result shape: skip gracefully, never a bare AttributeError ─
+#
+# Live-verify (2026-08-27): a batched result's structured output can have a
+# field come back the wrong TYPE (e.g. `checklist` as a bare string rather
+# than a list of entry dicts) even though the tool call itself is a dict
+# envelope. `_finish_checklist` guards this explicitly now — see
+# `MalformedLLMResultError`.
+
+
+def test_malformed_checklist_value_is_a_string_raises_named_error_with_a_log(facade, caplog):
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ex.MalformedLLMResultError):
+            ex._finish_checklist(
+                facade, "ent-c", {"checklist": "oops a bare string"},
+                doc_name="call.md", text="anything", origin=None,
+                provenance_extra=None, source_ref=None,
+            )
+    assert any("non-list" in r.message for r in caplog.records)
+
+
+def test_malformed_checklist_output_not_a_dict_raises_named_error(facade):
+    with pytest.raises(ex.MalformedLLMResultError):
+        ex._finish_checklist(
+            facade, "ent-c", "not-a-dict-output", doc_name="call.md",
+            text="anything", origin=None, provenance_extra=None,
+            source_ref=None,
+        )
+
+
+def test_one_malformed_checklist_entry_is_dropped_other_entries_still_process(facade, caplog):
+    """A `checklist` list that is itself well-formed but mixes a real entry
+    with a stray non-dict element must not lose the good entry."""
+    entries = [
+        "a stray malformed string, not an entry dict",
+        _entry("sentiment", content="real sentiment fact",
+               quote="customers seem happy"),
+    ]
+    text = "Rep: customers seem happy with the rollout."
+    with caplog.at_level("WARNING"):
+        result = _run_checklist(facade, entries, text)
+    assert result["signals"] == 1
+    assert _csig(facade, "real sentiment fact") is not None
+    assert any("malformed" in r.message for r in caplog.records)
+
+
 # ── build_checklist_request / parse_checklist_response: batch-authoring seam ─
 #
 # Same proof as the main pass (see test_kg_extractor.py): the standalone

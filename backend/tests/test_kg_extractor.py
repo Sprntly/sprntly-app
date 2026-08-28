@@ -690,6 +690,78 @@ def test_true_duplicate_write_is_still_tolerated_as_a_skip(facade):
     assert out["signals"] == 0
 
 
+# ── malformed batch-result shape: skip gracefully, never a bare AttributeError ─
+#
+# Live-verify (2026-08-27): a bulk backfill's batched result had `signals`
+# come back as a bare string instead of a list of signal dicts. Iterating a
+# string yields its characters, and the OLD code hit
+# `AttributeError: 'str' object has no attribute 'get'` deep inside the
+# per-item write loop. `_finish_extract` now guards the shape explicitly and
+# raises a named `MalformedLLMResultError` (a `ValueError`, still caught by
+# every existing per-call `except Exception` isolation upstream) instead.
+
+
+def test_malformed_output_not_a_dict_raises_named_error_not_attribute_error(facade):
+    with pytest.raises(ex.MalformedLLMResultError):
+        ex._finish_extract(
+            facade, "ent-x", "not-a-dict-output", doc_name="d", origin=None,
+            source_type_default=None, force_source_type=None,
+            provenance_extra=None, resolved_skill_id=None,
+            triage_category=None, source_ref=None, tau_high=0.9, tau_low=0.6,
+        )
+
+
+def test_malformed_signals_value_is_a_string_raises_named_error(facade, caplog):
+    """The EXACT live-verify shape: `output["signals"]` is a bare string, not
+    a list. Must raise the named error (and log), never an unhandled
+    AttributeError from iterating the string's characters."""
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ex.MalformedLLMResultError):
+            ex._finish_extract(
+                facade, "ent-x", {"signals": "oops a bare string"},
+                doc_name="d", origin=None, source_type_default=None,
+                force_source_type=None, provenance_extra=None,
+                resolved_skill_id=None, triage_category=None,
+                source_ref=None, tau_high=0.9, tau_low=0.6,
+            )
+    assert any("non-list" in r.message for r in caplog.records)
+
+
+def test_malformed_llm_result_error_is_caught_by_existing_broad_except(facade):
+    """`MalformedLLMResultError` is a `ValueError` — proves it is caught by
+    every pre-existing `except Exception` per-call isolation (the CLI's
+    `_run_batched`/`_run_sync_fallback`, `sync_provider`) without those call
+    sites needing to change."""
+    assert issubclass(ex.MalformedLLMResultError, Exception)
+    try:
+        ex._finish_extract(
+            facade, "ent-x", {"signals": "oops"}, doc_name="d", origin=None,
+            source_type_default=None, force_source_type=None,
+            provenance_extra=None, resolved_skill_id=None,
+            triage_category=None, source_ref=None, tau_high=0.9, tau_low=0.6,
+        )
+        assert False, "expected MalformedLLMResultError"
+    except Exception:  # noqa: BLE001 — proving the SAME catch-all upstream uses works
+        pass
+
+
+def test_one_malformed_item_in_an_otherwise_valid_signals_list_is_dropped_not_fatal(facade, caplog):
+    """A `signals` list that is itself well-formed but MIXES a real item with
+    a stray non-dict entry must not lose the good item — only the malformed
+    one is dropped (logged), the rest write normally."""
+    items = [_item("good fact", "customer_voice"), "a stray malformed string"]
+    with caplog.at_level("WARNING"), \
+         patch.object(ex, "llm_call", return_value=_llm_result(items)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+    assert out["signals"] == 1
+    import uuid
+    good_id = str(uuid.uuid5(ex._NS, "ent-x|good fact"))
+    assert facade.get_signal("ent-x", good_id) is not None
+    assert any("malformed" in r.message for r in caplog.records)
+
+
 # ── build_extract_request / parse_extract_response: the batch-authoring seam ─
 #
 # extract_document's live path is now build (input string + gateway.llm_call)
