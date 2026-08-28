@@ -1,7 +1,6 @@
 """Tests for the directed-checklist second pass (app.graph.extractor.
 run_checklist_pass) and its wiring into app.kg_ingest.runner.sync_provider
-for call-shaped providers (fireflies/zoom/google_meet), plus the gated-rollout
-allowlist that scopes that pipeline's rollout.
+for call-shaped providers (fireflies/zoom/google_meet).
 """
 from __future__ import annotations
 
@@ -510,82 +509,29 @@ def test_checklist_schema_requires_category_discussed_content_quote():
     assert "properties" not in required, "properties (owner/due/etc) is optional"
 
 
-# ── runner wiring: gated rollout (KG_CALL_REEXTRACT_ALLOWLIST) ──────────────────
+# ── runner wiring: call providers always process (no per-tenant gate) ─────────
 
 
-def test_gated_rollout_env_absent_allows_every_tenant(monkeypatch):
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
-    assert runner._call_provider_reextraction_allowed("ent-anything-at-all") is True
-
-
-def test_gated_rollout_empty_env_string_allows_every_tenant(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "")
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
-
-
-def test_gated_rollout_env_set_restricts_to_listed_tenants(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-A, ent-B")
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
-    assert runner._call_provider_reextraction_allowed("ent-B") is True
-    assert runner._call_provider_reextraction_allowed("ent-C") is False
-
-
-def test_sync_provider_skips_non_allowlisted_call_provider(monkeypatch):
-    """A gated tenant's fireflies sync is a NO-OP for this tick — the puller
-    is never even called — not an error, and the scheduler simply retries it
-    on its next pass once the allowlist widens."""
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
-    pulled: list[str] = []
-
-    def fake_pull(token, **kw):
-        pulled.append(token)
-        return iter([])
-
-    monkeypatch.setitem(runner.PULLERS, "fireflies",
-                        (fake_pull, "api_key", "hint"))
-    out = runner.sync_provider(None, "ent-blocked", "fireflies", token="t")
-    assert out["gated"] is True
-    assert out["records"] == 0
-    assert pulled == [], "the puller must never be called for a gated tenant"
-
-
-def test_sync_provider_proceeds_for_allowlisted_call_provider(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
+def test_sync_provider_processes_call_provider_for_any_tenant(monkeypatch):
+    """No allowlist gates `_CALL_PROVIDERS` — every tenant's call-provider
+    sync proceeds through the full pipeline (puller + main pass + checklist
+    pass) unconditionally."""
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     monkeypatch.setattr(
         runner, "extract_document",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0},
+        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0},
     )
     monkeypatch.setattr(
         runner, "run_checklist_pass",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []},
     )
     rec = RawRecord(provider="fireflies", kind="meeting", external_id="FF1",
                     title="t", text="body")
-    out = runner.sync_provider(None, "ent-allowed", "fireflies", token="t",
-                               records=[rec])
-    assert out.get("gated") is None
+    out = runner.sync_provider(None, "ent-any-tenant-at-all", "fireflies",
+                               token="t", records=[rec])
     assert out["records"] == 1
-
-
-def test_gating_does_not_restrict_non_call_providers(monkeypatch):
-    """The allowlist only scopes `_CALL_PROVIDERS` — every other connector
-    keeps syncing for every tenant regardless of the allowlist."""
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
-    monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
-    monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
-    monkeypatch.setattr(
-        runner, "extract_document",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0},
-    )
-    rec = RawRecord(provider="clickup", kind="task", external_id="C1",
-                    title="t", text="body")
-    out = runner.sync_provider(None, "ent-blocked", "clickup", token="t",
-                               records=[rec])
-    assert out.get("gated") is None
-    assert out["records"] == 1
+    assert out["signals"] == 2
 
 
 # ── runner wiring: checklist pass invocation ──────────────────────────────────
@@ -597,7 +543,6 @@ def test_fireflies_checklist_pass_reads_full_transcript_not_the_digest(monkeypat
     transcript (`RawRecord.checklist_text`) — same call (doc_name/source_ref
     match), DIFFERENT text. The checklist is now the sole full-transcript
     reader; known-fact recall flows through it, not the main pass."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []
@@ -643,7 +588,6 @@ def test_zoom_main_pass_gets_haiku_summary_checklist_gets_full_transcript(monkey
     checklist pass still reads the untouched full transcript (Zoom/Meet have
     no separate `checklist_text` — `RawRecord.text` already IS the full
     transcript)."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []
@@ -683,7 +627,6 @@ def test_zoom_summarization_failure_falls_back_to_full_transcript_for_main_pass(
     """A Haiku summarization failure must degrade to feeding the main pass
     the full transcript — never fail the sync or leave the main pass with
     nothing. Uses google_meet to also prove Meet shares this path with Zoom."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []

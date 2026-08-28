@@ -32,7 +32,6 @@ import hashlib
 import inspect
 import json
 import logging
-import os
 from dataclasses import replace
 from typing import Callable, Iterable
 
@@ -128,40 +127,6 @@ _DOCUMENT_PROVIDERS: frozenset[str] = frozenset({"uploads", "confluence"})
 #: ``call_index.CALL_PROVIDERS`` / ``call_digest._CALL_PROVIDERS``. Every OTHER
 #: provider keeps batching unchanged — see ``_extraction_units``.
 _CALL_PROVIDERS: frozenset[str] = frozenset({"fireflies", "zoom", "google_meet"})
-
-#: Env var honored by `_call_provider_reextraction_allowed` — a comma-separated
-#: tenant (enterprise_id) allowlist gating the call-provider pipeline
-#: (transcript-read + directed-checklist pass) rollout. See that function's
-#: docstring for the off-by-default-safe contract.
-REEXTRACT_ALLOWLIST_ENV = "KG_CALL_REEXTRACT_ALLOWLIST"
-
-
-def _call_provider_reextraction_allowed(enterprise_id: str) -> bool:
-    """Gated-rollout guard for `_CALL_PROVIDERS` (fireflies/zoom/google_meet).
-
-    Reads a comma-separated tenant allowlist from `REEXTRACT_ALLOWLIST_ENV`
-    (`KG_CALL_REEXTRACT_ALLOWLIST`):
-
-      * Unset / empty (the default): no restriction. Every tenant's
-        call-provider sync proceeds exactly as this code is written — the env
-        var has zero effect until someone sets it. Deploying this change with
-        the var absent behaves identically to not having this guard at all.
-      * Set: ONLY the listed enterprise_ids proceed. Every other tenant's
-        call-provider sync for this tick is SKIPPED, not errored — the
-        all-tenant scheduler simply retries it on its next pass, so a
-        narrowed allowlist pauses rather than fails those tenants.
-
-    Exists to let the FIRST re-extraction sweep after full-transcript-read +
-    the directed-checklist pass ships be scoped to one tenant, then widened,
-    rather than firing uncontrolled across every enterprise the moment the
-    ledger busts (see the module docstring's COST GATE section for why a
-    content change busts the ledger).
-    """
-    raw = os.environ.get(REEXTRACT_ALLOWLIST_ENV, "").strip()
-    if not raw:
-        return True
-    allowed = {e.strip() for e in raw.split(",") if e.strip()}
-    return enterprise_id in allowed
 
 
 def _condensed_and_full_text(
@@ -292,20 +257,6 @@ def sync_provider(
     if provider not in PULLERS:
         raise ValueError(f"No puller for provider {provider!r}")
     puller, _, hint = PULLERS[provider]
-
-    # Gated rollout (call providers only) — see
-    # `_call_provider_reextraction_allowed`. Checked before pulling anything:
-    # a non-allowlisted tenant's sync for this provider is a no-op for this
-    # tick, retried by the scheduler once the allowlist widens.
-    if provider in _CALL_PROVIDERS and not _call_provider_reextraction_allowed(
-            enterprise_id):
-        logger.info(
-            "kg-ingest: skipping %s sync for %s — not on the %s allowlist "
-            "(gated rollout; widen the allowlist to include this tenant)",
-            provider, enterprise_id, REEXTRACT_ALLOWLIST_ENV,
-        )
-        return {"records": 0, "deduped": 0, "batches": 0, "signals": 0,
-                "themes": 0, "skipped": 0, "errors": [], "gated": True}
 
     if records is None:
         # A puller that declares `enterprise_id` gets the tenant id so it can
