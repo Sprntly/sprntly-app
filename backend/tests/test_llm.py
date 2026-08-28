@@ -137,6 +137,55 @@ def test_call_json_with_schema_sends_tool_choice(stub_client):
     assert kwargs["tools"][0]["name"] == "submit_response"
 
 
+# ---- build_json_kwargs / parse_tool_response: the batch-authoring seam ------
+#
+# call_json's schema branch now composes build_json_kwargs(...) ->
+# _create_maybe_batched(**kwargs) -> parse_tool_response(msg, schema). These
+# tests prove that composition is genuinely byte-identical to what a batch
+# caller (app.llm_batch.BatchRequest.params, built directly from
+# build_json_kwargs) would send and how it would parse a result — the "cannot
+# drift" guarantee both functions' docstrings claim.
+
+
+def test_build_json_kwargs_is_byte_identical_to_what_call_json_sends(stub_client):
+    """A caller building a BATCH request with `build_json_kwargs(...)` for the
+    same arguments `call_json` was given must get the EXACT dict `call_json`
+    sends to `messages.create` — the single-source-of-truth this refactor is
+    for."""
+    client = stub_client([_tool_use_block("submit_response", {"ok": True})])
+    schema = {"type": "object", "properties": {"ok": {"type": "boolean"}},
+              "required": ["ok"]}
+    llm.call_json(
+        system="SYS", user="USR", model="claude-sonnet-4-6", max_tokens=999,
+        schema=schema, user_cacheable_prefix="PREFIX",
+    )
+    sent = client.calls[0]
+
+    built = llm.build_json_kwargs(
+        system="SYS", user="USR", model="claude-sonnet-4-6", max_tokens=999,
+        schema=schema, user_cacheable_prefix="PREFIX",
+    )
+    assert built == sent
+
+
+def test_parse_tool_response_matches_call_jsons_own_parsing(stub_client):
+    """`parse_tool_response` applied to a raw Message must equal what
+    `call_json` itself returns for the identical response — proving a batched
+    result (a raw `Message`, never routed through `call_json`) parses
+    identically to the live path."""
+    schema = {"type": "object", "properties": {"answer": {"type": "string"}},
+              "required": ["answer"]}
+    block = _tool_use_block("submit_response", {"answer": "yes"})
+    client = stub_client([block])
+    live_out = llm.call_json(system="s", user="u", schema=schema)
+
+    from types import SimpleNamespace
+    fake_message = SimpleNamespace(content=[block])
+    batch_out = llm.parse_tool_response(fake_message, schema)
+
+    assert batch_out == live_out == {"answer": "yes"}
+
+
 # ---- cacheable-prefix shape -------------------------------------------------
 
 def test_call_json_cacheable_prefix_builds_content_list(stub_client):

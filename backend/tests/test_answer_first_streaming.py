@@ -363,6 +363,51 @@ def test_voc_report_flag_on_uses_answer_first(monkeypatch):
     assert out["answer"] == "streamed"
 
 
+def test_pinned_voc_report_narrates_gather_then_write(monkeypatch):
+    """The pinned VoC path (KG-only) narrates its two legs — GATHERING (bundle
+    retrieval) then WRITING (synthesis) — via the shared report vocabulary."""
+    monkeypatch.delenv("ANSWER_FIRST_STREAMING_ENABLED", raising=False)
+    import app.qa_agent as qa
+
+    _stub_voc_deps(monkeypatch)
+
+    class _R:
+        output = {"answer": "a", "key_points": [], "citations": [],
+                  "confidence": 0.8, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _R())
+    phases: list[str] = []
+
+    qa._answer_voc_report(
+        _fake_route_decision("voice-of-customer-report"),
+        "ent-1", "what are customers saying?", [], on_delta=None,
+        on_phase=phases.append,
+    )
+
+    assert phases == [
+        "Gathering the latest information…",
+        "Writing your report…",
+    ]
+
+
+def test_pinned_voc_report_runs_unchanged_without_a_phase_sink(monkeypatch):
+    monkeypatch.delenv("ANSWER_FIRST_STREAMING_ENABLED", raising=False)
+    import app.qa_agent as qa
+
+    _stub_voc_deps(monkeypatch)
+
+    class _R:
+        output = {"answer": "a", "key_points": [], "citations": [],
+                  "confidence": 0.8, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _R())
+    out = qa._answer_voc_report(
+        _fake_route_decision("voice-of-customer-report"),
+        "ent-1", "what are customers saying?", [], on_delta=None,
+    )
+    assert out["answer"] == "a"
+
+
 def test_group_b_warm_path_ignores_the_flag(monkeypatch):
     """(e) A Group-B call (background warm) stays on forced-JSON even flag ON."""
     monkeypatch.setenv("ANSWER_FIRST_STREAMING_ENABLED", "1")

@@ -383,3 +383,38 @@ def test_the_engine_still_refuses_to_corroborate_itself():
 
     assert AUTHORITATIVE_FOR["agent_inferred"] == frozenset()
     assert AUTHORITATIVE_FOR["verbal_claim"] == frozenset()
+
+# ── A customer witnesses its own blocker ─────────────────────────────────────
+
+def test_a_customer_may_report_its_own_constraint():
+    """The extractor types a blocked deal `deal_blocker` -> `constraint`. Without
+    this authority a tenant whose only connected source is call recordings had
+    every blocked deal refuted as "no source that may speak to this claim type
+    reported it" — and the identical sentence typed into Slack surfaced,
+    because `communication` already had it."""
+    assert "constraint" in AUTHORITATIVE_FOR["customer_voice"]
+    claim = project_signal(sig(source_type="customer_voice", kind="deal_blocker"), {})
+    assert claim is not None
+    assert claim.type == "constraint"
+    assert claim.authoritative is True
+
+
+def test_the_two_self_selected_sources_agree_about_constraints():
+    """The asymmetry was arbitrary: the same test groups these two as
+    self-selected, and one of them could report a blocker while the other
+    could not."""
+    for source in ("customer_voice", "communication"):
+        assert "constraint" in AUTHORITATIVE_FOR[source]
+
+
+def test_reporting_a_constraint_does_not_let_a_call_size_anything():
+    """THE SELF-SELECTION RULE IS UNTOUCHED, and this is the test that says so
+    rather than a comment claiming it. Authority is not sizing: `score_impact`
+    reads `impact_inputs` and nothing else."""
+    assert "magnitude" not in AUTHORITATIVE_FOR["customer_voice"]
+    assert "direction" not in AUTHORITATIVE_FOR["customer_voice"]
+    claim = project_signal(
+        sig(source_type="customer_voice", kind="metric_anomaly"), {})
+    assert claim is not None
+    assert claim.type == "magnitude"
+    assert claim.authoritative is False

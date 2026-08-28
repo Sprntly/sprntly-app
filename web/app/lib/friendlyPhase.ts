@@ -57,6 +57,16 @@ export function friendlyPhase(raw: string | null | undefined): string {
   if (s.startsWith("putting your answer together")) {
     return "Putting your answer together…"
   }
+  // corpus_mapreduce.py's map-reduce count engine (call_digest.py's
+  // VOC_CALLS_SPEC.phase_label) — an INLINE answer engine, never a report
+  // (backend/app/chat_intent.py's `_is_report_pipeline` keeps its questions
+  // out of the Reports drawer even though they share a pipeline id with the
+  // real voice-of-customer report). Checked BEFORE the broader "analyzing" /
+  // ReportPhase.ANALYZING match below so it keeps its own copy instead of
+  // reading as report-generation progress.
+  if (s.startsWith("analyzing your calls")) {
+    return "Analyzing your calls…"
+  }
 
   // ── Competitive-intelligence report (the long / report path) ───────────────
   // competitive_intel.py:1454 "Reading the last competitive review…"
@@ -70,6 +80,42 @@ export function friendlyPhase(raw: string | null | undefined): string {
   // competitive_intel.py:1561 "Writing the review from {N} sourced observations…"
   // — strip the count.
   if (s.startsWith("writing the review") || s.includes("the review")) {
+    return "Writing your report…"
+  }
+
+  // ── Reports — shared vocabulary (backend/app/report_phases.ReportPhase) ─────
+  // ONE mapping set that covers every report path (voice-of-customer, market-
+  // intel, public-feedback, company-research). The backend emits these generic,
+  // already-user-safe raw labels via `emit_report_phase`; each maps to its own
+  // hardcoded constant here so the count/detail-stripping guarantee still holds
+  // by construction. The company-research stage set is FIXED (non-tenant), so
+  // each stage surfaces as its own checklist line.
+  //
+  // Company-research per-stage lines are checked BEFORE the generic "researching"
+  // gathering fallthrough so a stage keeps its specific copy.
+  if (s.startsWith("researching products")) {
+    return "Researching products & features…"
+  }
+  if (s.startsWith("researching positioning")) {
+    return "Researching positioning…"
+  }
+  if (s.startsWith("researching pricing")) {
+    return "Researching pricing…"
+  }
+  if (s.startsWith("researching market")) {
+    return "Researching market & recent news…"
+  }
+  // ReportPhase.GATHERING "Gathering the latest information…"
+  if (s.startsWith("gathering")) {
+    return "Gathering the latest information…"
+  }
+  // ReportPhase.ANALYZING "Analyzing the findings…" (reserved for the
+  // per-section map-reduce fast-follow; mapped now so the vocabulary is whole).
+  if (s.startsWith("analyzing") || s.startsWith("analysing")) {
+    return "Analyzing the findings…"
+  }
+  // ReportPhase.WRITING "Writing your report…"
+  if (s.startsWith("writing your report") || s.startsWith("writing the report")) {
     return "Writing your report…"
   }
 

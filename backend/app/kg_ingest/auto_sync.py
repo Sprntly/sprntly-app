@@ -568,6 +568,52 @@ def _run_call_index_sync(company_id: str) -> None:
     except Exception:  # noqa: BLE001 — fully isolated; already stamped
         logger.warning("call-index refresh failed for %s", company_id, exc_info=True)
 
+    # Persons are minted OFF the just-refreshed index (participants are in hand,
+    # and doing it here sidesteps the puller/index race entirely for persons —
+    # the row exists before we read it). Deliberately AFTER the try/except above
+    # so a call-index failure that still left some rows can still yield persons;
+    # itself fully isolated so a directory failure never fails the refresh.
+    _mint_persons(company_id)
+    _backfill_source_call_ids(company_id)
+
+
+def _mint_persons(company_id: str) -> None:
+    """Find-or-create a `person` node per participant across this tenant's
+    indexed calls. Best-effort and idempotent; never raises into the refresh."""
+    try:
+        from app import call_index
+        from app.graph import GraphFacade
+        from app.kg_ingest import directory
+
+        calls = call_index.list_calls(company_id, limit=call_index._SYNC_LIMIT)
+        if not calls:
+            return
+        touched = directory.mint_persons_for_indexed_calls(
+            GraphFacade(), company_id, calls)
+        logger.info("directory: minted/matched %d person(s) for %s",
+                    touched, company_id)
+    except Exception:  # noqa: BLE001 — directory is never load-bearing on a sync
+        logger.warning("directory: person minting failed for %s", company_id,
+                       exc_info=True)
+
+
+def _backfill_source_call_ids(company_id: str) -> None:
+    """Relink any call signals that raced ahead of their index row, now that the
+    index has just been refreshed. Best-effort; never raises into the refresh."""
+    try:
+        from app.graph import GraphFacade
+        from app.kg_ingest import directory
+
+        linked = directory.backfill_source_call_ids(GraphFacade(), company_id)
+        if linked:
+            logger.info(
+                "call-index: backfilled source_call_id on %d signal(s) for %s",
+                linked, company_id,
+            )
+    except Exception:  # noqa: BLE001 — backfill is never load-bearing on a sync
+        logger.warning("call-index: source_call_id backfill failed for %s",
+                       company_id, exc_info=True)
+
 
 def kickoff_call_index_sync(company_id: str) -> bool:
     """Fire-and-forget: refresh this company's call index.

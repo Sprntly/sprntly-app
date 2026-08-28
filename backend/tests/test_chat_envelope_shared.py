@@ -88,7 +88,7 @@ def _seed_prd(db_mod, dataset: str = "acme", *, title: str = "Checkout PRD") -> 
     )
     prd_id = db_mod.start_prd(
         brief_id=brief_id, insight_index=0, title=title,
-        template_version=1, variant="v2",
+        template_version=1, variant="v2", source="chat",
     )
     db_mod.complete_prd(prd_id, title=title, md="<h1>Doc</h1>")
     return prd_id

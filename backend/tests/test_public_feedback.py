@@ -170,6 +170,47 @@ def test_answer_truncated_empty_capture_never_claims_no_feedback(monkeypatch):
     assert "couldn't find enough feedback" not in out["answer"]
 
 
+def _stub_happy_path(monkeypatch):
+    """Wire the happy path (profile + capture + gateway + save) and return the
+    persisted-run capture dict, so a phase test reuses the exact same stubs the
+    render/persist test uses."""
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(
+        pf, "llm_call",
+        lambda **kw: SimpleNamespace(output=dict(REPORT_DATA)))
+    import app.db as db
+    monkeypatch.setattr(db, "save_public_feedback_run", lambda *a, **k: 7)
+
+
+def test_phases_name_capture_then_synthesis_in_order(monkeypatch):
+    _stub_happy_path(monkeypatch)
+    phases: list[str] = []
+    pf.answer(enterprise_id="e1", question="what are people saying about us online?",
+              on_phase=phases.append)
+    assert phases == [
+        "Gathering the latest information…",
+        "Writing your report…",
+    ]
+
+
+def test_no_synthesis_phase_when_capture_found_nothing(monkeypatch):
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+    phases: list[str] = []
+    pf.answer(enterprise_id="e1", question="public feedback report",
+              on_phase=phases.append)
+    assert phases == ["Gathering the latest information…"]
+
+
+def test_pipeline_runs_unchanged_without_a_phase_sink(monkeypatch):
+    _stub_happy_path(monkeypatch)
+    with_sink = pf.answer(enterprise_id="e1", question="public feedback report",
+                          on_phase=lambda _l: None)
+    without = pf.answer(enterprise_id="e1", question="public feedback report")
+    assert with_sink == without
+
+
 def test_answer_happy_path_renders_and_persists(monkeypatch):
     _patch_profile(monkeypatch)
     monkeypatch.setattr(pf, "_capture", lambda *a, **k: (list(RECORDS), False))
@@ -312,6 +353,37 @@ def test_followup_answers_from_stored_run(monkeypatch):
     assert "legit rides flagged" in calls["llm"]["input"]
     assert '"collected": 2' in calls["llm"]["input"]
     assert calls["llm"]["max_tokens"] == 4000
+
+
+def test_a_followup_about_a_subject_the_capture_never_saw_goes_to_the_web(monkeypatch):
+    """Query mode filters the records already on file and is held to them, so
+    a question about an app the last sweep never collected was answered "I
+    don't have that" by the one pipeline whose job is to go and get it."""
+    _patch_profile(monkeypatch)
+    _patch_latest_run(monkeypatch, dict(RUN))
+    monkeypatch.setattr(pf, "_capture", lambda *a, **k: ([], False))
+
+    def _never(**kw):  # pragma: no cover — query mode must not be entered
+        raise AssertionError("query mode answered off a run that never saw it")
+
+    monkeypatch.setattr(pf, "_answer_from_run", _never)
+    out = pf.answer(enterprise_id="e1",
+                    question="what are people saying about Umbrella?",
+                    entity="Umbrella")
+    assert "couldn't find enough feedback" in out["answer"]   # the sweep ran
+
+
+def test_a_followup_about_a_collected_subject_still_answers_from_the_run(monkeypatch):
+    """The cheap path is not lost — a subject the records mention is still
+    answered off them, and no sweep is bought."""
+    _patch_latest_run(monkeypatch, dict(RUN))
+    monkeypatch.setattr(pf, "llm_call", lambda **kw: SimpleNamespace(output={
+        "answer": "Riders flagged it.", "key_points": [], "citations": [],
+        "confidence": 0.7, "unanswered": "",
+    }))
+    out = pf.answer(enterprise_id="e1", question="what did the App Store say?",
+                    entity="Trustpilot")
+    assert out["_skill_source"] == "public-feedback-query"
 
 
 def test_followup_without_run_falls_to_full_pipeline(monkeypatch):

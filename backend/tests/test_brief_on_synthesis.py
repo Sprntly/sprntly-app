@@ -647,7 +647,7 @@ def test_scheduler_cycle_iterates_companies(isolated_settings, monkeypatch):
 
     seen: list[str] = []
     with patch("app.synthesis_brief.generate_brief_for",
-               side_effect=lambda slug: seen.append(slug)):
+               side_effect=lambda slug, **kw: seen.append(slug)):
         asyncio.run(scheduler_mod._run_scheduled_cycle())
     assert sorted(seen) == ["acme", "globex"]
 
@@ -660,7 +660,7 @@ def test_scheduler_synthesis_isolates_per_company_failure(isolated_settings, mon
 
     seen: list[str] = []
 
-    def _gen(slug):
+    def _gen(slug, **kw):
         if slug == "globex":
             raise RuntimeError("synthesis blew up for globex")
         seen.append(slug)
@@ -718,7 +718,7 @@ def test_generate_all_synthesis_briefs_iterates_and_warms(isolated_settings, mon
     seen: list[str] = []
     warmed: list[str] = []
     with patch.object(sb, "generate_brief_for",
-                      side_effect=lambda slug: seen.append(slug)), \
+                      side_effect=lambda slug, **kw: seen.append(slug)), \
          patch("app.brief_runner.warm_synthesis_drilldowns",
                side_effect=lambda slug: warmed.append(slug)):
         sb.generate_all_synthesis_briefs()
@@ -733,7 +733,7 @@ def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monke
 
     seen: list[str] = []
 
-    def _gen(slug):
+    def _gen(slug, **kw):
         if slug == "acme":
             raise RuntimeError("boom")
         seen.append(slug)

@@ -258,7 +258,7 @@ def test_tick_isolates_per_company_failure():
     ]
     seen: list[str] = []
 
-    async def _gen(slug):
+    async def _gen(slug, **kw):
         if slug == "acme":
             raise RuntimeError("brief blew up for acme")
         seen.append(slug)
@@ -394,7 +394,10 @@ def test_scheduled_generation_suppresses_inline_delivery():
                side_effect=lambda slug, **kw: calls.append((slug, kw)) or {"id": 1}), \
          patch("app.brief_runner.warm_synthesis_drilldowns"):
         asyncio.run(sched_mod._generate_brief_for_company("acme"))
-    assert calls == [("acme", {"deliver": False})]
+    # `batch=True` is the scheduled path taking the half-price Batches route;
+    # generation runs 3h before delivery, so the latency is free here.
+    assert calls == [("acme", {"deliver": False, "batch": True,
+                               "batch_deadline_s": 45 * 60})]
 
 
 def test_deliver_top_insights_pushes_current_brief():

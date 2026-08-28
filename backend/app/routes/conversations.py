@@ -340,10 +340,49 @@ class TurnAttachment(BaseModel):
         return strip_nul(v)
 
 
+#: Ceiling on a persisted structured reply, measured on its serialized JSON.
+#: The payload this exists for is small and bounded — an answer plus at most
+#: `chat_envelope._MAX_CHAT_ARTIFACTS` listing rows — so anything near this is
+#: not a reply, and the column is writable by any signed-in caller on their own
+#: conversation. Rejected outright rather than truncated: half a payload
+#: restores as half a thread, which is worse than restoring from `content`.
+_MAX_TURN_REPLY_BYTES = 64_000
+
+
 class TurnIn(BaseModel):
     role: str = "user"  # "user" or "assistant"
     content: str = Field(..., min_length=1)
     attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
+    #: The FULL structured reply on an ASSISTANT turn — the answer payload plus
+    #: the listing's own rows (`artifact_list`) — persisted onto
+    #: `conversation_turns.reply` (jsonb, migration 20260816160000).
+    #:
+    #: Why it exists at all: `content` is a STRING, so everything a turn showed
+    #: beyond prose was dropped the moment it was saved. "Show me the PRDs I
+    #: created" rendered twelve clickable rows live and, reopened from Chat
+    #: history, rendered the sentence announcing them over empty space — the
+    #: answer promised "click one to open it" and there was nothing to click.
+    #:
+    #: The COLUMN already existed: it was added for the group project chat,
+    #: which hit this same defect first and was itself removed later
+    #: (520c12cc), taking its writer with it. The main chat kept the bug and
+    #: inherits the column.
+    #:
+    #: `content` still carries the plain answer text and is still the fallback:
+    #: null here (every row written before this, and every non-structured
+    #: writer) restores exactly as it did before.
+    reply: dict[str, Any] | None = None
+
+    @field_validator("reply")
+    @classmethod
+    def _bounded(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
+        if v is None:
+            return v
+        import json
+
+        if len(json.dumps(v, default=str)) > _MAX_TURN_REPLY_BYTES:
+            raise ValueError("reply payload too large")
+        return v
 
     # The same NUL guard `AskIn.question` carries, and this model needs it for
     # the same reason: a turn's content is the message the composer built, which
@@ -449,6 +488,13 @@ def add_turn(
         # exclude_none keeps the stored shape minimal — a text-only attachment
         # stays {name, content}; key/mime/size appear only when a file was stored.
         row["attachments"] = [a.model_dump(exclude_none=True) for a in body.attachments]
+    # ASSISTANT TURNS ONLY. `reply` is what the product said, in the shape it
+    # said it; a user turn has no structured reply and a client sending one is
+    # describing a turn that does not exist, so the field is dropped rather
+    # than stored. `list_turns` selects `*`, so a row written here comes back
+    # to the client with no read-side change.
+    if body.reply is not None and body.role == "assistant":
+        row["reply"] = body.reply
     resp = c.table("conversation_turns").insert(row).execute()
     turn = resp.data[0] if resp.data else {}
     _catalog_turn_attachments(turn, body, company)

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 //
-// The "Others" section of the Artifacts library — team documents of any kind.
+// The Documents section of the Artifacts library — team documents of any kind.
 //
 // What these pin is the behaviour that is specific to a document rather than
 // to the rows around it: the KIND leads the source line (because "leadership
@@ -51,15 +51,18 @@ function view(items: ArtifactItem[], onOpen = noop, filter: "all" | "custom_arti
 
 afterEach(cleanup)
 
-describe("Others / custom artifacts", () => {
-  it("offers an Others filter chip", () => {
+describe("Documents / custom artifacts", () => {
+  it("offers a Documents filter chip", () => {
+    // Named after the thing, not after what it is NOT. "Others" asked people to
+    // find a leadership update by elimination, and a filter named that way is a
+    // filter people report as missing.
     const { container } = view([doc()])
     const chip = container.querySelector('[data-filter="custom_artifact"]')
     expect(chip).not.toBeNull()
-    expect(chip?.textContent).toBe("Others")
+    expect(chip?.textContent).toBe("Documents")
   })
 
-  it("filters to only documents when Others is selected", () => {
+  it("filters to only documents when Documents is selected", () => {
     const prd: ArtifactItem = {
       type: "prd", id: 1, title: "A PRD", status: "ready",
       created_at: new Date().toISOString(),

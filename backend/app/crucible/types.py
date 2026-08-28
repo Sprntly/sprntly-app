@@ -319,7 +319,15 @@ class Claim:
     assertion: str
     type: ClaimType
     subject: str
-    source_id: str            # connector id — NOT an enum, see SPEC §4
+    # THE SOURCE TYPE, despite the name. `project_signal` assigns
+    # `source_id=source_type` (`claims.py`), so this carries `customer_voice` /
+    # `project_mgmt` / … — the same vocabulary `AUTHORITATIVE_FOR` is keyed on,
+    # which is why the authority check works at all. The comment here used to
+    # read "connector id — NOT an enum, see SPEC §4", which described the SPEC's
+    # intent rather than the code, and the run's published `sources` count is
+    # correct only because the code disagrees with it. If this is ever made a
+    # real connector id, `routes/crucible.py`'s `sources` must stop counting it.
+    source_id: str
     artifact_id: str
     artifact_type: str
     strength: EvidenceStrength
@@ -543,3 +551,19 @@ class Finding:
     confidence_inputs: ConfidenceInputs
     adjudication: Adjudication = "no_authoritative_source"
     cell_refs: tuple[str, ...] = ()
+    #: THE THEME, ON ITS OWN. `statement` embeds it in a sentence — "30 claims
+    #: across 11 accounts concern “Sales Pipeline” — for example, …" — which is
+    #: a fine thing to read and a terrible thing to SCAN: the one word the
+    #: reader is looking for sits mid-clause, in quotes, behind two numbers they
+    #: are about to be shown again as chips. Carried separately so a renderer
+    #: can LEAD with it rather than reverse-engineer it back out of prose.
+    #:
+    #: Defaulted because the pipeline is not the only thing that builds a
+    #: Finding — fixtures and older stored rows have none, and a renderer that
+    #: falls back to the statement is correct for them.
+    label: str = ""
+    #: One claim in its source's own words, already linted as part of the
+    #: statement it came from. Empty when the statement fell back to its plain
+    #: form — never re-derived, because an example that is innocent alone can be
+    #: causal in a sentence and the lint runs on the sentence.
+    example: str = ""

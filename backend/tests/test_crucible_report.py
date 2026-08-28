@@ -20,6 +20,7 @@ from __future__ import annotations
 import re
 
 from app.crucible.report import (
+    MAX_LEDGER_REASON_CHARS,
     body_fingerprint,
     render_report_html,
     report_title,
@@ -479,14 +480,23 @@ def test_it_sheds_detail_when_the_first_rung_does_not_fit():
     """
     from app.crucible import report as r
 
+    # ASSUMPTIONS VARY PER FINDING, and that is not incidental. Identical
+    # assumptions across every finding are now hoisted to a single paragraph at
+    # the top of the section, which is a large enough saving that a fixture
+    # sharing one assumption no longer overflows the first rung at all — this
+    # test went green for the wrong reason and stopped exercising the ladder.
+    # A run that is genuinely large in every dimension has assumptions that
+    # differ, so varying them by index is both what keeps the ladder under test
+    # and the more honest fixture.
     fat = [
         _finding(
             statement="s" * 2_000,
             surfaced_by=[f"{'n' * 500}.pdf ({i})" for i in range(10)],
-            assumed_params=[{"name": "p" * 500, "basis": "b" * 500}
-                            for _ in range(20)],
+            assumed_params=[{"name": f"{j}-{k}-{'p' * 500}",
+                             "basis": "b" * 500}
+                            for k in range(20)],
         )
-        for _ in range(1_500)
+        for j in range(1_500)
     ]
     html = r.render_report_html(_run(), fat, _full_ledger(101), _full_plan())
 
@@ -566,3 +576,786 @@ def test_clipping_never_emits_a_half_escaped_entity():
         out = r._esc_clipped('"' * 50, n)
         assert len(out) <= n
         assert "&" not in out or out.count("&") == out.count(";")
+
+
+# ── The report must not claim more than the run established ──────────────────
+
+def test_an_unsized_top_finding_is_not_called_the_largest():
+    """THE SUPERLATIVE HAS TO BE EARNED.
+
+    `_rank` orders by size then confidence, and its size term is constant when
+    nothing could be sized — so on a corpus with no account attribution the
+    order collapses onto the confidence tie-break. Calling row one "the largest
+    thing this reading found" then asserts a comparison that was never made,
+    and the reader can see it is false: the observed report named a 5-claim
+    finding largest with a 27-claim one below it.
+    """
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2", "c3", "c4"]),
+    ])
+    assert "largest thing this reading found" not in html
+    # And it says what IS true of the order. NOT "arbitrary": with every value
+    # None the sort key is (1, 1, -confidence), so the order is strictly
+    # confidence-descending — a real ordering, just not the one the heading
+    # used to imply.
+    assert "ordered by confidence rather than by size" in html
+    assert "Nothing in this reading could be sized" in html
+
+
+def test_a_sized_top_finding_still_says_largest():
+    """The claim is not banned, it is CONDITIONAL. A run that could size its
+    findings has earned the word and keeps it."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=120, claim_ids=["c1"]),
+        _finding(impact_value=10, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+
+
+def test_the_report_says_findings_were_not_filtered_to_the_goal():
+    """The definition gate establishes what the goal means, and claim selection
+    never sees it — `_load_signals` reads the whole corpus and `build_findings`
+    takes no goal argument. A reader cannot tell that from the output, so a run
+    about churn returns receipt-scanning accuracy looking exactly like an
+    answer. Stated, rather than left to be discovered."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html
+
+
+def test_largest_is_not_claimed_while_anything_went_unsized():
+    """"The largest thing this reading found" quantifies over EVERYTHING, and
+    an unsized finding is not a small one — its size is unknown, and an unknown
+    can be bigger. So the superlative is only earned when every row has a size;
+    otherwise the true sentence is the weaker one, about the sized ones."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=None, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "largest of the ones that could be sized" in html
+    # And it says HOW MANY it could not size, so "the largest known size" is
+    # something the reader can weigh rather than a hedge they have to trust.
+    assert "One of these could not be sized" in html
+
+
+def test_largest_is_still_claimed_when_everything_was_sized():
+    """The weaker sentence must not swallow the strong one: when every finding
+    has a size, "the largest thing this reading found" is exactly true and
+    saying less than that is its own kind of inaccuracy."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=900, claim_ids=["c1"]),
+        _finding(impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" in html
+    assert "largest of the ones that could be sized" not in html
+
+
+def test_the_definition_does_not_claim_to_have_selected_the_findings():
+    """The limits section says findings were NOT filtered or ranked by the
+    definition. This section used to say "everything below is measured against
+    that sentence and nothing else" — the same document asserting both, with
+    the false one three sections higher and in the more prominent position."""
+    html = render_report_html(_run(), [_finding()], plan=_full_plan())
+    assert "measured against that sentence" not in html
+    assert "did not decide which findings appear below" in html
+    # Both halves in one document, and they must not contradict.
+    assert "not selected for your goal" in html
+
+
+def test_an_order_the_reader_cannot_check_says_so():
+    """`_rank`'s last term is a confidence SCORE, which is never rendered — the
+    reader sees bands. On a corpus with no outcome evidence every band comes
+    out the same, so "ordered by confidence" describes an ordering they cannot
+    check against anything on the page, and a list that LOOKS ranked is read as
+    ranked. Position is the most persuasive thing in a document."""
+    same = {"band": "medium"}
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, confidence_band="medium", confidence=same,
+                 claim_ids=["c1"]),
+        _finding(impact_value=None, confidence_band="medium", confidence=same,
+                 claim_ids=["c2"]),
+    ])
+    assert "Not ranked by reach" in html
+    assert "same confidence band" in html
+    assert "not as a verdict on which matters more" in html
+
+
+def test_a_real_confidence_spread_is_not_disclaimed():
+    """The control. When the bands actually differ the order IS checkable from
+    the page, and telling the reader to discount it would be its own inaccuracy."""
+    html = render_report_html(_run(), [
+        _finding(impact_value=None, confidence_band="high",
+                 confidence={"band": "high"}, claim_ids=["c1"]),
+        _finding(impact_value=None, confidence_band="low",
+                 confidence={"band": "low"}, claim_ids=["c2"]),
+    ])
+    assert "Not ranked by reach" in html
+    assert "same confidence band" not in html
+
+
+def test_the_overflow_line_does_not_invent_a_reach_ranking():
+    """The overflow paragraph called the remainder "ranked lower by reach"
+    unconditionally — directly under a lede that, on an all-unsized run, had
+    just said nothing here could be sized at all."""
+    findings = [
+        _finding(impact_value=None, claim_ids=[f"c{i}"]) for i in range(200)
+    ]
+    html = render_report_html(_run(), findings)
+    assert "The next" in html, "expected the overflow paragraph to render"
+    assert "rank lower by reach" not in html
+    assert "not by size, which nothing here had" in html
+
+
+def test_one_weakest_link_shared_by_all_is_stated_once():
+    """A corpus with no outcome evidence anywhere gives EVERY finding the same
+    weakest link. Printing it on all 32 rows reads as 32 separate judgements
+    about 32 different themes when it is one fact about the corpus — and a
+    reader who skims an identical sentence three times stops seeing the section
+    at all, which is how a genuine per-finding difference goes unnoticed."""
+    same = {"band": "medium", "weakest_leg_reason": "no outcome evidence exists"}
+    html = render_report_html(_run(), [
+        _finding(confidence=same, claim_ids=["c1"]),
+        _finding(confidence=same, claim_ids=["c2"]),
+        _finding(confidence=same, claim_ids=["c3"]),
+    ])
+    assert "Every finding below has the same weakest link" in html
+    # Once in the lede, and NOT again on any row.
+    assert html.count("no outcome evidence exists") == 1
+    assert "Weakest link." not in html
+
+
+def test_the_cap_joins_the_weakest_link_as_a_clause():
+    """`cap_reason` arrives uncapitalised, so a full stop before it rendered
+    "…the diagnosis are not. capped at medium" — shipped once and caught only
+    by reading the rendered panel."""
+    same = {"band": "medium", "weakest_leg_reason": "no outcome evidence exists",
+            "cap_reason": "capped at medium: no outcome evidence in the corpus"}
+    html = render_report_html(_run(), [
+        _finding(confidence=same, claim_ids=["c1"]),
+        _finding(confidence=same, claim_ids=["c2"]),
+    ])
+    assert "exists; capped at medium" in html
+    assert not re.search(r"\.\s*capped at medium", html)
+
+
+def test_two_different_weakest_links_stay_on_their_own_rows():
+    """The control, and the reason this is detected rather than assumed: the
+    moment two findings differ, the sentence is about the finding again and
+    belongs beside it."""
+    html = render_report_html(_run(), [
+        _finding(confidence={"band": "medium",
+                             "weakest_leg_reason": "no outcome evidence"},
+                 claim_ids=["c1"]),
+        _finding(confidence={"band": "low",
+                             "weakest_leg_reason": "one account carries it"},
+                 claim_ids=["c2"]),
+    ])
+    assert "Every finding below has the same weakest link" not in html
+    assert html.count("Weakest link.") == 2
+    assert "no outcome evidence" in html
+    assert "one account carries it" in html
+
+
+def test_a_single_finding_keeps_its_weakest_link_on_the_row():
+    """One finding is not a corpus-wide pattern. Hoisting a lone sentence into
+    a "every finding below" lede would be a claim about a set of one."""
+    html = render_report_html(_run(), [
+        _finding(confidence={"band": "medium",
+                             "weakest_leg_reason": "no outcome evidence"},
+                 claim_ids=["c1"]),
+    ])
+    assert "Every finding below" not in html
+    assert "Weakest link." in html
+
+
+def test_a_ledger_that_died_for_one_reason_says_so_once():
+    """One group is the degenerate case of grouping: the reason belongs to the
+    group heading, not to each of the four rows under it."""
+    ledger = [
+        {"id": i, "label": f"candidate {i}",
+         "reason": "no source that may speak to this claim type reported it",
+         "stopped_at_stage": "verification"}
+        for i in range(4)
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "every one of them died for the same one" in html
+    assert html.count(
+        "no source that may speak to this claim type reported it") == 1
+    assert "<strong>4</strong> died because" in html
+    for i in range(4):
+        assert f"candidate {i}" in html
+
+
+def test_a_ledger_groups_by_reason_biggest_cause_first():
+    """THE SHAPE OF THE ANSWER. A real run rejected 102 candidates for five
+    different reasons — 49 one way, 47 another — and the flat list repeated
+    each reason beside each label, so a reader could not see that half the
+    ledger died one way and half another without counting by hand."""
+    ledger = (
+        [{"id": i, "label": f"a{i}", "reason": "no authoritative source",
+          "stopped_at_stage": "verification"} for i in range(3)]
+        + [{"id": 90 + i, "label": f"b{i}", "reason": "only 1 supporting claim",
+            "stopped_at_stage": "clustering"} for i in range(5)]
+    )
+    html = render_report_html(_run(), [_finding()], ledger)
+    # Each reason appears ONCE, as a heading over its own group.
+    assert html.count("no authoritative source") == 1
+    assert html.count("only 1 supporting claim") == 1
+    assert "<strong>5</strong> died because only 1 supporting claim" in html
+    assert "<strong>3</strong> died because no authoritative source" in html
+    # Biggest cause first: the 5 come before the 3.
+    assert html.index("only 1 supporting claim") < html.index("no authoritative source")
+    # And every candidate is still named, under its own cause.
+    for lbl in ["a0", "a1", "a2", "b0", "b4"]:
+        assert lbl in html
+
+
+def test_the_grouped_rejection_reason_is_still_clipped():
+    """Grouping must not drop a bound the per-row render was carrying.
+    `reason` is tenant text of any length and this is the section with the
+    hard body budget."""
+    huge = "z" * 5_000
+    ledger = [
+        {"id": i, "label": f"c{i}", "reason": huge, "stopped_at_stage": "verification"}
+        for i in range(3)
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "died because" in html
+    longest = max((len(m) for m in re.findall(r"z+", html)), default=0)
+    assert longest <= MAX_LEDGER_REASON_CHARS, (
+        f"grouped reason rendered {longest} chars, cap is {MAX_LEDGER_REASON_CHARS}"
+    )
+
+
+def test_a_ledger_with_different_reasons_keeps_them_per_row():
+    ledger = [
+        {"id": 1, "label": "alpha", "reason": "one account only",
+         "stopped_at_stage": "verification"},
+        {"id": 2, "label": "beta", "reason": "one conversation echoing",
+         "stopped_at_stage": "verification"},
+    ]
+    html = render_report_html(_run(), [_finding()], ledger)
+    assert "every one of them died for the same one" not in html
+    assert "grouped below by that reason" in html
+    assert "one account only" in html
+    assert "one conversation echoing" in html
+
+
+def test_two_conflicts_are_not_described_as_ordered_regardless_of_size():
+    """The rule is "a conflict outranks everything that is not one", NOT "this
+    row is first regardless of size". With two conflicts `_rank` orders them
+    against EACH OTHER by size, so the row that surfaces is the largest
+    conflict and size did decide which — and the old wording told the reader
+    the ordering carried less information than it actually does."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=900, claim_ids=["c1"]),
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c2"]),
+    ])
+    assert "regardless of size" not in html
+    assert "placed above every finding that is not one" in html
+
+
+def test_a_conflict_placed_first_is_not_called_the_largest_either():
+    """`_rank`'s DOMINANT term is `0 if conflict else 1` — an authoritative
+    disagreement outranks every finding that is not one. The first version of
+    this fix knew only about the size term, so a conflict-led run announced its
+    top row as the largest thing found with a bigger finding directly beneath
+    it."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=3, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=900, claim_ids=["c2"]),
+    ])
+    assert "largest thing this reading found" not in html
+    assert "placed first because two sources" in html
+    assert "placed above every finding that is not one" in html
+
+
+def test_an_unsized_top_above_sized_findings_does_not_deny_the_sizes():
+    """The unsized sentence quantifies over EVERY finding, so gating it on the
+    top row's own value made a document say "nothing here could be sized" with
+    412 accounts rendered on the row below."""
+    html = render_report_html(_run(), [
+        _finding(adjudication="conflict", impact_value=None, claim_ids=["c1"]),
+        _finding(adjudication="corroborated", impact_value=412, claim_ids=["c2"]),
+    ])
+    assert "Nothing in this reading could be sized" not in html
+    assert "not ordered by size at all" not in html
+
+
+def test_the_findings_heading_agrees_with_the_headline():
+    """One document read "not ordered by size at all" and, two lines later,
+    "Ranked by reach — how many accounts each theme touches"."""
+    unsized = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "Ranked by reach" not in unsized
+    assert "Not ranked by reach" in unsized
+    sized = render_report_html(_run(), [_finding(impact_value=7)])
+    assert "Ranked by reach" in sized
+
+
+def test_the_relevance_disclosure_does_not_also_claim_completeness():
+    """The relevance half is true; "every theme is listed" is not — findings
+    are capped, and anecdote/ungroupable/refuted candidates never reach the
+    list. Bundling them would let the false half discredit the true one."""
+    html = render_report_html(_run(), [_finding(impact_value=None)])
+    assert "not selected for your goal" in html
+    assert "Every theme in the sources you approved is listed" not in html
+
+
+# ─── Said once: the report stops repeating itself ───────────────────────────
+#
+# Apurva, on a real report: "poorly formatted (not human readable), lots of
+# irrelevant information and it did not answer the question." Two of the
+# repetitions were mechanical and are pinned here.
+
+
+def test_an_assumption_every_finding_makes_is_stated_once_not_on_each():
+    """I8 says disclose the assumption where the number is read. It does not
+    say disclose it 279 times.
+
+    On a corpus with no revenue connected EVERY finding carries the identical
+    line — "value_per_account: no revenue data connected; accounts weighted
+    equally" — and a real report printed it on all 279 findings. That is not
+    disclosure; it is the noise a reader has to look past to find the
+    assumptions that ARE per-finding."""
+    shared = [{"name": "value_per_account",
+               "basis": "no revenue data connected; accounts weighted equally"}]
+    findings = [_finding(statement=f"finding {i}", assumed_params=list(shared))
+                for i in range(6)]
+    html = render_report_html(_run(), findings)
+
+    # Stated — the disclosure is not lost.
+    assert "value_per_account" in html
+    # Once.
+    assert html.count("value_per_account") == 1
+    assert "same assumption" in html
+
+
+def test_assumptions_that_differ_stay_on_their_own_findings():
+    """The moment two findings assume different things, the hoist is wrong: it
+    would attribute one finding's assumption to every other. Only a single
+    distinct value across more than one finding is a statement about the
+    corpus."""
+    findings = [
+        _finding(statement="a", assumed_params=[{"name": "seats", "basis": "median"}]),
+        _finding(statement="b", assumed_params=[{"name": "seats", "basis": "mean"}]),
+    ]
+    html = render_report_html(_run(), findings)
+
+    assert "same assumption" not in html
+    # Both bases survive, each on its own finding.
+    assert "median" in html and "mean" in html
+
+
+def test_a_lone_finding_keeps_its_assumption_on_itself():
+    """Hoisting out of a single finding moves the disclosure AWAY from the
+    number it qualifies for no saving at all."""
+    html = render_report_html(_run(), [_finding()])
+    assert "same assumption" not in html
+    assert "cohort median" in html
+
+
+def test_the_unsized_caveat_is_not_stated_twice_in_adjacent_paragraphs():
+    """The headline and the findings lede both disclosed how many findings had
+    no size, and both explained that a missing size is not a small one — three
+    lines apart, in a real report:
+
+        …257 of these could not be sized at all, and a missing size is not a
+        small one — so this is the largest known size…
+
+        Ranked by reach …, and 257 of them could not be sized at all. An
+        unsized theme sorts last without being small: its size is unknown…
+    """
+    findings = [_finding(impact_value=14), _finding(statement="b", impact_value=None)]
+    html = render_report_html(_run(), findings)
+
+    # Still disclosed.
+    assert "could not be sized" in html
+    # Once.
+    assert html.count("could not be sized") == 1
+    assert "is not a small" in html
+    assert html.count("is not a small") == 1
+
+
+def test_the_count_survives_when_the_headline_states_only_the_caveat():
+    """THE CASE A BOOLEAN GOT WRONG, and it got it wrong by losing data.
+
+    When the TOP finding is unsized but others below it are sized, the headline
+    says "a missing size is not a small one" and never names how many. Treating
+    that as "the headline covered it" suppressed the whole lede clause and
+    dropped "N of them could not be sized" out of the document entirely — a
+    de-duplication quietly turning into a deletion.
+
+    So the count is still made here, and the caveat — which WAS said above — is
+    not repeated."""
+    findings = [
+        _finding(statement="top", impact_value=None),
+        _finding(statement="b", impact_value=None),
+        _finding(statement="c", impact_value=9),
+    ]
+    html = render_report_html(_run(), findings)
+
+    # The count is here, because nothing above it said one.
+    assert "2 of them could not be sized" in html
+    # The caveat is not repeated: the headline made it.
+    assert "its size is unknown, not zero" not in html
+    assert html.count("is not a small") == 1
+
+
+def test_the_unsized_fact_survives_when_the_headline_cannot_carry_it():
+    """The branch where NOTHING could be sized. The headline says something
+    else entirely, so this paragraph is the only place the fact can appear —
+    silence here drops an honesty disclosure rather than de-duplicating one."""
+    findings = [_finding(statement="a", impact_value=None),
+                _finding(statement="b", impact_value=None)]
+    html = render_report_html(_run(), findings)
+    # The actual disclosure, in this branch's own words — and on each row.
+    assert "Nothing in this reading could be sized" in html
+    assert "nothing here could be sized" in html
+    assert html.count("Could not be sized") == 2
+
+
+def test_the_hoist_fires_when_only_the_sized_findings_carry_an_assumption():
+    """THE SHAPE REAL DATA ACTUALLY HAS, and the reason the first version of
+    this never fired.
+
+    Asking whether EVERY finding carried the identical set sounded right and
+    was useless: a live run had 326 findings of which 30 were sized and carried
+    `value_per_account`, and 296 were unsized and carried nothing. An unsized
+    finding has no size to qualify, so it has no assumption — that is not
+    disagreement, and counting it as disagreement left the line repeated 30
+    times on the page written to de-duplicate it."""
+    sized = [_finding(statement=f"sized {i}", impact_value=3,
+                      assumed_params=[{"name": "value_per_account",
+                                       "basis": "no revenue data connected"}])
+             for i in range(4)]
+    unsized = [_finding(statement=f"unsized {i}", impact_value=None,
+                        assumed_params=[])
+               for i in range(9)]
+    html = render_report_html(_run(), sized + unsized)
+
+    assert html.count("value_per_account") == 1
+    # AND SAYS HOW MANY IT SPEAKS FOR. "Every finding below" is false here.
+    assert "4 of the findings below rest on the same assumption" in html
+    assert "Every finding below rests on the same assumption" not in html
+
+
+def test_it_still_says_every_when_it_really_is_every():
+    findings = [_finding(statement=f"f{i}") for i in range(3)]
+    html = render_report_html(_run(), findings)
+    assert "Every finding below rests on the same assumption" in html
+
+
+def test_one_finding_with_an_assumption_is_not_a_corpus_statement():
+    """A single carrier is not a pattern, and hoisting moves its disclosure
+    away from the number it qualifies for no saving at all."""
+    findings = [
+        _finding(statement="a", assumed_params=[{"name": "seats", "basis": "median"}]),
+        _finding(statement="b", assumed_params=[]),
+        _finding(statement="c", assumed_params=[]),
+    ]
+    html = render_report_html(_run(), findings)
+    assert "same assumption" not in html
+    assert html.count("seats") == 1
+
+
+# ─── The finding is a card, not a sentence ──────────────────────────────────
+
+
+def _as_meta(run: dict) -> dict:
+    """The run's existing prioritisation, so a test adding extras keeps the plan."""
+    return dict(run.get("prioritisation") or {})
+
+
+def _findings_html(html: str) -> str:
+    """Everything from the findings heading on.
+
+    The document has `<h3>` section headings of its own above this point, so a
+    test that reads "the first h3" reads the wrong one.
+    """
+    i = html.find("What the evidence says")
+    assert i != -1, "no findings section"
+    return html[i:]
+
+
+def test_the_heading_is_the_theme_and_the_counts_are_not_repeated_in_it():
+    """Apurva: make the document "display data in a more beautiful manner, so
+    that the user is able to understand the wins".
+
+    The heading used to be the whole sentence — "25 claims across 2 accounts
+    concern “AI tabletop exercise generation” — for example, …" — so the one
+    word a reader scans for sat mid-clause, in quotes, behind two numbers that
+    the chips on the very next line repeat verbatim."""
+    html = render_report_html(_run(), [_finding(
+        statement='25 claims across 2 accounts concern “AI tabletop generation” — for example, “x”.',
+        label="AI tabletop generation",
+        example="Northwind tailors scenarios by role and complexity",
+    )])
+    head = _findings_html(html).split("<h3>")[1].split("</h3>")[0]
+    assert head == "1. AI tabletop generation"
+    # The counts live in the chips, once.
+    assert "claims across" not in head
+    # The quote is set as a quote rather than trailing the heading.
+    assert "<blockquote>“Northwind tailors scenarios by role and complexity”" in html
+
+
+def test_a_finding_stored_before_the_theme_existed_still_has_a_heading():
+    """Every run stored before `label` shipped has none, and an empty heading
+    would be a worse regression than the run-on it replaced."""
+    html = render_report_html(_run(), [_finding(
+        statement="9 claims across 4 accounts concern “export latency”.",
+    )])
+    head = _findings_html(html).split("<h3>")[1].split("</h3>")[0]
+    assert "export latency" in head
+    # And no empty quote block appears for it.
+    assert "<blockquote>“”" not in html
+
+
+def test_the_quote_is_not_shown_twice_when_the_sentence_is_the_heading():
+    """With no label the sentence IS the heading, and it already contains the
+    example — printing the quote underneath would say it twice."""
+    html = render_report_html(_run(), [_finding(
+        statement='4 claims concern “x” — for example, “the export times out”.',
+        example="the export times out",
+    )])
+    # Scoped to the findings section: the headline above legitimately restates
+    # the top finding's sentence, which is a summary, not a repetition.
+    assert _findings_html(html).count("the export times out") == 1
+
+
+# ─── The card leads with what to do ─────────────────────────────────────────
+
+
+def test_the_recommendation_leads_the_card_and_carries_its_justification():
+    """Apurva: "we should start with a recommendation on how to solve this,
+    this is only the issues, no suggestion on how to solve"."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [{
+            "label": "export latency",
+            "recommendation": {
+                "action": "Route export tickets to the rendering on-call team",
+                "because": "three accounts named export in a renewal call",
+            },
+        }],
+    }
+    html = render_report_html(run, [_finding()])
+    body = _findings_html(html)
+
+    assert "Recommended." in body
+    assert "Route export tickets to the rendering on-call team" in body
+    assert "three accounts named export in a renewal call" in body
+    # It leads: the suggestion is above the counts, not a footnote under them.
+    assert body.index("Recommended.") < body.index("medium confidence")
+
+
+def test_a_finding_with_no_recommendation_renders_exactly_as_before():
+    """Only the top findings get one, and a suggestion that failed a check was
+    dropped rather than repaired. Absent is the normal case, not an error."""
+    html = render_report_html(_run(), [_finding()])
+    body = _findings_html(html)
+    assert "Recommended." not in body
+    assert "Why." not in body
+    # And the finding is still fully rendered.
+    assert "medium confidence" in body
+
+
+def test_half_a_recommendation_is_not_rendered():
+    """An action with no justification is the thing this feature replaces."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [
+            {"recommendation": {"action": "Do the thing", "because": ""}},
+        ],
+    }
+    html = render_report_html(run, [_finding()])
+    assert "Do the thing" not in html
+
+
+def test_extras_are_ignored_when_they_do_not_line_up_with_the_findings():
+    """The merge is positional. A length mismatch means the two lists are not
+    the same sequence, and attaching one finding's recommendation to another is
+    far worse than showing none."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [
+            {"recommendation": {"action": "A", "because": "b"}},
+        ],
+    }
+    html = render_report_html(run, [_finding(), _finding(statement="second")])
+    assert "Recommended." not in html
+
+
+# ─── The goal-relevance gate, in the document ───────────────────────────────
+
+
+def _with_aside(run: dict, reasons: list) -> dict:
+    run = dict(run)
+    run["prioritisation"] = {**dict(run.get("prioritisation") or {}),
+                             "set_aside_by_rank": reasons}
+    return run
+
+
+def test_a_set_aside_finding_leaves_the_main_list_and_keeps_its_reason():
+    """Apurva ruled for a goal-relevance gate: a run for "grow revenue by 5%"
+    led with three descriptions of the company's own product, because the order
+    is how many accounts mentioned a theme."""
+    findings = [_finding(statement="a", label="export latency"),
+                _finding(statement="b", label="our own platform features")]
+    html = render_report_html(
+        _with_aside(_run(), [None, "describes our own product, not a problem"]),
+        findings)
+
+    body = _findings_html(html)
+    assert "export latency" in body
+    # It moved, and it took its reason with it.
+    assert "Considered and set aside" in html
+    assert "describes our own product, not a problem" in html
+
+
+def test_the_funnel_is_stated_before_the_findings():
+    """The first thing a filtered list owes its reader. A filtered list that
+    does not say it was filtered is the more confident-looking of the two, and
+    the less honest."""
+    findings = [_finding(statement=f"f{i}", label=f"theme {i}") for i in range(4)]
+    html = render_report_html(
+        _with_aside(_run(), [None, "off-topic", "off-topic", None]), findings)
+
+    assert "4 themes were found. 2 bear on this goal." in html
+    assert html.index("bear on this goal") < html.index("What the evidence says")
+
+
+def test_no_funnel_when_nothing_was_set_aside():
+    """A funnel with one step is not a funnel, and "4 of 4" is noise."""
+    findings = [_finding(statement=f"f{i}") for i in range(4)]
+    html = render_report_html(_with_aside(_run(), [None] * 4), findings)
+    assert "bear on this goal" not in html
+    assert "Considered and set aside" not in html
+
+
+def test_a_length_mismatch_sets_nothing_aside():
+    """The split is positional. Setting aside the WRONG finding is far worse
+    than setting none aside."""
+    findings = [_finding(statement="a"), _finding(statement="b")]
+    html = render_report_html(_with_aside(_run(), ["off-topic"]), findings)
+    assert "Considered and set aside" not in html
+
+
+def test_the_headline_describes_the_kept_findings_not_all_of_them():
+    """The summary must agree with the list under it. A headline computed over
+    findings the reader cannot see would name a theme that appears nowhere."""
+    # DISTINCT STATEMENTS, because the headline renders the STATEMENT — an
+    # earlier version of this test asserted on the label and passed against its
+    # own mutation, which is a test that checks nothing.
+    findings = [
+        _finding(statement="our platform supports scenario building",
+                 label="ours", impact_value=99),
+        _finding(statement="renewals stall on the parts flow",
+                 label="theirs", impact_value=2),
+    ]
+    html = render_report_html(
+        _with_aside(_run(), ["describes our own product", None]), findings)
+
+    head = html[html.index("The short version"):html.index("What the evidence says")]
+    assert "renewals stall on the parts flow" in head
+    assert "our platform supports scenario building" not in head
+
+
+# ─── RICE: the ranking, and the arithmetic behind it ────────────────────────
+
+
+def _rice_run(framework: str = "RICE") -> dict:
+    run = _run()
+    run["prioritisation"] = {"plan": {"framework": framework,
+                                      "definition_text": "d", "sources": []}}
+    return run
+
+
+def _rice_html(html: str) -> str:
+    i = html.index("How this was ranked")
+    return html[i:html.index("The short version", i)]
+
+
+def test_the_table_shows_every_term_and_marks_the_one_it_cannot_fill():
+    """The skill's output spec: a "how we scored it" table so the ranking is
+    reviewable, never a black box, with every input marked real vs
+    [ASSUMPTION]."""
+    findings = [_finding(statement="a", label="blocked", impact_value=5,
+                         claim_types=["constraint"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+
+    for header in ("Reach", "Impact", "Confidence", "Effort", "Score", "Inputs"):
+        assert header in body
+    # NAMED IN THE CELL, not merely mentioned in the key above it. Asserting
+    # the word appears anywhere passed against a mutation that filled the cell
+    # with "1" and left the definitions untouched — a table that quietly
+    # supplies the one number nothing supports.
+    assert "<td>Unquantified</td>" in body
+    assert "person-month" in body
+
+
+def test_a_blocker_outranks_a_bigger_theme_that_only_describes():
+    """THE POINT OF SCORING AT ALL. Reach alone put commentary above blocked
+    revenue: a theme mentioned on eleven accounts outranked the one blocker in
+    the list. Impact read from the claim type is what separates them."""
+    findings = [
+        _finding(statement="a", label="chatter", impact_value=11,
+                 claim_types=["mechanism"]),
+        _finding(statement="b", label="blocked", impact_value=5,
+                 claim_types=["constraint"]),
+    ]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    scores = [float(x) for x in re.findall(r"<td>(\d+\.\d)</td>", body)]
+    assert len(scores) == 2
+    assert scores[1] > scores[0], "the blocker must outscore the chatter"
+
+
+def test_an_unsized_finding_scores_nothing_rather_than_zero():
+    """I3 again, in the place it would be easiest to lose: a table cell."""
+    findings = [_finding(statement="a", label="unsized", impact_value=None,
+                         claim_types=["preference"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "<td>—</td>" in body
+    assert "<td>0.0</td>" not in body
+
+
+def test_it_says_why_a_missing_effort_does_not_change_the_order():
+    """An effort applied equally to every row is a common divisor. Saying so is
+    the derived form of the reference memo's "cheapness is not the constraint
+    here" — and it stops a reader discounting the whole table for a gap that
+    cannot have moved it."""
+    findings = [_finding(statement="a", label="x", impact_value=5,
+                         claim_types=["constraint"]),
+                _finding(statement="b", label="y", impact_value=None,
+                         claim_types=["preference"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "cannot change their order" in body
+
+
+def test_no_framework_means_no_table():
+    findings = [_finding(statement="a", label="x", impact_value=5)]
+    html = render_report_html(_rice_run(framework=""), findings)
+    assert "How this was ranked" not in html
+
+
+def test_the_table_does_not_reorder_the_findings():
+    """`_rank` froze the order before this ran. A scoring table that re-sorted
+    would be the prioritisation step mutating the ranking, which is I10."""
+    findings = [_finding(statement="a", label="first", impact_value=1,
+                         claim_types=["mechanism"]),
+                _finding(statement="b", label="second", impact_value=50,
+                         claim_types=["constraint"])]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert body.index("first") < body.index("second")
+
+
+def test_the_table_says_when_it_stopped_short():
+    """NO SILENT CAPS. A table that stops at ten without saying so reads as the
+    whole ranking — the rule this file applies everywhere else."""
+    findings = [_finding(statement=f"f{i}", label=f"t{i}", impact_value=i + 1,
+                         claim_types=["mechanism"]) for i in range(14)]
+    body = _rice_html(render_report_html(_rice_run(), findings))
+    assert "4 findings below these" in body

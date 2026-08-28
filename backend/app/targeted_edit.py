@@ -64,6 +64,18 @@ def enabled() -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def goalreport_enabled() -> bool:
+    """Dedicated sub-gate for the goal-report path, independent of the PRD flag.
+
+    Default OFF: `TARGETED_EDIT_GOALREPORT_ENABLED=1|true|yes|on` turns it on.
+    Goal-report gets its own gate so it can dark-launch / roll back without
+    disturbing the proven PRD path — its win profile differs (partial on the big
+    findings section) and its `count_heading` normalize path is live-untested.
+    """
+    raw = (os.environ.get("TARGETED_EDIT_GOALREPORT_ENABLED") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 # ── Fallback signal ──────────────────────────────────────────────────────────
 
 class FallbackNeeded(Exception):
@@ -198,6 +210,25 @@ PRD_SECTION_MODEL = SectionModel(
 )
 
 
+# Goal-report: primary delimiter `<h2>NAME</h2>`. The doc is machine-rendered by
+# crucible/report.render_report_html and SANITIZED on every write to a bare tag
+# allowlist (no class/id/data-*), so heading TEXT is the only anchor. Two
+# headings carry a live count — "What the evidence says (N)" and "Considered and
+# ruled out (N)" — so count_heading strips the trailing " (N)" and the anchor
+# matches whether the model echoes, drops, or changes the count. The preamble is
+# just <h1>{goal}</h1> (no .frame/.page/<style> wrapper), so _div_net(preamble)
+# == 0 and there is no wrapper to peel. No appendix / nested addressable block →
+# no secondary delimiters. The <h3> sub-headings (per-finding blocks, the
+# coverage note) ride inside their parent <h2> and are not independently
+# addressable — an edit to one re-emits its whole parent section.
+GOALREPORT_SECTION_MODEL = SectionModel(
+    name="goal_report",
+    delimiter_re=re.compile(r"<h2>(.*?)</h2>", re.DOTALL),
+    count_heading=True,
+    secondary=(),
+)
+
+
 # ── Output contract schema (replaces the `html` full-doc field, when ON) ──────
 
 TARGETED_EDIT_SCHEMA: dict = {
@@ -274,12 +305,21 @@ def targeted_system(base_system: str, model: SectionModel) -> str:
 
     The base prompt's editing DISCIPLINE (change only what the instruction
     reaches, invent nothing, keep the house style) is preserved verbatim; only
-    the final 'Return the FULL updated HTML document…' paragraph is swapped for
-    the ops contract. Matched by anchor phrase; if the anchor drifts, the clause
-    is appended anyway (the contract still lands) and a warning is logged.
+    the final 'Return the FULL updated HTML …' paragraph is swapped for the ops
+    contract. Matched by anchor phrase; if the anchor drifts, the clause is
+    appended anyway (the contract still lands) and a warning is logged.
+
+    The word "document" is OPTIONAL in the anchor: the PRD prompts say "Return
+    the FULL updated HTML document in `html`, …" while the goal-report prompt
+    says "Return the FULL updated HTML in `html`, …". Both must be REPLACED (not
+    appended to) — a stray "return the full HTML" left in the prompt contradicts
+    the "do NOT re-emit" ops contract and silently makes the model append instead
+    of splice. Broadening the anchor here (rather than editing the goal-report
+    prompt) keeps every base `_EDIT_SYSTEM` byte-identical to today on the
+    flag-off path.
     """
     anchor = re.compile(
-        r"Return the FULL updated HTML document.*?a one-line `summary`[^.]*\.",
+        r"Return the FULL updated HTML(?: document)?.*?a one-line `summary`[^.]*\.",
         re.DOTALL,
     )
     clause = _targeted_contract_clause(model).lstrip("\n")

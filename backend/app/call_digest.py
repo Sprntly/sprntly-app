@@ -46,8 +46,12 @@ import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from typing import Any, Callable, Optional
 
+from app.config import settings
+from app.corpus_mapreduce import CorpusMapReduceSpec
 from app.prompt_history import clamp_turn_text
+from app.report_phases import ReportPhase, emit_report_phase
 from app.connector_lookup import slack_voc
 from app.connectors.tokens import TokenEncryptionError, decrypt_token_json
 from app.connectors.zoom_oauth import (
@@ -1213,6 +1217,61 @@ def is_voc_query(question: str) -> bool:
     return any(p.search(question) for p in _VOC_QUERY_SHAPES)
 
 
+# ── Map-reducible count eligibility ──────────────────────────────────────────
+# The narrow subclass of `is_voc_query` that the concurrent map-reduce count
+# engine (app.corpus_mapreduce) may answer: an aggregate/enumeration shape
+# ("how many", "count", "which/what <calls|accounts|customers|users|clients>")
+# AND a per-item content predicate — some clause that actually filters on WHAT
+# a call/customer said or raised, not just its entity type. Without a content
+# predicate there is nothing for the map step to classify against (a bare
+# "how many customers do we have" is a headcount, not a classification task).
+#
+# Everything `is_voc_query` already routes to a DIFFERENT shape stays
+# ineligible even when it happens to contain an aggregate word: comparative /
+# over-time asks need the report's prior-period bucketing
+# (`_VOC_COMPARATIVE`), and a single-subject "what did X say" probe has
+# nothing to count across a corpus.
+_SINGLE_SUBJECT_QUERY = re.compile(r"\bwhat\s+did\b.{0,40}\bsay\b", re.I | re.S)
+
+_COUNT_AGGREGATE_SHAPE = re.compile(
+    r"\bhow\s+many\b|\bcount\s+(?:of|the)\b|\bnumber\s+of\b"
+    r"|\b(?:which|what)\b.{0,40}\b(?:calls?|accounts?|customers?|users?|"
+    r"clients?)\b",
+    re.I | re.S,
+)
+
+#: A per-item content predicate — the classification bar itself, not the
+#: entity being counted. Deliberately broad (any of these words anywhere in
+#: the question) rather than anchored right after "that/who/which": David's
+#: own phrasing ("...that had asked for product features or raised product
+#: issues") and the plainer "how many customers raised billing issues" both
+#: carry the predicate word directly, with no relative pronoun in between.
+_COUNT_CONTENT_PREDICATE = re.compile(
+    r"\b(?:ask(?:ed|ing)?|rais(?:ed|ing)?|complain(?:ed|ing)?|"
+    r"request(?:ed|ing)?|report(?:ed|ing)?|mention(?:ed|ing)?|"
+    r"flag(?:ged|ging)?|issue|problem|bug|feature|feedback)\b"
+    r"|\b(?:about|regarding)\s+\w",
+    re.I,
+)
+
+
+def is_mapreducible_count(question: str) -> bool:
+    """True for the strict subset of `is_voc_query` the map-reduce count
+    engine may answer — see the block comment above for the eligibility
+    rule. NOT eligible: comparative/over-time, single-subject "what did X
+    say", report-shaped, or an aggregate ask with no content predicate to
+    classify against."""
+    if not is_voc_query(question):
+        return False
+    if _VOC_COMPARATIVE.search(question):
+        return False
+    if _SINGLE_SUBJECT_QUERY.search(question):
+        return False
+    if not _COUNT_AGGREGATE_SHAPE.search(question):
+        return False
+    return bool(_COUNT_CONTENT_PREDICATE.search(question))
+
+
 _QUERY_SYSTEM = (
     "You answer a pointed question about the user's own customer feedback "
     "from the CUSTOMER CALLS / UPLOADED DOCUMENTS / STORED SIGNAL provided — "
@@ -1419,6 +1478,7 @@ def _answer_query(
     window: Window, compare_boundary: str | None,
     history: list[dict] | None, kg: KgContext | None = None,
     voc: "slack_voc.VocRead | None" = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Answer a query-shaped ask directly from the merged corpus text.
 
@@ -1426,9 +1486,17 @@ def _answer_query(
     because the text handed to the model is now calls + uploaded docs + stored
     KG signal and no single dataclass owns all three. `source_line` is the same
     coverage banner the report pass prints — carried here so a pointed answer
-    discloses what it read just as loudly as a report does."""
+    discloses what it read just as loudly as a report does.
+
+    `on_phase`, when supplied, announces ANALYZING here — the query branch's
+    one real leg once GATHERING (in `answer`, above) has finished. Without
+    this the query path narrated nothing after GATHERING and a slow pointed
+    answer (see `long_output=True` below) looked like a dead spinner even
+    though it was still running."""
     from app.ask_runner import _ASK_RESPONSE_SCHEMA
     from app.graph.gateway import llm_call
+
+    emit_report_phase(on_phase, ReportPhase.ANALYZING)
 
     boundary_note = (
         f"\nThe question compares periods: records dated ON/AFTER "
@@ -1454,6 +1522,17 @@ def _answer_query(
         json_schema=_ASK_RESPONSE_SCHEMA,
         skill=_VOC_SKILL,
         max_tokens=_QUERY_MAX_TOKENS,
+        # `long_output=True` selects the gateway's long read timeout (600s vs
+        # the 120s default) and the streaming TRANSPORT — it does NOT publish
+        # any partial text: `on_delta` stays unset below, and the gateway only
+        # forwards deltas to a caller-supplied sink (see app.llm's
+        # `_create_with_retries`). A pointed query answer can still run long
+        # (a wide corpus + a table-shaped ask), and it was dying silently on
+        # the default non-streamed timeout with no caller-visible symptom
+        # other than a dead spinner. No client preview risk: this stays a
+        # single, non-fallback-prone call, unlike the report path's comment
+        # above about a garbled two-attempt preview.
+        long_output=True,
     )
     payload = result.output if isinstance(result.output, dict) else {
         "answer": str(result.output), "key_points": [], "citations": [],
@@ -1527,6 +1606,414 @@ def _ensure_answer(payload: dict, result, window: "Window") -> dict:
         **(payload if isinstance(payload, dict) else {}),
         "answer": text,
         "key_points": [], "citations": [], "confidence": 0.0, "unanswered": "",
+    }
+
+
+# ── Map-reduce count engine — the voc_calls domain descriptor ───────────────
+# Dark-ship (see `settings.voc_count_engine_enabled`, default OFF). When
+# eligible AND enabled, `answer()` runs `app.corpus_mapreduce.run` over the
+# SAME already-assembled `corpus.calls` this module's report/query passes
+# read (no new fetch, no new data model), instead of the single big synthesis
+# call — see `app.corpus_mapreduce` for why: a deterministic Python
+# `len(hit_ids)` count structurally cannot disagree with its own enumerated
+# evidence the way a model-narrated aggregate can.
+
+# Split from the original single `_VOC_COUNT_RUBRIC` string into two pieces
+# `app.corpus_mapreduce.CorpusMapReduceSpec` composes together (base_discipline
+# + criterion, see that module's docstring): `_VOC_BASE_DISCIPLINE` is the
+# structural guard the engine NEVER lets a caller relax (scope/external-
+# participant/actively-raised — the vendor-buyer/internal/demo exclusions);
+# `_VOC_DEFAULT_CRITERION` is the classification bar itself — WHICH content
+# counts as a hit — and is the one half a caller's `constraints["criterion"]`
+# may replace per query, so "what counts as a product ask" is no longer
+# hardcoded to one phrasing (see `_assemble_count_answer`'s stated-assumption
+# line for how the answer discloses which bar it actually used).
+_VOC_BASE_DISCIPLINE = (
+    "You are reviewing a batch of customer calls for Sprntly, a "
+    "product-planning tool. For EACH call in the batch (identified by its "
+    "id), decide whether it meets the classification bar below.\n"
+    "A hit requires ALL THREE of the following structural conditions to be "
+    "true, checked BEFORE the classification bar is ever considered:\n"
+    "1. SCOPE — the ask/issue was raised by the CUSTOMER or PROSPECT side of "
+    "the call, the buying party — never the reviewed company's own "
+    "employees or reps, and never the reviewed company itself asking one "
+    "of ITS OWN vendors or tools for a feature (vendor-buyer asks are "
+    "never a hit, no matter how feature-request-shaped they read).\n"
+    "2. EXTERNAL PARTICIPANT — the call has a real external customer or "
+    "prospect on it. An internal-only call, with no external "
+    "customer/prospect participant, is never a hit regardless of its "
+    "content.\n"
+    "3. ACTIVE, CUSTOMER-RAISED — the customer/prospect themselves actively "
+    "asked for it or raised the problem. A feature the reviewed company's "
+    "own rep pitched, demoed, or described — where the customer only "
+    "watched, listened, gave background, or acknowledged it without asking "
+    "for it themselves — is never a hit.\n"
+    "Only once all three hold does the classification bar below apply.\n"
+    "Return a verdict for EVERY call id shown to you — never omit one and "
+    "never invent an id that was not shown. For a call that meets the bar, "
+    "hit=true and reason is a paraphrase of the specific ask/bug in AT MOST "
+    "12 WORDS — never a verbatim quote, never a speaker or participant "
+    "name. For a call that does not, hit=false and reason may be empty. Do "
+    "not guess — a call whose content is ambiguous, purely "
+    "relationship/scheduling, internal-only, a vendor-buyer inversion, or "
+    "rep-pitched/demo-only with no customer-raised ask gets hit=false.\n"
+    "SELF-CHECK before finalizing: (a) identify WHO raised the ask, by name "
+    "and role — a rep/employee's own ask is scope-excluded even if a "
+    "summary elsewhere calls it a customer ask; (b) hit and reason MUST "
+    "agree — if your reason concludes rep-side, vendor-side, or "
+    "internal-only, hit MUST be false."
+)
+
+#: The domain's SENSIBLE DEFAULT classification bar — used whenever a query
+#: carries no `constraints["criterion"]`. A caller-supplied criterion
+#: replaces this text for one query; `_VOC_BASE_DISCIPLINE` above is
+#: unaffected either way (see `app.corpus_mapreduce`'s composition contract).
+_VOC_DEFAULT_CRITERION = (
+    "COUNT A CALL AS A HIT WHEN it raised a PRODUCT FEATURE REQUEST or a "
+    "PRODUCT ISSUE:\n"
+    "- A FEATURE REQUEST is an explicit ask for new functionality, an "
+    "integration, an export/import capability, or a change to how the "
+    "product works.\n"
+    "- A PRODUCT ISSUE is a bug, a crash, a broken/missing capability, or "
+    "something that doesn't work as expected.\n"
+    "- Routine scheduling, pricing/contract discussion, relationship/status "
+    "check-ins, and generic \"things are going well\" commentary do NOT "
+    "count, even if the call also has other content."
+)
+
+#: See `app.corpus_mapreduce`'s module docstring for the response-shape
+#: contract every domain's `verdict_schema` must honour: a top-level
+#: `verdicts` object keyed by each item's exact id, each entry carrying at
+#: least `hit`/`reason`.
+_VOC_COUNT_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "verdicts": {
+            "type": "object",
+            "description": (
+                "Keyed by each call's exact id as shown in the corpus below "
+                "— one entry per id shown, never omitted, never invented."
+            ),
+            "additionalProperties": {
+                "type": "object",
+                "properties": {
+                    "hit": {"type": "boolean"},
+                    "reason": {"type": "string"},
+                },
+                "required": ["hit", "reason"],
+            },
+        },
+    },
+    "required": ["verdicts"],
+}
+
+
+def _voc_count_fetch(enterprise_id: str, window: "Window", constraints):
+    """`CorpusMapReduceSpec.fetch` for the voc_calls domain — kept for a
+    caller that has no already-assembled corpus in hand. `answer()` itself
+    never calls this: it passes `items=corpus.calls` (already fetched for the
+    report/query passes) so eligible questions cost no extra live fetch."""
+    del constraints  # voc_calls' own build_corpus takes no extra constraints
+    return build_corpus(enterprise_id, window).calls
+
+
+@dataclass(frozen=True)
+class _VocAnnotatedCall:
+    """One call once `_voc_count_prefilter` has computed its deterministic
+    external-participant verdict — the original `CallTranscript` plus the
+    corpus-wide `own_domains` set and THIS call's own derived `account`,
+    carried alongside it so `_render_call_item`/`_render_call_label` can read
+    a server-computed FACT instead of recomputing (or, worse, leaving the
+    model to guess) which participants are company-side vs external. Never
+    built for a call `derive_account` could not resolve — see
+    `_voc_count_prefilter`, which is the only place this is constructed."""
+    call: "CallTranscript"
+    own_domains: frozenset
+    account: str
+
+
+def _unwrap_voc_call(it: Any) -> "CallTranscript":
+    """Every `VOC_CALLS_SPEC` per-item callable (`item_id`/`render_item`/
+    `render_label`) may receive either a bare `CallTranscript` — a caller
+    that bypasses `_voc_count_prefilter` (a direct unit test, or a future
+    caller wiring this spec with no prefilter) — or a `_VocAnnotatedCall`
+    (the real engine path, once `corpus_mapreduce.run` has prefiltered).
+    Every callable unwraps through this one helper so both shapes work
+    identically and neither has to duplicate the `isinstance` check."""
+    return it.call if isinstance(it, _VocAnnotatedCall) else it
+
+
+def _participant_side_line(
+    call: "CallTranscript", own_domains: frozenset, account: str,
+) -> str:
+    """One deterministic line naming which of THIS call's participants are
+    company-side (their email is on an `own_domains` domain) vs external
+    customer/prospect — computed from the SAME `call_index.derive_account`
+    verdict `_voc_count_prefilter` already ran, never left for the model to
+    infer from a flat, unattributed participants line. This is what turns
+    SCOPE (condition #1 of `_VOC_BASE_DISCIPLINE`) from a guess into a check
+    against a stated fact: a rep on the company's own domain can no longer
+    be misread as the customer just because a summary elsewhere calls them
+    one (see `_VOC_BASE_DISCIPLINE`'s SELF-CHECK clause)."""
+    company_side: list[str] = []
+    external_side: list[str] = []
+    for raw in call.participants or []:
+        email = (raw or "").strip().lower()
+        if "@" not in email:
+            continue
+        domain = email.rsplit("@", 1)[1]
+        (company_side if domain in own_domains else external_side).append(raw)
+    return (
+        "participant sides (server-computed from email domain — this is a "
+        "fact, not a guess; do not re-derive it from the names above):\n"
+        f"  company-side (never the customer): "
+        f"{', '.join(company_side) if company_side else '(none)'}\n"
+        f"  external customer/prospect (account: {account}): "
+        f"{', '.join(external_side) if external_side else '(none)'}"
+    )
+
+
+def _render_call_item(it: Any) -> str:
+    """`CorpusMapReduceSpec.render_item` for the voc_calls domain. Renders
+    the call's usual content (`CallTranscript.render()`, unchanged) plus —
+    ONLY when `it` is a `_VocAnnotatedCall`, i.e. it survived
+    `_voc_count_prefilter` — the deterministic participant-side line (see
+    `_participant_side_line`). A bare `CallTranscript` (bypassing the
+    prefilter) renders exactly as before this change: no annotation line."""
+    call = _unwrap_voc_call(it)
+    base = call.render()
+    if isinstance(it, _VocAnnotatedCall):
+        base = f"{base}\n{_participant_side_line(call, it.own_domains, it.account)}"
+    return base
+
+
+def _voc_count_prefilter(
+    calls: list["CallTranscript"], enterprise_id: str,
+) -> list["_VocAnnotatedCall"]:
+    """`CorpusMapReduceSpec.prefilter` for the voc_calls domain — the
+    deterministic customer-vs-rep grounding this engine REUSES rather than
+    reinvents: `app.call_index._own_domains` + `app.call_index.derive_account`,
+    the SAME primitive `IndexedCall.account` (the indexed call listing) is
+    already built from. Read-only; no new I/O beyond what `_own_domains`
+    itself already does (member-email lookup, best-effort).
+
+    Two things, both against the SAME corpus already fetched for this run:
+
+    1. DROPS any call with no real external customer/prospect participant
+       (`derive_account` returns None). The map pass never even sees it, so
+       an internal-only call can never become a false hit no matter what the
+       model reads into its content — this is a HARD structural guard,
+       enforced here before the model ever runs, not merely a prompt
+       instruction (condition #2, "EXTERNAL PARTICIPANT", of
+       `_VOC_BASE_DISCIPLINE`).
+    2. WRAPS every surviving call in a `_VocAnnotatedCall` carrying its own
+       derived `account` + the corpus-wide `own_domains` set, so
+       `_render_call_item` can show the model a server-computed
+       participant-side map instead of a flat, unattributed participants
+       line (condition #1, "SCOPE").
+
+    `_own_domains` wants `[{"participants": [...]}, ...]` — the ingestion-side
+    shape `call_index.py`'s own sync rows carry. `CallTranscript` is a
+    dataclass, so adapting the shape here is the ONE piece of glue this
+    function does; no other `call_index` behaviour is touched, duplicated,
+    or reimplemented.
+    """
+    from app.call_index import _own_domains, derive_account
+
+    own = frozenset(_own_domains(
+        enterprise_id, [{"participants": c.participants} for c in calls],
+    ))
+    kept: list[_VocAnnotatedCall] = []
+    for call in calls:
+        account = derive_account(call.participants, own)
+        if account is None:
+            continue  # internal-only — can never be a hit; excluded, not classified
+        kept.append(_VocAnnotatedCall(call=call, own_domains=own, account=account))
+    return kept
+
+
+def _render_call_label(it: Any) -> str:
+    """`CorpusMapReduceSpec.render_label` for the voc_calls domain — the
+    human-friendly reference for one call in a count answer's evidence list,
+    matching `app.call_index.IndexedCall.render()`'s "date · account —
+    title" shape (the SAME listing format a "which calls" answer already
+    shows, reused rather than reinvented) instead of the raw Fireflies/Zoom
+    `external_id` a reader cannot act on.
+
+    `it` is either a `_VocAnnotatedCall` (the real engine path — its already-
+    derived `account`, computed corpus-wide by `_voc_count_prefilter`, is
+    reused here rather than recomputed) or a bare `CallTranscript` (a direct
+    caller bypassing the prefilter — `account` falls back to a per-call
+    derivation with `own_domains=set()`, byte-for-byte the original
+    behaviour of this function before prefiltering existed). A call with no
+    identifiable external domain omits the account segment rather than
+    guessing — same as `IndexedCall.render()` when `account` is None."""
+    call = _unwrap_voc_call(it)
+    when = (call.date or "")[:10]
+    if isinstance(it, _VocAnnotatedCall):
+        account = it.account
+    else:
+        from app.call_index import derive_account
+
+        account = derive_account(call.participants, own_domains=set())
+    who = f" · {account}" if account else ""
+    return f"{when}{who} — {call.title or '(untitled)'}"
+
+
+VOC_CALLS_SPEC = CorpusMapReduceSpec(
+    domain="voc_calls",
+    fetch=_voc_count_fetch,
+    render_item=_render_call_item,
+    item_id=lambda it: _unwrap_voc_call(it).external_id,
+    render_label=_render_call_label,
+    # "Analyzing your calls…" — never `app.report_phases.ReportPhase`: this
+    # engine answers inline in the thread, never a saved report document (see
+    # `app.corpus_mapreduce`'s module docstring), and a `ReportPhase` value is
+    # exactly the signal `app.chat_intent._is_report_pipeline` exists to keep
+    # OFF a count-shaped call-digest question.
+    phase_label="Analyzing your calls…",
+    base_discipline=_VOC_BASE_DISCIPLINE,
+    criterion=_VOC_DEFAULT_CRITERION,
+    verdict_schema=_VOC_COUNT_VERDICT_SCHEMA,
+    # Sonnet, not the engine's default FAST_MODEL (Haiku): real-corpus
+    # accuracy verification found Haiku plateaus at precision 0.71-0.78 /
+    # recall 0.42-0.58 even on the patched rubric, with a name vendor-buyer
+    # inversion (a call where THIS company is the buyer, not the customer)
+    # still misread in every run — Sonnet cleared it (precision 0.90-1.00,
+    # recall 0.75-0.83) at ~3x the cost and ~1.7x the latency of an already
+    # cheap, already fast per-run classification pass (well under the
+    # interactive path; this runs as a background pass either way). Same
+    # Sonnet constant `ANSWER_MODEL` above (and qa_agent's own identically-
+    # valued `ANSWER_MODEL`) already use for this module's synthesis calls.
+    map_model=ANSWER_MODEL,
+    # Deterministic customer-vs-rep grounding, reused from `call_index` (see
+    # `_voc_count_prefilter`'s docstring) — never re-invented here: drops
+    # internal-only calls before the map pass and annotates every surviving
+    # call's participant sides as a server-computed fact.
+    prefilter=_voc_count_prefilter,
+)
+
+
+#: The stated assumption when no `constraints["criterion"]` was supplied —
+#: names the default bar in plain language so a bare count is never a silent
+#: unilateral reading (see `_count_assumption_line`).
+_VOC_DEFAULT_ASSUMPTION_LINE = (
+    "Counted calls where a customer actively asked for a feature or raised "
+    "an issue (compliance/hosting requirements not counted)."
+)
+
+
+def _count_assumption_line(criterion: Optional[str]) -> str:
+    """One clean sentence stating the interpretation the count used —
+    `_VOC_DEFAULT_ASSUMPTION_LINE` when the caller supplied none, or the
+    caller's own `constraints["criterion"]` named back verbatim when one was
+    given. Never a silent unilateral reading: the answer always says which
+    bar it counted against, in both cases."""
+    if isinstance(criterion, str) and criterion.strip():
+        return f'Counted calls matching your stated criterion: "{criterion.strip()}".'
+    return _VOC_DEFAULT_ASSUMPTION_LINE
+
+
+def _count_coverage_caveat(corpus: "DigestCorpus", window: "Window") -> str:
+    """Empty string for a healthy corpus, else a short caveat sentence — the
+    ONLY coverage text `_assemble_count_answer` ever appends. Deliberately NOT
+    `_coverage_line`'s full `=== … ===` banner: that banner discloses what
+    the CLASSIFIER model saw for the query/report synthesis passes (down to
+    "verbatim quotes sampled to ~N per call") — a disclosure about corpus
+    text a count answer never renders, so pasted into a count it reads as
+    misleading filler rather than the honest coverage statement it is
+    elsewhere. `_coverage_line` itself is untouched; the query/report passes
+    still get the full banner.
+
+    Names only the coverage gaps genuinely consequential to a COUNT:
+    truncation (fewer calls read than exist in the window — the count would
+    otherwise silently understate itself with no disclosure) and a source
+    that failed to sync (a real, checkable gap). Never mentions quote
+    sampling, KG, or Slack: the count engine classifies `corpus.calls`
+    alone, so nothing else is "what this answer was built from". A healthy
+    corpus returns "", so the count answer opens straight on the count line
+    with no coverage caveat at all (see `_assemble_count_answer`)."""
+    parts: list[str] = []
+    if corpus.total > corpus.count:
+        parts.append(
+            f"only the most recent {corpus.count} of {corpus.total} calls "
+            f"in {window.label} were read — older calls omitted for space"
+        )
+    if corpus.failed_sources:
+        parts.append(
+            f"{_sources_phrase(corpus.failed_sources)} could not be reached "
+            "for this window, so its calls are missing"
+        )
+    return "; ".join(parts)
+
+
+def _assemble_count_answer(
+    eng, *, window: "Window", corpus: "DigestCorpus", criterion: Optional[str] = None,
+) -> dict:
+    """The `EngineResult` -> Ask-shaped payload, matching `_answer_query`'s
+    response contract exactly (same field set, same `_skill`/`_skill_action`/
+    `_skill_source` mechanism) so the chat surface renders it identically.
+    The count and the call list are Python values off `eng`, never model
+    prose. Opens directly on the count + stated-assumption line — never the
+    query/report passes' full `=== … ===` banner (see
+    `_count_coverage_caveat`'s docstring for why): that banner would be
+    misleading filler at the top of a count, so this answer only appends a
+    coverage caveat, and only when one is genuinely present.
+
+    `criterion` is the resolved `constraints["criterion"]` the engine actually
+    classified against (or None when the default was used) — see
+    `_count_assumption_line`: the answer always states which bar it counted
+    under, so the user can correct it in one turn instead of distrusting an
+    unexplained number.
+
+    Each hit is named by `eng.labels.get(item_id, item_id)` — `spec.render_
+    label`'s output (date · account · title — see `VOC_CALLS_SPEC.render_
+    label`/`_render_call_label`), computed once by `app.corpus_mapreduce.run`
+    and carried on `EngineResult` (see its docstring) — never the raw
+    `item_id` (a provider ULID a reader cannot act on). Falls back to the raw
+    id only for a hit `run()` did not label (a caller-constructed
+    `EngineResult` in a test, never a real run)."""
+    lines = [f"{eng.count} of {eng.total_items} calls in {window.label} "
+             "matched.",
+             _count_assumption_line(criterion)]
+    coverage_caveat = _count_coverage_caveat(corpus, window)
+    if coverage_caveat:
+        lines.append("")
+        lines.append(f"Note: {coverage_caveat}.")
+    if eng.hit_ids:
+        lines.append("")
+        for item_id in eng.hit_ids:
+            label = eng.labels.get(item_id, item_id)
+            reason = eng.reasons.get(item_id, "")
+            lines.append(f"- {label}: {reason}" if reason else f"- {label}")
+    unanswered = ""
+    if eng.unclassified_ids:
+        unanswered = (
+            f"{len(eng.unclassified_ids)} call(s) could not be classified "
+            "and are excluded from the count above: "
+            + ", ".join(eng.unclassified_ids)
+        )
+        lines.append("")
+        lines.append(f"Note: {unanswered}")
+    citations = [
+        {"source": eng.labels.get(item_id, item_id),
+         "evidence": eng.reasons.get(item_id, "")}
+        for item_id in eng.hit_ids
+    ]
+    return {
+        "answer": "\n".join(lines),
+        "key_points": [f"{eng.count} of {eng.total_items} calls matched"],
+        "citations": citations,
+        "confidence": 0.95 if not eng.unclassified_ids else 0.7,
+        "unanswered": unanswered,
+        "_skill": _VOC_SKILL,
+        "_skill_action": f"Voice of customer · counted from {window.label}",
+        "_skill_source": "voc-count-engine",
+        # Explicit, not just absent: this is an inline chat answer, never a
+        # report document — `app.report_capture.is_report_payload` already
+        # reads absence as falsy, but naming it here says so on the payload
+        # itself rather than leaving it to be inferred from a missing key.
+        "_report": False,
     }
 
 
@@ -1736,8 +2223,15 @@ def answer(
     history: list[dict] | None = None,
     on_delta=None,
     constraints: dict | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
+
+    `on_phase`, when supplied, narrates the two real legs of the wait —
+    GATHERING (the live corpus/KG/Slack fetch) then WRITING (the document-scale
+    synthesis) — via the shared report vocabulary. This is David's most-used
+    report path and the one whose blank wait was reported; a no-op without a
+    sink (scheduled/test callers).
 
     `on_delta`, when given, is the Ask worker's token sink (see
     `app.ask_stream.AnswerFieldExtractor`): the report call below publishes its
@@ -1785,6 +2279,9 @@ def answer(
             f"{window.label} plus the prior period for comparison",
             explicit=True,
         )
+    # GATHERING: the live evidence fetch — calls (Fireflies/Zoom), then the KG
+    # and the Slack feedback channels below. The first (minutes-long) leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     corpus = build_corpus(enterprise_id, window)
 
     # No explicit window in the question + default window empty → widen through
@@ -1908,6 +2405,38 @@ def answer(
     # rule — so a merge wired only into the report pass would have left the
     # reported bug exactly where it was.
     if query_mode:
+        # Dark-ship concurrent count engine (`settings.voc_count_engine_enabled`,
+        # default OFF): a narrow subclass of query-mode — "how many/which
+        # <calls|customers> that <content filter>" — that the single big
+        # synthesis call below structurally cannot answer as reliably (a
+        # model-narrated aggregate can, and has, disagreed with its own
+        # enumerated citation list). When eligible and enabled, this runs the
+        # SAME already-assembled `corpus.calls` through
+        # `app.corpus_mapreduce.run` (N concurrent small classification
+        # calls + a deterministic Python `len()` reduce) instead. ANY
+        # exception here — model, schema, gate contention, anything — falls
+        # through to the untouched query path below exactly like that path's
+        # own failure falls through to the report: never a dead end.
+        if settings.voc_count_engine_enabled and is_mapreducible_count(question):
+            try:
+                from app import corpus_mapreduce
+
+                eng = corpus_mapreduce.run(
+                    VOC_CALLS_SPEC, enterprise_id=enterprise_id,
+                    question=question, window=window, constraints=constraints,
+                    on_phase=on_phase, items=corpus.calls,
+                )
+                return _assemble_count_answer(
+                    eng, window=window, corpus=corpus,
+                    criterion=(
+                        constraints.get("criterion")
+                        if isinstance(constraints, dict) else None
+                    ),
+                )
+            except Exception:  # noqa: BLE001 — degrade to the query path, never a dead end
+                logger.exception(
+                    "voc count engine failed; falling back to voc-query synthesis"
+                )
         # DELIBERATELY NOT STREAMED, unlike the report path below.
         #
         # This call is followed by `except -> fall through to the report`, so a
@@ -1925,7 +2454,7 @@ def answer(
                 enterprise_id=enterprise_id, question=question,
                 corpus_text=merged_text, source_line=source_line,
                 window=window, compare_boundary=compare_boundary,
-                history=history, kg=kg, voc=voc,
+                history=history, kg=kg, voc=voc, on_phase=on_phase,
             )
         except Exception:  # noqa: BLE001 — degrade to the report, never a dead end
             logger.exception("voc query-mode answer failed; falling back to report")
@@ -1939,6 +2468,10 @@ def answer(
     # live fetch from every connected source, the windowing, the full-corpus
     # pass, and the coverage disclosure above. Those are capability; the layout
     # was format.
+    # WRITING: the corpus is assembled — the document-scale synthesis (the
+    # slowest call in the product) is the last leg. The query-shaped branch
+    # above returns before reaching here, so this fires only for the report.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
         from app.ask_runner import _ASK_RESPONSE_SCHEMA
         from app.graph.gateway import llm_call
@@ -2089,6 +2622,13 @@ def answer(
     # records the desync that made it a rule.
     payload.update({
         "_skill": _VOC_SKILL,
+        # This IS the VoC report document, so it is captured as a `reports`
+        # artifact and hangs off the chat that produced it. `_skill` cannot
+        # carry that meaning — `_plain_payload` stamps it on the not-connected
+        # / no-calls / error apologies too, and query mode stamps it on pointed
+        # answers read off the corpus. Same marker, same reason, as
+        # `competitive_intel` / `market_intel` / `public_feedback`.
+        "_report": True,
         "_skill_action": f"Voice of customer · {sources} · {window.label}",
         "_skill_source": "call-digest",
     })

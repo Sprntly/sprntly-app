@@ -134,6 +134,11 @@ def _app_schemas() -> list[tuple[str, dict]]:
 # appearing anywhere in this schema still fails the test.
 _ACCEPTED: dict[str, list[str]] = {
     "app.graph.extractor._EXTRACT_SCHEMA": ["$.signals[].properties"],
+    # Same shape, same rationale: the directed-checklist pass's per-category
+    # `properties` bag carries owner/due/status (commitment) or urgency/
+    # trigger_date (timeline) — no fixed field list across all 11 categories,
+    # so it is genuinely open-ended like the main extraction schema's bag.
+    "app.graph.extractor._CHECKLIST_SCHEMA": ["$.checklist[].properties"],
 }
 
 

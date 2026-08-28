@@ -632,6 +632,31 @@ def is_followup_query(question: str) -> bool:
     return any(p.search(question) for p in _QUERY_SHAPES)
 
 
+def _run_covers(run: dict, entity: str | None) -> bool:
+    """Can this stored run answer a follow-up about `entity`?
+
+    Query mode answers off the run already on file and buys no web search,
+    and `_QUERY_SYSTEM` forbids answering from general knowledge — correctly,
+    since a review's integrity rests on every figure being observed and
+    dated. Both are right for "what did Acme ship?" when Acme is in the set.
+    For a company the run never covered they combine into the failure this
+    guard closes: the honest "I don't have that" from a pipeline whose entire
+    job is to go and get it.
+
+    True whenever nothing specific was named — the ordinary follow-up
+    ("where did that number come from?") is about the review itself."""
+    subject = " ".join((entity or "").split()).lower()
+    if not subject:
+        return True
+    return any(
+        subject in name or name in subject
+        for name in (
+            str(n).strip().lower() for n in (run.get("competitor_set") or [])
+        )
+        if name
+    )
+
+
 # ── Competitor set derivation ────────────────────────────────────────────────
 
 # "vs Acme", "against Acme and Globex", "compare us to Acme", "how do we stack
@@ -699,31 +724,58 @@ def named_competitors(question: str) -> list[str]:
     tail = tail.rstrip(" .,")
     out: list[str] = []
     for piece in re.split(r",|\band\b|&|/", tail, flags=re.I):
-        name = piece.strip().strip("\"'").rstrip(".")
-        name = re.sub(r"^(?:the|our|a|an)\s+", "", name, flags=re.I).strip()
-        if not name or len(name) > 40:
-            continue
-        if name.lower() in _GENERIC_SET_WORDS:
-            continue
-        words = name.split()
-        # A real company name is short. Four words is generous ("Amazon Web
-        # Services Marketplace") and keeps prose fragments out.
-        if len(words) > 4:
-            continue
-        # Head-noun test: "European market" / "market leaders" / "SMB segment"
-        # are groups, not companies.
-        if words[-1].strip(".,'\"").lower() in _GENERIC_HEAD_NOUNS:
-            continue
-        if name not in out:
+        name = _clean_competitor_name(piece)
+        if name and name not in out:
             out.append(name)
     return out[:_MAX_COMPETITORS]
 
 
-def _competitor_set(enterprise_id: str, question: str) -> tuple[list[str], str]:
+def _clean_competitor_name(piece: str) -> str | None:
+    """One candidate name → the company it names, or None when it names no
+    company. Shared by the "vs Acme" tail split above and the planner's
+    `constraints.entity` below, so a phrase rejected as a group in one place
+    cannot be researched as a company in the other."""
+    name = (piece or "").strip().strip("\"'").rstrip(".")
+    name = re.sub(r"^(?:the|our|a|an)\s+", "", name, flags=re.I).strip()
+    if not name or len(name) > 40:
+        return None
+    if name.lower() in _GENERIC_SET_WORDS:
+        return None
+    words = name.split()
+    # A real company name is short. Four words is generous ("Amazon Web
+    # Services Marketplace") and keeps prose fragments out.
+    if len(words) > 4:
+        return None
+    # Head-noun test: "European market" / "market leaders" / "SMB segment"
+    # are groups, not companies.
+    if words[-1].strip(".,'\"").lower() in _GENERIC_HEAD_NOUNS:
+        return None
+    return name
+
+
+def _competitor_set(enterprise_id: str, question: str, *,
+                    entity: str | None = None,
+                    us: str | None = None) -> tuple[list[str], str]:
     """(names, source) for this run. User-named wins, then the stored roster,
     then one-off discovery. Returns ([], "none") when nothing can be derived —
-    the caller asks the user to name competitors rather than inventing a set."""
+    the caller asks the user to name competitors rather than inventing a set.
+
+    `entity` is the planner's `constraints.entity`. It is the SAME "the user
+    named who to look at" signal `named_competitors` extracts, reaching the
+    phrasings its regex cannot: "run a competitive review ON Figma" / "...for
+    Figma" names a subject with no `vs`/`against`/`compare to` anywhere, so it
+    fell through to the roster and the sweep dutifully researched a set the
+    question never asked about. It ranks below an explicit "vs" tail (that is
+    the user being unambiguous) and above the roster, matching the precedence
+    already documented on `named_competitors`.
+
+    `us` is our own display name, excluded because a review OF our own company
+    is a review against the roster, not a sweep of ourselves."""
     named = named_competitors(question)
+    if not named and entity:
+        subject = _clean_competitor_name(entity)
+        if subject and subject.lower() != (us or "").strip().lower():
+            named = [subject]
     if named:
         return named, "question"
     from app.research import competitor as comp
@@ -1416,7 +1468,8 @@ def _log_capture(enterprise_id: str, result: CaptureResult, calls: int,
 def answer(*, enterprise_id: str, question: str,
            history: list[dict] | None = None,
            is_cancelled: Callable[[], bool] | None = None,
-           on_phase: Callable[[str], None] | None = None) -> dict | None:
+           on_phase: Callable[[str], None] | None = None,
+           entity: str | None = None) -> dict | None:
     """Run the competitive-intelligence pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -1436,6 +1489,13 @@ def answer(*, enterprise_id: str, question: str,
     STAGED/REVIEW `_capture` stay silent, because their boundaries move with
     the module sequence and a label that is right for a Scan is wrong for a
     staged Review.
+
+    `entity`, when supplied, is the subject the planner read out of the
+    question (`constraints.entity`). It decides two things a stored run used
+    to decide alone: WHO this run covers (see `_competitor_set`), and whether
+    query mode is even eligible — a follow-up about a company the last run
+    never looked at cannot be answered off that run, and the whole point of
+    this module is that it can go and look.
     """
     from app.research.market import company_profile
 
@@ -1446,7 +1506,7 @@ def answer(*, enterprise_id: str, question: str,
     prior_run: dict | None = None
     if is_followup_query(question):
         prior_run = _latest_run(enterprise_id)
-        if prior_run:
+        if prior_run and _run_covers(prior_run, entity):
             # Query mode: one call over the run already on file, no web sweep.
             # Published here rather than inside _answer_from_run because this is
             # the branch that commits to it — a failure below falls through to
@@ -1474,7 +1534,9 @@ def answer(*, enterprise_id: str, question: str,
             "and I'll derive the competitor set and research the landscape."
         )
 
-    names, set_source = _competitor_set(enterprise_id, question)
+    names, set_source = _competitor_set(
+        enterprise_id, question, entity=entity, us=profile.get("display_name"),
+    )
     if not names:
         return _plain_payload(
             "I couldn't work out who to compare you against. Name the "

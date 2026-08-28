@@ -115,7 +115,7 @@ class AskFailedError extends Error {
  * ask_id is deliberately left in place so a reload re-attaches. Split out from
  * the generic failure so the chat can render the honest "still running on our
  * side — reload and it will pick up where it left off" state instead of the
- * red "that answer didn't come through" bubble.
+ * red "there was an interruption" bubble.
  */
 export class AskTimeoutError extends AskFailedError {}
 
@@ -352,6 +352,10 @@ export async function runAskGeneration(
      *  mutually exclusive with prd_id (the tab has one primary artifact). */
     evidence_id?: number
     ticket_set_id?: number
+    /** The report/document the side panel is SHOWING. Not grounding by id like
+     *  the three above — the backend grounds on everything this THREAD made
+     *  and uses this only to put the one on screen first. */
+    open_artifact?: { kind: "report" | "document"; id: number } | null
     /** Individual-project-chat send identity — the idempotency key the
      *  server persists this turn's user side under. Passed straight through
      *  to `askApi.start`. */

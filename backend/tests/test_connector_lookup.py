@@ -1698,7 +1698,16 @@ def test_verbatim_system_text_without_flag_still_excludes_kg():
         run_loop=lambda **k: captured.update(k) or "x", log=lambda *a: None,
     )
     assert kg.TOOL_NAME not in {t["name"] for t in captured["tools"]}
-    assert captured["system"] == "JIRA RULES"
+    # The tuned prompt is preserved and the KG block is NOT appended — which is
+    # what this test is for. It is no longer byte-equal, because the framework
+    # now also appends its presentation rule (charts): a tuned adapter prompt
+    # cannot know about a renderer contract that is not its concern, and the
+    # one path that skipped `_build_system` was the one answering "tickets per
+    # status" with a markdown table. Asserting equality here would mean any
+    # framework-wide rule could only ever reach half the adapters.
+    assert captured["system"].startswith("JIRA RULES")
+    assert "## Sprntly knowledge graph" not in captured["system"]
+    assert "```chart" in captured["system"]
 
 
 def test_kg_only_fallback_is_tenant_scoped(monkeypatch):
@@ -1746,3 +1755,59 @@ def test_kg_retrieval_failure_degrades_readably(monkeypatch):
     )
     assert "could not be read just now" in out["answer"]
     assert "pgvector down" not in out["answer"]  # no internals leak
+
+
+# ── The chart contract reaches BOTH prompt paths ─────────────────────────────
+#
+# This path answers the most chart-shaped questions in the product — tickets per
+# status, issues per assignee, messages per channel — and until 2026-08-27 it
+# had no way to draw one, so every answer was a markdown grid of numbers.
+#
+# Two paths assemble the system prompt and the fix has to be on both. The
+# multi-source one goes through `_build_system`; an adapter with its own tuned
+# prompt (Jira) passes `system_text` and never touches it. The first attempt
+# landed only on `_build_system`, shipped, and "what share of our open tickets
+# sits in each status?" came back as a table from an image that already carried
+# the rule — because Jira was answering through the other branch.
+
+
+def test_the_multi_source_prompt_carries_the_chart_contract():
+    system = ca._build_system([], None, False, False)
+    assert "```chart" in system
+    # LAST, after every adapter block: a rule about the shape of the ANSWER has
+    # to be read after everything describing where the data came from.
+    assert "```chart" in system[-900:]
+
+
+def test_a_tuned_adapter_prompt_gets_it_appended_too():
+    """The Jira-shaped case: `system_text` is verbatim and knows nothing about
+    charts, so the framework appends the rule rather than trusting the adapter
+    to carry it."""
+    captured = {}
+
+    def loop(**kwargs):
+        captured.update(kwargs)
+        return "answered"
+
+    provider = FakeProvider(result="ok")
+    ca.answer(
+        enterprise_id="co-a",
+        question="how many issues does each assignee have?",
+        providers=[provider],
+        system_text="You are a Jira assistant. Answer from the tools.",
+        run_loop=loop,
+        log=lambda *a: None,
+    )
+    system = captured["system"]
+    assert "You are a Jira assistant." in system, "the tuned prompt must survive"
+    assert "```chart" in system, "the verbatim path lost the chart contract"
+    assert "A COUNT PER THING IS A CHART" in system
+
+
+def test_no_adapter_has_to_remember_the_contract_itself():
+    """One schema, appended by the framework. An adapter shipping its own copy
+    is how the two drift into different dialects — and `InlineChart.tsx` refuses
+    anything that does not match the one it parses."""
+    from app.connector_lookup import jira as jira_adapter
+
+    assert "```chart" not in jira_adapter.SYSTEM

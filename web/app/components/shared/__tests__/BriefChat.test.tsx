@@ -625,13 +625,14 @@ describe("BriefChat header — top bar removed", () => {
 // The PM agent is no longer user-named: there is ONE fixed display name,
 // "Sprntly", sourced from the AGENT_NAME constant. The brief/chat header must
 // render that name (next to the sparkle mark) — never the old hardcoded
-// "PM Agent". The "Product Coworker" pill is a *role* badge.
+// "PM Agent". The "Product Coworker" role pill was removed (owner,
+// 2026-08-24) — the name now stands alone.
 describe("BriefChat header — fixed agent name 'Sprntly'", () => {
   it("renders the agent display name as 'Sprntly' (not 'PM Agent')", async () => {
     await act(async () => {
       renderBrief()
     })
-    // The brief's agent head carries the agent's NAME + role badge.
+    // The brief's agent head carries the agent's NAME, and nothing else.
     const head = document.querySelector(".bc-agent-head") as HTMLElement | null
     expect(head).not.toBeNull()
     // The agent's NAME (the .bc-agent-name span) reads "Sprntly".
@@ -641,8 +642,9 @@ describe("BriefChat header — fixed agent name 'Sprntly'", () => {
     expect(name!.textContent).toBe("Sprntly")
     // The old hardcoded name is gone everywhere.
     expect(screen.queryByText("PM Agent")).toBeNull()
-    // The role pill ("Product Coworker") is present.
-    expect(within(head!).getByText("Product Coworker")).not.toBeNull()
+    // The role pill is gone — the name stands alone.
+    expect(within(head!).queryByText("Product Coworker")).toBeNull()
+    expect(head!.querySelector(".bc-agent-badge")).toBeNull()
   })
 
   it("greeting still renders below the Sprntly header", async () => {

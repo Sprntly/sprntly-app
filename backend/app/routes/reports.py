@@ -26,6 +26,7 @@ report library (see app/report_capture.py and db/reports.py).
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Literal
 
@@ -34,6 +35,8 @@ from pydantic import BaseModel, Field
 
 from app.auth import CompanyContext, require_company
 from app.db import get_report, list_reports_for_conversation, set_report_share_config
+from app.db.reports import update_report_body
+from app import report_markdown
 from app.design_agent.rate_limit import SlidingWindowLimiter
 from app.design_agent.url_slug import url_slugify
 from app.report_pdf import render_report_pdf
@@ -104,7 +107,12 @@ def read_report(
         "skill": row.get("skill") or "",
         "title": row.get("title") or "",
         "question": row.get("question") or "",
-        "html": row.get("html") or "",
+        # Served as HTML whatever is stored. New reports are captured as HTML;
+        # the rows written before that — the scheduled monthly runs, and
+        # everything captured since #1024 — hold markdown and are converted on
+        # the way out, so the panel, the editor and the PDF all see one shape.
+        # A row is rewritten as HTML the first time someone saves an edit.
+        "html": report_markdown.to_html(row.get("html")),
         "created_at": row.get("created_at"),
         "conversation_id": row.get("conversation_id"),
         "prd_id": row.get("prd_id"),
@@ -112,6 +120,49 @@ def read_report(
         # The token rides along only when sharing is actually on.
         "share_mode": row.get("share_mode") or "private",
         "share_token": row.get("share_token") if row.get("share_mode") != "private" else None,
+    }
+
+
+class ReportEdit(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/{report_id}/chat-edit")
+async def chat_edit_report(
+    report_id: int,
+    body: ReportEdit,
+    company: CompanyContext = Depends(require_company),
+):
+    """Apply a free-form chat instruction to this report.
+
+    THE TARGET IS THE URL'S REPORT, NOT AN ARGUMENT. The client names the report
+    the user has open beside the chat; nothing in the request body can redirect
+    the write. Same rule as `edit_prd` and the Goal Analysis report editor, same
+    reason: a model — or a prompt-injected instruction sitting inside a
+    customer's own document — must not be able to edit a document the user is
+    not looking at.
+
+    Live on call, no confirm gate: that gate was retired for PRDs in e05577dc,
+    and two documents that read in the same panel should not be on two
+    contracts.
+
+    An instruction the editor judges is NOT an edit (a question about the
+    report) writes nothing and comes back with `sections_changed: []`, which is
+    what lets the chat answer instead of claiming a change it did not make.
+    """
+    from app.artifact_chat_edit import edit_report_scoped
+
+    result = await asyncio.to_thread(
+        edit_report_scoped, report_id, body.instruction, company
+    )
+    row = result["report"]
+    return {
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "skill": row.get("skill") or "",
+        "html": row.get("html") or "",
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
     }
 
 
@@ -142,7 +193,7 @@ async def download_report_pdf(
         )
     PDF_LIMITER.register(key)
 
-    pdf = await render_report_pdf(row.get("html") or "")
+    pdf = await render_report_pdf(report_markdown.to_html(row.get("html")))
     if not pdf:
         logger.warning(
             "report pdf unavailable report_id=%s company=%s", report_id, company.company_id
@@ -163,6 +214,46 @@ async def download_report_pdf(
             "Cache-Control": "private, no-store",
         },
     )
+
+
+class ReportBodyIn(BaseModel):
+    """A hand edit of the report's own text.
+
+    `html` is the column name, not a claim about the format: a report's stored
+    body is MARKDOWN today (every pipeline answers in it) and was a
+    self-contained HTML document before the pinned templates were removed. Both
+    viewers sniff the body to pick a renderer, so what goes in comes back
+    rendered the same way.
+
+    Bounded at the same ceiling a generated report is written under — a report
+    that would not fit could not have been produced.
+    """
+    html: str = Field(min_length=0, max_length=400_000)
+
+
+@router.patch("/{report_id}")
+def update_report(
+    report_id: int,
+    body: ReportBodyIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Save a hand edit made in the panel.
+
+    Company-filtered in the UPDATE itself, so a foreign id matches zero rows and
+    404s exactly like a missing one — no cross-tenant existence disclosure, the
+    same posture every read on this router already takes.
+
+    LAST-WRITE-WINS, deliberately and narrowly: `reports` carries no `version`
+    column, because until this endpoint existed a report was written once by a
+    pipeline and only ever read. The losing race is two people editing one
+    report at the same moment; the compare-and-set that documents get
+    (`custom_artifacts.version`) is what this would need first, and adding a
+    column is its own change.
+    """
+    row = update_report_body(report_id, company.company_id, html=body.html)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Report not found")
+    return {"id": row["id"], "title": row.get("title") or "", "html": row.get("html") or ""}
 
 
 class ShareIn(BaseModel):

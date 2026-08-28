@@ -422,6 +422,41 @@ def test_a_multiline_entity_is_collapsed_to_one_line():
     assert plan.constraints["entity"] == "Acme Corp Ltd"
 
 
+def test_a_supplied_criterion_survives_the_gate():
+    """`constraints.criterion` — the corpus map-reduce classification bar —
+    flows through `_gate_constraints` unchanged when present, the same way
+    `entity` does (see app.corpus_mapreduce)."""
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "raised a billing complaint"}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert plan.constraints["criterion"] == "raised a billing complaint"
+
+
+def test_a_blank_or_missing_criterion_is_dropped():
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "   "}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert "criterion" not in plan.constraints
+    plan = ap.apply_gates(_plan_out(constraints={}), enterprise_id=COMPANY, connected=[])
+    assert "criterion" not in plan.constraints
+
+
+def test_a_multiline_criterion_is_collapsed_and_length_capped():
+    long_criterion = "x" * 900
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": "raised a\nbilling  complaint"}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert plan.constraints["criterion"] == "raised a billing complaint"
+    plan = ap.apply_gates(
+        _plan_out(constraints={"criterion": long_criterion}),
+        enterprise_id=COMPANY, connected=[],
+    )
+    assert len(plan.constraints["criterion"]) == ap._CRITERION_CHARS
+
+
 # ── the route-like projection (what the comparison line compares) ────────────
 
 def test_route_like_puts_the_company_skill_first(monkeypatch):
@@ -593,7 +628,7 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     # could name. The version is pinned here rather than merely compared to
     # itself because pooling rows across versions would pool two different
     # menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v11"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v14"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -1631,3 +1666,123 @@ def test_an_unplanned_turn_still_routes(monkeypatch):
     )
 
     assert len(routed) == 1, "an unplanned turn must still reach the router"
+
+
+# ── the open PRD (the thread's own state) ────────────────────────────────────
+# The planner was told nothing about what the tab had open, while the
+# pre-planner resolver rendered exactly this line. "build a report from this
+# prd" planned as `answer` with the reason "no PRD is open or identified in the
+# thread — need to ask which PRD they mean", on a thread that had PRD 3723 open
+# beside it — so the document the user asked for was written into the chat as
+# prose and filed as no artifact at all.
+
+
+def test_the_open_prd_rides_the_input_when_one_is_open(monkeypatch):
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan(
+        "build a report from this prd",
+        enterprise_id=COMPANY,
+        prd_id=3723,
+        prd_title="Share-link token expiry",
+    )
+
+    text = calls[0]["input"]
+    assert 'Active tab: PRD #3723 — "Share-link token expiry" is open beside this chat.' in text
+    # Still ahead of the question, which stays last.
+    assert text.endswith("Question: build a report from this prd")
+
+
+def test_the_open_prd_line_survives_a_missing_title(monkeypatch):
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan("what does it say", enterprise_id=COMPANY, prd_id=12)
+
+    assert "Active tab: PRD #12 is open beside this chat." in calls[0]["input"]
+
+
+def test_no_open_prd_adds_no_line_at_all(monkeypatch):
+    """The absence is already the prompt's default ("no PRD exists in this
+    thread yet → generate_prd"); a "No PRD is open" line on every planless
+    message is tokens spent to say nothing."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    ap.plan("what shipped last month", enterprise_id=COMPANY)
+
+    assert "Active tab:" not in calls[0]["input"]
+
+
+def test_two_threads_with_different_prds_open_do_not_share_a_plan(monkeypatch):
+    """The memo exists so ONE turn is planned once (the intent endpoint and the
+    ask worker both plan it). The open PRD is now an input, so it has to be part
+    of the key — otherwise the same sentence asked on two threads inside the TTL
+    is routed by the other thread's context."""
+    _no_custom_skills(monkeypatch)
+    _connected(monkeypatch, ["slack"])
+    calls = _stub_planner(monkeypatch)
+    monkeypatch.setattr(ap, "decide_enabled", lambda *_a, **_k: True)
+    ap._plan_memo.clear()
+
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=12
+    )
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=40
+    )
+    assert len(calls) == 2, "a different open PRD is a different turn"
+
+    # The SAME thread's second caller (the ask worker after the intent endpoint)
+    # still reuses the one plan — that is what the memo is for.
+    ap.plan_for_answer(
+        enterprise_id=COMPANY, question="build a report from this prd", prd_id=40
+    )
+    assert len(calls) == 2, "same question, same open PRD — planned once"
+
+
+# ── call-digest vs call-listing — a content-filtered count is call-digest ───
+# A live browser re-verify found the planner classifying a content-filtered
+# count question ("how many customer calls asked for X") as `call-listing`
+# — the index engine, which cannot classify by content at all — because the
+# call-listing bullet said "list or count" with no distinction from
+# call-digest's own content-match job. The planner is an LLM; there is no
+# CI-runnable way to prove it now classifies correctly short of a live call
+# (see `test_delegation_no_fabrication.py`'s identical reasoning for its own
+# prompt-property tests) — this pins that the INSTRUCTION says the right
+# thing, which is what `qa_agent`'s deterministic dispatch-guard test suite
+# (`test_qa_agent_planned_routing.py`) backstops regardless of what the model
+# actually does with it.
+
+
+def _normalized_planner_system() -> str:
+    """`_PLANNER_SYSTEM` is hand-wrapped prose — a phrase this test cares
+    about can legitimately fall across a line break. Collapsed to single
+    spaces so a substring check reads it the way a model does, not the way
+    the source file's 80-column wrapping happens to lay it out."""
+    return " ".join(ap._PLANNER_SYSTEM.lower().split())
+
+
+def test_planner_prompt_sends_a_content_filtered_count_to_call_digest():
+    system = _normalized_planner_system()
+    assert "content filter" in system
+    assert "how many calls asked for sso" in system
+    # The rule is stated as belonging to call-digest, not as a standalone
+    # aside — a model reading only the call-listing bullet must still see
+    # the redirect.
+    assert "call-digest above" in system
+
+
+def test_planner_prompt_keeps_a_bare_count_on_call_listing():
+    """Negative-space companion: the fix narrows call-listing, it must not
+    remove its own job — "which calls did we have last week" and "how many
+    calls did I have this month" (no content predicate) still read as
+    call-listing."""
+    system = _normalized_planner_system()
+    assert "which calls did we have last week" in system
+    assert "how many calls did i have this month" in system
+    assert "structural properties only" in system
+
+    weak = system.replace("structural properties only", "any structure at all")
+    assert "structural properties only" not in weak

@@ -574,6 +574,23 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "type, cross-company) in the fast lane; this suite is the real-DB "
         "proof, run locally against the dev rig when touching this hook."
     ),
+    ("test_kg_extractor.py", "RUN_KG_EXTRACTOR_LLM"): (
+        "Real-LLM eval for the KG extractor's vendor-side/owner extraction. "
+        "Deterministic backstop: the unmarked facade-fixture tests in the same "
+        "file (vendor-side kinds/owner properties, source_call_id stamping, "
+        "provenance) run in the fast lane on every PR."
+    ),
+    ("test_kg_checklist_pass.py", "RUN_KG_EXTRACTOR_LLM"): (
+        "Real-LLM eval for the directed-checklist pass's OWN scenario-noise "
+        "guardrail (Config B made the checklist the sole full-transcript "
+        "reader, so its guardrail must independently suppress simulated "
+        "content while keeping a real fact in the same transcript). "
+        "Deterministic backstop: the unmarked facade-fixture tests in the "
+        "same file (13-category kind mapping, grounding gate incl. the "
+        "reformatted-quote fix, source_call_id stamping, gated rollout, "
+        "runner wiring for both Fireflies' digest split and Zoom/Meet's "
+        "Haiku condensation) run in the fast lane on every PR."
+    ),
 }
 
 

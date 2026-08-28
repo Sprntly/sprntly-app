@@ -242,6 +242,36 @@ def test_happy_path_runs_every_stage_and_writes_kg(seeded_company, monkeypatch):
     assert set(out["stages"]) == {s for s, _ in cr._STAGES}
 
 
+def test_sweep_narrates_a_phase_per_stage_then_writing(
+    seeded_company, monkeypatch
+):
+    """The staged sweep is the longest wait in the product, so it emits one
+    phase per stage (a checklist) then WRITING — via the shared vocabulary."""
+    _full_stack(monkeypatch)
+    phases: list[str] = []
+
+    cr.run_company_research(
+        _COMPANY_ID, url="https://acme.com", trigger="chat", run_id=13,
+        on_phase=phases.append)
+
+    assert phases == [
+        "Researching products & features…",
+        "Researching positioning…",
+        "Researching pricing…",
+        "Researching market & recent news…",
+        "Writing your report…",
+    ]
+
+
+def test_sweep_runs_unchanged_without_a_phase_sink(seeded_company, monkeypatch):
+    _full_stack(monkeypatch)
+    out = cr.run_company_research(
+        _COMPANY_ID, url="https://acme.com", trigger="chat", run_id=14)
+    # No sink wired (the scheduled/onboarding caller) — identical result shape.
+    assert out["ok"] is True
+    assert set(out["stages"]) == {s for s, _ in cr._STAGES}
+
+
 def test_signals_are_clamped_and_carry_web_research_origin(
     seeded_company, monkeypatch
 ):

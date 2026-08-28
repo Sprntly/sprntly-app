@@ -1104,7 +1104,8 @@ _VOC_KG_SYSTEM = (
 
 
 def _answer_voc_report(
-    decision: RouteDecision, enterprise_id, question, history, on_delta=None
+    decision: RouteDecision, enterprise_id, question, history, on_delta=None,
+    on_phase=None,
 ) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
@@ -1127,6 +1128,13 @@ def _answer_voc_report(
     generic answer (which explains what to connect).
     """
     from app.graph.retrieval import VOC_SCALE, render_context_section
+    # Local import: report_phases imports emit_phase from THIS module, so a
+    # top-level import here would be a load-time cycle. At call time both are
+    # fully loaded (same lazy-import pattern the report dispatch below uses).
+    from app.report_phases import ReportPhase, emit_report_phase
+
+    # GATHERING: the KG bundle retrieval — the pinned path's evidence leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
 
     # Same widened retrieval as the merged path (`call_digest.build_kg_context`).
     # These two are the only callers that pass a scale, and they must pass the
@@ -1152,6 +1160,8 @@ def _answer_voc_report(
         + corpus_text
     )
     _voc_model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    # WRITING: the bundle is rendered — the document-scale synthesis is next.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     from app import answer_first
 
     if answer_first.enabled():
@@ -1366,6 +1376,7 @@ def _dispatch_planned_method(
     dataset: str,
     fresh: Callable[[], bool],
     is_cancelled: Optional[Callable[[], bool]],
+    on_phase: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Run the machinery the PLANNER named, or return None to keep going.
 
@@ -1396,6 +1407,37 @@ def _dispatch_planned_method(
     if not method or method not in _PLANNED_MACHINERY:
         return None
 
+    # A genuinely mapreducible count question ("how many calls asked for X")
+    # must run the count engine even when the planner named `call-listing` —
+    # its own instructions classify ANY "list or count recorded calls"
+    # question there (see `ask_planner._PLANNER_SYSTEM`'s call-listing
+    # bullet), and the planner is a model reading a sentence, not a
+    # guarantee. `is_mapreducible_count` is the SAME strict eligibility check
+    # `call_digest.answer` itself gates the engine on (excludes comparative/
+    # over-time, single-subject, report-shaped, and a bare aggregate with no
+    # content predicate) — so this redirect fires ONLY for a question that
+    # genuinely belongs to the engine, never for a bare "how many calls did I
+    # have", which the index already answers correctly and instantly. Dark-
+    # shipped identically to the engine itself: off unless the flag is on.
+    if method in _COUNT_ENGINE_REDIRECT_METHODS:
+        try:
+            from app.config import settings
+
+            if settings.voc_count_engine_enabled:
+                from app import call_digest
+
+                if call_digest.is_mapreducible_count(question):
+                    logger.info(
+                        "[planner] redirecting method=%s -> call-digest "
+                        "(mapreducible count) company=%s",
+                        method, enterprise_id,
+                    )
+                    method = "call-digest"
+        except Exception:  # noqa: BLE001 — a redirect check must never block dispatch
+            logger.exception(
+                "[planner] count-engine redirect check failed for %s", enterprise_id
+            )
+
     logger.info(
         "[planner] exec method=%s company=%s", method, enterprise_id
     )
@@ -1409,6 +1451,7 @@ def _dispatch_planned_method(
             fresh=fresh,
             is_cancelled=is_cancelled,
             plan=plan,
+            on_phase=on_phase,
         )
     except AskCancelled:
         raise  # a user Stop is not an engine declining — it must reach the caller
@@ -1434,7 +1477,9 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
+def _m_call_digest(
+    *, enterprise_id, question, history, plan=None, on_phase=None, **_kw
+) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1442,7 +1487,12 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     ladder's digest branch applies, and its comment records why it was added:
     this was the only interceptor claiming its turn unconditionally, so a
     company with no call source at all got the digest's empty-corpus answer
-    instead of falling through to routing that could actually serve them."""
+    instead of falling through to routing that could actually serve them.
+
+    `on_phase`, when supplied, is forwarded to `call_digest.answer` — this is
+    the planned-dispatch entry point, so without this the digest's own
+    GATHERING/WRITING/ANALYZING narration never reached a planned turn (it
+    landed on `**_kw` and was silently dropped)."""
     from app import call_digest
 
     if not call_digest.has_call_source(enterprise_id):
@@ -1462,6 +1512,7 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     return call_digest.answer(
         enterprise_id=enterprise_id, question=question, history=history,
         constraints=(plan.constraints if plan is not None else None),
+        on_phase=on_phase,
     )
 
 
@@ -1551,6 +1602,19 @@ _PLANNED_MACHINERY: dict = {
     "ticket-update": _m_ticket_update,
     "tracker-lookup": _m_tracker_lookup,
 }
+
+
+#: Machinery ids a genuinely mapreducible-count question can land on by
+#: planner misclassification, and must be redirected to `call-digest` — see
+#: `_dispatch_planned_method`'s redirect block. `call-listing` is the one
+#: real case: its own instructions cover ANY "list or count recorded calls"
+#: question, so a content-filtered count ("how many calls asked for X") can
+#: land there instead of `call-digest`. `single-call-read` is deliberately
+#: EXCLUDED — `is_mapreducible_count` requires the plural/aggregate "how
+#: many/which <calls>" shape, which cannot co-occur with a single named-call
+#: reference, so including it would guard against a case that can never
+#: happen. No other `_PLANNED_MACHINERY` key names a calls-listing engine.
+_COUNT_ENGINE_REDIRECT_METHODS: frozenset[str] = frozenset({"call-listing"})
 
 
 #: Providers whose presence in a plan's `sources` means "this question is
@@ -1923,6 +1987,73 @@ def _skip_project_connectors(
     except Exception:  # noqa: BLE001 — never break the answer over a routing hint
         return False
     return not names_source
+
+
+#: The pipeline ids that generate a REPORT — always company-wide, never
+#: project-scoped (`call_digest.answer`, `public_feedback.answer`,
+#: `company_research.answer`, `market_intel.answer`, and the pinned VoC path
+#: all key off `enterprise_id` alone; none takes a `project_id`). Deferring
+#: to one of these is never a project-scoping decision — it is standing the
+#: connector-blind project tool loop DOWN so the turn reaches the same
+#: company-wide report main chat already produces for the identical
+#: phrasing. Five `PIPELINE_SKILLS` report ids plus `call-digest` (the
+#: machinery id the live call-window fetch resolves to) — every other
+#: `_MACHINERY_IDS` member (`call-listing`, `single-call-read`,
+#: `data-analysis`, `tracker-lookup`, `ticket-update`) is excluded on
+#: purpose: those are lookups/utilities, not report generation.
+_REPORT_PIPELINE_IDS: frozenset[str] = PIPELINE_SKILLS | frozenset({"call-digest"})
+
+
+def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    report-generation pipeline at high confidence — the mirror of
+    `_skip_project_connectors`, one more narrow AND-clause on the sixth
+    branch's own claim rather than a new mechanism.
+
+    Root cause this closes: a report-phrased ask on a project surface
+    ("how have my customers been saying? give me a voice-of-customer
+    report") lexically matches `is_project_content_request` (a leading
+    interrogative plus a content noun) just as readily as a genuine
+    project-content question does, so the connector-blind project tool
+    loop claimed it and declined — it has no report-generation tool at
+    all. When the planner has already named a report pipeline for this
+    exact turn, that claim is wrong on its face: defer instead, so the
+    turn reaches the SAME company-wide report path
+    (`call_digest.answer` / `public_feedback.answer` / etc.) main chat's
+    identical phrasing already produces.
+
+    `plan.pipeline_id` is `None` unless it already cleared
+    `ask_planner._gate_pipeline`'s confidence bar (`_PLANNER_THRESHOLD`) —
+    reading its mere presence as "high confidence" needs no second
+    threshold to keep in sync with the planner's own gate. Restricted to
+    `plan.is_answer`: a `create_artifact`/`list_artifacts`/other non-answer
+    action turn (e.g. "show me the reports list", a listing of the
+    project's OWN artifacts) must never be read as a report-generation
+    request just because a stray `pipeline_id` happened to ride along.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan) leaves the
+    sixth branch's admission exactly as the gates above already decide it."""
+    return bool(
+        plan is not None
+        and plan.is_answer
+        and plan.pipeline_id in _REPORT_PIPELINE_IDS
+    )
+
+
+def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
+    """The specific subject this question is about, when the planner named one.
+
+    The planner already extracts it (`constraints.entity` — "the specific
+    company, customer, account, person, project or repo the question is
+    about"), so the report branches below can ask whether a saved report
+    actually covers what was asked rather than only whether one exists.
+
+    `None` for an unplanned turn, which leaves those branches deciding on
+    freshness alone exactly as they did before."""
+    if plan is None:
+        return None
+    return ((plan.constraints or {}).get("entity") or "").strip() or None
 
 
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
@@ -2322,6 +2453,16 @@ def answer(
     prd_id: Optional[int] = None,
     evidence_id: Optional[int] = None,
     ticket_set_id: Optional[int] = None,
+    #: The chat thread this ask belongs to. Everything `app.thread_context`
+    #: grounds on is keyed off it — the thread is the boundary, so an artifact
+    #: from another conversation can never be read as "the report". Absent (a
+    #: Slack ask, a warm) simply means no thread grounding.
+    conversation_id: Optional[int] = None,
+    #: What the side panel is SHOWING — `{"kind": "report"|"document", "id":
+    #: int}`, the same shape the classify call already receives. It only
+    #: reorders what the thread already owns, so a stale pointer from the
+    #: thread the reader just left is ignored rather than fetched.
+    open_artifact: Optional[dict] = None,
     on_delta: Optional[Callable[[str], None]] = None,
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
@@ -2438,6 +2579,16 @@ def answer(
         # admits. One predicate now governs both this gate and the connector
         # skip → guaranteed symmetry.
         and _skip_project_connectors(scope, routing_text, history)
+        # Yield to the report pipeline when the planner has ALREADY resolved
+        # this turn to one at high confidence — same shape as the connector
+        # clause above, mirrored rather than reinvented. A report-phrased ask
+        # ("give me a voice-of-customer report") lexically satisfies
+        # `is_project_content_request` just like a genuine project-content
+        # question does, but the project tool loop has no report-generation
+        # tool and would only decline it. `plan` is already resolved by the
+        # caller (`ask_job_runner.run_ask_job`) before `answer()` ever runs,
+        # so this reads it rather than reordering anything below.
+        and not _defers_to_report_pipeline(plan)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
@@ -2559,6 +2710,7 @@ def answer(
             dataset=dataset,
             fresh=_index_fresh,
             is_cancelled=is_cancelled,
+            on_phase=on_phase,
         )
         if planned is not None:
             return planned
@@ -3115,6 +3267,31 @@ def answer(
 
         prd_context = build_ticket_set_context(enterprise_id, ticket_set_id)
 
+    # THE REST OF WHAT THIS THREAD MADE. The three builders above are addressed
+    # BY ID, and only a PRD, an evidence page and a ticket set have one to
+    # send — so a report or a document produced in this chat reached no builder
+    # at all and was never in the prompt. Reported: with a report open in the
+    # panel, "summarize the report" was answered out of a corpus file covering
+    # a different month, then a follow-up counted that file's themes as the
+    # report's. See app/thread_context.py.
+    #
+    # It APPENDS rather than replaces. A PRD tab whose thread also produced a
+    # report can be asked about either, and the id-addressed block stays first
+    # because the tab is the strongest statement of what the reader is looking
+    # at. With no id at all this is the whole grounding, which is the reported
+    # case.
+    #
+    # Scoped to `conversation_id` throughout: the thread is the boundary, and a
+    # report from another chat is not what "the report" means to someone typing
+    # in this one.
+    from app.thread_context import build_thread_artifact_context
+
+    thread_context = build_thread_artifact_context(
+        enterprise_id, conversation_id, focus=open_artifact
+    )
+    if thread_context:
+        prd_context = f"{prd_context}\n\n{thread_context}" if prd_context else thread_context
+
     if not decision.skill_id:
         # Direct path — corpus + KG, plus a bounded live read of every connected
         # source. Retrieval (the shared question embedding, KG theme kNN, the
@@ -3316,7 +3493,8 @@ def answer(
     if (
         decision.skill_id == "public-feedback-report"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.PF_SPEC)
+            enterprise_id, monthly_reports.PF_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import public_feedback
 
@@ -3325,6 +3503,12 @@ def answer(
             # Only consumed on the flagged map-reduce synthesis path (mirrors the
             # VoC/MI dispatch); ignored while that gate is off.
             on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
+            # Whether the last capture can answer this at all: a follow-up
+            # about an app or company it never saw needs the sweep, not a
+            # filter over records that never mention it (CIR parity).
+            entity=_plan_entity(plan),
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3344,6 +3528,9 @@ def answer(
             # A sweep is several minutes of paid web search; each stage boundary
             # is a cancellation checkpoint, so a Stop actually stops it.
             is_cancelled=is_cancelled,
+            # The staged sweep narrates a per-stage checklist from inside the
+            # module — the longest wait in the product (competitive_intel parity).
+            on_phase=on_phase,
         )
         if cr is not None:
             return _maybe_verify(cr, enterprise_id)
@@ -3368,7 +3555,8 @@ def answer(
     if (
         decision.skill_id == "competitive-intelligence-review"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.CIR_SPEC)
+            enterprise_id, monthly_reports.CIR_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import competitive_intel
 
@@ -3381,6 +3569,11 @@ def answer(
             # The sweep is the longest wait in the product; its own legs
             # (capture, then synthesis) publish from inside that module.
             on_phase=on_phase,
+            # WHO to research, when the question named someone the "vs Acme"
+            # regex cannot see ("a competitive review on Figma"). Without it
+            # the sweep falls back to the stored roster and researches a set
+            # the question never asked about.
+            entity=_plan_entity(plan),
         )
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
@@ -3394,7 +3587,8 @@ def answer(
     if (
         decision.skill_id == "market-intelligence-report"
         and not monthly_reports.has_current_report(
-            enterprise_id, monthly_reports.MI_SPEC)
+            enterprise_id, monthly_reports.MI_SPEC,
+            entity=_plan_entity(plan))
     ):
         from app import market_intel
 
@@ -3407,6 +3601,8 @@ def answer(
             # Only consumed on the flagged map-reduce synthesis path (mirrors the
             # VoC dispatch below); ignored while that gate is off.
             on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
         )
         if mi is not None:
             return _maybe_verify(mi, enterprise_id)
@@ -3447,6 +3643,9 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
                 constraints=(plan.constraints if plan is not None else None),
+                # Narrates its gather→synthesis legs (competitive_intel parity);
+                # David's most-used report and the reported blank-wait path.
+                on_phase=on_phase,
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).
@@ -3472,12 +3671,15 @@ def answer(
 
         if answer_first.enabled():
             voc = _answer_voc_report(
-                decision, enterprise_id, question, history, on_delta=on_delta
+                decision, enterprise_id, question, history, on_delta=on_delta,
+                on_phase=on_phase,
             )
             if voc is None:
                 answer_first.reset_stream(on_delta)
         else:
-            voc = _answer_voc_report(decision, enterprise_id, question, history)
+            voc = _answer_voc_report(
+                decision, enterprise_id, question, history, on_phase=on_phase,
+            )
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 

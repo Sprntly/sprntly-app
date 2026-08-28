@@ -394,6 +394,34 @@ def test_answer_heavy_skill_escalates_to_opus(monkeypatch):
 # override and still does not.
 
 
+def test_m_call_digest_forwards_plan_constraints_including_criterion(monkeypatch):
+    """`plan.constraints` — including a `criterion` key (see
+    `app.ask_planner._gate_constraints`) — must flow to
+    `call_digest.answer(constraints=...)` completely unchanged, so the count
+    engine's caller-supplied classification bar (`app.corpus_mapreduce`)
+    actually reaches it end to end."""
+    import app.call_digest as cd
+    from types import SimpleNamespace
+
+    captured: dict = {}
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **kw: captured.update(kw) or {"answer": "x", "_skill_source": "y"},
+    )
+    plan = SimpleNamespace(
+        constraints={"since": "2026-07-01", "criterion": "raised a billing complaint"},
+    )
+    out = qa._m_call_digest(
+        enterprise_id="ent", question="how many raised billing issues",
+        history=[], plan=plan,
+    )
+    assert out == {"answer": "x", "_skill_source": "y"}
+    assert captured["constraints"] == {
+        "since": "2026-07-01", "criterion": "raised a billing complaint",
+    }
+
+
 def test_answer_intercepts_call_digest_before_routing(monkeypatch):
     # "summarize the customer calls from last week" must short-circuit to the
     # on-demand digest path, NOT flow through the generic skill router.

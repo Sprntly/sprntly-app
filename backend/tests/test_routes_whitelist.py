@@ -140,3 +140,36 @@ def test_per_ip_budget_closes(isolated_settings):
     assert "Retry-After" in blocked.headers
     # The rejected signup was not stored.
     assert all(r["email"] != "one-too-many@example.com" for r in _rows())
+
+
+def test_marketing_origin_allowed_without_env(isolated_settings, monkeypatch):
+    """The form's origin must not depend on an operator editing ALLOWED_ORIGINS.
+
+    Staging deployed without it, so the browser threw away a perfectly good 200
+    as `400 Disallowed CORS origin` while the row was written — a signup that
+    "failed" and succeeded at the same time.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "allowed_origins", "http://localhost:3000")
+    assert "https://www.sprntly.ai" in settings.origins_list
+    assert "https://sprntly.ai" in settings.origins_list
+
+    # An env that already names one does not get it twice.
+    monkeypatch.setattr(
+        settings, "allowed_origins", "https://sprntly.ai,http://localhost:3000"
+    )
+    assert settings.origins_list.count("https://sprntly.ai") == 1
+
+    # And CORSMiddleware honours it — the stack is built from origins_list.
+    with _anon() as anon:
+        pre = anon.options(
+            "/v1/whitelist",
+            headers={
+                "Origin": "https://www.sprntly.ai",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+    assert pre.status_code == 200
+    assert pre.headers["access-control-allow-origin"] == "https://www.sprntly.ai"

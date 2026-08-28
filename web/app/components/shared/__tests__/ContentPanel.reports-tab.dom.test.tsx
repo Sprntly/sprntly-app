@@ -73,6 +73,10 @@ async function renderPanel(opts: {
   status?: "idle" | "loading" | "ready" | "error"
   /** A PRD in scope puts the Evidence → PRD → Tickets pipeline in scope too. */
   prd?: unknown
+  /** A report is being written for this thread right now. */
+  generating?: boolean
+  /** The streamed draft so far. */
+  partial?: string | null
   /** Which conversation the rows were FETCHED for. Defaults to the thread the
    *  panel is showing — the normal case, once useThreadReportsSync has answered
    *  for it. Pass a different id to stage the commit where the chat has already
@@ -90,6 +94,8 @@ async function renderPanel(opts: {
     conversationId: 77,
     reportFocusId: null,
     reportFocusStandalone: false,
+    reportGenerating: opts.generating ?? false,
+    reportPartialMd: opts.partial ?? null,
     threadReports: opts.reports ?? [],
     threadReportsStatus: opts.status ?? "ready",
     threadReportsConversationId: opts.listFor === undefined ? 77 : opts.listFor,
@@ -197,5 +203,127 @@ describe("ContentPanel — the Reports tab", () => {
     // The header names what the panel is showing — not the PRD, which a
     // report-only thread may not even have.
     expect(document.querySelector(".cpanel-main-name")?.textContent).toBe("Reports")
+  })
+})
+
+// ── A report generates in the panel, not in the chat ────────────────────────
+// A report is an artifact, so it is written where artifacts are written — the
+// same posture the PRD build takes. The tab has to EXIST for that whole window,
+// which is the whole generation: capture is a post-terminal server step, so
+// there is no row to key the tab on until the report has already landed.
+describe("ContentPanel — a report being written", () => {
+  it("shows the Reports tab while one is generating, with no row yet", async () => {
+    await renderPanel({ generating: true })
+    expect(reportsTab()).toBeTruthy()
+  })
+
+  it("shows the working state on that tab before the first delta", async () => {
+    await renderPanel({ tab: "reports", generating: true })
+    expect(screen.getByTestId("reports-generating-pane")).toBeTruthy()
+  })
+
+  it("renders the draft as it streams, in the panel", async () => {
+    await renderPanel({
+      tab: "reports",
+      generating: true,
+      partial: "# Voice of customer\n\nOnboarding friction leads the window.",
+    })
+    expect(screen.getByTestId("reports-streaming")).toBeTruthy()
+    expect(screen.getByTestId("reports-streaming-preview").textContent)
+      .toContain("Onboarding friction")
+  })
+
+  it("goes back to the thread's reports once it lands", async () => {
+    await renderPanel({ tab: "reports", reports: [ROW], generating: false })
+    expect(document.querySelector("[data-testid='reports-generating']")).toBeNull()
+  })
+})
+
+// ── A report is a rich document, edited in the panel ────────────────────────
+// It is the same editor and the same toolbar a team document gets — that is
+// what "edit the report in the panel" means, and a report that behaved
+// differently from the document beside it was the report this closes.
+describe("ContentPanel — editing a report", () => {
+  const HTML_DOC = {
+    ...ROW,
+    html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
+  }
+
+  it("is editable on sight, with the PRD's toolbar and no mode to enter", async () => {
+    // The PRD and the team document are editable the moment they are open; a
+    // mode you have to ask for is a step between the reader and a typo they can
+    // already see.
+    reportGet.mockResolvedValue(HTML_DOC)
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(screen.getByTestId("report-document")).toBeTruthy())
+    expect(document.querySelector(".prd-toolbar")).not.toBeNull()
+    expect(screen.queryByTestId("reports-edit-toggle")).toBeNull()
+  })
+
+  it("says Saved, not the PRD's Saved · Draft", async () => {
+    // "Draft" is the PRD's word for its own lifecycle state. A report is not a
+    // draft of anything, and telling its reader otherwise is a claim about the
+    // document that nothing made.
+    reportGet.mockResolvedValue(HTML_DOC)
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector(".prd-status")).toBeTruthy())
+    const status = document.querySelector(".prd-status")!.textContent ?? ""
+    expect(status).toContain("Saved")
+    expect(status).not.toContain("Draft")
+  })
+
+  it("shows no editor or toolbar on a legacy self-contained document", async () => {
+    // Those carry their own <head> and <style> and read in a sandboxed iframe:
+    // they own their rendering, so they are shown, not edited.
+    reportGet.mockResolvedValue({
+      ...ROW,
+      html: "<!doctype html><html><head><title>VoC</title></head><body><h1>VoC</h1></body></html>",
+    })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector("iframe")).toBeTruthy())
+    expect(screen.queryByTestId("report-document")).toBeNull()
+    expect(document.querySelector(".prd-toolbar")).toBeNull()
+  })
+})
+
+describe("ContentPanel — where the report's toolbar sits", () => {
+  it("puts the bar ahead of the document, first under the artifact tabs", async () => {
+    reportGet.mockResolvedValue({
+      ...ROW,
+      html: "<h1>Voice of customer</h1><p>Onboarding friction leads.</p>",
+    })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+    await waitFor(() => expect(document.querySelector(".prd-toolbar")).toBeTruthy())
+
+    const bar = document.querySelector(".prd-toolbar")
+    // The panel prints no heading of its own any more — the document's own <h1>
+    // IS the title — so the bar is measured against the document itself.
+    const body = screen.getByTestId("report-document")
+    expect(bar).not.toBeNull()
+    // A control you reach for while typing belongs at the top edge, not below
+    // the document's own heading — DOCUMENT_POSITION_FOLLOWING means the
+    // document comes after the bar in document order.
+    expect(bar!.compareDocumentPosition(body) & Node.DOCUMENT_POSITION_FOLLOWING)
+      .toBeTruthy()
+  })
+})
+
+describe("ContentPanel — where the report's share menu sits", () => {
+  it("renders it in the panel header, not inside the document", async () => {
+    // Beside where the PRD's share sits. It used to render inside the document
+    // it acts on, which put an action on the artifact rather than on the panel.
+    reportGet.mockResolvedValue({ ...ROW, html: "<h1>VoC</h1><p>body</p>" })
+    await renderPanel({ tab: "reports", reports: [ROW] })
+
+    const slot = await waitFor(() => {
+      const el = screen.getByTestId("cpanel-report-share-slot")
+      expect(el.querySelector("button")).not.toBeNull()
+      return el
+    })
+    // In the HEADER's action row…
+    expect(slot.closest(".cpanel-head-actions")).not.toBeNull()
+    // …and not in the document body.
+    const detail = screen.getByTestId("reports-detail")
+    expect(detail.contains(slot)).toBe(false)
   })
 })

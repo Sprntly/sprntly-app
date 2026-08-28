@@ -308,6 +308,11 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
+    #: What the side panel is showing — `{"kind": "report"|"document", "id":
+    #: int}`. Unlike the three ids above it addresses nothing on its own: it
+    #: only says which of THIS THREAD's artifacts to put first
+    #: (`app.thread_context`), so an id from elsewhere reorders nothing.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
@@ -385,7 +390,13 @@ def _run_sync(
         from app import ask_planner
 
         ask_plan = ask_planner.plan_for_answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            # Same context the intent endpoint planned with, so the memo hit is a
+            # real reuse of THIS turn's plan rather than a differently-keyed
+            # second opinion.
+            prd_id=prd_id,
         )
 
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
@@ -468,6 +479,12 @@ def _run_sync(
             prd_id=prd_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            # The thread, and what the panel is showing in it — the two inputs
+            # `app.thread_context` needs to ground a question on the report or
+            # document THIS chat produced. Both optional: a Slack ask or a warm
+            # has no thread, and the block simply isn't built.
+            conversation_id=conversation_id,
+            open_artifact=open_artifact,
             # Cooperative cancellation: the user's Stop flips the job row to
             # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
             # steps and raises AskCancelled to abort before the expensive answer call.
@@ -561,6 +578,10 @@ async def run_ask_job(
     user_id: str | None = None,
     workspace_id: str | None = None,
     project_id: int | None = None,
+    #: The report/document the panel is showing — passed straight down to
+    #: `_run_sync` for `app.thread_context`'s ordering. Defaulted so every
+    #: existing caller and test double is unaffected.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
@@ -595,6 +616,7 @@ async def run_ask_job(
             project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            open_artifact=open_artifact,
             context_source=context_source,
         )
 
@@ -605,9 +627,12 @@ async def run_ask_job(
         # self-swallowing, so it can only ever ADD a durable artifact/memory
         # entry, never delay or break the already-stored answer.
         payload = outcome.response
-        # A report skill answers with a self-contained HTML document; capture
-        # it as a durable `reports` artifact (no-op for a markdown answer).
-        capture_report(
+        # A report answer is a durable artifact, not just a chat reply: capture
+        # it into `reports` with the originating ask's `conversation_id`, which
+        # is what lets /artifacts open a report over the thread that produced it
+        # and what the thread's own Reports panel lists on. A no-op for an
+        # ordinary answer.
+        report_id = capture_report(
             payload,
             company_id=enterprise_id,
             question=question,
@@ -617,6 +642,44 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
+        # A report GENERATED within a project chat also auto-attaches to that
+        # project's own artifact list — the same standing rule the other five
+        # artifact types already follow (prd/evidence/ticket_set/prototype/
+        # custom_artifact: "any artifact made in a project lands in the
+        # project"). It attaches the row `capture_report` just wrote rather
+        # than minting a second one: this block used to call
+        # `save_chat_output_as_report` itself, because capture was a no-op for
+        # every markdown report (see report_capture.py's docstring on the
+        # regression that made it one) — that workaround filed project reports
+        # under the `saved-chat` skill and, being project-only, left main chat
+        # with no report row at all.
+        #
+        # Gated STRICTLY on `context_source["kind"] == "project"` — never a
+        # top-level `project_id` fallback, which project chat never sends
+        # (the same source `maybe_promote_turn` below reads its project id
+        # from). `add_artifact` upserts on the `(project_id, artifact_type,
+        # artifact_id)` PK, so a rare double-run of this best-effort block
+        # is a no-op, never a duplicate ref. Best-effort by construction:
+        # a failure here can only fail to ADD an artifact ref — it can never
+        # delay or break the answer, already durably stored above.
+        if (
+            report_id is not None
+            and context_source
+            and context_source.get("kind") == "project"
+        ):
+            _report_project_id = (context_source.get("params") or {}).get("project_id")
+            if _report_project_id is not None:
+                try:
+                    from app.db import projects as projects_db
+
+                    projects_db.add_artifact(
+                        int(_report_project_id), "report", report_id
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "project report auto-attach failed ask_id=%s project_id=%s",
+                        ask_id, _report_project_id, exc_info=True,
+                    )
         # Private project chat: promote a durable insight into project
         # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
         # (the assembler resolved a project `SurfaceScope` for this turn, which

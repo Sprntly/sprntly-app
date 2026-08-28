@@ -110,7 +110,7 @@ const FEATURE_LABELS: Record<string, string> = {
   design_agent: "Prototype generation",
   chat: "Chat",
   ask: "Ask",
-  ideation: "Ideation",
+  ideation: "Backlog",
   synthesis: "Synthesis",
   top_insights: "Top Insights",
   // Pre-rename rows persisted `weekly_brief`; keep them labeled under the

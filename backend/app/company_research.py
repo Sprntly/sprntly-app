@@ -82,6 +82,11 @@ from app.graph.facade import GraphFacade
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
 from app.prompt_history import clamp_turn_text
+from app.report_phases import (
+    ReportPhase,
+    emit_report_phase,
+    emit_research_stage_phase,
+)
 # The salvage-tolerant JSON-array parser is shared with the public-feedback
 # capture pass: both read a model's "output ONLY a JSON array" turn and must
 # survive fences, prose wrappers and a budget-truncated tail. Reusing it keeps
@@ -523,6 +528,7 @@ def run_company_research(
     trigger: str,
     run_id: int | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Run the staged sweep for one company. Returns the run result dict::
 
@@ -571,6 +577,10 @@ def run_company_research(
         # Stage boundary = cancellation checkpoint. Each remaining stage is a
         # paid multi-search call, so a Stop here saves real money.
         _check_cancelled(is_cancelled)
+        # Narrate the staged sweep as a checklist — one phase per stage, since
+        # each stage is a discrete, minutes-long, individually-observable leg
+        # (the competitive_intel per-item pattern applied to fixed stages).
+        emit_research_stage_phase(on_phase, stage)
         try:
             records, meta = _capture_stage(
                 enterprise_id, profile=profile, url=url, stage=stage,
@@ -610,6 +620,9 @@ def run_company_research(
         if records:
             carried.append(_digest(records, stage))
 
+    # WRITING: the sweep is done — fold the findings into the business context
+    # and write up what was found. The last leg after the staged checklist.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     version = _fold_into_business_context(
         enterprise_id, records=all_records, url=url)
     failed_stages = sorted(s for s, c in stages.items() if c.get("error"))
@@ -698,6 +711,7 @@ def execute_run(
     url: str,
     trigger: str,
     is_cancelled: Callable[[], bool] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict:
     """Own the durable run row around `run_company_research`.
 
@@ -737,7 +751,7 @@ def execute_run(
     try:
         result = run_company_research(
             enterprise_id, url=url, trigger=trigger, run_id=run_id,
-            is_cancelled=is_cancelled,
+            is_cancelled=is_cancelled, on_phase=on_phase,
         )
     except Exception as exc:  # noqa: BLE001 — the row must reach a terminal state
         # A cancelled ask is not an error, but the row must still leave
@@ -919,8 +933,15 @@ def answer(
     question: str,
     history: list[dict] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    on_phase: Callable[[str], None] | None = None,
 ) -> dict | None:
     """Answer a company-research ask and return an Ask-shaped payload.
+
+    `on_phase`, when supplied, narrates the staged sweep as a checklist — one
+    phase per stage (products / positioning / pricing / market) then WRITING —
+    via the shared report vocabulary. This is the longest wait in the product,
+    so per-stage narration is the highest-value progress signal. A no-op
+    without a sink (the onboarding job passes none).
 
     A sweep is only run when it is actually needed. If a completed run exists
     inside the freshness window (`FRESH_RUN_DAYS`) and the user hasn't asked for
@@ -986,7 +1007,7 @@ def answer(
 
     try:
         result = execute_run(enterprise_id, url=url, trigger="chat",
-                             is_cancelled=is_cancelled)
+                             is_cancelled=is_cancelled, on_phase=on_phase)
     except Exception as exc:  # noqa: BLE001 — surface as a graceful chat message
         # A user Stop must propagate so the Ask job records a cancellation
         # rather than a "something broke" message.
@@ -1034,6 +1055,11 @@ def answer(
         "confidence": 0.6,
         "unanswered": "",
         "_skill": CR_SKILL,
+        # The sweep's findings document — captured as a `reports` artifact and
+        # attached to the chat that produced it. Not on `_plain_payload`'s
+        # apologies or on query mode's pointed answers, which carry `_skill`
+        # all the same.
+        "_report": True,
         "_skill_action": f"Company research · {len(records)} facts",
         "_skill_source": "company-research",
     }

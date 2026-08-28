@@ -16,6 +16,7 @@ import app.ask_job_runner as ajr
 import app.qa_agent as qa
 import app.routes.projects as projects_route
 from app import project_delegation, project_task_execution
+from app.ask_planner import Plan
 from app.db.workspaces import ensure_default_workspace
 from app.surface_scope import PROJECT_FACTS_AUTHORITATIVE_PREAMBLE, Surface, SurfaceScope
 
@@ -1388,3 +1389,209 @@ def test_terminal_narration_not_treated_as_empty(monkeypatch):
     )
     # The handler narration survives — the guard did NOT degrade it to a blank.
     assert out["answer"] == "Sent the brief to Priya's chat."
+
+
+# ── Sixth-branch gate yields to a report pipeline the planner already
+# resolved (report-routing fix) ─────────────────────────────────────────────
+# A report-phrased ask on a project surface ("how have my customers been
+# saying? give me a voice-of-customer report") lexically satisfies
+# `is_project_content_request` (leading interrogative + a content noun) just
+# like a genuine project-content question does — but the connector-blind
+# project tool loop has no report-generation tool at all, so it only ever
+# declines. When the planner has ALREADY resolved this turn to a report
+# pipeline at high confidence, the gate must defer instead, mirroring the
+# existing `_skip_project_connectors` clause rather than inventing a new
+# mechanism. Reports are company-wide by construction (`call_digest.answer`,
+# `market_intel.answer` etc. take no `project_id`), so the deferred turn
+# reaches the SAME shared report path main chat's identical phrasing already
+# produces — no project-scoping is added anywhere.
+
+
+@pytest.mark.parametrize(
+    "question, pipeline_id, patch_target",
+    [
+        (
+            "How have my customers been saying? Give me a voice-of-customer report",
+            "voice-of-customer-report",
+            "app.call_digest.answer",
+        ),
+        (
+            "give me a market intel report",
+            "market-intelligence-report",
+            "app.market_intel.answer",
+        ),
+    ],
+)
+def test_report_phrased_project_ask_defers_to_shared_report_path(
+    monkeypatch, question, pipeline_id, patch_target,
+):
+    """MUTATION-shaped proof of the fix. With the deferral clause present the
+    turn reaches the shared report engine (GREEN); forcing the predicate to
+    always report "nothing to defer to" (the pre-fix gate) reproduces the
+    wrongful decline (RED) — the exact reported symptom."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(pipeline_id=pipeline_id, confidence=0.92)
+
+    calls = {"scoped": 0, "report": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "DECLINED by the connector-blind project loop", "citations": []}
+
+    def _fake_report(**kw):
+        calls["report"] += 1
+        return {"answer": "Here is the report you asked for.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(patch_target, _fake_report)
+
+    # Sanity: the phrasing really does lexically satisfy the sixth-branch
+    # content gate — this is what makes the deferral load-bearing rather than
+    # incidental (a phrasing the gate never matched would pass either way).
+    from app.skill_router import is_project_content_request
+
+    assert is_project_content_request(question) is True, question
+
+    # GREEN (fix present): the turn reaches the shared report engine, never
+    # the project tool loop.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert calls["report"] == 1
+    assert out["answer"] == "Here is the report you asked for."
+
+    # RED (mutation: force the predicate as if no plan ever deferred it) —
+    # reproduces the wrongful decline the bug report described.
+    calls["scoped"] = 0
+    calls["report"] = 0
+    monkeypatch.setattr(qa, "_defers_to_report_pipeline", lambda *a, **kw: False)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert calls["report"] == 0
+    assert out["answer"].startswith("DECLINED")
+
+
+def test_report_pipeline_deferral_is_a_noop_with_no_plan(monkeypatch):
+    """AC byte-identity for every caller that predates the planner threading:
+    `plan=None` (the sixth branch's own default) must behave exactly as it
+    did before this fix — the project tool loop still claims a genuine
+    project-content question with no plan supplied at all."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "project ledger facts", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    out = qa.answer(
+        enterprise_id="c1", question="what tasks are open?", dataset="d",
+        scope=scope,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "project ledger facts"
+
+
+def test_sixth_branch_gate_and_report_defer_use_same_predicate():
+    """Symmetry proof (source-level), mirroring `test_sixth_branch_gate_and_
+    connector_skip_use_same_predicate`: the gate's report-defer clause reads
+    `_defers_to_report_pipeline(plan)` — one predicate, one call site, so the
+    mechanism cannot silently drift out of sync with itself."""
+    src = inspect.getsource(qa.answer)
+    assert "and not _defers_to_report_pipeline(plan)" in src
+
+
+def test_defers_to_report_pipeline_predicate_unit():
+    """Pure-unit coverage of the predicate itself: every member of the report
+    set (five `PIPELINE_SKILLS` report ids + the `call-digest` machinery id)
+    defers; a non-report pipeline id, a non-answer action, and no plan at all
+    do not."""
+    from app.skill_router import PIPELINE_SKILLS
+
+    for report_id in sorted(PIPELINE_SKILLS) + ["call-digest"]:
+        assert qa._defers_to_report_pipeline(
+            Plan(pipeline_id=report_id, confidence=0.9)
+        ) is True, report_id
+
+    # A non-report machinery id (a lookup/utility, not report generation).
+    assert qa._defers_to_report_pipeline(
+        Plan(pipeline_id="tracker-lookup", confidence=0.9)
+    ) is False
+    # No pipeline resolved at all — the ordinary outcome for project-meta/
+    # delegation/edit-doc phrasings.
+    assert qa._defers_to_report_pipeline(Plan()) is False
+    # A non-answer action must never be read as a report request even if a
+    # stray pipeline_id rode along.
+    non_answer_plan = dataclasses.replace(
+        Plan(pipeline_id="voice-of-customer-report", confidence=0.9),
+        action="list_artifacts",
+    )
+    assert qa._defers_to_report_pipeline(non_answer_plan) is False
+    # No plan at all.
+    assert qa._defers_to_report_pipeline(None) is False
+
+
+def test_sixth_branch_still_claims_genuine_project_turns_with_plan_present(monkeypatch):
+    """Regression per the report-routing fix (hard constraint #1). Supplying
+    a resolved `plan` must NOT broadly stand the sixth branch down — a plan
+    whose `pipeline_id` is None (the ordinary outcome for project-meta,
+    delegation, and edit-doc phrasings, none of which resemble a report
+    request) leaves the gate exactly as the existing gates already decide
+    it. Covers the three regression classes the fix names explicitly: a
+    project-meta question, a delegation phrase, and an edit-PRD phrase."""
+    no_report_plan = Plan()  # action=answer, pipeline_id=None
+    assert no_report_plan.pipeline_id is None
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "project agent turn", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    private = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    for question in (
+        "what tasks are open?",                     # project-meta
+        "please delegate the export review to Priya", # delegation
+    ):
+        calls["scoped"] = 0
+        out = qa.answer(
+            enterprise_id="c1", question=question, dataset="d",
+            scope=private, plan=no_report_plan,
+        )
+        assert calls["scoped"] == 1, question
+        assert out["answer"] == "project agent turn", question
+
+    # Edit-PRD phrase — needs a scope that registers an edit handler (private
+    # never does; see SurfaceScope.edit_prd_handler), same construction the
+    # existing edit-prd-grounding tests above use.
+    def _handler(tool_input):  # noqa: ARG001
+        return ("Done — I've updated the PRD.", None)
+
+    edit_capable = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+        edit_prd_handler=_handler,
+    )
+    calls["scoped"] = 0
+    out = qa.answer(
+        enterprise_id="c1", question="tighten the scope of the PRD",
+        dataset="d", scope=edit_capable, plan=no_report_plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "project agent turn"

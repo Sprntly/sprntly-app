@@ -100,6 +100,34 @@ class RunPlan:
     #: "the thing you believed is not supported, and here is what killed it",
     #: which is usually the more valuable half.
     hypotheses: tuple[str, ...] = ()
+    #: WHERE THE DEFINITION CAME FROM, and whether a person has said yes to it.
+    #:
+    #: The goal definition used to be settled at its own gate, one screen
+    #: earlier, before the plan existed. Product feedback collapsed the two: a
+    #: separate clarification step made the reader answer a question with no
+    #: context for it, and the answer it collected showed exactly why — a run
+    #: went out with its definition recorded as the literal words "that is
+    #: accurate", because that is what the reader typed at a question that was
+    #: not asking for a definition.
+    #:
+    #: So the definition now arrives here as a PROPOSAL and is adopted by the
+    #: same click that approves the plan. I9 is unchanged and these three
+    #: fields are how it stays unchanged: the proposal must be shown, be
+    #: attributed to whatever produced it, and be editable at the moment of
+    #: approval. `definition_adopted` is False for exactly as long as no person
+    #: has said yes.
+    definition_source: str = ""
+    definition_note: str = ""
+    definition_adopted: bool = False
+    #: HOW THE SURVIVORS GET ORDERED, said before the run rather than
+    #: discovered in the output.
+    #:
+    #: RICE by default, on Apurva's call. The `prioritize` skill's own checklist
+    #: says a framework should be "chosen with a reason, not defaulted to RICE"
+    #: — the reason here is that it is the one the reader asked for, and naming
+    #: it in the plan is what makes it a choice they can override rather than a
+    #: convention they discover afterwards.
+    framework: str = "RICE"
 
     def to_json(self) -> dict:
         return {
@@ -112,6 +140,10 @@ class RunPlan:
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
             "hypotheses": list(self.hypotheses),
+            "definition_source": self.definition_source,
+            "definition_note": self.definition_note,
+            "definition_adopted": self.definition_adopted,
+            "framework": self.framework,
         }
 
 
@@ -148,19 +180,25 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
     return out, total
 
 
-def build_plan(
-    *,
-    company_id: str,
-    goal_text: str,
-    definition_text: str,
-    currency: str = "accounts",
-    excluded_sources: tuple[str, ...] = (),
+def derive_gaps_and_promises(
+    kept: "tuple[SourceInventory, ...] | list[SourceInventory]",
     hypotheses: tuple[str, ...] = (),
-) -> RunPlan:
-    """What this run will try to establish, where it will look, and what it
-    will not be able to tell you."""
-    sources, total = source_inventory(company_id)
-    kept = tuple(s for s in sources if s.source_type not in excluded_sources)
+) -> tuple[tuple["Gap", ...], tuple[str, ...]]:
+    """What this run will NOT be able to answer, and what it WILL produce,
+    derived from the sources it will actually read.
+
+    EXTRACTED SO THE APPROVE PATH CAN RE-DERIVE THEM. `build_plan` computed
+    these from the kept set correctly, but approval narrowed only `sources` and
+    `total_signals` in place — so a reader who unticked analytics and revenue
+    still got a plan promising "your analytics/revenue data is connected and
+    will be read", in the same document that said those sources were excluded.
+    Worse, they lost the gap that had just become TRUE ("nothing connected here
+    carries numbers") along with its actionable remedy, and were handed "no
+    action needed from you" instead.
+
+    Pure: it reads only the kept inventory, so the plan gate and the approve
+    path cannot drift.
+    """
 
     present = {s.source_type for s in kept}
     gaps: list[Gap] = []
@@ -232,6 +270,27 @@ def build_plan(
             f"turned into a point estimate — that is the next thing being built"
         )
 
+    return tuple(gaps), tuple(produce)
+
+
+def build_plan(
+    *,
+    company_id: str,
+    goal_text: str,
+    definition_text: str,
+    currency: str = "accounts",
+    excluded_sources: tuple[str, ...] = (),
+    hypotheses: tuple[str, ...] = (),
+    definition_source: str = "",
+    definition_note: str = "",
+    definition_adopted: bool = False,
+    framework: str = "RICE",
+) -> RunPlan:
+    """What this run will try to establish, where it will look, and what it
+    will not be able to tell you."""
+    sources, total = source_inventory(company_id)
+    kept = tuple(s for s in sources if s.source_type not in excluded_sources)
+    gaps, produce = derive_gaps_and_promises(kept, hypotheses)
     return RunPlan(
         goal_text=goal_text,
         definition_text=definition_text,
@@ -242,4 +301,8 @@ def build_plan(
         total_signals=sum(s.signal_count for s in kept),
         excluded_sources=tuple(excluded_sources),
         hypotheses=tuple(h.strip() for h in hypotheses if h.strip()),
+        definition_source=definition_source,
+        definition_note=definition_note,
+        definition_adopted=definition_adopted,
+        framework=framework or "RICE",
     )

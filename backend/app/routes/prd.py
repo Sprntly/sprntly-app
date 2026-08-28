@@ -54,6 +54,7 @@ from app.db.prds import (
     list_prd_generations,
     list_prd_versions,
     mark_prd_generating,
+    mark_prd_read,
     resolve_prd_id_by_public_id,
     restore_prd_version,
     save_prd_version,
@@ -809,6 +810,18 @@ def get(
     row = get_prd_rendered(prd_id)
     if not row:
         raise HTTPException(404, "PRD not found")
+    # THIS is a person opening the document — the one place the product can
+    # honestly say a PRD was read. An auto-generated PRD is kept out of the
+    # library until this happens (`db.prds.is_hidden_from_library`), and this
+    # stamp is what moves it in: the pipeline's output has to earn its place by
+    # someone actually going to look at it, which they do from the brief that
+    # produced it.
+    #
+    # AFTER the ownership gate, so a foreign id 404s without recording
+    # anything, and advance-only + best-effort inside, so a second open cannot
+    # move the timestamp and a failed stamp cannot cost the caller the document
+    # they asked for.
+    mark_prd_read(prd_id)
     # Canonical share token: read-mostly get-or-create (see the /latest
     # handler's identical comment above).
     row["share_token"] = get_or_mint_canonical_share(

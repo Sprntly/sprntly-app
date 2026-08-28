@@ -121,6 +121,12 @@ def _seed_prd(*, brief_id: int, title: str, insight_index: int = 0,
         "status": status,
         "source": source,
         "theme_id": theme_id,
+        # READ, so the auto-archive rule (db.prds.is_hidden_from_library) does
+        # not hold brief-sourced rows out of these listings. This file is about
+        # the ARTIFACTS ENDPOINT's shape and scoping, not about which PRDs a
+        # library chooses to show; stamped rather than re-sourced, because
+        # `source` is what several of these tests vary on purpose.
+        "first_read_at": "2026-08-25T00:00:00Z",
     }
     if generated_at is not None:
         row["generated_at"] = generated_at

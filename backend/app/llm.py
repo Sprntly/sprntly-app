@@ -287,6 +287,46 @@ def _attempt_delay(attempt: int) -> float:
     return _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
 
 
+def _anthropic_kwargs(client: LLMClient, kwargs: dict) -> dict:
+    """Move `temperature` off the signature and into the request body.
+
+    `anthropic` 1.0.0 REMOVED `temperature` (and `top_p`/`top_k`) from
+    `messages.create()`. Passing one is not an API rejection — it is a plain
+    Python `TypeError` raised before any request is made, and `ask_planner`
+    passes `temperature=0`. Its caller catches that and logs "answering
+    unplanned", so the product does not error: it silently loses its router,
+    and every question falls through to the generic answer path. That is how
+    "show me the PRDs I created" came to be answered out of the knowledge
+    graph and a Slack channel index, naming PRD ids that do not exist.
+
+    `extra_body` is the SDK's own documented escape hatch for exactly this, it
+    lands the value in the same place on the wire, and it exists on BOTH
+    majors — so this is version-agnostic rather than a bet on which SDK a
+    deploy happens to resolve. The models here (`claude-sonnet-4-6`,
+    `claude-haiku-4-5`) still accept the parameter server-side; only the
+    client signature dropped it. Deleting `temperature` instead would have
+    been the smaller diff and the wrong one: sixteen call sites pin it to 0
+    for determinism, several saying so in as many words ("Pin to
+    temperature=0 for deterministic screen matching"), and a router that
+    answers differently to the same question twice is a worse router.
+
+    ANTHROPIC ONLY. `app.openai_client` reads `kwargs["temperature"]` off this
+    same dict and drops it for the GPT-5 family itself, so the OpenAI shim
+    must keep receiving it where it already looks. Metering leaves the client
+    object's type intact (it swaps `.messages`), which is what makes the
+    isinstance check here reliable.
+    """
+    if "temperature" not in kwargs or not isinstance(client, Anthropic):
+        return kwargs
+    out = dict(kwargs)
+    temperature = out.pop("temperature")
+    extra_body = dict(out.get("extra_body") or {})
+    # A caller that set it explicitly wins — this only fills the gap.
+    extra_body.setdefault("temperature", temperature)
+    out["extra_body"] = extra_body
+    return out
+
+
 def _create_with_retries(
     client: LLMClient, *, stream: bool = False, background: bool = False,
     on_delta=None, on_json_delta=None, **kwargs
@@ -328,6 +368,9 @@ def _create_with_retries(
     low-priority lane (capped, and always behind interactive waiters) so a
     user-facing call is never queued behind warm work.
     """
+    # Once, before the retry loop — every attempt sends the same request, and
+    # the translation is not something to redo per attempt.
+    kwargs = _anthropic_kwargs(client, kwargs)
     _wait_start = _time.monotonic()
     _llm_gate.acquire(background=background)
     waited = _time.monotonic() - _wait_start
@@ -435,6 +478,74 @@ _DEFAULT_MIN_CACHEABLE_TOKENS = 4096
 # where erring high costs a cache we could have had and erring low costs a dead
 # breakpoint — so this stays deliberately conservative.
 _CHARS_PER_TOKEN = 4
+
+
+def _create_maybe_batched(
+    client, *, batch: bool, label: str = "", batch_deadline_s: float | None = None,
+    stream: bool = False, background: bool = False, on_delta=None,
+    on_json_delta=None, **kwargs,
+):
+    """`_create_with_retries`, except a caller with no one waiting can pay half.
+
+    Anthropic's Message Batches API runs the SAME request for 50% of the price;
+    the trade is latency (minutes, not seconds). `batch=True` means "this work
+    is not on anyone's request path" — background ingest, a catalog backfill —
+    and it is opt-in per call site rather than a global default because only the
+    call site knows whether anything is waiting.
+
+    Falls back to the ordinary synchronous path whenever batching does not work
+    out (`run_batch` returns None: switch off, non-Anthropic key, API error,
+    deadline). ONE shape can never batch, and it is refused here rather than in
+    `app.llm_batch` because the reason is local to this module:
+
+      * PER-DELTA CALLBACKS. A batch returns one finished message; there are no
+        deltas to forward, so a caller that passed `on_delta`/`on_json_delta`
+        must keep the live path or it would silently stop streaming.
+
+    `stream` and a per-request `timeout` do NOT refuse a batch, which they used
+    to. Both exist for one reason — a large generation on the synchronous path
+    trips the HTTP read timeout — and a batch performs no synchronous read, so
+    neither applies to it. Refusing on them meant every long-output skill
+    (`prd-author`, `evidence-brief`, `implementation-spec`,
+    `ideation-prioritize` — see `graph.gateway._LONG_OUTPUT_SKILLS`) had
+    `batch=True` silently downgraded to a full-price live call, which is most of
+    the background generation in the product.
+
+    They are instead dropped for the BATCH attempt and kept for the FALLBACK.
+    That distinction is load-bearing: `run_batch` returns None on a switched-off
+    flag, a non-Anthropic key, an API error or a deadline, and the fallback then
+    runs the very generation the long-output transport exists for — Part B
+    averages ~185s against a 120s default read timeout, so falling back without
+    the streaming transport would trade a batch miss for a guaranteed
+    `httpx.ReadTimeout`.
+
+    `timeout` is also not a Messages-API body parameter — it is an SDK request
+    option — so it could not go into a batch request's `params` even if the
+    semantics fit.
+
+    The batched request is otherwise byte-identical to the one the sync path
+    would send, which is the point: `_build_base_kwargs` produced it, both paths
+    consume it, and neither can drift from the other.
+    """
+    can_batch = batch and on_delta is None and on_json_delta is None
+    if can_batch:
+        from app.llm_batch import BatchRequest, run_batch
+
+        # Strip the SDK request option; the body is what a batch carries.
+        batch_kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
+        results = run_batch(
+            [BatchRequest("r0", batch_kwargs)],
+            label=label,
+            **({"deadline_s": batch_deadline_s}
+               if batch_deadline_s is not None else {}),
+        )
+        if results and "r0" in results:
+            return results["r0"]
+    # Fallback keeps the caller's original transport, timeout included.
+    return _create_with_retries(
+        client, stream=stream, background=background, on_delta=on_delta,
+        on_json_delta=on_json_delta, **kwargs,
+    )
 
 
 def _cache_control(ttl: str | None) -> dict:
@@ -579,6 +690,77 @@ def _unwrap_response_envelope(out, schema):
     return inner
 
 
+def build_json_kwargs(
+    *,
+    system: str,
+    user: str,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 16000,
+    schema: dict | None = None,
+    user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
+    temperature: float | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """Build the exact `messages.create` kwargs `call_json` sends — model,
+    max_tokens, system, messages, and (when `schema` is given) the forced
+    `submit_response` tool + `tool_choice`.
+
+    `call_json` calls this and hands the result straight to
+    `_create_maybe_batched`, so a LIVE `call_json(...)` call and a BATCHED
+    request built from the same arguments (e.g.
+    `app.llm_batch.BatchRequest(custom_id, build_json_kwargs(...))`) are
+    byte-identical params — the same "cannot drift" guarantee
+    `_build_base_kwargs` already gives the sync/per-call-batch seam inside
+    `_create_maybe_batched`, one layer up: a caller assembling a BULK batch
+    (many `BatchRequest`s handed to `app.llm_batch.run_batch` directly, rather
+    than the one-request-per-call `batch=True` opt-in below) uses this same
+    function so its requests can never diverge from what the live path would
+    have sent.
+    """
+    kwargs: dict = _build_base_kwargs(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
+        temperature=temperature,
+    )
+    if timeout is not None:
+        # Per-request read-timeout override (an SDK request option) — used for
+        # long generations that exceed the client default.
+        kwargs["timeout"] = timeout
+    if schema is not None:
+        kwargs["tools"] = [{
+            "name": "submit_response",
+            "description": "Submit the structured response. All fields required.",
+            "input_schema": schema,
+        }]
+        kwargs["tool_choice"] = {"type": "tool", "name": "submit_response"}
+    return kwargs
+
+
+def parse_tool_response(msg, schema: dict | None) -> dict:
+    """Extract the structured dict from a forced `submit_response` tool-use
+    Message — the same parsing `call_json`'s schema branch applies to a live
+    response.
+
+    Shared so a BATCHED result (one of the raw Anthropic `Message` objects
+    `app.llm_batch.run_batch` returns, keyed by `custom_id`) parses IDENTICALLY
+    to the live path; only the transport differs, never the interpretation of
+    the response. Raises the same 502 `HTTPException` `call_json` would for a
+    response that never invoked the tool.
+    """
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "submit_response":
+            out = dict(block.input) if not isinstance(block.input, dict) else block.input
+            return _unwrap_response_envelope(out, schema)
+    raise HTTPException(
+        502, "LLM did not invoke the structured response tool"
+    )
+
+
 def call_json(
     *,
     system: str,
@@ -594,8 +776,16 @@ def call_json(
     background: bool = False,
     temperature: float | None = None,
     on_json_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
+
+    `batch=True` routes the call through the Message Batches API at half price
+    when nothing is waiting on it — see `_create_maybe_batched`. It is a pure
+    cost/latency trade: the request, the response handling, and the returned
+    value are identical either way, and any problem falls back to the live path.
 
     If `schema` is provided, uses Anthropic tool-use with a forced tool_choice
     — the SDK validates the structured input and returns a real dict, which
@@ -616,44 +806,35 @@ def call_json(
     prompt is also substantial (>1000 chars), it gets the same treatment.
     """
     client = get_client()
-    base_kwargs: dict = _build_base_kwargs(
-        model=model,
-        max_tokens=max_tokens,
+    base_kwargs: dict = build_json_kwargs(
         system=system,
         user=user,
+        model=model,
+        max_tokens=max_tokens,
+        schema=schema,
         user_cacheable_prefix=user_cacheable_prefix,
         cache_ttl=cache_ttl,
         temperature=temperature,
+        timeout=timeout,
     )
-    if timeout is not None:
-        # Per-request read-timeout override (an SDK request option) — used for
-        # long generations that exceed the client default.
-        base_kwargs["timeout"] = timeout
     if schema is not None:
-        tool = {
-            "name": "submit_response",
-            "description": "Submit the structured response. All fields required.",
-            "input_schema": schema,
-        }
-        msg = _create_with_retries(
+        msg = _create_maybe_batched(
             client,
+            batch=batch,
+            label=batch_label,
+            batch_deadline_s=batch_deadline_s,
             stream=stream,
             background=background,
             on_json_delta=on_json_delta,
             **base_kwargs,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "submit_response"},
         )
         _capture_meta(meta_out, msg, model)
-        for block in msg.content:
-            if block.type == "tool_use" and block.name == "submit_response":
-                out = dict(block.input) if not isinstance(block.input, dict) else block.input
-                return _unwrap_response_envelope(out, schema)
-        raise HTTPException(
-            502, "LLM did not invoke the structured response tool"
-        )
+        return parse_tool_response(msg, schema)
 
-    msg = _create_with_retries(client, stream=stream, background=background, **base_kwargs)
+    msg = _create_maybe_batched(
+        client, batch=batch, label=batch_label, batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, **base_kwargs,
+    )
     _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
@@ -684,8 +865,16 @@ def call_md(
     background: bool = False,
     temperature: float | None = None,
     on_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
+
+    `batch=True` is the same half-price opt-in `call_json` takes — see
+    `_create_maybe_batched`. It matters most on THIS branch: markdown callers
+    are where the long-output skills live (prd-author and friends), and those
+    are exactly the background generations worth batching.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for
@@ -713,8 +902,10 @@ def call_md(
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
-    msg = _create_with_retries(
-        get_client(), stream=stream, background=background, on_delta=on_delta, **kwargs
+    msg = _create_maybe_batched(
+        get_client(), batch=batch, label=batch_label,
+        batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, on_delta=on_delta, **kwargs
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()

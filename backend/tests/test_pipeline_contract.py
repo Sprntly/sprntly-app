@@ -238,6 +238,43 @@ def test_prd_skill_has_no_scope_assumption_boilerplate(repo_root):
         assert 'class="scope"' not in text, f"leftover .scope markup in {path.name}"
 
 
+def test_prd_riskiest_box_label_is_just_the_label(repo_root):
+    """The riskiest-assumption callout is labelled "Riskiest assumption" and
+    nothing else.
+
+    It used to read "Riskiest assumption — exactly one". That second half is a
+    rule for the WRITER — a PRD names one load-bearing assumption, not three —
+    and it had been written into the label the READER sees, where it means
+    nothing: nobody reading a finished PRD is choosing how many to list.
+
+    The rule itself is untouched and lives where rules live: SKILL.md still
+    says "exactly one riskiest assumption", and the template's own placeholder
+    still asks for exactly one. Guard every source, examples included, since
+    the model imitates those more readily than it reads the template."""
+    prd_dir = repo_root / "skills" / "prd-author"
+    sources = [
+        prd_dir / "templates" / "prd-template.html",
+        prd_dir / "examples" / "01-perch.html",
+        prd_dir / "examples" / "02-tandem.html",
+        prd_dir / "examples" / "03-copperline.html",
+    ]
+    for path in sources:
+        text = path.read_text(encoding="utf-8")
+        assert '<span class="rk">Riskiest assumption</span>' in text, (
+            f"{path.name}: the callout label is not the bare label"
+        )
+        assert "Riskiest assumption — exactly one" not in text, (
+            f"{path.name}: the author-facing rule is back in the reader's label"
+        )
+
+    # The rule survives where it belongs — a label change must not quietly
+    # relax the one-assumption contract.
+    skill = (prd_dir / "SKILL.md").read_text(encoding="utf-8").lower()
+    assert "exactly one riskiest assumption" in skill
+    template = (prd_dir / "templates" / "prd-template.html").read_text(encoding="utf-8")
+    assert "{{exactly one riskiest assumption}}" in template
+
+
 def test_prd_skill_part_b_template_is_derived_impl_spec(repo_root):
     """Part B is the machine-readable Implementation Spec, derived ONLY from a
     Part A: a B0 derivation header plus EARS requirements traced to Part A IDs."""

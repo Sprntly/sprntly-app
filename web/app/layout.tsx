@@ -46,19 +46,7 @@ const CRITICAL_CSS = `
     transition: opacity 0.2s ease;
   }
   #app-splash.is-hidden { opacity: 0; pointer-events: none; }
-  #app-splash .app-splash__inner {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 18px;
-  }
   #app-splash .app-splash__mark { color: #111111; display: block; }
-  #app-splash .app-splash__text {
-    color: #6B7770;
-    font-size: 13px;
-    font-weight: 500;
-    letter-spacing: 0.01em;
-  }
   /* The working animation, duplicated here on purpose. This block is inlined
      in <head> so the first paint has it; globals.css — which carries the same
      keyframes for the rest of the app — has not loaded yet at that point, and
@@ -119,24 +107,21 @@ export default function RootLayout({
             — a component import would arrive with React, long after the frame
             this is meant to fill. Geometry is identical to that component's. */}
         <div id="app-splash" aria-hidden="true">
-          <div className="app-splash__inner">
-            <svg
-              className="app-splash__mark"
-              width="56"
-              height="56"
-              viewBox="0 0 126 126"
-              fill="currentColor"
-              aria-hidden="true"
-            >
-              <g className="spr-iris">
-                <rect className="spr-blade-top" x="21" y="21" width="60" height="22" />
-                <rect className="spr-blade-right" x="83" y="21" width="22" height="60" />
-                <rect className="spr-blade-bottom" x="45" y="83" width="60" height="22" />
-                <rect className="spr-blade-left" x="21" y="45" width="22" height="60" />
-              </g>
-            </svg>
-            <span className="app-splash__text">Loading…</span>
-          </div>
+          <svg
+            className="app-splash__mark"
+            width="56"
+            height="56"
+            viewBox="0 0 126 126"
+            fill="currentColor"
+            aria-hidden="true"
+          >
+            <g className="spr-iris">
+              <rect className="spr-blade-top" x="21" y="21" width="60" height="22" />
+              <rect className="spr-blade-right" x="83" y="21" width="22" height="60" />
+              <rect className="spr-blade-bottom" x="45" y="83" width="60" height="22" />
+              <rect className="spr-blade-left" x="21" y="45" width="22" height="60" />
+            </g>
+          </svg>
         </div>
         <SplashRemover />
         <AuthProvider>{children}</AuthProvider>

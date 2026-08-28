@@ -55,12 +55,12 @@ def test_respect_stated_timeline_uses_stated():
 
 
 def test_respect_stated_timeline_clamps_stated_below_floor():
-    """A stated timeline earlier than the floor is raised to the floor —
-    never respected as-is if it's too soon."""
-    stated = NOW + timedelta(minutes=30)
+    """A stated timeline earlier than the small stated floor is raised to
+    the small stated floor — never respected as-is if it's too soon."""
+    stated = NOW + timedelta(minutes=1)
     proposed = NOW + timedelta(hours=1)
     result = cadence.respect_stated_timeline(stated, proposed, now=NOW, last_checked_in=None)
-    assert result == NOW + timedelta(hours=24)
+    assert result == NOW + timedelta(minutes=5)
 
 
 def test_respect_stated_timeline_none_falls_back():
@@ -68,6 +68,51 @@ def test_respect_stated_timeline_none_falls_back():
     result = cadence.respect_stated_timeline(None, proposed, now=NOW, last_checked_in=None)
     assert result == cadence.clamp_next_check_in(proposed, last_checked_in=None, now=NOW)
     assert result == proposed
+
+
+# ── stated-timeline honoring / small floor (AC1–AC5, this fix) ──────────
+
+
+def test_respect_stated_timeline_honors_short_stated_below_24h():
+    """A human-stated timeline below the 24h model floor is honored as-is,
+    not raised to 24h."""
+    stated = NOW + timedelta(minutes=10)
+    result = cadence.respect_stated_timeline(
+        stated, None, now=NOW, last_checked_in=NOW - timedelta(minutes=2)
+    )
+    assert result == NOW + timedelta(minutes=10)
+
+
+def test_respect_stated_timeline_stated_above_small_floor_respected():
+    stated = NOW + timedelta(days=3)
+    proposed = NOW + timedelta(hours=2)
+    result = cadence.respect_stated_timeline(stated, proposed, now=NOW, last_checked_in=None)
+    assert result == NOW + timedelta(days=3)
+
+
+def test_respect_stated_timeline_floor_anchors_on_last_checked_in():
+    stated = NOW + timedelta(minutes=1)
+    result = cadence.respect_stated_timeline(
+        stated, None, now=NOW, last_checked_in=NOW + timedelta(minutes=30)
+    )
+    assert result == NOW + timedelta(minutes=35)
+
+
+def test_stated_and_model_floors_are_distinct_constants():
+    assert cadence.STATED_TIMELINE_MIN_INTERVAL == timedelta(minutes=5)
+    assert cadence.MIN_INTERVAL == timedelta(hours=24)
+
+
+def test_clamp_model_proposed_still_floors_at_24h():
+    result = cadence.clamp_next_check_in(
+        NOW + timedelta(hours=1), last_checked_in=NOW, now=NOW
+    )
+    assert result == NOW + timedelta(hours=24)
+
+
+def test_clamp_none_still_returns_24h_floor():
+    result = cadence.clamp_next_check_in(None, last_checked_in=None, now=NOW)
+    assert result == NOW + timedelta(hours=24)
 
 
 # ── in_quiet_hours / next_send_window (AC7) ──────────────────────────────

@@ -351,6 +351,117 @@ async def create_document(
     return await asyncio.to_thread(_create_document, row, company)
 
 
+#: §6's convention statement, per metric family. "If no computation is found,
+#: state the common convention you are assuming for that metric, in one
+#: sentence, and let them change it."
+#:
+#: THIS IS AN ASSUMPTION OFFERED FOR CORRECTION, NOT AN INFERENCE. §10 forbids
+#: inferring a definition and I9 forbids locking one without a human; §6
+#: explicitly asks for the opposite move — say out loud what you would otherwise
+#: assume silently, so the user can overwrite it in the box directly beneath.
+#: The difference is whether the sentence is stated and editable, and it is
+#: both: nothing here reaches `crucible_goal_definitions` unless the user leaves
+#: it in their own confirmed text.
+#:
+#: Keyed on words that appear in the GOAL, not on anything about the company —
+#: a per-company convention would be exactly the cross-customer contamination
+#: README F11 bars. These are the ordinary industry readings, and each names the
+#: fork it is choosing, because the fork is the part that resizes every
+#: recommendation (F4: "two teams both say revenue and mean recognised versus
+#: booked").
+_METRIC_CONVENTIONS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("churn", "attrition"),
+     "I will read churn as LOGO churn — accounts that cancel or fail to renew — "
+     "rather than revenue churn, and as voluntary and involuntary together."),
+    (("retention", "renewal", "nrr", "grr"),
+     "I will read retention on ACCOUNTS rather than on revenue, and count an "
+     "account retained if it renews at all, regardless of contraction."),
+    (("revenue", "arr", "mrr", "bookings"),
+     "I will read revenue as RECOGNISED rather than booked, net of refunds and "
+     "credits, excluding internal and comped accounts."),
+    (("activation", "onboarding", "adoption"),
+     "I will read activation as an account reaching first meaningful use, not "
+     "merely signing up, and count it once per account."),
+    (("engagement", "active", "usage", "dau", "mau"),
+     "I will read active as having taken an action in the window, not merely "
+     "having logged in."),
+    (("conversion", "signup", "trial"),
+     "I will read conversion as the share of starts that reach the paid step "
+     "within the window, counted on accounts rather than on sessions."),
+)
+
+
+#: WHAT THE RUN DOES WITH THE SENTENCE, once there is a sentence.
+#:
+#: Split out of `_method_note` when the clarification gate folded into the
+#: plan. On the folded path the CONVENTION is no longer a note about the
+#: definition — it IS the definition, sitting in an editable field — so
+#: repeating it underneath is exactly the "multiple repetitions and LLM
+#: re-explaining" the feedback asked us to cut. What still needs saying is the
+#: part the sentence itself cannot: that it is taken literally, and what gets
+#: read against it.
+#:
+#: A CONSTANT for every company and goal, deliberately: the mechanism it
+#: describes does not vary, so branching on anything would imply the run
+#: behaves differently when it does not.
+_PROCESS_NOTE = (
+    "I will work to that sentence exactly as you write it: I do not "
+    "recompute it, and I do not fill in anything you leave out. The "
+    "analysis then reads your documents, tickets and conversations against "
+    "it, not a metric series, so it reports how much of your book each "
+    "theme touches rather than a movement in this number."
+)
+
+
+def _convention_definition(goal_text: str) -> str:
+    """The definition this run will assume when nothing else has one.
+
+    Same table `_method_note` reads, returning the CONVENTION SENTENCE alone —
+    the note wraps it in process prose, which reads as an explanation rather
+    than as a definition you can edit. Empty when the goal names no metric
+    family we have a convention for, and empty is load-bearing: there is then
+    nothing to propose, so the run asks rather than inventing one, which is the
+    inference I9 exists to forbid.
+    """
+    lowered = f" {(goal_text or '').lower()} "
+    return next(
+        (text for words, text in _METRIC_CONVENTIONS
+         if any(w in lowered for w in words)),
+        "",
+    )
+
+
+def _method_note(goal_text: str) -> str:
+    """§6's one sentence: the calculation, stated and editable.
+
+    A metric NAME is not a definition — "revenue" can be recognised or booked,
+    "active" can mean logged in or took an action, and none of that is visible
+    in the name while all of it resizes every recommendation (F4).
+
+    §6's rule is to surface the company's own computation where one exists and
+    otherwise to STATE THE CONVENTION being assumed. Nothing in this codebase
+    reads a dbt model or a metric layer yet, so the second branch is the honest
+    one — and an earlier version of this function skipped it entirely, saying
+    only what the ANALYSIS reads (documents, not a metric series) while citing
+    §6 and F4 as its justification. That is a true sentence answering a
+    different, easier question than the one §6 poses, with §6's citation on it.
+
+    Where the goal names no recognisable metric family there is no convention to
+    state, and inventing one would be the inference §10 forbids. That case gets
+    the process sentence alone, which is what it always was.
+    """
+    lowered = f" {(goal_text or '').lower()} "
+    convention = next(
+        (text for words, text in _METRIC_CONVENTIONS
+         if any(w in lowered for w in words)),
+        "",
+    )
+    process = _PROCESS_NOTE
+    if not convention:
+        return process
+    return f"{convention} Say otherwise below and I will use your reading. {process}"
+
+
 def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
@@ -552,6 +663,13 @@ async def chat_edit_document(
 
 class ApprovePlan(BaseModel):
     """What the user changed about the plan before saying go."""
+    #: THE DEFINITION, ADOPTED BY THIS CLICK. The plan renders it as an
+    #: editable proposal, so approving is the moment a person agrees to those
+    #: words — I9's human act, now on the same screen as the method rather
+    #: than one gate earlier. Optional because a client that sends nothing is
+    #: agreeing to the proposal exactly as it was shown, which the server can
+    #: read straight off the stored plan.
+    definition_text: Optional[Annotated[str, StringConstraints(max_length=4_000)]] = None
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
     # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
     # ten 40,000-char hypotheses render past the document limit with only a
@@ -570,9 +688,18 @@ async def approve(
     """The SECOND gate. The plan said what would be read and what could not be
     answered; this is the user saying go, having seen both.
 
-    Separate from `/confirm` on purpose. Confirming a goal DEFINITION and
-    approving a method are different decisions, and collapsing them is how a
-    user ends up having agreed to something they never saw.
+    THIS NOW CARRIES THE DEFINITION TOO, and the comment it replaces argued
+    the opposite: that confirming a definition and approving a method are
+    different decisions, and collapsing them is how a user agrees to something
+    they never saw. The second half of that is still exactly right and is why
+    the plan renders the definition as an editable field rather than swallowing
+    it — what changed is that a SEPARATE SCREEN turned out to be the thing
+    producing agreement-without-seeing. Asked cold, with no plan yet on screen
+    to give the question meaning, one reader answered it "that is accurate" and
+    that sentence became the definition of the run.
+
+    So both decisions are made here, both are visible here, and neither is
+    inferred: `/confirm` still exists for runs already parked at the old gate.
     """
     claimed = await asyncio.to_thread(
         runs_db.claim_for_approval, run_id, company.company_id
@@ -588,7 +715,13 @@ async def approve(
         )
 
     meta = _meta_of(run_id, company.company_id)
-    definition_text = (meta.get("plan") or {}).get("definition_text") or ""
+    # THE EDIT WINS, THE PROPOSAL IS THE FALLBACK. A body that carries text is
+    # the reader having changed the proposed definition in place; a body that
+    # carries none is them agreeing to it as shown. Blank-after-strip is
+    # treated as "no change" rather than as an empty definition — `confirm_goal`
+    # refuses to lock nothing, and a 500 there would strand a claimed run.
+    edited = (body.definition_text or "").strip()
+    definition_text = edited or (meta.get("plan") or {}).get("definition_text") or ""
 
     kwargs = dict(
         run_id=run_id, company_id=company.company_id,
@@ -630,6 +763,13 @@ def execute_run(
     what happened.
     """
     now = datetime.now(timezone.utc)
+    # WHOSE WORDS THESE ARE. A definition arriving already set came from
+    # `/confirm` — a person typed it at the old gate — so it is adopted before
+    # this function starts. One resolved below on the folded path is a
+    # proposal until `/approve` carries it back, and these two flags are what
+    # keep those cases distinguishable everywhere downstream.
+    definition_source = "your own words"
+    definition_adopted = definition_text is not None
     try:
         runs_db.heartbeat(run_id, company_id)
 
@@ -661,41 +801,104 @@ def execute_run(
                 resolution.definition.definition_text
                 if resolution.definition is not None else ""
             )
-            runs_db.update(
-                run_id, company_id,
-                status="awaiting_confirmation",
-                prioritisation={
-                    "ask": resolution.ask,
-                    "resolution": resolution.status,
-                    "proposed_definition": proposed,
-                    "proposed_source": (
+            # ── FOLD THE CLARIFICATION INTO THE PLAN. ───────────────────────
+            #
+            # Decided BEFORE anything is written, and the order is the fix for
+            # a race rather than a tidiness preference. The first version of
+            # this wrote `awaiting_confirmation` and then fell through to build
+            # the plan — so for the second or so that the inventory query took,
+            # the row advertised a gate that this run was never going to stop
+            # at. The chat polls for either gate; a poll landing in that window
+            # rendered the definition card for a run that had already moved on,
+            # which is precisely the screen this change exists to remove.
+            #
+            # Why it stopped being its own step: asking "what does revenue mean
+            # to you?" cold, before the reader has seen a single thing the run
+            # intends to do, is a question with no context attached — and the
+            # answers showed it. One run went out with its definition recorded
+            # as the literal words "that is accurate", because that is what the
+            # reader typed at a prompt that was not, to them, asking for a
+            # definition. A second screen later they were asked to approve a
+            # plan built on it.
+            #
+            # I9 IS NOT WEAKENED, AND THIS IS THE PART TO CHECK. The rule is
+            # that a definition is adopted or elicited, never inferred — it has
+            # never been a rule about how many screens that takes. What it
+            # requires is that a person sees the words and says yes to them.
+            # They still do: the proposal is rendered inside the plan, editable
+            # in place, and `/approve` locks whatever text comes back from that
+            # field. `definition_adopted=False` says in the row itself that
+            # nobody has agreed yet.
+            #
+            # TWO CASES STILL STOP AT THEIR OWN GATE, because in neither is
+            # there an honest proposal to put in front of anyone:
+            #   - nothing to propose (no KPI-tree definition, and the goal
+            #     names no metric family we hold a convention for) — inventing
+            #     one is the inference the invariant forbids;
+            #   - two authoritative systems that DISAGREE, where the conflict
+            #     is worth more than either answer and picking one silently is
+            #     the failure. That is a decision, not a confirmation, and it
+            #     gets its own screen.
+            prefill = proposed or _convention_definition(goal_text)
+            folds = bool(prefill) and not resolution.conflicts
+
+            if folds:
+                _remember(run_id, resolution)
+                definition_text = prefill
+                definition_source = (
+                    "your own metric tree" if proposed
+                    else "the usual reading of this metric"
+                )
+            else:
+                runs_db.update(
+                    run_id, company_id,
+                    status="awaiting_confirmation",
+                    prioritisation={
+                        "ask": resolution.ask,
+                        "resolution": resolution.status,
+                        "proposed_definition": proposed,
+                        "proposed_source": (
                         resolution.definition.definition_source_ref
                         if resolution.definition is not None else None
-                    ),
-                    # Carried, never resolved: two authoritative systems
-                    # disagreeing about what a metric means is worth more than
-                    # either answer, and picking one silently is the failure.
-                    "conflicts": [
+                        ),
+                        # Carried, never resolved: two authoritative systems
+                        # disagreeing about what a metric means is worth more than
+                        # either answer, and picking one silently is the failure.
+                        "conflicts": [
                         {"metric": c.metric_name,
-             "a": {"source": c.source_a, "definition": c.definition_a},
-             "b": {"source": c.source_b, "definition": c.definition_b}}
+                 "a": {"source": c.source_a, "definition": c.definition_a},
+                 "b": {"source": c.source_b, "definition": c.definition_b}}
                         for c in resolution.conflicts
-                    ],
-                },
-            )
-            _remember(run_id, resolution)
-            return
+                        ],
+                        # §6, IN THE SAME STEP. "If no computation is found, state
+                        # the common convention you are assuming for that metric,
+                        # in one sentence, and let them change it." Identity without
+                        # method is README F4's "half of this that gets missed" —
+                        # two teams can point at the same metric name and mean
+                        # recognised versus booked, and none of that is visible in
+                        # the name while all of it resizes every recommendation.
+                        "method_note": _method_note(goal_text),
+                    },
+                )
+                _remember(run_id, resolution)
+                return
 
-        # Past this line a human confirmed these words. Lock and persist the
-        # definition BEFORE spending anything, so the run is auditable even if
-        # the analysis below fails.
-        pending = _pending(run_id) or _bare_definition(company_id, goal_text)
-        locked = confirm_goal(
-            pending, user_id=confirmed_by or "", at=now,
-            definition_text=definition_text,
-        )
-        definition_row_id = runs_db.save_definition(company_id, locked)
-        runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
+
+        # NOTHING IS LOCKED ON THE WAY TO THE PLAN. This block used to run
+        # here unconditionally, which was right while the definition arrived
+        # already confirmed from gate one. It is not right now: on the folded
+        # path `definition_text` is a PROPOSAL, and locking it here would
+        # record a person as having confirmed words they had not yet been
+        # shown — with their user id on it. The lock belongs to the act that
+        # actually is the agreement, which is approving the plan.
+        if approved:
+            pending = _pending(run_id) or _bare_definition(company_id, goal_text)
+            locked = confirm_goal(
+                pending, user_id=confirmed_by or "", at=now,
+                definition_text=definition_text,
+            )
+            definition_row_id = runs_db.save_definition(company_id, locked)
+            runs_db.update(run_id, company_id, goal_definition_id=definition_row_id)
 
         # ── Stage 1. SAY WHAT WILL BE DONE, then stop for approval. ─────────
         #
@@ -712,6 +915,9 @@ def execute_run(
                 goal_text=goal_text,
                 definition_text=definition_text,
                 currency="accounts",
+                definition_source=definition_source,
+                definition_note=_PROCESS_NOTE,
+                definition_adopted=definition_adopted,
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()
@@ -725,10 +931,38 @@ def execute_run(
         # finished report lists a source the user dropped among the ones it
         # read, and loses the hypotheses they typed entirely — a report that
         # misstates its own inputs is worse than one that shows fewer.
-        if excluded_sources or hypotheses:
+        # AND THE DEFINITION, WHICH WAS THE ONE ANSWER THAT NEVER LANDED.
+        #
+        # The report renders `plan.definition_text` under the words "You
+        # confirmed this goal means, IN YOUR OWN WORDS". Approve folded the
+        # dropped sources and the hypotheses into the stored plan and left the
+        # definition at whatever was PROPOSED — so a reader who corrected the
+        # proposal got their correction locked (the definition ROW was always
+        # right) and then read the document attributing the sentence they had
+        # just rejected to themselves. A false attribution is worse than the
+        # clumsy definition this gate exists to prevent, and a test that checked
+        # the write and not the read is how it survived.
+        #
+        # UNCONDITIONAL NOW. This block only runs on approve, and every approve
+        # settles the same three things — what was dropped, what was believed,
+        # and what the metric means. The old gate asked whether sources or
+        # hypotheses had changed, so a reader who edited ONLY the definition
+        # skipped it entirely; a predicate for "did the definition change"
+        # would have fixed that case and left a branch whose two sides write the
+        # same bytes, since an unedited approve carries the proposal forward
+        # verbatim anyway.
+        if True:
             meta = dict(_meta_of(run_id, company_id))
             plan_json = dict(meta.get("plan") or {})
             if plan_json:
+                # The words the run actually worked from — the reader's edit
+                # when they made one, the proposal verbatim when they did not.
+                plan_json["definition_text"] = definition_text
+                # AND IT IS ADOPTED, which is the whole meaning of this click.
+                # `definition_adopted` was written False at plan time to say
+                # nobody had agreed yet; leaving it False past the agreement
+                # would make the record contradict the act it exists to record.
+                plan_json["definition_adopted"] = True
                 kept = [
                     src for src in (plan_json.get("sources") or [])
                     if src.get("source_type") not in excluded_sources
@@ -739,6 +973,38 @@ def execute_run(
                 )
                 plan_json["excluded_sources"] = list(excluded_sources)
                 plan_json["hypotheses"] = list(hypotheses)
+                # AND THE GAPS AND PROMISES, which are DERIVED from the kept
+                # set and were being left at their pre-exclusion values. A
+                # reader who unticked analytics and revenue still got "your
+                # analytics/revenue data is connected and will be read" in the
+                # same document that said those sources were excluded — and
+                # lost the gap that had just become true ("nothing connected
+                # here carries numbers") along with the remedy that would close
+                # it, handed "no action needed from you" instead.
+                #
+                # Re-derived through the same pure function the plan gate uses,
+                # so the two cannot drift.
+                from app.crucible.plan import (
+                    SourceInventory, derive_gaps_and_promises,
+                )
+                gaps, produce = derive_gaps_and_promises(
+                    [
+                        SourceInventory(
+                            source_type=src.get("source_type") or "",
+                            signal_count=int(src.get("signal_count") or 0),
+                            label=src.get("label") or "",
+                            witnesses=src.get("witnesses") or "",
+                        )
+                        for src in kept
+                    ],
+                    tuple(hypotheses),
+                )
+                plan_json["cannot_answer"] = [
+                    {"question": g.question, "because": g.because,
+                     "remedy": g.remedy}
+                    for g in gaps
+                ]
+                plan_json["will_produce"] = list(produce)
                 meta["plan"] = plan_json
                 runs_db.update(run_id, company_id, prioritisation=meta)
 
@@ -759,6 +1025,22 @@ def execute_run(
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
         claims, stats = project_signals(signals)
+        # SOURCES OF THE CLAIMS, not of the rows. Counting `signals` says "read
+        # from 4 sources" on a tenant whose entire `docs` corpus was retired —
+        # so a PM defending the ranking believes their documents are in it when
+        # no claim came from one.
+        # BOTH DROP REASONS, separately. `seen - projected` is retired PLUS
+        # undated, and attributing all of it to a missing date is the same
+        # "confidently stated false reason" the coverage note already avoids —
+        # the two would print different numbers for one fact on one run.
+        _progress(
+            run_id, company_id, step="grouping",
+            signals_read=stats.get("seen") or 0,
+            claims=stats.get("projected") or 0,
+            retired=stats.get("retired") or 0,
+            undated=stats.get("no_timestamp") or 0,
+            sources=len({c.source_id for c in claims if c.source_id}),
+        )
 
         # GROUPING: the graph's own themes first, embeddings only for whatever
         # it left unthemed.
@@ -796,6 +1078,20 @@ def execute_run(
             cluster_stats.update(embed_stats)
 
         runs_db.update(run_id, company_id, claim_count=len(claims))
+        # EXACT COUNTS ONLY. `themed`/`unthemed` are measured; the number of
+        # GROUPS is not known until `build_findings` clusters, so it is not
+        # reported here rather than estimated and silently corrected later — a
+        # narration that revises its own numbers teaches a reader to distrust
+        # all of them.
+        # CLAIM counts, named as claim counts. `assign_themes` returns
+        # `themed + unthemed == len(claims)`, so rendering them as the parts of
+        # a THEME count invites an arithmetic that can never hold — the same
+        # unit error this feature already guards at the ungroupable row.
+        _progress(
+            run_id, company_id, step="analysing",
+            claims_themed=cluster_stats.get("themed") or 0,
+            claims_unthemed=cluster_stats.get("unthemed") or 0,
+        )
 
         if not claims:
             runs_db.fail(run_id, company_id, code="no_evidence",
@@ -806,8 +1102,61 @@ def execute_run(
         ingest_clock = _dates_are_ingest_clock(signals)
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock)
-        result.stats.update(cluster_stats)
+        # CAPTURED BEFORE THE MERGE, and this is not a style preference.
+        # `assign_clusters` returns its OWN `"clusters"` key counting only the
+        # groups formed among the graph-unthemed leftovers, and the merge below
+        # lands it on top of `build_findings`' total. Read afterwards, the
+        # funnel's headline becomes the leftover count — smaller than numbers
+        # printed beneath it, and 0 outright on a tenant whose embeddings are
+        # unusable. Worse, `ungroupable` can ONLY be produced by
+        # `assign_clusters`, so the wrong headline and the ungroupable row are
+        # exactly co-incident: whenever the panel shows one, the other is wrong.
+        total_groups = result.stats.get("clusters") or 0
+        # READ BEFORE THE MERGE TOO, for the same reason and not by analogy:
+        # `assign_clusters` is the function that CREATES ungroupable claims, so
+        # it is the most likely future source of an `ungroupable_groups` key of
+        # its own. Read after the merge, that key would clobber the pipeline's
+        # total and put the headline back on the leftover count — on precisely
+        # the no-embedding tenants this feature exists to narrate.
+        ungroupable_groups = result.stats.get("ungroupable_groups") or 0
+        # Namespaced on the way in so the collision cannot come back.
+        result.stats.update({
+            ("embed_clusters" if k == "clusters" else k): v
+            for k, v in cluster_stats.items()
+        })
         runs_db.heartbeat(run_id, company_id)
+        # THE FUNNEL. It is also rendered after the run finishes — `progress` is
+        # durable in `prioritisation` and the ready view reads it — because the
+        # drop rows ARE the feature and the window between this write and
+        # `status="ready"` is about a second against a 3s poll, so a reader who
+        # only saw it live would usually see nothing at all.
+        # TWO NUMBERS, BECAUSE THEY ARE TWO THINGS. `_cluster` gives every
+        # ungroupable claim its OWN cluster key, so `total_groups` counts one
+        # pseudo-group per claim we could not embed. It is the right number for
+        # the balance identity and the WRONG one to call a theme: on a tenant
+        # with no usable embeddings it would render "Grouped into 2,410 themes"
+        # directly above "2,410 claims never grouped at all" — one screen
+        # asserting both. `themes` is what a reader means by a theme, and
+        # `groups == themes + ungroupable` keeps the funnel checkable.
+        _progress(
+            run_id, company_id, step="done",
+            groups=total_groups,
+            themes=total_groups - ungroupable_groups,
+            # PUBLISHED, because `themes` is derived from THIS and not from
+            # `dropped.ungroupable`. Without it an auditor checking the
+            # identity the `groups` field exists for computes
+            # `themes + dropped.ungroupable` and gets the wrong total in
+            # exactly the case the group count was introduced to handle.
+            ungroupable_groups=ungroupable_groups,
+            findings=len(result.findings),
+            conflicts=result.stats.get("conflicts") or 0,
+            deep=result.deep_count,
+            dropped=result.stats.get("dropped") or {},
+            # NOT a zero. When the corpus is dated by ingest the echo rule
+            # never ran, and rendering "0 dropped" would claim a check passed
+            # that could not see. The panel reads this and says so.
+            echo_check_skipped=bool(result.stats.get("echo_check_skipped")),
+        )
 
         rows = []
         for rank, (finding, impact, confidence) in enumerate(zip(
@@ -846,11 +1195,149 @@ def execute_run(
         } for r in result.rejected]
 
         runs_db.save_findings(run_id, company_id, rows, ledger)
+        # ENRICHMENT IS COMING, AND THE CLIENT HAS TO BE TOLD SO.
+        #
+        # `GoalAnalysisTab`'s poller treats "ready" as TERMINAL, so publishing
+        # the report first — which is what stops the reader waiting on four
+        # model calls — also stops the client listening before the gate and the
+        # recommendations land. They were written to a row nobody read again:
+        # the analysis appeared, and the suggestions never did.
+        #
+        # This flag is the whole handshake. It goes up BEFORE `ready` so there
+        # is no window where the panel can see a ready run without knowing more
+        # is coming, and it comes down in the same write that publishes the
+        # results — so "pending" is never left true by a path that finished.
+        meta = dict(_meta_of(run_id, company_id))
+        meta["enrichment_pending"] = True
+        runs_db.update(run_id, company_id, prioritisation=meta)
+
+        # READY THE MOMENT THE ANALYSIS EXISTS. The panel polls on this, so
+        # leaving it until after the enrichment kept the reader on the spinner
+        # for the whole of it — which is what actually happened on staging.
         runs_db.update(
             run_id, company_id, status="ready",
             finished_at=datetime.now(timezone.utc).isoformat(),
             coverage_notes=_coverage_notes(stats, result.stats),
         )
+
+        # ── THE REPORT IS PUBLISHED BEFORE ANYTHING IS ASKED OF A MODEL. ────
+        #
+        # The gate and the suggestions used to run HERE, above the save, and
+        # that was the mistake: everything the deterministic pipeline computed
+        # in seconds sat unsaved and invisible behind four sequential model
+        # calls. On staging a 149-finding run hung for thirteen minutes past its
+        # last narration line, showing nothing, with no error to show — because
+        # there was no error. Both layers "failed open" on exceptions and
+        # neither had any notion of TIME, which is the failure mode that
+        # actually bit.
+        #
+        # Saved first, enriched second. A reader gets the analysis as soon as it
+        # exists; the selection and the suggestions land when they land, and if
+        # they never land the document is exactly what it was before either
+        # feature existed.
+        # ── WHICH OF THEM BEAR ON THE GOAL THAT WAS ASKED. ─────────────
+        #
+        # The ranking orders by how many accounts mention a theme, so a run for
+        # "grow revenue by 5%" led with three descriptions of the company's own
+        # product: what gets mentioned most on a sales call is the vendor's own
+        # demo. The report conceded the gap in as many words — "nothing here was
+        # filtered or ranked by it" — and this is that filter.
+        #
+        # NOTHING IS DROPPED FROM THE ROW SET. Every finding is still stored and
+        # still rendered; a set-aside one moves to an appendix carrying the
+        # reason. Storing only the survivors would destroy the record a wrong
+        # verdict has to be recoverable from.
+        #
+        # BY RANK, because the stored rows carry no id and the renderer reads
+        # them back positionally.
+        set_aside_by_rank: list = [None] * len(result.findings)
+        try:
+            from app.crucible.relevance import judge_relevance, partition
+
+            verdicts = judge_relevance(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=result.findings,
+            )
+            _, aside = partition(result.findings, verdicts)
+            reason_of = {f.id: reason for f, reason in aside}
+            set_aside_by_rank = [
+                reason_of.get(f.id) for f in result.findings
+            ]
+        except Exception:  # noqa: BLE001 — a gate that failed keeps everything
+            logger.exception("crucible: relevance gate skipped for run %s", run_id)
+
+        # AND THE SUGGESTIONS GO TO THE ONES THAT SURVIVED IT. Recommending an
+        # action for a theme the gate just judged irrelevant would spend the
+        # reader's attention on the thing they were told to ignore.
+        relevant = [
+            f for f, reason in zip(result.findings, set_aside_by_rank)
+            if reason is None
+        ]
+
+        # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
+        #
+        # AFTER the ranking, and that ordering is the invariant rather than a
+        # detail. `result.findings` is already sorted and every score is already
+        # frozen; nothing below is fed back into either. I2 says no LLM returns
+        # a score, a rank or a decision, and it still holds — this returns prose
+        # to hang beside a decision the engine already made on its own.
+        #
+        # TOTAL, like everything else on this path: a suggestion layer that
+        # failed must not cost a reader the findings that succeeded.
+        recs = {}
+        try:
+            from app.crucible.recommend import build_recommendations
+
+            recs = build_recommendations(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=relevant,
+                claims=claims,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("crucible: recommendations skipped for run %s", run_id)
+
+        # CARRIED IN THE RUN'S OWN JSON, not in new columns on
+        # `crucible_findings`. Adding columns means a migration against the
+        # shared Supabase, which is a production change and not one to make
+        # without being asked; the meta blob is already where this run's plan
+        # lives and costs nothing to extend.
+        meta = dict(_meta_of(run_id, company_id))
+        meta["findings_extra"] = {
+            f.id: {
+                "label": f.label,
+                "example": f.example,
+                # RICE's Impact term is read from the kinds of claim behind a
+                # finding, so the renderer needs them. Carried here for the same
+                # reason as the label: adding a column to `crucible_findings`
+                # means a migration against the shared Supabase.
+                "claim_types": sorted(set(f.confidence_inputs.claim_types)),
+                **({"recommendation": {
+                    "action": recs[f.id].action, "because": recs[f.id].because,
+                }} if f.id in recs else {}),
+            }
+            for f in result.findings
+        }
+        # Keyed by RANK as well, because the stored finding rows carry no id —
+        # the renderer reads them back positionally.
+        # THE FUNNEL, SAID IN NUMBERS THE RENDERER CAN QUOTE. How many were
+        # considered and how many bear on the goal is the first thing Apurva's
+        # reference memo states, and it is the thing a filtered list has to
+        # disclose or it reads as the whole picture.
+        # DOWN IN THE SAME WRITE THAT PUBLISHES THE RESULTS. Clearing it
+        # separately leaves a window where the panel has stopped polling and
+        # the verdicts are not there yet — the exact bug this flag exists to
+        # close, one write narrower.
+        meta["enrichment_pending"] = False
+        meta["set_aside_by_rank"] = list(set_aside_by_rank)
+        meta["findings_extra_by_rank"] = [
+            meta["findings_extra"][f.id] for f in result.findings
+        ]
+        runs_db.update(run_id, company_id, prioritisation=meta)
+
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))
@@ -951,10 +1438,55 @@ def _meta_of(run_id: int, company_id: str) -> dict:
     return meta if isinstance(meta, dict) else {}
 
 
+def _progress(run_id: int, company_id: str, **fields) -> None:
+    """Publish what the run has decided SO FAR, for the panel to render.
+
+    WHY A RUN NARRATES ITSELF. Until now `running` was one state and the panel
+    showed "Reading N claims…" for minutes, so the first thing a user learned
+    about how the answer was reached was the finished report. But this pipeline
+    is deterministic and every number in its funnel is already computed — the
+    only reason they were invisible is that nothing wrote them down. A reader
+    who watched 1,744 groups become 168 findings knows what the ranking IS; a
+    reader handed 168 findings has to take them on faith.
+
+    RIDES IN `prioritisation`, so this needs no migration. Read-modify-written
+    for the same reason `_meta_of` exists: the blob already holds Stage 0's ask
+    and the approved plan, and replacing it would erase the plan the report has
+    to reprint.
+
+    TOTAL, like its caller. A run that produced real findings must not fail
+    because a progress write did — the narration is display, and display never
+    outranks the answer.
+    """
+    try:
+        meta = dict(_meta_of(run_id, company_id))
+        progress = dict(meta.get("progress") or {})
+        progress.update(fields)
+        meta["progress"] = progress
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — see the docstring; display only.
+        logger.warning("crucible: could not write progress for run %s", run_id)
+
+
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
     """Every degradation renders. A quietly thinner run is indistinguishable
     from a complete one, which is worse than the failure it replaced."""
     notes = []
+    # SUPERSEDED EVIDENCE, WHICH NOTHING WAS SAYING. `project_signals` counts
+    # two independent drop reasons — `retired` and `no_timestamp` — and only
+    # the second one was ever rendered. A corpus that is mostly superseded
+    # therefore read as fully read: "What was read: 49 signals across 1 source"
+    # over a run whose findings rested on 4, with the section whose entire
+    # purpose is disclosing degradation staying silent about the largest one.
+    # The narration in the same panel knew and printed it, so the panel
+    # contradicted itself.
+    if claim_stats.get("retired"):
+        notes.append({
+            "reason": "superseded evidence",
+            "actual": f"{claim_stats['retired']} of {claim_stats['seen']} "
+                      f"signals have been superseded by a later version and "
+                      f"were not read",
+        })
     if claim_stats.get("no_timestamp"):
         notes.append({
             "reason": "undated evidence",
@@ -1005,6 +1537,68 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
     return notes
 
 
+#: A page that times out is retried at this size before the run gives up. A
+#: statement timeout is about how much work ONE query does, so the answer to
+#: one is a smaller query, not a failed run.
+_PAGE_RETRY = 100
+
+
+def _signal_page(client, company_id: str, page: int) -> list[dict]:
+    """One page of signal metadata, retried smaller if the statement times out.
+
+    MEASURED, NOT GUESSED: on a 3,364-signal staging tenant three consecutive
+    runs went `ready`, `failed`, `failed`, all with Postgres 57014 "canceling
+    statement due to statement timeout". `_load_embeddings` already survives
+    this — it catches per page and degrades the run to ungrouped, and says so
+    in a coverage note. This loader had no such guard, so one slow page killed
+    the whole run and the reader got "Something went wrong on our side partway
+    through this run" for a corpus that was merely large.
+
+    IT MUST NOT SILENTLY SHRINK THE CORPUS. Swallowing the failure the way the
+    embedding loader does would hand back a partial book with nothing saying
+    so — the one thing every coverage note exists to prevent. So a timeout is
+    retried in smaller slices and, if those fail too, it RAISES: a run that
+    cannot read its evidence has to fail loudly, not quietly read less.
+    """
+    cols = (
+        "id,kind,source_type,content,properties,provenance,"
+        "valid_at,created_at,source_id"
+    )
+
+    def _fetch(size: int, offset: int) -> list[dict]:
+        return (
+            client.table("kg_signal")
+            .select(cols)
+            .eq("enterprise_id", company_id)
+            # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
+            # unordered query's rows in any order, so paging without one can
+            # repeat a row on page 2 and never return another — a run would
+            # read a slightly different corpus each time and stop being
+            # reproducible, which is the whole claim this engine makes.
+            .order("id")
+            .range(offset, offset + size - 1)
+            .execute()
+        ).data or []
+
+    try:
+        return _fetch(_PAGE, page * _PAGE)
+    except Exception:  # noqa: BLE001 — retried below, re-raised if that fails
+        logger.warning(
+            "crucible: signal page %d timed out for %s; retrying in slices "
+            "of %d", page, company_id, _PAGE_RETRY,
+        )
+
+    out: list[dict] = []
+    for offset in range(page * _PAGE, (page + 1) * _PAGE, _PAGE_RETRY):
+        slice_ = _fetch(_PAGE_RETRY, offset)
+        out.extend(slice_)
+        # A short slice means the table ended inside this page; the outer loop
+        # reads that as "stop", which is correct.
+        if len(slice_) < _PAGE_RETRY:
+            break
+    return out
+
+
 def _load_signals(company_id: str) -> list[dict]:
     """Read the company's signals, paged, metadata only.
 
@@ -1020,28 +1614,7 @@ def _load_signals(company_id: str) -> list[dict]:
     client = require_client()
     rows: list[dict] = []
     for page in range(160):
-        chunk = (
-            client.table("kg_signal")
-            .select(
-                # `provenance` carries the source DOCUMENT id, which the
-                # refutation step needs. It was missing here while
-                # `_artifact_id` read it, so every claim came out unattributed
-                # and every run shipped a coverage note saying so — false, and
-                # invisible to the unit suite because the fake Supabase used to
-                # ignore column projection entirely.
-                "id,kind,source_type,content,properties,provenance,"
-                "valid_at,created_at,source_id"
-            )
-            .eq("enterprise_id", company_id)
-            # ORDER IS NOT OPTIONAL WITH RANGE. Postgres may return an
-            # unordered query's rows in any order, so paging without one can
-            # repeat a row on page 2 and never return another — a run would
-            # read a slightly different corpus each time and stop being
-            # reproducible, which is the whole claim this engine makes.
-            .order("id")
-            .range(page * _PAGE, page * _PAGE + _PAGE - 1)
-            .execute()
-        ).data or []
+        chunk = _signal_page(client, company_id, page)
         rows.extend(chunk)
         if len(chunk) < _PAGE:
             break

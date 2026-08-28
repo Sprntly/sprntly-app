@@ -120,11 +120,17 @@ _BRIEF_SCHEMA = {
                                                 "account'). Complete sentence(s), no "
                                                 "trailing fragment."},
                     "recommendation": {"type": "string",
-                                       "description": "A concrete, self-contained next "
-                                                      "step a PM can act on this week — a "
-                                                      "complete imperative sentence, not a "
-                                                      "fragment, that reads as the obvious "
-                                                      "move given the subtitle's numbers."},
+                                       "description": "NOT RENDERED IN THE BRIEF. A "
+                                                      "concrete, self-contained next step a "
+                                                      "PM could take — a complete imperative "
+                                                      "sentence, not a fragment, that follows "
+                                                      "from the subtitle's numbers. The card "
+                                                      "body the reader sees is `body` above; "
+                                                      "this field seeds the PRD's goal if "
+                                                      "the PM decides to generate one, so "
+                                                      "write it for that reader, and never "
+                                                      "let it leak into `subtitle` or "
+                                                      "`body`."},
                     "metrics": {"type": "array", "items": {
                         "type": "object",
                         "properties": {"label": {"type": "string"}, "value": {"type": "string"}},
@@ -185,9 +191,13 @@ _BRIEF_SCHEMA = {
         "greeting": {
             "type": "string",
             "description": "The top-insights skill's 3-line greeting: address the "
-                           "recipient by name, roll up the upside on the table, "
-                           "name what surfaced. Totals must be the sum of figures "
-                           "actually present in the cards — never invented.",
+                           "recipient by name, say what you looked across, name "
+                           "what surfaced, and roll up what those findings CARRY "
+                           "or what is at stake. Never frame the total as a payoff "
+                           "for acting ('upside on the table', 'within reach', "
+                           "'money to capture') — the reader has not agreed to act "
+                           "yet. Totals must be the sum of figures actually present "
+                           "in the cards — never invented.",
         },
         "cards": {
             "type": "array",
@@ -264,8 +274,11 @@ Emit BOTH:
   came from (the candidate theme_id).
 - `summary_headline` + `insights[]` — the structured render payload below. Each \
   insight corresponds to one card and copies that card's `theme_id`/`finding_id`. \
-  The insight `title` should be the card's finding-then-stake title; the `subtitle` \
-  + `recommendation` carry the card's body as the structured render reads them.
+  The insight `title` should be the card's finding-then-stake title. The BRIEF \
+  RENDERS THE CARD'S OWN `body` — not `subtitle`, not `recommendation` — so the \
+  card body is the prose the PM actually reads and must carry the full three \
+  beats on its own. `subtitle` is the evidence page's version of the same \
+  finding; `recommendation` is a PRD seed the brief never shows.
 
 Rules:
 - Ground every claim in the provided evidence — never invent numbers.
@@ -314,11 +327,15 @@ Rules:
   onboarding step, a new dashboard widget, a checkout-flow fix). Set it false
   when the fix is backend/data/pricing/process/ops/policy with nothing visual
   to render (e.g. "renegotiate vendor pricing", "fix data pipeline latency").
-- `subtitle` + `recommendation` together are the card body the PM reads first:
-  lead the subtitle with the sharpest quantitative hook + why it matters, and
-  make the recommendation a concrete, self-contained next step. Both must be
-  complete sentences (no trailing fragments) so the body reads as a compelling,
-  quantitative reason to act.
+- The card `body` is what the PM reads — the render takes it verbatim, so write
+  it to the METHOD's three beats: what's happening → what's at stake → what the
+  finding RESTS ON. It ends on the evidence basis, never on a call to act.
+- `subtitle` is the same finding in 2-4 sentences for the evidence page: lead
+  with the sharpest quantitative hook and why it matters. It is NOT the place
+  for the next step — `recommendation` holds that, and `recommendation` is not
+  rendered in the brief. Do not append the action to `subtitle`, and do not
+  write `subtitle` so it needs the action to finish its thought. Complete
+  sentences, no trailing fragments.
 - `reasoning` must say why this beats the alternatives — it is audit-logged.
 - SELF-CRITIQUE (METHOD step 9): the skill's `references/rubric.md` and
   `references/examples.md` are in the METHOD above. Before you emit, score each
@@ -450,6 +467,19 @@ def run_synthesis(
     dataset_slug: str,
     agent: str = "synthesis",
     deliver: bool = True,
+    # Half-price Message Batches, for the SCHEDULED callers only. The brief has
+    # a three-hour GENERATION_LEAD before delivery, so minutes of batch latency
+    # are free there -- but `routes/synthesis.py POST /brief` and
+    # `routes/brief.py` are synchronous user-facing routes where a person is
+    # watching a spinner, so this defaults OFF and only the scheduler opts in.
+    batch: bool = False,
+    # How long to wait before cancelling the batch and running the call live.
+    # CALLER-SUPPLIED, because the right bound depends on what the caller is
+    # doing: the brief tick generates ONE company 3h before delivery and can
+    # afford 45 minutes, while the all-company cycles walk 21 tenants
+    # SEQUENTIALLY, where a long per-company bound multiplies into hours. They
+    # leave this None and take app.llm_batch's shorter default.
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Generate + persist a KG-driven brief. Returns the brief payload.
 
@@ -626,6 +656,13 @@ def run_synthesis(
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="compose_top_insights",
         model=DEEP_MODEL,
+        # This is the single most expensive call in the product (~$486/mo of a
+        # ~$2,731/mo run-rate: opus, a 32k-token method block, one call per
+        # company per period), and when nothing is waiting on it it is also the
+        # best candidate for the 50% batch discount. Whatever the bound, the
+        # seam cancels the batch and runs the call live when it expires, so a
+        # slow batch can never make a brief miss its delivery slot.
+        batch=batch, batch_deadline_s=batch_deadline_s,
         prompt_version=PROMPT_VERSION, system=_SYSTEM,
         input=(strategic + roadmap_block + bizctx_block + skill_request
                + "\n\nCANDIDATE EVIDENCE (for the structured render fields):\n"
@@ -820,7 +857,8 @@ def run_synthesis(
     brief_theme_ids = [ins.get("theme_id") for ins in insights if ins.get("theme_id")]
     try:
         ideation = sequence_ideation(
-            facade, enterprise_id, exclude_theme_ids=brief_theme_ids)
+            facade, enterprise_id, exclude_theme_ids=brief_theme_ids,
+            batch=batch, batch_deadline_s=batch_deadline_s)
         brief["_ideation_count"] = len(ideation)
     except Exception:  # noqa: BLE001 — ideation is best-effort; brief must survive
         logger.exception("ideation sequencing failed (brief unaffected)")

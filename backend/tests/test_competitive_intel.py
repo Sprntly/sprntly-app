@@ -459,6 +459,50 @@ def test_user_named_set_wins_and_is_never_written_to_the_roster(monkeypatch):
     assert writes == []          # no discovery, and nothing written back
 
 
+def test_the_planner_s_entity_names_the_subject_the_vs_regex_cannot_see(monkeypatch):
+    """"a competitive review ON Umbrella" names who to research without a
+    single `vs` / `against` / `compare to` for `named_competitors` to find, so
+    the run used to fall back to the roster and research a set the question
+    never asked about. The planner already read the subject out of the
+    question; this is that subject reaching the sweep."""
+    saves = []
+    _full(monkeypatch, roster=("Globex", "Initech"), saves=saves)
+    ci.answer(enterprise_id="e1",
+              question="give me a competitive review on Umbrella",
+              entity="Umbrella")
+    assert saves[0]["competitor_set"] == ["Umbrella"]
+
+
+def test_an_explicit_vs_tail_still_outranks_the_planner_s_entity(monkeypatch):
+    """The user being unambiguous beats an extracted subject — the entity is a
+    fallback for the phrasings the regex misses, not a replacement for it."""
+    saves = []
+    _full(monkeypatch, roster=("Globex",), saves=saves)
+    ci.answer(enterprise_id="e1",
+              question="competitive review vs Initech",
+              entity="Umbrella")
+    assert saves[0]["competitor_set"] == ["Initech"]
+
+
+def test_an_entity_naming_our_own_company_falls_back_to_the_roster(monkeypatch):
+    """"how is Acme positioned against the market" is a review OF us, against
+    the roster — not a sweep of ourselves."""
+    saves = []
+    _full(monkeypatch, roster=("Globex", "Initech"), saves=saves)
+    ci.answer(enterprise_id="e1", question="competitive review", entity="Acme")
+    assert saves[0]["competitor_set"] == ["Globex", "Initech"]
+
+
+def test_an_entity_that_is_a_collective_falls_back_to_the_roster(monkeypatch):
+    """The entity goes through the SAME name test the `vs` tail does, so a
+    group the regex path rejects cannot be researched as a company here."""
+    saves = []
+    _full(monkeypatch, roster=("Globex", "Initech"), saves=saves)
+    ci.answer(enterprise_id="e1", question="competitive review",
+              entity="the enterprise market")
+    assert saves[0]["competitor_set"] == ["Globex", "Initech"]
+
+
 def test_roster_is_used_when_the_question_names_nobody(monkeypatch):
     saves = []
     _full(monkeypatch, roster=("Globex", "Initech"), saves=saves)
@@ -1210,6 +1254,52 @@ def test_followup_answers_from_the_stored_run_without_a_web_sweep(monkeypatch):
     assert "Apr – Jul 2026" in kw["input"]
     assert "never from general knowledge" in kw["system"]
     assert "Never promote a tier" in kw["system"]
+
+
+def test_a_followup_about_a_company_the_run_never_covered_goes_to_the_web(monkeypatch):
+    """Query mode answers off the stored run and is forbidden from using
+    general knowledge — both correct for a competitor that run covered. For
+    one it never looked at they combine into an honest "I don't have that"
+    from the one pipeline whose job is to go and get it. So the run has to
+    cover the subject before it can answer about it."""
+    saves = []
+    _full(monkeypatch, latest=dict(PRIOR_RUN), saves=saves)   # covers Globex, Initech
+    out = ci.answer(enterprise_id="e1", question="what did Umbrella ship?",
+                    entity="Umbrella")
+    assert out["_skill_source"] == "competitive-intel"        # the sweep, not query mode
+    assert saves[0]["competitor_set"] == ["Umbrella"]
+
+
+def test_a_followup_about_a_covered_company_still_answers_from_the_run(monkeypatch):
+    """The cheap path is not lost: a subject the run covered is still answered
+    off it in seconds, with no web sweep bought."""
+    _patch_profile(monkeypatch)
+    _patch_run_io(monkeypatch, latest=dict(PRIOR_RUN))
+
+    def _web(**kw):  # pragma: no cover — must never be reached
+        raise AssertionError("query mode ran a web sweep")
+
+    monkeypatch.setattr(ci, "call_with_web_search", _web)
+    monkeypatch.setattr(ci, "llm_call", lambda **kw: SimpleNamespace(output={
+        "answer": "Globex shipped Asset Studio.", "key_points": [],
+        "citations": [], "confidence": 0.7, "unanswered": "",
+    }))
+    out = ci.answer(enterprise_id="e1", question="what did Globex ship?",
+                    entity="Globex")
+    assert out["_skill_source"] == "competitive-intel-query"
+
+
+def test_an_unplanned_followup_keeps_query_mode(monkeypatch):
+    """No planner, no entity — the guard is a no-op and the ordinary follow-up
+    ("where did that number come from?") is unaffected."""
+    _patch_profile(monkeypatch)
+    _patch_run_io(monkeypatch, latest=dict(PRIOR_RUN))
+    monkeypatch.setattr(ci, "llm_call", lambda **kw: SimpleNamespace(output={
+        "answer": "From the Globex pricing page.", "key_points": [],
+        "citations": [], "confidence": 0.7, "unanswered": "",
+    }))
+    out = ci.answer(enterprise_id="e1", question="what is the source for that?")
+    assert out["_skill_source"] == "competitive-intel-query"
 
 
 def test_followup_without_a_stored_run_falls_to_the_full_pipeline(monkeypatch):

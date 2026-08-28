@@ -290,6 +290,13 @@ def summarize_for_catalog(
             model=SUMMARY_MODEL,
             json_schema=_SUMMARY_SCHEMA,
             max_tokens=1000,
+            # Nothing waits on a catalog summary. `_spawn_enrichment` runs this
+            # on its own daemon thread per document, so the extra minutes a
+            # batch costs do not queue behind each other and no request path is
+            # touched — which makes this the cheapest place in the product to
+            # buy the Batches API's 50% discount. Falls back to the live call
+            # automatically when batching is off or unavailable.
+            batch=True,
         )
         payload = result.output if isinstance(result.output, dict) else {}
     except Exception:  # noqa: BLE001 — a summary is an enhancement, never a blocker

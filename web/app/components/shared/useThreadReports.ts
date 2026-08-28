@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect } from "react"
+import { useEffect, useRef } from "react"
 import { useContent } from "../../context/ContentContext"
 import { useNavigation } from "../../context/NavigationContext"
 import { reportsApi, type ReportSummary } from "../../lib/api"
@@ -8,6 +8,17 @@ import { reportsApi, type ReportSummary } from "../../lib/api"
 /** Long enough for capture (which runs right after the answer completes) to have
  *  landed, short enough that nobody reads the empty state as the answer. */
 const RETRY_MS = 1500
+
+/** How many times an EMPTY list is re-asked before it is believed.
+ *
+ *  Capture is a post-terminal side effect on the server: the ask job is marked
+ *  `ready` and only THEN is the report written, so the poll that delivers the
+ *  answer routinely beats the insert — measured at 2.2s on 2026-08-24
+ *  (`GET /v1/reports?conversation_id=998` returned `[]` at 09:51:08.524; the row
+ *  landed at 09:51:10.685). One retry was not enough for that gap. Three at
+ *  `RETRY_MS` covers it, and an empty thread pays them only when something
+ *  actually said a report was coming. */
+const MAX_EMPTY_RETRIES = 3
 
 /**
  * Last known reports per conversation, for the session.
@@ -48,6 +59,15 @@ export function useThreadReportsSync() {
   const { contentPanelTab } = useNavigation()
   const conversationId = content.conversationId
   const onReportsTab = contentPanelTab === "reports"
+  // Bumped when a report answer lands in the open thread — capture is a
+  // server-side step AFTER the answer, so nothing else here changes to say the
+  // list just went stale. See `reportsRefreshKey` in types/content.ts.
+  const refreshKey = content.reportsRefreshKey
+  // The key value this hook has already chased. A run where it CHANGED is a run
+  // that follows a report answer, and only that run may retry an empty list —
+  // otherwise every ordinary thread-open on a report-less chat would pay three
+  // pointless requests for the rest of the session.
+  const chasedKeyRef = useRef<number | undefined>(undefined)
 
   useEffect(() => {
     if (conversationId == null) {
@@ -62,6 +82,10 @@ export function useThreadReportsSync() {
     }
     let cancelled = false
     let retry: ReturnType<typeof setTimeout> | undefined
+    // A report answer just landed, and the row it produced may not be committed
+    // yet (see MAX_EMPTY_RETRIES).
+    const chasingAReport = refreshKey !== undefined && refreshKey !== chasedKeyRef.current
+    chasedKeyRef.current = refreshKey
     // Seed from the last known answer for THIS thread so a revisit renders (and
     // the panel opens) immediately, with the refetch confirming underneath.
     // Status stays "ready" in that case: the list is real, just possibly a beat
@@ -93,7 +117,7 @@ export function useThreadReportsSync() {
           },
     )
 
-    const load = (isRetry: boolean): Promise<void> =>
+    const load = (attempt: number): Promise<void> =>
       reportsApi.listForConversation(conversationId)
         .then((rows) => {
           if (cancelled) return
@@ -103,8 +127,11 @@ export function useThreadReportsSync() {
             threadReportsStatus: "ready",
             threadReportsConversationId: conversationId,
           })
-          if (!isRetry && rows.length === 0 && onReportsTab) {
-            retry = setTimeout(() => { void load(true) }, RETRY_MS)
+          // "No reports in this chat", said about the report the user just
+          // watched arrive, is simply wrong — so an empty list is re-asked while
+          // there is reason to think one is on its way.
+          if (rows.length === 0 && (onReportsTab || chasingAReport) && attempt < MAX_EMPTY_RETRIES) {
+            retry = setTimeout(() => { void load(attempt + 1) }, RETRY_MS)
           }
         })
         .catch(() => {
@@ -113,7 +140,7 @@ export function useThreadReportsSync() {
           if (!cancelled) setContent({ threadReportsStatus: "error" })
         })
 
-    void load(false)
+    void load(0)
     return () => { cancelled = true; if (retry) clearTimeout(retry) }
-  }, [conversationId, onReportsTab, setContent])
+  }, [conversationId, onReportsTab, refreshKey, setContent])
 }

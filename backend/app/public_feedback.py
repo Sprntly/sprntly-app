@@ -31,10 +31,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Callable
 
 from app.prompt_history import clamp_turn_text
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.report_phases import ReportPhase, emit_report_phase
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -456,6 +458,28 @@ def is_followup_query(question: str) -> bool:
     return any(p.search(question) for p in _QUERY_SHAPES)
 
 
+def _run_covers(run: dict, entity: str | None) -> bool:
+    """Can this stored run answer a follow-up about `entity`?
+
+    Query mode answers off the records already on file and buys no web sweep,
+    and `_QUERY_SYSTEM` holds it to those records — right for a subject the
+    sweep collected, and the wrong answer entirely for one it never saw. A
+    company, product or app the last capture never touched is not something
+    this report knows; going back to the web is, and it is the only thing that
+    turns "I don't have that" into an answer.
+
+    True whenever nothing specific was named — the ordinary follow-up ("show
+    me the pricing complaints") is a filter over the report itself.
+    """
+    subject = " ".join((entity or "").split()).lower()
+    if not subject:
+        return True
+    # ponytail: substring scan of the records, so a name mentioned once counts
+    # as covered. Enough while the failure is a subject that appears nowhere.
+    return subject in json.dumps(
+        run.get("records") or [], ensure_ascii=False).lower()
+
+
 def _answer_from_run(
     *, enterprise_id: str, question: str, run: dict, history: list[dict] | None
 ) -> dict:
@@ -641,7 +665,9 @@ def _pf_reduce(*, enterprise_id: str, question: str, report: str,
 
 
 def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None,
-           on_delta=None) -> dict | None:
+           on_delta=None,
+           on_phase: Callable[[str], None] | None = None,
+           entity: str | None = None) -> dict | None:
     """Run the public-feedback pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -652,7 +678,16 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     the map-reduce synthesis path (gated by
     `answer_first.report_mapreduce_enabled("public_feedback")`); with the gate off
     the synthesis stays the single un-streamed forced-JSON call it is today and
-    `on_delta` is ignored. The scheduled caller passes nothing."""
+    `on_delta` is ignored. The scheduled caller passes nothing.
+
+    `entity`, when supplied, is the subject the planner read out of the
+    question (`constraints.entity`). It decides whether query mode is eligible
+    at all: a follow-up about a company or app the last capture never saw
+    cannot be answered off that capture, and this pipeline can go and look.
+
+    `on_phase`, when supplied, narrates the two real legs — GATHERING (the paid
+    public-web capture) then WRITING (the synthesis) — via the shared report
+    vocabulary. A no-op without a sink."""
     from app.research.market import company_profile
 
     # Follow-up filter over an existing run → query mode (seconds, no web
@@ -666,7 +701,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             run = db.latest_public_feedback_run(enterprise_id)
         except Exception:  # noqa: BLE001 — treat as no stored run
             logger.exception("public-feedback: latest-run read failed for %s", enterprise_id)
-        if run:
+        if run and _run_covers(run, entity):
             try:
                 return _answer_from_run(
                     enterprise_id=enterprise_id, question=question,
@@ -691,6 +726,8 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     scope = _scope_block(profile, question)
     product = profile.get("product") or {}
     subject = product.get("name") or profile.get("display_name") or ""
+    # GATHERING: the paid public-web sweep (app stores / Reddit / reviews).
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     try:
         records, truncated = _capture(enterprise_id, scope, subject)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
@@ -729,6 +766,8 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         _render_history(history) + f"Question: {question}\n\n{source_line}"
     )
     _report_input = f"{_report_header}\n\n{records_json}"
+    # WRITING: capture is done — the document-scale synthesis is the last leg.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
         from app import answer_first
 

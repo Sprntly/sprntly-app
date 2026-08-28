@@ -19,12 +19,20 @@ WHAT IS FIXED is therefore only the two things the app depends on:
     that invents a revenue number is worse than no leadership update, because
     it is the artifact most likely to be forwarded without being checked.
 
-GROUNDING SOURCE. Context comes from the caller (the chat turn that asked),
-not from a fresh retrieval pass here. The chat already resolved what the thread
-is about — that is what the planner's `task` brief is — and re-running
-retrieval would answer a different question from the one the user watched being
-answered. A generation started from the library with no chat behind it simply
-has less context, and the prompt's honesty rule covers that case.
+GROUNDING SOURCE, MOSTLY THE CALLER. Context comes from the caller (the chat
+turn that asked), not from a fresh retrieval pass here — BY DEFAULT. The chat
+already resolved what the thread is about — that is what the planner's `task`
+brief is — and re-running retrieval would answer a different question from the
+one the user watched being answered.
+
+The one exception is `_ground_thin_context`: when `context` is THIN (a cold
+thread — "generate a report on X" as the first message, with nothing yet
+discussed to draw on), this module runs ONE retrieval pass — the same
+`qa_agent.answer` an unplanned chat question already goes through — before
+writing the document, rather than honestly reporting a gap that a plain
+question one line earlier in the same thread would not have had. A generation
+with real prior context, or with no `dataset` to ground against, is completely
+unaffected; the prompt's honesty rule still covers whatever gap remains.
 
 LIFECYCLE mirrors ticket sets: the row is created `generating` BEFORE the
 multi-minute call so the panel has an id to open and poll, and this module
@@ -37,6 +45,7 @@ from __future__ import annotations
 
 import logging
 import math
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 
 from app.custom_artifact_html import sanitize_artifact_html
 from app.db.client import require_client, retry_on_disconnect
@@ -182,6 +191,112 @@ def _title_from(html: str, fallback: str) -> str:
     return (text or fallback or "Untitled document")[:300]
 
 
+# A THIN-CONTEXT THRESHOLD, not a zero one. `threadContextFor` on a cold thread
+# still seeds ~100-150 chars (the user's own question plus the "Writing your
+# X — it will open in the panel on the right" ack), so gating on `context == ""`
+# would never fire on the exact case this exists for. 300 is comfortably above
+# that seed and comfortably below one real prior Q/A turn, so a thread that has
+# already surfaced something stays on the original no-retrieval path — the
+# thing GROUNDING FALLBACK below deliberately does NOT re-run for.
+_THIN_CONTEXT_CHARS = 300
+
+
+# BOUNDS the grounding call independently of anything `qa_agent.answer` does
+# internally. Its own pipelines (call digest, a live web sweep) can legitimately
+# run for MINUTES — fine when a person is watching a chat turn, not fine as an
+# unbounded prelude to writing a document, because `generate_into` has no
+# retry/backoff signal of its own to shorten it and the ORIGINAL failure mode
+# this whole fallback replaces was a document that failed HONEST AND FAST
+# (~15-20s). A hang here must degrade to that failure mode, never to something
+# strictly worse than it. 45s is comfortably above every normal grounding call
+# observed (15-20s) and far short of a stuck live-fetch pipeline.
+_GROUNDING_TIMEOUT_S = 45.0
+
+# A single, tiny, dedicated pool — never the shared default executor a wedged
+# call could starve for everyone else's blocking work (`asyncio.to_thread`
+# sites elsewhere in this codebase share one; see routes/custom_artifacts.py's
+# own reasoning for why `_GENERATION_POOL` is dedicated, same argument here at
+# smaller scale). A call that times out is NOT cancelled — Python cannot
+# preempt a running thread — it keeps running to completion in the background
+# and its result is discarded; this bounds how long GENERATION waits, not how
+# long the underlying call itself takes.
+_GROUNDING_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="artifact-ground")
+
+
+def _ground_thin_context(*, company_id: str, dataset: str, task: str) -> str:
+    """A real answer for `task`, via the SAME retrieval `answer` already uses.
+
+    GROUNDING FALLBACK. `generate_into`'s context is "whatever the caller
+    already resolved" (see the module docstring) — correct for a document
+    drafted from a conversation that has already discussed its subject, and
+    silently wrong for one asked cold: "generate a report on our biggest
+    issues" as a thread's FIRST message reaches here with nothing to draw on,
+    so the document's own honesty rule (below) correctly writes "no factual
+    grounding was available" — while the SAME question, asked without the word
+    "report", reaches `qa_agent.answer` instead and gets a real answer, because
+    that path retrieves (call digest, voice-of-customer, the KG) instead of
+    reading a transcript that doesn't exist yet.
+
+    This closes that gap for the one case it's safe to close it in: `context`
+    thin enough that there was plainly nothing to resolve from.
+
+    MUST BUILD A REAL PLAN FIRST. An earlier cut of this call passed
+    `plan=None` on the theory that `qa_agent.answer(plan=None)` is "the same
+    router every unplanned chat question goes through" — quoting the docstring
+    out of context. Every LIVE caller of `qa_agent.answer` (routes/ask.py via
+    `ask_job_runner`) calls `ask_planner.plan_for_answer` FIRST and passes its
+    result; `plan=None` is what a PLANNER OUTAGE degrades to, not a path any
+    real question takes today. Verified live: the identical question, asked
+    plainly through chat (which plans it), returned a 10,044-character grounded
+    answer citing this exact workspace's data; the same call from here, with
+    `plan=None`, returned nothing — the missing plan, not the retrieval, was
+    the gap. `plan_for_answer` never raises (a planner outage returns None,
+    the documented fail-open), so this stays best-effort either way.
+
+    MUST BE TIME-BOUNDED. Fixing the plan surfaced a second, worse failure:
+    a planned call CAN resolve to a live-fetch pipeline (call digest) that
+    hangs far past any normal answer's latency — observed live, over 18
+    minutes with zero progress, on a workspace with no real call connector for
+    it to read. `qa_agent.answer` takes no timeout of its own, so this wraps
+    the call in `_GROUNDING_POOL` and gives up waiting after
+    `_GROUNDING_TIMEOUT_S` — see that constant for why 45s and why a dedicated
+    pool. A timeout is exactly one more shape of "grounding produced nothing
+    usable": same return value, same fallback, as every other failure path
+    here.
+    """
+    if not dataset or not task.strip():
+        return ""
+
+    def _run() -> str:
+        from app import ask_planner, qa_agent
+
+        plan = ask_planner.plan_for_answer(
+            enterprise_id=company_id, question=task, history=None,
+        )
+        result = qa_agent.answer(
+            enterprise_id=company_id,
+            question=task,
+            dataset=dataset,
+            plan=plan,
+        )
+        return str(result.get("answer") or "").strip()
+
+    future = _GROUNDING_POOL.submit(_run)
+    try:
+        return future.result(timeout=_GROUNDING_TIMEOUT_S)
+    except FutureTimeoutError:
+        logger.warning(
+            "custom artifact grounding timed out after %ss for company_id=%s",
+            _GROUNDING_TIMEOUT_S, company_id,
+        )
+        return ""
+    except Exception:  # noqa: BLE001 — grounding is best-effort, never fatal
+        logger.exception(
+            "custom artifact grounding answer failed for company_id=%s", company_id
+        )
+        return ""
+
+
 def generate_into(
     *,
     company_id: str,
@@ -189,6 +304,7 @@ def generate_into(
     kind: str,
     task: str,
     context: str = "",
+    dataset: str = "",
 ) -> None:
     """Write the document and land it on the row. Never raises.
 
@@ -196,7 +312,24 @@ def generate_into(
     the panel polls that row and an exception escaping here would leave it
     spinning on a generation that is not running. The stored error string is
     for operators; the web maps failures onto its own recovery copy.
+
+    `dataset`, when supplied, gates a GROUNDING FALLBACK — see
+    `_ground_thin_context` — that only ever fires when `context` is thin; a
+    document drafted from a real conversation is completely unaffected.
     """
+    # THIN-CONTEXT GROUNDING (see `_ground_thin_context`). Folded into `context`
+    # itself, before the rendering prompt is built, so everything downstream —
+    # the prompt, the honesty rule, the grounding-source comment the model
+    # reads — behaves exactly as if the caller had supplied this as `context`
+    # in the first place. A grounding answer that came back empty (no dataset,
+    # no real answer, or the retrieval itself failed) changes nothing: `context`
+    # is unchanged and the module's original honest-empty-context path runs.
+    if len(context.strip()) < _THIN_CONTEXT_CHARS:
+        grounded = _ground_thin_context(company_id=company_id, dataset=dataset, task=task)
+        if grounded:
+            context = (
+                f"{context.strip()}\n\n" if context.strip() else ""
+            ) + f"From the workspace's connected sources:\n{grounded}"
     # Which side of the model call we are on when something raises. Set the
     # instant the call returns, so "the generator could not be reached" is only
     # ever said about a run where that is true.

@@ -343,9 +343,11 @@ async def _stage_brief_generation(dataset: str) -> dict[str, Any]:
                 "duration_s": round(time.time() - t0, 1),
             }
         # Warm the drill-downs for the fresh brief — same as the regenerate
-        # route + scheduler — so a pipeline-generated brief also auto-generates
-        # its PRDs (prd_warm_count, default 3 = all insights), evidence, and Ask
-        # answers. Fire-and-forget in the background lane; never fails the stage.
+        # route + scheduler — so a pipeline-generated brief also pre-generates
+        # its top insight's PRD, evidence and Ask answers (depth:
+        # prd_warm_count / evidence_warm_count). Skipped entirely for a
+        # workspace nobody has used lately, see app.warm_gate. Fire-and-forget
+        # in the background lane; never fails the stage.
         try:
             from app.brief_runner import warm_synthesis_drilldowns
             warm_synthesis_drilldowns(dataset)

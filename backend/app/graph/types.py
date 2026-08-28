@@ -226,6 +226,12 @@ class Signal:
     origin: Optional[str] = None
     channel: Optional[str] = None
     evidence_eligible: Optional[bool] = None
+    #: FK into ``call_index`` (bigint) when this signal was distilled from a
+    #: single catalogued call — set by ``extract_document`` for call-shaped
+    #: connector providers. NULL for every other signal, and for a call not yet
+    #: in ``call_index`` at extraction time. Distinct from ``source_id`` (a uuid
+    #: FK into ``kg_source``): a call's bigint id cannot live in a uuid column.
+    source_call_id: Optional[int] = None
 
     def __post_init__(self) -> None:
         if self.source_type not in SIGNAL_SOURCE_TYPES:

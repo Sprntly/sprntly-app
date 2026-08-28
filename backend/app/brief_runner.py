@@ -4,12 +4,15 @@ After a synthesis brief is generated and saved (by the brief route, the
 scheduler, or the startup pass), `warm_synthesis_drilldowns` warms the
 per-insight evidence/Ask drill-downs so the first user click renders instantly.
 
-PRDs are NOT pre-warmed: a PRD is the most expensive drill-down (a large
-2-part LLM generation, minutes each), so warming one per insight floods the
-warm queue and a user's "Generate PRD" click ends up stuck behind the warm
-backlog. PRDs are generated strictly on-demand instead — the on-demand path
-(`routes/prd.py` → `prd_runner.generate_prd`) runs unthrottled (it does not
-acquire `_WARM_SEMA`), so a click runs immediately.
+PRDs warm too, through `prd_runner.warm_prds_for_brief`. The paragraph that
+used to stand here said they never did; that stopped being true when that
+function landed and the docstring was not updated with it.
+
+All three warms (evidence, Ask, PRD) are speculation, and speculation is
+opt-in per workspace: `_warm_drilldowns` asks `app.warm_gate` whether anybody
+has actually used this company lately and skips the whole fan-out when nobody
+has. Depth is capped by `settings.evidence_warm_count` / `prd_warm_count`.
+Whatever is skipped still generates on demand on the first click.
 """
 import asyncio
 import logging
@@ -21,9 +24,11 @@ from app.db import (
     start_evidence,
 )
 from app.ask_runner import warm_brief_dynamic_asks, warm_predefined_asks
+from app.config import settings
 from app.evidence_runner import generate_evidence
-from app.prd_runner import warm_prds_for_brief
+from app.prd_runner import top_insight_indices, warm_prds_for_brief
 from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
+from app.warm_gate import should_warm_drilldowns
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +40,9 @@ _errors: dict[str, str] = {}
 # parallel calls, but firing several in a burst on every restart competes for
 # rate limit and bandwidth — each call ends up slower than in isolation,
 # and a user clicking "View evidence" during the burst waits behind the
-# queue. 3 lets all 3 evidence calls for a brief run concurrently so no
-# insight queues behind another. PRDs are NOT warmed (they run on-demand,
-# unthrottled), so this only caps evidence + Ask warming.
+# queue. 3 lets the capped evidence warm and the Ask warm overlap without
+# either queueing behind the other. PRDs ride the LLM gate's background lane
+# instead of this semaphore, so this caps evidence + Ask warming only.
 _WARM_CONCURRENCY = 3
 
 # Per-event-loop warm semaphore. A module-level Semaphore is bound to the loop
@@ -144,9 +149,36 @@ async def _warm_evidence(brief_id: int, insight_index: int, title: str) -> None:
         await generate_evidence(ev_id, brief_id, insight_index, background=True)
 
 
+def _company_for_warm(brief: dict, dataset: str | None) -> str | None:
+    """The company id this brief belongs to, for the warm gate.
+
+    Briefs are keyed by dataset SLUG, not company id, so the slug has to be
+    resolved. Returns None when it cannot be — an unresolvable slug means the
+    gate has nothing to judge and `should_warm_drilldowns` warms, which keeps
+    the legacy corpus datasets that own no company behaving as they always did.
+    """
+    slug = dataset or brief.get("dataset")
+    if not slug:
+        return None
+    try:
+        # Function-local: app.synthesis_brief imports THIS module (for
+        # warm_synthesis_drilldowns), so a module-level import here would close
+        # the cycle.
+        from app.synthesis_brief import resolve_company
+
+        company_id, _slug = resolve_company(slug)
+        return company_id
+    except Exception:  # noqa: BLE001 — unresolvable slug → warm as before
+        logger.info("warm-gate: no company for dataset=%r — warming anyway", slug)
+        return None
+
+
 def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
-    """Fan out evidence generation for every insight in this brief, plus
-    warming for predefined Ask Sprntly starter prompts.
+    """Fan out evidence generation for this brief's top insights, plus warming
+    for predefined Ask Sprntly starter prompts.
+
+    Does nothing at all when `app.warm_gate` says the workspace has been idle
+    (see this module's docstring) — the whole fan-out is skipped, not trimmed.
 
     Warm tasks share a semaphore (_WARM_SEMA) so at most a few run at once;
     cached entries return immediately (dedupe lives in _warm_evidence /
@@ -164,10 +196,19 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
     brief_id = brief.get("id")
     if not brief_id:
         return
+    # One gate for all three warms. Evidence, Ask and PRD are the same bet on
+    # the same click, so they stand or fall together — gating only some of them
+    # would keep paying for the fan-out while removing the payoff.
+    if not should_warm_drilldowns(_company_for_warm(brief, dataset)):
+        return
     insights = brief.get("insights") or []
-    # All evidence — these get the early semaphore slots.
-    for i, ins in enumerate(insights):
-        title = (ins or {}).get("title") or f"Insight #{i + 1}"
+    # The insights most likely to be opened — the same ranking, and by default
+    # the same depth, as the PRD warm below, so a reader who clicks the hero
+    # insight finds BOTH its evidence and its PRD already there. Evidence used
+    # to warm every insight regardless of `prd_warm_count`.
+    warm_indices = top_insight_indices(insights, settings.evidence_warm_count)
+    for i in warm_indices:
+        title = (insights[i] or {}).get("title") or f"Insight #{i + 1}"
         _track(asyncio.create_task(_warm_evidence(brief_id, i, title)))
     # Predefined Ask Sprntly starter prompts. The home + Ask chips
     # send a fixed set of questions; pre-generating responses means the
@@ -177,7 +218,7 @@ def _warm_drilldowns(brief: dict, dataset: str | None = None) -> None:
         # Pass 4: per-insight Ask prompts. Clicking "Ask Sprntly" on a
         # finding card in the BriefScreen fires "Tell me more about: <title>"
         # — those titles are known at brief-gen time, so we warm them too.
-        warm_brief_dynamic_asks(dataset, brief, _warm_sema())
+        warm_brief_dynamic_asks(dataset, brief, _warm_sema(), warm_indices)
     # PRDs for the top insights — background-lane only (see docstring), so
     # this never competes with evidence/Ask warming or a user click.
     _track(asyncio.create_task(warm_prds_for_brief(brief)))

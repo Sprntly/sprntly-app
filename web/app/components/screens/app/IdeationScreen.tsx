@@ -174,14 +174,14 @@ function SourceCell({ idea }: { idea: IdeationIdea }) {
   if (idea.source === "ideation") {
     return (
       <div className="bl-source">
-        {/* Orange grid icon for Ideation */}
+        {/* Orange grid icon for Backlog */}
         <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
           <rect x="3"  y="3"  width="7" height="7" rx="1.5" fill="#e07d23" />
           <rect x="14" y="3"  width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.7" />
           <rect x="3"  y="14" width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.7" />
           <rect x="14" y="14" width="7" height="7" rx="1.5" fill="#e07d23" opacity="0.45" />
         </svg>
-        <span className="bl-source-name">Ideation</span>
+        <span className="bl-source-name">Backlog</span>
       </div>
     )
   }
@@ -243,7 +243,7 @@ function IdeaRow({
   )
 }
 
-// ── Inline "Add idea" card (replaces modal) ───────────────────────────────────
+// ── Inline "Add to backlog" card (replaces modal) ────────────────────────────
 
 function AddIdeaCard({
   onClose,
@@ -305,7 +305,7 @@ function AddIdeaCard({
             })}
           </div>
         </div>
-        <button type="button" className="bl-add-card-send" disabled={!value.trim()} onClick={submit} aria-label="Add idea">
+        <button type="button" className="bl-add-card-send" disabled={!value.trim()} onClick={submit} aria-label="Add to backlog">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
             <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
           </svg>
@@ -417,9 +417,9 @@ function ProposedContent({
       .create(title, TYPE_TO_TAG[type] ?? null)
       .then((item) => {
         setIdeas((prev) => [...prev, { ...ideationItemToIdea(item), type }])
-        showToast("Idea added", `"${title}" saved to ideation.`)
+        showToast("Idea added", `"${title}" saved to the backlog.`)
       })
-      .catch(() => showToast("Couldn't add idea", "Please try again."))
+      .catch(() => showToast("Couldn't add to the backlog", "Please try again."))
   }
 
   // Re-sequence: re-order by real analysis impact score (desc) and persist.
@@ -452,7 +452,7 @@ function ProposedContent({
           No ideas yet
         </h2>
         <p style={{ fontSize: 13, lineHeight: 1.55, margin: 0 }}>
-          Ideation is built from the weekly analysis — the top 3 insights go
+          The backlog is built from the weekly analysis — the top 3 insights go
           into your brief, and the strongest of the rest are shortlisted here.
           Once a brief has been generated for your company, your prioritized
           ideas will show up automatically.
@@ -738,7 +738,7 @@ function IdeaDetailModal({
         <div className="bl-detail-body">
           <h2 className="bl-detail-title">{idea.title}</h2>
 
-          {/* Why it's here: Ideation is defined by NOT being prioritized. */}
+          {/* Why it's here: the backlog is defined by NOT being prioritized. */}
           <p className="bl-modal-why">
             Not prioritized in the Top Insights brief — it ranked #{idea.rank} behind
             this week&apos;s top 3.
@@ -893,7 +893,7 @@ export function IdeationScreen() {
     openPrdTab({
       title: `PRD · ${idea.title}`,
       insightBody: painPoint || undefined,
-      seedQuery: `Generate a brief for "${idea.title}" — an ideation idea that didn't make this week's top 3.`,
+      seedQuery: `Generate a brief for "${idea.title}" — a backlog idea that didn't make this week's top 3.`,
       source: { kind: "generateIdeation", ideationItemId: idea.id },
     })
     setSelectedIdea(null)
@@ -954,7 +954,7 @@ export function IdeationScreen() {
         {/* ── Single combined top bar ── */}
         <div className="bl-topbar">
           <div className="bl-topbar-left">
-            <h1 className="bl-title">Ideation</h1>
+            <h1 className="bl-title">Backlog</h1>
             <span className="bl-count-badge">
               {tab === "proposed"
                 ? `${proposedCount ?? 0} ideas`
@@ -984,10 +984,10 @@ export function IdeationScreen() {
               onClick={handleSync}
               disabled={isSyncing}
             >
-              <SyncIcon /> Sync ideas
+              <SyncIcon /> Sync backlog
             </button>
             <button type="button" className="bl-btn-add" onClick={() => { setShowAddIdea(true); setTab("proposed") }}>
-              + Add idea
+              + Add to backlog
             </button>
           </div>
         </div>
@@ -1013,7 +1013,7 @@ export function IdeationScreen() {
           )}
         </div>
 
-        {/* ── Add idea card: outside scroll, replaces chat bar ── */}
+        {/* ── Add-to-backlog card: outside scroll, replaces chat bar ── */}
         {tab === "proposed" && showAddIdea && (
           <div className="bl-chat-bar bl-chat-bar--add">
             <AddIdeaCard

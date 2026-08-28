@@ -87,6 +87,39 @@ def save_report(
 
 
 @retry_on_disconnect
+def update_report_body(
+    report_id: int, company_id: str, *, html: str, title: str | None = None
+) -> dict | None:
+    """Replace a report's stored body; return the updated row, or None when the
+    id is absent OR belongs to another company.
+
+    Company-filtered in the UPDATE itself rather than after a read, so a foreign
+    id matches zero rows and the route turns that into the same 404 a missing
+    one gets — never a 403, and never a write that landed before the check.
+
+    No compare-and-set: `reports` carries no `version`, because until now a
+    report was written once by a pipeline and only ever read. The one writer is
+    the chat editor (`app.artifact_chat_edit`), whose losing race is two edits
+    of the SAME report in flight on one thread at once. A hand editor for
+    reports would need a version column before it needs this function.
+    """
+    patch: dict[str, Any] = {"html": html or ""}
+    if title is not None:
+        patch["title"] = title
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .update(patch)
+        .eq("id", report_id)
+        .eq("company_id", company_id)
+        .execute()
+    )
+    if not resp.data:
+        return None
+    return get_report(report_id, company_id)
+
+
+@retry_on_disconnect
 def get_report(report_id: int, company_id: str) -> dict | None:
     """One report by id, scoped to its company — the caller's tenant gate.
 
@@ -185,6 +218,39 @@ def list_reports_for_conversation(conversation_id: int, company_id: str) -> list
         .eq("company_id", company_id)
         .order("id", desc=True)
         .limit(_CONVERSATION_LIST_CAP)
+        .execute()
+    )
+    return resp.data or []
+
+
+@retry_on_disconnect
+def reports_with_bodies_for_conversation(
+    conversation_id: int, company_id: str, limit: int = 4
+) -> list[dict]:
+    """The newest reports in one thread, WITH their bodies.
+
+    The listing above omits `html` on purpose — a panel showing N rows must not
+    carry N documents. This read is the opposite case and the body IS the
+    point: it grounds a question about a report the thread produced
+    (`app.thread_context`). Reported: asked to summarize the report open in the
+    panel, the chat answered from a corpus file covering a different month
+    entirely, because the report itself was never in the prompt.
+
+    `limit` is small and deliberate. A follow-up is almost always about the
+    newest one or two, and every extra body is prompt budget taken from the
+    answer; the block that consumes this caps the text again on top.
+
+    Company-filtered like every other read here, so a conversation id guessed
+    from another tenant returns nothing rather than their reports.
+    """
+    c = require_client()
+    resp = (
+        c.table("reports")
+        .select(_READ_COLUMNS)
+        .eq("conversation_id", conversation_id)
+        .eq("company_id", company_id)
+        .order("id", desc=True)
+        .limit(max(1, limit))
         .execute()
     )
     return resp.data or []

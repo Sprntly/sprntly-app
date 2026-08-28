@@ -468,6 +468,7 @@ export function useProjectConversation(
     setContent, openContentPanel, content, showToast,
     openArtifactInPanel, postOpenArtifactReply,
     markTicketSetAutoOpened: () => {}, postSummary: () => {},
+    activeCompany,
   })
 
   // ── Skills palette: the company's own uploaded skills (main parity) ─────────
@@ -1151,6 +1152,12 @@ export function useProjectConversation(
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
+    // The project GROUP surface has no Goal Analysis. Named explicitly rather
+    // than omitted: `MapMainTurnsDeps` requires these so a surface cannot drop
+    // them with a clean `tsc`, which is how the in-thread gates shipped inert.
+    goalGateBusyTurnId: undefined,
+    confirmGoalDefinition: undefined,
+    approveGoalPlan: undefined,
     activeTab: { id: convKey, prdId: meta.prdId ?? null, prd: meta.prd ?? null, prdGenerating: !!meta.prdGenerating, pendingClarify: meta.pendingClarify },
     name, userInitials, skillForQuery: composer.skillForQuery,
     ticketSetActionState: (meta.ticketSetStatus === "generating" ? "running" : meta.ticketSetStatus === "ready" ? "ready" : meta.ticketSetStatus === "failed" ? "failed" : null),

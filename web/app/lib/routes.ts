@@ -95,7 +95,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // `/prototype?prd=<id>`; bare `/prototype` with no `?prd=` shows an empty state
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
-  ideation: "/ideation",
+  ideation: "/backlog",
   templates: "/templates",
   skills: "/skills",
   // Flat route + `?id=<id>` (AD-P14) — no per-id dynamic segment, exactly the
@@ -120,6 +120,12 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // stays highlighted. The PRD context rides as a `?prd=` query param, which
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
+  "/backlog": "ideation",
+  // The OLD path still resolves to the same screen. `/backlog/page.tsx`
+  // redirects it, but a race between that redirect and the shell's own
+  // `?company=` rewrite would otherwise leave the rail unhighlighted for a
+  // frame — and any code deriving the screen from the pathname must not read
+  // an old link as "no screen".
   "/ideation": "ideation",
   "/templates": "templates",
   "/skills": "skills",

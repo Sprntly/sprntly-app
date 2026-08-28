@@ -69,3 +69,22 @@ export const STANDALONE_TICKET_GEN: GenerationCopy = {
   note: "This usually takes a minute or two. Tickets appear here as they're written — you can keep working in the chat meanwhile.",
   slowNote: "Still working — a long conversation takes longer to break down. Each ticket appears here the moment it's written.",
 }
+
+/** Report — the intelligence pipelines (voice-of-customer, public feedback,
+ *  competitive/market intelligence, company research): gather the corpus →
+ *  read it → find the themes → write the document.
+ *
+ *  The backend DOES emit real phases for these paths (`app/report_phases.py`),
+ *  and the panel shows them when they arrive. These rotating lines are the
+ *  fallback for the gap before the first phase frame and for a flag-off client
+ *  — honest about the legs the pipeline really runs, in the order it runs them. */
+export const REPORT_GEN: GenerationCopy = {
+  phases: [
+    "Gathering the source material…",
+    "Reading it end to end…",
+    "Finding the themes and what they add up to…",
+    "Writing the report…",
+  ],
+  note: "Reports take a few minutes — they read a whole corpus first. It renders here as it's written, and you can keep working in the chat meanwhile.",
+  slowNote: "Still working — a wide window of calls, reviews and feedback takes longer to read.",
+}

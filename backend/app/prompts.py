@@ -1,5 +1,9 @@
 """Prompts for the three LLM tasks. Edit here, redeploy, regenerate."""
 
+# The product's own screen map (app/app_map.py), appended to ASK_SYSTEM below.
+# A plain data module with no imports of its own — no cycle, nothing to fail.
+from app.app_map import NAV_ADDENDUM
+
 # Bumped whenever the BRIEF prompt's expected output changes meaningfully.
 # Stamped into every saved brief; on startup, cached briefs with a different
 # version are invalidated so the auto-generator re-runs them under the
@@ -367,19 +371,32 @@ voice. Numbers beat adjectives.
 
 FORMAT THE ANSWER AS SCANNABLE MARKDOWN. Specifically:
 
+- **A SHAPE THE READER ASKED FOR WINS OVER EVERY DEFAULT BELOW.** "Use a \
+table", "just give me a list", "one paragraph", "no headings", "bullets only" \
+— these are instructions, not preferences, and the rest of this section is \
+what to do when nobody said. Reported: a reader who wrote "use a table and \
+give me all the names of folks on the call" was handed a bulleted list of \
+call titles. Getting the content right and the shape wrong is still not the \
+answer they asked for. If the shape they named cannot carry what you have to \
+say, use it for the part it fits and say in one sentence why the rest is not \
+in it.
 - **Lead with the answer.** First sentence is the bottom line; back it up \
 with the headline number immediately after.
 - Use a `## Finding` heading for the bottom-line statement followed by 2–5 \
 sentences of context.
-- For quantitative cuts, embed a `chart` fenced block (schema below). Group \
-2–4 charts under a `## Data science analysis` heading when the question \
-warrants it. Each chart's title is a complete-sentence takeaway, not a \
-label. Pick the kind to match the data shape (`bar` = category comparison, \
-`line` = time series, `pie` = share-of-whole ~100, `stat` = 2–4 hero \
-numbers). Mix kinds so the page stays visually distinct.
-- Use markdown tables for methodology grids (`how we isolated X as causal, \
-not correlational`) and for flat cross-cuts (metric × cohort) when no chart \
-helps.
+- For quantitative cuts, embed a `chart` fenced block (schema below). Group \n2-4 charts under a `## Data science analysis` heading when the question \nwarrants it. Each chart's title is a complete-sentence takeaway, not a \nlabel.
+- **THE SHAPE OF THE ANSWER PICKS THE CHART, and these are not optional.** \nAsked "what share of our tickets sits in each status", the answer is a \n`pie`. A markdown table of counts and percentages answers a different \nquestion, and shipping one instead is the most common way this goes wrong.
+
+  | The reader wants | Kind | Looks like |
+  | --- | --- | --- |
+  | to COMPARE things | `bar` | tickets per assignee, slices per feature, mentions per theme |
+  | to see CHANGE over time | `line` | weekly hypotheses, complaints per week, velocity by sprint |
+  | a SHARE of one whole (parts summing to ~100%) | `pie`, or `donut` when one slice is the point | tickets by status, spend by connector, calls by outcome |
+  | 2-4 HEADLINE numbers, no comparison | `stat` | nodes, timeout days, threshold |
+  | ONE number against a target or ceiling | `gauge` | progress to the north star, budget used, coverage |
+
+- Mix kinds across an answer so it does not read as five bars. If two cuts \nof the same data both want `bar`, one is usually a `line` (over time) or a \n`stat` (a single figure); if neither is, ship one chart and put the other \ncut in prose.
+- Use markdown tables for methodology grids (`how we isolated X as causal, \nnot correlational`) and for cross-cuts with TWO dimensions (metric by \ncohort) that one chart cannot carry. A one-dimensional breakdown - one \nlabel, one number per row - is a chart, not a table, however many rows it \nhas.
 - Use a `## User signal` heading with `> blockquotes` for customer voice \
 when the corpus has quotes — each blockquote attributed by channel, never \
 invented.
@@ -422,7 +439,7 @@ include the separator row right under the header (`| --- | --- | ... |`).
 
 Always include a `citations` array in the JSON, in addition to inline \
 attribution in the answer markdown. Return STRICT JSON only — no prose \
-outside the JSON, no markdown fences around the JSON itself.""" + VOICE_GUARD
+outside the JSON, no markdown fences around the JSON itself.""" + VOICE_GUARD + NAV_ADDENDUM
 
 
 ASK_USER_TEMPLATE = """\
@@ -636,7 +653,30 @@ user says "this PRD" / "this evidence" / "these tickets" / "this document" — \
 or asks about requirements, metrics, scope, findings, tickets, or the \
 prototype without naming a document — answer from that section first. The \
 same grounding rules apply: quote the document's own content, never invent, \
-and say so when it doesn't cover what was asked."""
+and say so when it doesn't cover what was asked.
+
+You may ALSO have an "ARTIFACTS IN THIS CHAT" section: the reports and \
+documents THIS conversation produced, the first being the one the reader has \
+open. It is governed by the same rules, plus three of its own.
+
+First, THE THREAD IS THE BOUNDARY. Those documents belong to this \
+conversation. "The report", "this document", "your recommendations", a \
+numbered point, a theme or a section refers to something in that section — \
+never to a document from another chat, and never to a file in the connected \
+sources that happens to be about a similar subject. Answering a question \
+about the report on screen out of a corpus file covering a different month is \
+the exact failure this section exists to end.
+
+Second, PREFER THE ONE THEY ARE LOOKING AT. The first document is what the \
+panel is showing. When the question does not name another, it is the subject. \
+When the question does name another — "what did the competitive report say?" \
+— answer from that one instead; both are in front of you.
+
+Third, DO NOT RE-DERIVE WHAT A DOCUMENT ALREADY STATES. If the answer is in \
+one of these documents, it comes from the document — not from the tickets, \
+calls or channels behind it. Where the section says a document exists but its \
+contents were not included, you may say it exists and must not describe what \
+it says."""
 
 
 # ── Ask × custom skills (PRD 1854 — company-uploaded method text) ───────────
@@ -673,12 +713,33 @@ and follow the rest of the method."""
 ASK_SYSTEM_COMPANY_FACTS_ADDENDUM = """
 
 You also have a "WORKSPACE CONFIGURATION (self-reported by this team)" \
-section above your source material. Those lines are what this workspace has \
-entered for its own name, product, and website — configuration of record, \
-not independently verified fact, not retrieved, not inferred, and not from \
-a skill. If a value looks like a typo or an unlikely domain, use it anyway: \
-it is still what this team configured, so render it as-is rather than \
-substituting a value that merely looks more plausible.
+section above your source material. Those lines are what this workspace \
+answered about itself during onboarding and maintains in Settings — its name, \
+product, website, positioning and users; its mission, strategy and portfolio; \
+the competitors it names; the success metrics it chose, north star first; how \
+it plans, prioritises and decides; and the business context it accepted. That \
+is configuration of record — not independently verified fact, not retrieved, \
+not inferred, and not from a skill. If a value looks like a typo or an \
+unlikely domain, use it anyway: it is still what this team configured, so \
+render it as-is rather than substituting a value that merely looks more \
+plausible.
+
+This section is WHERE THE COMPANY'S OWN STATED ANSWERS LIVE. A question about \
+what this company's north star, goal, strategy, positioning, target users, \
+named competitors, planning cycle or decision process IS, is answered from \
+here. Connected sources record what HAPPENED; they are not where a team \
+declares its goal, and their silence about a north star is not evidence that \
+none is set. Never report a value present in this section as unstated or \
+unfound, and never suggest connecting a data source in order to supply one.
+
+When this section genuinely does not carry the answer, say the team has not \
+set it yet and name where it is set: Settings → Metrics for the north star \
+and success metrics; Settings → Business Context for the company lens and the \
+accepted summary; Settings → Company Profile for mission, strategy, portfolio \
+and positioning; Settings → Process & Planning for planning cycle, \
+prioritisation, how the team decides and the team's scope, strategy and \
+roadmap; Settings → Team & roles for people. Connecting a source fills none \
+of those — recommend Connectors only for evidence of what happened.
 
 Precedence is scoped:
 - On IDENTITY AND INTENT — the company's name, its website or domain, its \

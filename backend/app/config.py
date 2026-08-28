@@ -4,6 +4,20 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
+# First-party origins that are allowed on TOP of whatever `ALLOWED_ORIGINS`
+# names, in every environment. These are our own domains — the marketing site,
+# which is a separate deploy and the only caller of the no-auth
+# `POST /v1/whitelist` signup form. Leaving them to the env var meant the form
+# worked or not depending on which box a human had remembered to edit: prod's
+# `.env` happened to list them, staging's did not, so the browser threw away a
+# 200 as `400 Disallowed CORS origin` and the signup looked broken while the row
+# was in fact being written. There is no environment in which we want to refuse
+# our own marketing site, so the list should not be a thing anyone can forget.
+ALWAYS_ALLOWED_ORIGINS = (
+    "https://sprntly.ai",
+    "https://www.sprntly.ai",
+)
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
@@ -118,6 +132,15 @@ class Settings(BaseSettings):
     # deploy and a reloaded Settings singleton in tests stays honest.
     # Env-overridable via DESIGN_AGENT_WORKER_ENABLED.
     design_agent_worker_enabled: bool = False
+
+    # --- Message Batches (app.llm_batch) -----------------------------------
+    # Anthropic charges HALF for the same request submitted as a batch, and
+    # ~46% of measured spend is work with no human waiting on it (connector
+    # ingest, the catalog backfill, the scheduled brief). Off by default: the
+    # trade is latency for money, so each call site opts in and this switch
+    # turns the whole mechanism off again without a revert.
+    llm_batch_enabled: bool = False
+
     # When True, a backend startup whose prototype template version is greater
     # than an existing 'ready' prototype's stamped version demotes that prototype
     # to 'invalidated' (the View path 404s it → the PRD screen drops to the
@@ -130,11 +153,31 @@ class Settings(BaseSettings):
     # DESIGN_AGENT_INVALIDATE_PROTOTYPES_ON_TEMPLATE_BUMP.
     design_agent_invalidate_prototypes_on_template_bump: bool = False
     # How many of a fresh brief's top insights get their PRD auto-generated
-    # after brief generation (hero first, then confidence). Default 3 = every
-    # insight in the brief (the brief surfaces MAX_INSIGHTS=3), so all three
-    # points get a PRD automatically. Warm calls run in the LLM gate's
-    # background lane so they never delay a user's click. 0 disables.
-    prd_warm_count: int = 3
+    # after brief generation (hero first, then confidence). Warm calls run in
+    # the LLM gate's background lane so they never delay a user's click.
+    # 0 disables.
+    #
+    # Was 3 (every insight the brief surfaces). Measured over the 30 days to
+    # 2026-08-24: 1,955 PRDs generated, of which 72 were ever ticketed, edited
+    # or re-saved, at ~$172/mo for Part A alone. Nothing logs a PRD being READ,
+    # so 72 is a floor on engagement rather than a count of readers — but the
+    # warm fires before anyone could have clicked, so the fan-out is speculative
+    # by construction. 1 keeps the instant first click on the HERO insight and
+    # stops paying for the tail. Raise via PRD_WARM_COUNT if the click-through
+    # on insights 2-3 ever justifies it.
+    prd_warm_count: int = 1
+    # Warm a brief's drill-downs only when the workspace has shown a sign of
+    # life within this many days (see app.warm_gate). Pre-generation is a bet
+    # that somebody clicks; a workspace nobody has opened in two weeks is a bet
+    # that keeps losing. 0 disables the gate (always warm, the old behaviour).
+    # Env-overridable via WARM_ACTIVE_WITHIN_DAYS.
+    warm_active_within_days: int = 14
+    # How many of a brief's insights get their evidence page pre-generated.
+    # Evidence warming used to be unbounded (every insight, no cap) while PRDs
+    # were capped at `prd_warm_count` — an asymmetry with no rationale behind
+    # it: both are the same bet on the same click. Capped here for the same
+    # reason and, by default, to the same depth. 0 disables.
+    evidence_warm_count: int = 1
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
 
@@ -498,6 +541,16 @@ class Settings(BaseSettings):
     # one, so "disabled" left half the feature running.
     slack_voc_channels: bool = True
 
+    # Dark-ship flag for the concurrent map-reduce count engine
+    # (app/corpus_mapreduce.py + call_digest's `is_mapreducible_count`
+    # interception). Default OFF: the engine, when eligible, replaces the
+    # single big synthesis call for "how many calls that <content filter>"
+    # questions with N concurrent small classification calls + a
+    # deterministic Python reduce. Lands dark until its own real-tenant
+    # precision/recall gate passes — flip is a separate decision from
+    # merging the code.
+    voc_count_engine_enabled: bool = False
+
     # In-app feedback / feature-request form (June 20 #13 + #A). Users submit a
     # short message + type (bug / feature / connector request) from the left
     # nav; we store it in the `feedback` table and email it to the team via
@@ -797,7 +850,12 @@ class Settings(BaseSettings):
 
     @property
     def origins_list(self) -> list[str]:
-        return [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        # Order matters to `conftest.py`, which sends `origins_list[0]` as the
+        # test client's Origin, and reads better in logs: the env var stays
+        # first and the baked-in floor is appended, de-duplicated so an env that
+        # already names a marketing origin does not list it twice.
+        configured = [o.strip() for o in self.allowed_origins.split(",") if o.strip()]
+        return configured + [o for o in ALWAYS_ALLOWED_ORIGINS if o not in configured]
 
     @property
     def cookie_secure(self) -> bool:

@@ -19,12 +19,13 @@ question.
 from __future__ import annotations
 
 import logging
+import re
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, NamedTuple, Optional, Sequence
 
-from app.crucible.cluster import UNGROUPABLE_PREFIX
+from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
@@ -41,8 +42,40 @@ from app.crucible.types import (
 
 logger = logging.getLogger(__name__)
 
+#: Every reason a candidate can die, in the order the run applies them. The
+#: running view renders this funnel, so the set is CLOSED and declared here
+#: rather than inferred from whatever rejections a particular run happened to
+#: produce — a funnel that silently omits a rule the run applied reads as "this
+#: never happens" when the truth is "nothing counted it".
+NARRATED_DROPS = (
+    "ungroupable", "anecdote", "echo", "single_account", "no_authority",
+    "uncausal",
+)
+
 #: A cluster below this many claims is not a finding, it is an anecdote.
 MIN_CLAIMS_PER_FINDING = 2
+
+#: EXCEPT FOR CLAIM TYPES WHERE ONE MENTION IS THE WHOLE POINT.
+#:
+#: The corroboration rule is right for THEMES — "customers keep asking for X"
+#: means nothing on one mention. It is wrong for CONSTRAINTS. A deal blocker is
+#: specific to one deal by definition, so it is mentioned once by definition,
+#: and requiring a second independent mention deletes exactly the items a PM
+#: most needs.
+#:
+#: Measured on a real staging corpus of 160 blocker signals: 85 of 101
+#: rejections were `anecdote`, and among them
+#:   "$217,988 in expansion revenue was described as gated for the week of…"
+#:   "336K USD in renewals is at risk as of the Week of Aug 3 brief"
+#:   "1 named account is gating a deal, and 3 missing roles were identified…"
+#: A single-source, single-account, named-figure blocker is not an anecdote. It
+#: is the most actionable line in the corpus.
+#:
+#: The claim keeps everything else that makes it honest: it is still capped at
+#: `reported` strength, still sized only if an account is named (I3), and its
+#: confidence still falls with the thinner evidence — a reader sees ONE claim
+#: beside it and can weigh that. What changes is that they get to see it.
+CORROBORATION_EXEMPT_TYPES = frozenset({"constraint"})
 
 #: Refutation: a "pattern over time" backed by evidence that all lands inside
 #: this window is one conversation echoing, not a pattern. This is the exact
@@ -60,6 +93,18 @@ DEFAULT_DEEP_CAP = 5
 #: it did not. The ones kept are the largest, since a rejection backed by nine
 #: claims is the one a reader is most likely to want to reopen.
 MAX_LISTED_REJECTIONS = 100
+
+#: The two ledger rows that are BOOKKEEPING rather than candidates: the
+#: "N further candidates" summary the list overflows into, and the one standing
+#: for every signal that had no usable embedding. Both used to claim
+#: `stopped_at_stage="clustering"`, so every renderer counted them as
+#: rejections in their own right — a run that considered 1,576 candidates
+#: reported "Considered and ruled out (102)" directly under a promise that
+#: everything considered was listed. They also formed their own "reason"
+#: groups, inflating a one-reason ledger to three.
+OVERFLOW_STAGE = "overflow"
+UNGROUPED_STAGE = "ungrouped"
+AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 
 
 @dataclass(frozen=True)
@@ -129,13 +174,26 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+class Refutation(NamedTuple):
+    """Why a candidate died, in two registers.
+
+    `code` is for COUNTING and `reason` is for READING, and they are separate
+    fields because the funnel the running view renders has to say which rule
+    killed how many — and deriving that by matching on the prose would break
+    the first time someone improves a sentence. The codes are a closed set;
+    `NARRATED_DROPS` names every one of them for the client.
+    """
+    code: str
+    reason: str
+
+
 def _refute(
     claims: Sequence[Claim],
     accounts: Sequence[str],
     *,
     dates_are_ingest_clock: bool = False,
-) -> Optional[str]:
-    """Try to kill the finding. Returns a reason if it dies.
+) -> Optional[Refutation]:
+    """Try to kill the finding. Returns a code and a reason if it dies.
 
     Modelled on what actually killed the spike's first framing: evidence that
     looks like a pattern because there is a lot of it, when all of it lands in
@@ -146,7 +204,13 @@ def _refute(
     shipped as a finding and a fourth killed it — more evidence for the same
     thing made the verdict stricter, which is backwards, and it let through the
     exact shape the spike was fooled by at the sizes where it is most likely.
-    A cluster is two or more claims by construction, so the gates are gone.
+    A cluster USED TO BE two or more claims by construction, which is why the
+    gates went. That is no longer true: `CORROBORATION_EXEMPT_TYPES` lets a
+    single constraint through, so the echo rule now states its own precondition
+    rather than borrowing one from the caller. A group of one cannot be "one
+    conversation echoing" — there is nothing repeating. It fired anyway, and
+    the reason it printed read "all 1 supporting claims come from one source
+    document within 0 days", which is not a sentence about evidence.
 
     `accounts` here is the RAW set, before the goal's population filter. The
     single-account rule is about how diverse the EVIDENCE is; narrowing to the
@@ -184,24 +248,35 @@ def _refute(
     sources = {c.artifact_id for c in claims if c.artifact_id}
     fully_attributed = len(sources) > 0 and all(c.artifact_id for c in claims)
     one_conversation = fully_attributed and len(sources) == 1
-    if span < ECHO_WINDOW and one_conversation and not dates_are_ingest_clock:
-        return (
+    if (len(claims) >= MIN_CLAIMS_PER_FINDING
+            and span < ECHO_WINDOW and one_conversation
+            and not dates_are_ingest_clock):
+        return Refutation("echo", (
             f"all {len(claims)} supporting claims come from one source "
             f"document within {span.days} days — this is one conversation "
             f"echoing through the corpus, not a pattern over time"
-        )
+        ))
     # Exactly one, not "at most one": ZERO named accounts is unsizeable, which
     # is a finding we keep and mark (I3), not one we drop.
-    if len(accounts) == 1:
-        return (
+    # THE SAME CATEGORY ERROR, ONE RULE OVER. "This is that account's situation
+    # rather than a pattern across the book" is right about a PREFERENCE — one
+    # account wanting a feature is that account's opinion. It is wrong about a
+    # CONSTRAINT, where being about one account is the entire content:
+    # "Northwind has only a $5,000 budget approved for a POC" is not a failed
+    # pattern, it is the finding. Exempting the anecdote rule without this one
+    # left 34 named-account blockers still dropped on the measured corpus, so
+    # the change would have looked landed and delivered nothing.
+    exempt_single = all(c.type in CORROBORATION_EXEMPT_TYPES for c in claims)
+    if len(accounts) == 1 and not exempt_single:
+        return Refutation("single_account", (
             "every supporting claim comes from a single account, so this is "
             "that account's situation rather than a pattern across the book"
-        )
+        ))
     if not any(c.authoritative for c in claims):
-        return (
+        return Refutation("no_authority", (
             "no source that may speak to this claim type reported it — every "
             "supporting claim is outside its source's authority"
-        )
+        ))
     return None
 
 
@@ -231,6 +306,21 @@ def build_findings(
     confidences: list[Confidence] = []
     rejected: list[Rejection] = []
     ungroupable: list[str] = []
+    # COUNTED HERE, not derived from `rejected` afterwards. `rejected` is the
+    # LISTED set: over `MAX_LISTED_REJECTIONS` it collapses into one summary
+    # row, so counting it would report 100 anecdotes on a run that dropped
+    # 1,576. The funnel has to be the truth, not the excerpt.
+    # `defaultdict`, PRE-SEEDED. Pre-seeded so every rule is present at zero
+    # (the panel distinguishes "dropped nothing" from "did not run"); a
+    # defaultdict so a rule added to `_refute` without its constant cannot
+    # raise KeyError here — that escapes into `execute_run`'s catch-all and
+    # fails the run for every tenant. Narration must never outrank the answer.
+    drops: defaultdict[str, int] = defaultdict(int)
+    for _code in NARRATED_DROPS:
+        drops[_code] = 0
+    #: Ungroupable CLUSTERS, as distinct from the ungroupable CLAIMS in
+    #: `drops`. The theme count is `clusters - this`.
+    ungroupable_groups = 0
 
     for key, group in sorted(clusters.items()):
         ids = tuple(c.id for c in group)
@@ -244,9 +334,21 @@ def build_findings(
             # many identical rows into the ledger buries every genuine
             # rejection under it and makes the considered list unreadable.
             ungroupable.extend(ids)
+            drops["ungroupable"] += len(ids)
+            # COUNTED SEPARATELY FROM THE CLAIMS, because the theme count is
+            # derived by subtracting it and the two are only equal by an
+            # assumption: `_cluster` lowercases its key, so two claim ids
+            # differing only in case would share one ungroupable cluster and
+            # the subtraction would quietly under-report. Counting the groups
+            # themselves removes the assumption instead of relying on it.
+            ungroupable_groups += 1
             continue
 
-        if len(group) < MIN_CLAIMS_PER_FINDING:
+        # ALL of them, not any: a mixed group still contains claim types that
+        # do need corroboration, and one exempt member must not carry them.
+        exempt = all(c.type in CORROBORATION_EXEMPT_TYPES for c in group)
+        if len(group) < MIN_CLAIMS_PER_FINDING and not exempt:
+            drops["anecdote"] += 1
             rejected.append(Rejection(
                 _label(group, key),
                 f"only {len(group)} supporting claim — an anecdote, not a "
@@ -264,7 +366,9 @@ def build_findings(
         refutation = _refute(group, raw_accounts,
                              dates_are_ingest_clock=dates_are_ingest_clock)
         if refutation:
-            rejected.append(Rejection(_label(group, key), refutation, "verification", ids))
+            drops[refutation.code] += 1
+            rejected.append(Rejection(
+                _label(group, key), refutation.reason, "verification", ids))
             continue
 
         # The KEY groups; the LABEL reads. They are different strings on
@@ -272,9 +376,10 @@ def build_findings(
         # wants the theme in the corpus's own words. Rendering the key is how
         # the first version put "c490" in front of a user.
         label = _label(group, key)
-        statement = _statement(label, group, accounts)
+        statement, example = _statement_parts(label, group, accounts)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
+            drops["uncausal"] += 1
             # I5 is a hard error at the boundary; here it is a drop, because a
             # statement we cannot phrase honestly is not one to ship with a
             # caveat.
@@ -296,6 +401,8 @@ def build_findings(
         finding = Finding(
             id=f"f-{key}",
             statement=statement,
+            label=label,
+            example=example,
             claim_ids=ids,
             impact_inputs=ImpactInputs(
                 currency=currency,
@@ -337,7 +444,13 @@ def build_findings(
             f"{len(overflow)} more groups were considered and dropped, each "
             f"backed by fewer claims than the {MAX_LISTED_REJECTIONS} listed "
             f"above — most of them single-claim anecdotes",
-            "clustering",
+            # NOT "clustering". This row is BOOKKEEPING, not a candidate: it
+            # stands for everything the list could not hold. Renderers counted
+            # it as one more rejection, so a run that considered 1,576
+            # candidates reported "102" while promising it had listed them all.
+            # A distinct stage is how they can tell — no schema change, and the
+            # column is already free text.
+            OVERFLOW_STAGE,
             tuple(cid for r in overflow for cid in r.claim_ids)[:2000],
         ))
 
@@ -347,7 +460,7 @@ def build_findings(
             f"{len(ungroupable)} signals have no usable embedding, so whether "
             f"they corroborate anything is unknown rather than false — they "
             f"were read but could not be grouped",
-            "clustering", tuple(ungroupable)))
+            UNGROUPED_STAGE, tuple(ungroupable)))
 
     order = _rank(findings, impacts, confidences, deep_cap=deep_cap)
     findings = [findings[i] for i in order]
@@ -362,6 +475,16 @@ def build_findings(
             "claims": len(claims), "clusters": len(clusters),
             "findings": len(findings), "rejected": len(rejected),
             "sizeable": sum(1 for i in impacts if i.value is not None),
+            "conflicts": sum(1 for f in findings if f.adjudication == "conflict"),
+            # PER REASON, and every key present even at zero — the running view
+            # distinguishes "this rule dropped nothing" from "this rule did not
+            # run", and a missing key cannot carry that difference.
+            "dropped": dict(drops),
+            # `clusters` counts one pseudo-group per ungroupable claim, so a
+            # reader's "themes" is `clusters - ungroupable_groups`. Published
+            # rather than derived at the call site, so the subtraction cannot
+            # drift from how the clustering actually keyed.
+            "ungroupable_groups": ungroupable_groups,
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },
@@ -399,6 +522,52 @@ def _rank(
 MAX_NAMED_SOURCES = 4
 
 
+#: `kg_ingest.runner.sync_provider`'s doc_name shape: `<provider>-sync-batch-<n>`.
+#:
+#: THE NUMBER IS AN INGEST CHUNK, NOT A DOCUMENT. A connector sync slices its
+#: pull into arbitrary batches and stamps each with its index, so a finding read
+#: back as
+#:
+#:   fireflies-sync-batch-0 (9) · fireflies-sync-batch-4 (7) ·
+#:   fireflies-sync-batch-10 (4) · fireflies-sync-batch-5 (3) · +1 more documents
+#:
+#: looks like evidence spread across five documents and is one source chopped
+#: five ways. That is worse than unhelpful: breadth across documents is exactly
+#: what a reader uses to judge whether a finding is well-supported, and this
+#: inflates it.
+#:
+#: There is no call title to put here instead, and that is a property of the
+#: data rather than of this function: `call_digest` records that KG extraction
+#: is per-BATCH, so `extract_document` stamps only `{"doc": <batch name>}` and
+#: an extracted signal carries no call id to resolve. The provider is the ONLY
+#: real attribution in the string, so the provider is what gets rendered.
+_SYNC_BATCH = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
+
+#: What to call a provider's batches once they are collapsed. Anything not
+#: listed falls back to its own name, title-cased — a new connector reads
+#: acceptably without a code change.
+_PROVIDER_LABELS = {
+    "fireflies": "Fireflies call transcripts",
+    "zoom": "Zoom call transcripts",
+    "slack": "Slack",
+    "gong": "Gong call transcripts",
+}
+
+
+def _document_label(doc: str) -> str:
+    """The name to show for one source document.
+
+    Real document names — `slack/#mvp-product (part 2/3)`, a Drive filename —
+    pass through untouched. Only the sync-batch shape is rewritten, and only
+    because its number identifies nothing a reader could look up.
+    """
+    m = _SYNC_BATCH.match(doc)
+    if not m:
+        return doc
+    provider = m.group(1)
+    return _PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
+
+
 def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     """Which documents this finding rests on, most-cited first.
 
@@ -409,7 +578,12 @@ def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     for c in claims:
         doc = (c.artifact_id or "").strip()
         if doc:
-            counts[doc] = counts.get(doc, 0) + 1
+            # COLLAPSED BEFORE COUNTING, so the count is per SOURCE rather than
+            # per ingest chunk: five batches of one provider become one entry
+            # carrying all five counts, which is the true number of claims that
+            # source contributed.
+            label = _document_label(doc)
+            counts[label] = counts.get(label, 0) + 1
     if not counts:
         return ()
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -442,6 +616,26 @@ def _label(claims: Sequence[Claim], key: str) -> str:
 
 
 def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+    """The sentence alone. See `_statement_parts` for why there are two."""
+    return _statement_parts(label, claims, accounts)[0]
+
+
+def _statement_parts(
+    label: str, claims: Sequence[Claim], accounts: Sequence[str],
+) -> tuple[str, str]:
+    """The statement, AND the example quote it used — or "" when it used none.
+
+    Two returns rather than one because the renderer needs the example on its
+    own. A finding renders as a heading (the theme), a row of chips (the counts)
+    and the quote; the sentence form puts all three in one clause, which reads
+    well and scans terribly.
+
+    THE EXAMPLE COMES BACK ONLY IF THE WHOLE CANDIDATE PASSED THE LINT. That is
+    why this is one function and not two: the lint runs on the assembled
+    sentence, so an example that is fine alone and causal in context must not
+    escape. Recomputing it beside `_statement` would drift the moment either
+    side changed.
+    """
     """Prose that survives the causal lint by construction.
 
     Says what was OBSERVED and in what population, and stops. No "because", no
@@ -460,4 +654,51 @@ def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> 
         if accounts else ""
     )
     topic = (label or "").strip() or "an unlabelled group"
-    return f"{n} claims{where} concern \u201c{topic}\u201d."
+    # "1 claims concern" has been in every report this engine has ever
+    # produced. A count that cannot get its own plural right is the first thing
+    # a reader stops trusting, and everything after it is numbers.
+    # The VERB agrees too. Fixing only the noun produced "1 claim concern",
+    # which is the same defect one word to the right.
+    claims_word = "claim" if n == 1 else "claims"
+    concern = "concerns" if n == 1 else "concern"
+    plain = f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d."
+
+    # AND ONE OF THEM, IN THE SOURCE'S OWN WORDS.
+    #
+    # "4 claims concern 'Mobile editor keystroke loss'" is a table-of-contents
+    # entry, not a finding: it names a topic and says how many times it came
+    # up. A reader cannot judge it, argue with it, or take it to anyone —
+    # which is the whole job. Read against the same corpus, the chat surface
+    # answers with account counts and quotes; the report answered with a label.
+    #
+    # SO: quote the strongest claim beside the count. Reported speech, exactly
+    # like the topic — this asserts nothing we have not been told, and adds no
+    # causation, because the example goes through `label_for`, the same cut at
+    # the first causal connective the label already gets.
+    #
+    # AND IT CAN ONLY EVER ADD. The example is linted before it is used, and a
+    # failure falls back to `plain` rather than dropping the finding — the
+    # caller treats an unlintable statement as a DROP, so a clumsy example
+    # would have silently deleted findings, which is far worse than a dull one.
+    strongest = max(claims, key=lambda c: c.strength_score, default=None)
+    said = (getattr(strongest, "assertion", "") or "").strip()
+    # `label_for("")` returns the literal string "unlabelled", so an empty
+    # assertion rendered `for example, "unlabelled"` — a quotation mark around
+    # a word no source ever said, which is worse than no example at all.
+    # `example_for`, not `label_for`: same causal cut, its own length budget,
+    # and it ends where a reader can tell it ended.
+    example = example_for(said) if said else ""
+    if (
+        strongest is not None
+        and example
+        and example.lower() != topic.lower()
+        # A quote that only repeats the label teaches nothing and costs a line.
+        and example.lower() not in topic.lower()
+    ):
+        candidate = (
+            f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d "
+            f"\u2014 for example, \u201c{example}\u201d."
+        )
+        if lint_claim(candidate, strongest.strength).ok:
+            return candidate, example
+    return plain, ""
