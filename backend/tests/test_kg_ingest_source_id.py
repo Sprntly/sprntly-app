@@ -28,15 +28,16 @@ def captured(monkeypatch):
     calls: list[dict] = []
 
     def fake_extract(facade, enterprise_id, *, doc_name, text,
-                     source_ref=None, **kwargs):
+                     source_ref=None, valid_at=None, **kwargs):
         calls.append({"doc_name": doc_name, "text": text,
-                      "source_ref": source_ref})
+                      "source_ref": source_ref, "valid_at": valid_at})
         return {"signals": 1, "themes": 0, "skipped": 0}
 
     monkeypatch.setattr(runner, "extract_document", fake_extract)
-    # These tests are about extract_document's source_ref threading, not the
-    # directed-checklist second pass — stub it to a no-op so a call-provider
-    # sync here never reaches a real LLM call.
+    # These tests are about extract_document's source_ref/valid_at threading,
+    # not the directed-checklist second pass — stub it to a no-op (still
+    # accepting `valid_at` so the real call site's kwarg doesn't error) so a
+    # call-provider sync here never reaches a real LLM call.
     monkeypatch.setattr(
         runner, "run_checklist_pass",
         lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
@@ -53,9 +54,10 @@ def captured(monkeypatch):
     return calls
 
 
-def _rec(provider: str, external_id: str, body: str) -> RawRecord:
+def _rec(provider: str, external_id: str, body: str, *, timestamp: str | None = None) -> RawRecord:
     return RawRecord(provider=provider, kind="meeting", external_id=external_id,
-                     title=f"{provider} {external_id}", text=body)
+                     title=f"{provider} {external_id}", text=body,
+                     timestamp=timestamp)
 
 
 def test_call_provider_extracts_one_document_per_call(captured):
@@ -117,6 +119,47 @@ def test_call_provider_doc_name_keeps_the_sync_batch_shape(captured):
     ])
     for c in captured:
         assert re.match(r"^fireflies-sync-batch-\d+$", c["doc_name"]), c["doc_name"]
+
+
+# ── valid_at: a call's own date, not ingest time ──────────────────────────────
+
+
+@pytest.mark.parametrize("provider", ["fireflies", "zoom", "google_meet"])
+def test_call_provider_threads_the_call_own_date_as_valid_at(captured, provider):
+    """A call-shaped provider's `RawRecord.timestamp` (the call's own date)
+    reaches `extract_document` as `valid_at` — not left None to fall back to
+    ingest time. A historical call re-synced today must stale FROM WHEN IT
+    HAPPENED, not from today (#Part 2)."""
+    runner.sync_provider(None, "ent-A", provider, token="t", records=[
+        _rec(provider, "X1", "some call body", timestamp="2026-01-15T10:00:00Z"),
+    ])
+    assert len(captured) == 1
+    from datetime import datetime, timezone
+
+    assert captured[0]["valid_at"] == datetime(2026, 1, 15, 10, 0, tzinfo=timezone.utc)
+
+
+def test_call_provider_missing_timestamp_leaves_valid_at_none(captured):
+    """A call record with no timestamp degrades to `valid_at=None` (the
+    caller's ingest-time default) rather than raising — best-effort, never a
+    sync failure."""
+    runner.sync_provider(None, "ent-A", "fireflies", token="t", records=[
+        _rec("fireflies", "X1", "some call body", timestamp=None),
+    ])
+    assert len(captured) == 1
+    assert captured[0]["valid_at"] is None
+
+
+def test_non_call_provider_batch_leaves_valid_at_none(captured):
+    """A batched (non-call) provider mixes many records with no single
+    honest "as-of" date, so `valid_at` stays None — the pre-existing
+    ingest-time default, unchanged for every batched connector."""
+    runner.sync_provider(None, "ent-A", "github", token="t", records=[
+        _rec("github", "PR1", "diff of pr one", timestamp="2026-01-01T00:00:00Z"),
+        _rec("github", "PR2", "diff of pr two", timestamp="2026-01-02T00:00:00Z"),
+    ])
+    assert len(captured) == 1
+    assert captured[0]["valid_at"] is None
 
 
 # ── call_index.resolve_call_id ───────────────────────────────────────────────

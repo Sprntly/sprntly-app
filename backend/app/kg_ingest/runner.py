@@ -33,7 +33,8 @@ import inspect
 import json
 import logging
 from dataclasses import replace
-from typing import Callable, Iterable
+from datetime import datetime
+from typing import Callable, Iterable, Optional
 
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes
 from app.graph.extractor import (
@@ -61,6 +62,22 @@ from app.kg_ingest.types import RawRecord
 logger = logging.getLogger(__name__)
 
 _BATCH_CHAR_BUDGET = 6000
+
+
+def _record_valid_at(rec: RawRecord) -> Optional[datetime]:
+    """The real-world date a `RawRecord` asserts, for `extract_document`'s
+    `valid_at` — `rec.timestamp` (provider-side updated/created, ISO) for a
+    call-shaped provider's single-record unit, so a historical call's
+    signals date to WHEN THE CALL HAPPENED, not when this sync ran (see
+    `extract_document`'s `valid_at` docstring). Best-effort: `None` (falls
+    back to the ingest-time default) on a missing or unparseable timestamp,
+    never raises — a bad date must degrade, not break, a sync."""
+    if not rec.timestamp:
+        return None
+    try:
+        return datetime.fromisoformat(rec.timestamp.replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
 
 # provider → (puller fn, token_json key, source-type hint for the extractor)
 PULLERS: dict[str, tuple[Callable[[str], Iterable[RawRecord]], str, str]] = {
@@ -188,19 +205,27 @@ def _condensed_and_full_text(
 
 def _extraction_units(
     provider: str, fresh: list[RawRecord], enterprise_id: str
-) -> Iterable[tuple[str, str, list[RawRecord], tuple[str, str] | None, str | None]]:
-    """Yield ``(doc_name, text, records, source_ref, checklist_text)`` — one
-    per extraction pass.
+) -> Iterable[
+    tuple[str, str, list[RawRecord], tuple[str, str] | None, str | None,
+          Optional[datetime]]
+]:
+    """Yield ``(doc_name, text, records, source_ref, checklist_text,
+    valid_at)`` — one per extraction pass.
 
     Call providers (``_CALL_PROVIDERS``) get ONE pass per call, with a
     ``source_ref`` = the call's ``(provider, external_id)`` so the extractor can
     stamp ``kg_signal.source_id``, PLUS Config B's condensed/full-transcript
     split (see ``_condensed_and_full_text``): ``text`` is the CHEAP main-pass
     input and ``checklist_text`` is the FULL transcript the directed-checklist
-    pass reads. Every other provider keeps the existing char-budget batching,
-    with no ``source_ref`` (``source_id`` stays NULL, unchanged) and
-    ``checklist_text`` left ``None`` — the checklist pass never runs on them
-    (see ``sync_provider``).
+    pass reads. ``valid_at`` is that SAME call's own date
+    (``_record_valid_at(rec)``) — a call is one record, so it has exactly one
+    natural "as-of" date. Every other provider keeps the existing char-budget
+    batching, with no ``source_ref`` (``source_id`` stays NULL, unchanged),
+    ``checklist_text`` left ``None`` (the checklist pass never runs on them —
+    see ``sync_provider``), and ``valid_at`` left ``None``: a batch mixes many
+    records (each its own real-world date, or none at all for e.g. a ClickUp
+    task), so there is no single date honest to stamp on the batch as a
+    whole — these keep the pre-existing ingest-time default.
 
     The ``<provider>-sync-batch-<n>`` doc_name shape is DELIBERATELY preserved
     for both — ``call_digest`` identifies a call-provider signal by matching
@@ -215,11 +240,13 @@ def _extraction_units(
                 provider, rec, enterprise_id
             )
             yield (f"{provider}-sync-batch-{i}", main_text, [rec],
-                   (rec.provider, rec.external_id), checklist_text)
+                   (rec.provider, rec.external_id), checklist_text,
+                   _record_valid_at(rec))
     else:
         for i, batch in enumerate(_batches(fresh)):
             yield (f"{provider}-sync-batch-{i}",
-                   "\n\n".join(r.render() for r in batch), batch, None, None)
+                   "\n\n".join(r.render() for r in batch), batch, None, None,
+                   None)
 
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:
@@ -299,7 +326,7 @@ def sync_provider(
     from app.llm_errors import PROVIDER_LIMIT, classify_provider_error, user_message
 
     errors: list[str] = []
-    for i, (doc_name, text, unit_records, source_ref, checklist_text) in enumerate(
+    for i, (doc_name, text, unit_records, source_ref, checklist_text, valid_at) in enumerate(
             _extraction_units(provider, fresh, enterprise_id)):
         try:
             r = extract_document(
@@ -327,6 +354,11 @@ def sync_provider(
                 # Haiku relevance + category triage ahead of every extraction
                 # unit — the core connector-sync ingestion path.
                 triage=True,
+                # The call's OWN date for a call-shaped provider (None for a
+                # batched provider — see _extraction_units) so a historical
+                # call re-synced today dates and stales as of when it
+                # actually happened, not today.
+                valid_at=valid_at,
             )
             totals["batches"] += 1
             for k in ("signals", "themes", "skipped"):
@@ -350,6 +382,9 @@ def sync_provider(
                         doc_name=doc_name, text=checklist_text,
                         agent=f"ingest:{provider}",
                         origin="connector", source_ref=source_ref,
+                        # Same call date as the main pass above — one call,
+                        # one valid_at, both passes' signals stale together.
+                        valid_at=valid_at,
                     )
                     for k in ("signals", "themes", "skipped"):
                         totals[k] += c[k]

@@ -194,6 +194,22 @@ def test_source_call_id_and_provenance_stamped_via_source_ref(facade):
     assert sig.provenance["external_id"] == "FF-9"
 
 
+def test_valid_at_stamps_a_checklist_minted_signal(facade):
+    """A caller-supplied `valid_at` reaches a checklist-minted Signal exactly
+    like the main pass's — same `_write_items` path, same contract. The
+    runner threads the SAME call date to both passes for one call, so this
+    keeps the two passes' signals dating (and staling) identically."""
+    from datetime import datetime, timezone
+
+    entries = [_entry("commercial", content="priced at $50k/yr",
+                      quote="we're paying fifty thousand a year")]
+    text = "Buyer: we're paying fifty thousand a year for this."
+    call_date = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    _run_checklist(facade, entries, text, valid_at=call_date)
+    sig = _csig(facade, "priced at $50k/yr")
+    assert sig.valid_at == call_date
+
+
 def test_empty_checklist_output_writes_nothing(facade):
     result = _run_checklist(facade, [], "anything")
     assert result == {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}

@@ -111,6 +111,29 @@ VOC_SCALE: dict[str, int] = {
 #: well above 0.15. This is a noise gate, not a tuned relevance knob.
 _MIN_THEME_SCORE = 0.15
 
+# ── Leg C: content / entity search ───────────────────────────────────────
+#
+# Legs A (theme kNN) and B (recent-signals window) never text- or
+# vector-search `kg_signal.content` itself, so an entity-named question
+# ("what's the latest on the AIG account") that matches no topic-theme cannot
+# reach that entity's freshly-dated, correctly theme-wired signals. Leg C
+# closes that with a HYBRID: (i) word-boundary keyword/full-text match, and
+# (ii) signal-embedding cosine kNN — the same text-embedding-3-small vectors
+# the extractor already stores — feeding the SAME `by_id` dedupe + rank +
+# token-budget path Legs A/B already use. See `facade.search_signals_by_content`
+# / `facade.signal_candidates_by_embedding` for the two backing primitives.
+
+#: Rank boost for a content-leg hit — a signal the question named or is
+#: semantically about is strong evidence, so it floats above a generic recent
+#: signal (boost 0.0) while staying in the same band as a theme hit (theme
+#: boost is `score * 0.5`, i.e. ~0.05-0.4 over the noise floor).
+_CONTENT_BOOST = 0.3
+
+#: How many hits each content sub-leg contributes to the candidate pool
+#: before the global rank + token-budget cut. Bounds a common-term keyword
+#: flood or an over-eager semantic match from drowning theme/recency evidence.
+_CONTENT_LEG_CAP = 30
+
 
 def _recency_factor(signal: Signal, now: datetime) -> float:
     """Half-life decay using the per-source_type staleness window (#1).
@@ -381,6 +404,8 @@ def retrieve_context(
     question_embedding: Optional[list[float]] = None,
     skip_semantic: bool = False,
     min_theme_score: float = _MIN_THEME_SCORE,
+    content_leg: bool = False,
+    content_leg_cap: int = _CONTENT_LEG_CAP,
 ) -> dict[str, Any]:
     """Retrieve a ranked, deduped KG context bundle for a chat question.
 
@@ -419,6 +444,15 @@ def retrieve_context(
          each enriched with its decision-chain edges (`_ledger_entities`) so
          the causal link between them is resolvable, not just three parallel
          lists of bare labels.
+
+    `content_leg=True` (default False — every pre-existing caller unaffected)
+    additionally runs Leg C: a keyword/full-text sub-leg plus a semantic
+    sub-leg over `kg_signal.content`/`kg_signal.embedding`, admitted into the
+    SAME `by_id` dedupe/rank/budget as Legs A/B (see the module's Leg C
+    section). Best-effort like every other leg — a Leg C failure degrades to
+    the Leg A+B bundle, never breaks the answer. `content_leg_cap` bounds how
+    many hits each content sub-leg may contribute before the global rank +
+    budget cut (default `_CONTENT_LEG_CAP`).
 
     Returns a dict:
       {
@@ -678,6 +712,54 @@ def retrieve_context(
         rank = _signal_rank(sig, now, 0.0)
         by_id[sig.id] = (rank, _signal_payload(sig, theme_label=None, rank=rank))
 
+    # 4c) Leg C — content / entity search (opt-in via `content_leg`).
+    #
+    # Hybrid: word-boundary keyword/full-text match over `kg_signal.content`
+    # PLUS a signal-embedding cosine kNN over the same vectors the extractor
+    # stores. Both feed the SAME `by_id` dedupe + rank + budget path as
+    # Legs A/B — a content hit gets `_CONTENT_BOOST` so it floats above a
+    # generic recent signal — so nothing downstream (render, kg_refs, budget
+    # honesty) needs a second code path. Best-effort like every other leg: a
+    # failure logs and degrades to the Leg A+B bundle. `content_leg_ids`
+    # (attribution: keyword / embedding / both) is returned ONLY in this
+    # mode — every pre-existing caller's bundle shape is unchanged.
+    content_leg_ids: dict[str, str] = {}
+    if content_leg:
+        def _admit_content(sig: Signal, kind: str) -> None:
+            if signal_is_retired(sig.properties):
+                return
+            if sig.stale_after and sig.stale_after <= now:
+                return
+            rank = _signal_rank(sig, now, _CONTENT_BOOST)
+            prev = by_id.get(sig.id)
+            if prev is None or rank > prev[0]:
+                # Reuse whatever theme label a Leg-A payload already carried.
+                theme_label = prev[1].get("theme") if prev else None
+                by_id[sig.id] = (
+                    rank, _signal_payload(sig, theme_label=theme_label, rank=rank)
+                )
+            existing = content_leg_ids.get(sig.id)
+            content_leg_ids[sig.id] = (
+                f"{existing}+{kind}" if existing and kind not in existing else existing or kind
+            )
+
+        try:
+            for sig, _score in facade.search_signals_by_content(
+                enterprise_id, question, k=content_leg_cap
+            ):
+                _admit_content(sig, "keyword")
+        except Exception as exc:  # noqa: BLE001 — content leg is best-effort
+            logger.info("Ask KG retrieval: content keyword leg failed (%s)", exc)
+
+        if qvec is not None:
+            try:
+                for sig, _score in facade.signal_candidates_by_embedding(
+                    enterprise_id, qvec, k=content_leg_cap
+                ):
+                    _admit_content(sig, "embedding")
+            except Exception as exc:  # noqa: BLE001 — content leg is best-effort
+                logger.info("Ask KG retrieval: content embedding leg failed (%s)", exc)
+
     # 5) Rank globally + apply the token budget cap.
     #
     # The cut is COUNTED, not just taken. This loop used to `break` and leave no
@@ -736,7 +818,7 @@ def retrieve_context(
 
     empty = not (signals_out or themes_out or decisions_out or hypotheses_out or outcomes_out)
 
-    return {
+    bundle: dict[str, Any] = {
         "signals": signals_out,
         "themes": themes_out,
         "decisions": decisions_out,
@@ -747,6 +829,15 @@ def retrieve_context(
         "signals_dropped": signals_dropped,
         "empty": empty,
     }
+    # Leg C attribution, present ONLY when the content leg ran, so the
+    # default bundle shape every existing caller reads is unchanged.
+    if content_leg:
+        bundle["content_leg_ids"] = {
+            sid: content_leg_ids[sid]
+            for sid in (s["signal_id"] for s in signals_out)
+            if sid in content_leg_ids
+        }
+    return bundle
 
 
 # ── insight → hypothesis → SUPPORTS-signals evidence trail ────────────────

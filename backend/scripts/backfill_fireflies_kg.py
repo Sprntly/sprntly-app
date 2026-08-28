@@ -71,7 +71,12 @@ from app.graph.extractor import (  # noqa: E402
 )
 from app.graph.facade import GraphFacade  # noqa: E402
 from app.db.kg_ingest_ledger import record_hashes, seen_hashes  # noqa: E402
-from app.kg_ingest.runner import _condensed_and_full_text, _content_hash, token_for  # noqa: E402
+from app.kg_ingest.runner import (  # noqa: E402
+    _condensed_and_full_text,
+    _content_hash,
+    _record_valid_at,
+    token_for,
+)
 from app.kg_ingest.pullers import fireflies  # noqa: E402
 from app.kg_ingest.types import RawRecord  # noqa: E402
 from app.llm_batch import BatchRequest, BATCH_COST_MULTIPLIER, run_batch  # noqa: E402
@@ -268,17 +273,21 @@ def _run_sync_fallback(
         )
         doc_name = f"fireflies-backfill-{rec.external_id}"
         source_ref = ("fireflies", rec.external_id)
+        # This call's OWN date, not today — a backfill re-extracts calls that
+        # already happened, sometimes months ago; see extract_document's
+        # `valid_at` docstring.
+        valid_at = _record_valid_at(rec)
         try:
             r = extract_document(
                 facade, enterprise_id, doc_name=doc_name, text=main_text,
                 agent=_AGENT, origin="connector",
-                source_ref=source_ref,
+                source_ref=source_ref, valid_at=valid_at,
             )
             _accumulate(tally, r)
             c = run_checklist_pass(
                 facade, enterprise_id, doc_name=doc_name, text=checklist_text,
                 agent=_AGENT, origin="connector",
-                source_ref=source_ref,
+                source_ref=source_ref, valid_at=valid_at,
             )
             _accumulate(tally, c)
             record_hashes(enterprise_id, "fireflies", [hashes[id(rec)]])
@@ -387,12 +396,15 @@ def _run_batched(
             )
             continue
         source_ref = ("fireflies", rec.external_id)
+        # This call's OWN date, not today — same rationale as the sync
+        # fallback path above.
+        valid_at = _record_valid_at(rec)
         try:
             if "main" in entry:
                 doc_name, _text, message = entry["main"]
                 r = parse_extract_response(
                     facade, enterprise_id, message, doc_name=doc_name,
-                    origin="connector", source_ref=source_ref,
+                    origin="connector", source_ref=source_ref, valid_at=valid_at,
                 )
                 _accumulate(tally, r)
             else:
@@ -401,7 +413,7 @@ def _run_batched(
                 doc_name, text, message = entry["checklist"]
                 c = parse_checklist_response(
                     facade, enterprise_id, message, doc_name=doc_name, text=text,
-                    origin="connector", source_ref=source_ref,
+                    origin="connector", source_ref=source_ref, valid_at=valid_at,
                 )
                 _accumulate(tally, c)
             else:

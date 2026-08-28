@@ -336,6 +336,355 @@ def test_retrieve_context_recent_signals_without_theme_match(facade):
     assert bundle["themes"] == []
 
 
+# ─────────────────────────── retrieval: Leg C (content / entity search) ──────
+#
+# Legs A (theme kNN, mocked via `_patch_candidates`) and B (recent-signals
+# window) never reach `kg_signal.content`. These tests seed a signal Leg A/B
+# genuinely CANNOT surface (no theme edge, shadowed out of the recent window)
+# and assert Leg C — `content_leg=True` — reaches it anyway, mocking the two
+# facade primitives (`search_signals_by_content` / `signal_candidates_by_
+# embedding`) the same way `_patch_candidates` stands in for the real
+# pgvector kNN the fake backend can't run.
+
+
+def _patch_content_leg(keyword=(), embedding=()):
+    """Patch the two Leg C facade primitives. `keyword`/`embedding` are lists
+    of (Signal, score) tuples, mirroring each primitive's real return shape."""
+    from app.graph.facade import GraphFacade
+
+    return (
+        patch.object(GraphFacade, "search_signals_by_content",
+                    lambda self, ent, question, k=30: list(keyword)),
+        patch.object(GraphFacade, "signal_candidates_by_embedding",
+                    lambda self, ent, vec, k=30: list(embedding)),
+    )
+
+
+def _unreachable_signal(facade, ent, content, *, age_days=3, n_shadowing=10):
+    """Write a signal Legs A+B genuinely cannot reach: no theme edge, and
+    OLDER than `n_shadowing` newer unrelated signals — more than the default
+    recent-signals window (8), so Leg B's "newest 8" never includes it."""
+    from app.graph.types import Signal
+
+    now = datetime.now(timezone.utc)
+    sig = Signal(
+        enterprise_id=ent, source_type="customer_voice", kind="feature_request",
+        content=content, valid_at=now - timedelta(days=age_days),
+    )
+    facade.write_signal(ent, sig)
+    for i in range(n_shadowing):
+        facade.write_signal(ent, Signal(
+            enterprise_id=ent, source_type="customer_voice", kind="feature_request",
+            content=f"unrelated recent note {i}", valid_at=now,
+        ))
+    return sig
+
+
+def test_content_leg_off_by_default_leaves_the_bundle_unchanged(facade):
+    """`content_leg` defaults False — a caller that doesn't opt in gets the
+    EXACT Leg A+B bundle, byte-identical to before Leg C existed, even when a
+    content match would have been available."""
+    from app.graph.retrieval import retrieve_context
+
+    sig = _unreachable_signal(facade, "ent-A", "AIG flagged pricing concerns")
+    kw_patch, embed_patch = _patch_content_leg(keyword=[(sig, 1.0)])
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG")
+
+    assert sig.id not in {s["signal_id"] for s in bundle["signals"]}
+    assert "content_leg_ids" not in bundle
+
+
+def test_content_leg_keyword_surfaces_a_signal_legs_a_b_miss(facade):
+    """`content_leg=True` reaches a signal via the keyword sub-leg alone
+    (embedding leg returns nothing) that no theme edge or recency window
+    could — an entity-named question reaching content that matches no
+    topic-theme."""
+    from app.graph.retrieval import retrieve_context
+
+    sig = _unreachable_signal(facade, "ent-A", "AIG flagged pricing concerns")
+    kw_patch, embed_patch = _patch_content_leg(keyword=[(sig, 1.0)])
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(
+            facade, "ent-A", "what's the latest on the AIG account",
+            content_leg=True,
+        )
+
+    assert sig.id in {s["signal_id"] for s in bundle["signals"]}
+    assert bundle["content_leg_ids"][sig.id] == "keyword"
+
+
+def test_content_leg_semantic_surfaces_a_paraphrase(facade):
+    """The semantic sub-leg alone (keyword returns nothing) also reaches an
+    unreachable signal — the paraphrase case the keyword leg cannot cover."""
+    from app.graph.retrieval import retrieve_context
+
+    sig = _unreachable_signal(facade, "ent-A", "the insurer renewal is stalling on price")
+    kw_patch, embed_patch = _patch_content_leg(embedding=[(sig, 0.87)])
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(
+            facade, "ent-A", "what's the latest on AIG's renewal",
+            content_leg=True,
+        )
+
+    assert sig.id in {s["signal_id"] for s in bundle["signals"]}
+    assert bundle["content_leg_ids"][sig.id] == "embedding"
+
+
+def test_content_leg_both_sub_legs_hit_attributes_keyword_plus_embedding(facade):
+    """A signal both sub-legs surface is attributed to both, not just the
+    last one admitted — `content_leg_ids` records the union."""
+    from app.graph.retrieval import retrieve_context
+
+    sig = _unreachable_signal(facade, "ent-A", "AIG renewal stalling on price")
+    kw_patch, embed_patch = _patch_content_leg(
+        keyword=[(sig, 1.0)], embedding=[(sig, 0.9)],
+    )
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(
+            facade, "ent-A", "what's the latest on AIG", content_leg=True,
+        )
+
+    assert bundle["content_leg_ids"][sig.id] == "keyword+embedding"
+
+
+def test_content_leg_word_boundary_campaign_does_not_match_aig_query(facade):
+    """The word-boundary contract the migration's tsvector/tsquery search
+    enforces: a signal about a "campaign" must NOT be treated as an "AIG"
+    content hit — asserted via `content_leg_ids` attribution rather than mere
+    bundle membership, since Leg B's recent-signals window would ALSO surface
+    a freshly-written signal regardless of Leg C, and that is not what this
+    test is about. The ILIKE substring false-positive itself (an `%AIG%` scan
+    also matching "campAIGn") is closed at the SQL layer — the RPC uses
+    `websearch_to_tsquery`, not ILIKE; this asserts the retrieval-side half
+    of the contract: `retrieve_context` only ever ATTRIBUTES what the facade
+    primitive actually returned as a Leg C hit."""
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Signal
+
+    now = datetime.now(timezone.utc)
+    campaign_sig = Signal(
+        enterprise_id="ent-A", source_type="customer_voice", kind="feature_request",
+        content="the marketing campaign launched last week", valid_at=now,
+    )
+    facade.write_signal("ent-A", campaign_sig)
+    # The facade primitive itself would never return this signal for an "AIG"
+    # query against the real GIN/tsquery index — modeled here as an empty
+    # keyword-leg result, exactly like the migration's word-boundary search.
+    kw_patch, embed_patch = _patch_content_leg(keyword=[])
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                                  content_leg=True)
+
+    assert campaign_sig.id not in (bundle.get("content_leg_ids") or {})
+
+
+def test_content_leg_retired_signal_is_excluded_even_when_the_rpc_returns_it(facade):
+    """Retirement (`signal_is_retired`) is enforced in Python post-hydration
+    for Leg C exactly like Legs A/B — a superseded signal the mocked RPC
+    still "returns" (modeling a server that hasn't caught up) must not reach
+    the bundle."""
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Signal
+
+    sig = Signal(
+        enterprise_id="ent-A", source_type="customer_voice", kind="feature_request",
+        content="AIG old fact", valid_at=datetime.now(timezone.utc),
+        properties={"superseded_by": "some-newer-id"},
+    )
+    facade.write_signal("ent-A", sig)
+    kw_patch, embed_patch = _patch_content_leg(keyword=[(sig, 1.0)])
+    # recent_signals=0 disables Leg B entirely, so the ONLY path this signal
+    # could reach the bundle through is Leg C's own admit check — isolating
+    # exactly what this test is about (Leg C's OWN retirement check), not
+    # Leg B's independent filtering of the same signal.
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                                  content_leg=True, recent_signals=0)
+
+    assert sig.id not in {s["signal_id"] for s in bundle["signals"]}
+
+
+def test_content_leg_stale_signal_is_excluded(facade):
+    """A signal past its `stale_after` window is excluded — same as Legs A/B
+    (mirrors `_admit_content`'s explicit stale_after check)."""
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Signal
+
+    long_ago = datetime.now(timezone.utc) - timedelta(days=90)
+    sig = Signal(
+        enterprise_id="ent-A", source_type="verbal_claim", kind="feature_request",
+        content="AIG very old claim", valid_at=long_ago,
+    )
+    facade.write_signal("ent-A", sig)
+    assert sig.stale_after is not None and sig.stale_after < datetime.now(timezone.utc)
+    kw_patch, embed_patch = _patch_content_leg(keyword=[(sig, 1.0)])
+    # recent_signals=0 disables Leg B — see the retirement test above for why.
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                                  content_leg=True, recent_signals=0)
+
+    assert sig.id not in {s["signal_id"] for s in bundle["signals"]}
+
+
+def test_content_leg_boost_ranks_above_recent_but_a_theme_hit_can_still_lead(facade):
+    """A content-leg hit (`_CONTENT_BOOST=0.3`) outranks a generic recent
+    signal (boost 0.0) EVEN WHEN IT IS OLDER — the boost has to overcome the
+    recency-factor gap, not just tie-break an equally-fresh pair (which a
+    stable sort could get right by accident, boost or not). Matches the
+    theme leg's "float above recency alone" contract, without asserting a
+    specific ordering against a THEME hit, which is a tuning knob, not an
+    invariant."""
+    from app.graph.retrieval import retrieve_context
+
+    # 3 days old — content_sig is UNREACHABLE via Leg B (shadowed out of the
+    # recent-8 window by the 10 fresher unrelated signals `_unreachable_
+    # signal` writes), so the only way it can appear at all is Leg C, at a
+    # LOWER recency factor than the fresh recent signals it must still beat.
+    content_sig = _unreachable_signal(facade, "ent-A", "AIG pricing concern")
+
+    kw_patch, embed_patch = _patch_content_leg(keyword=[(content_sig, 1.0)])
+    with _patch_embed(), _patch_candidates([]), kw_patch, embed_patch:
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                                  content_leg=True)
+
+    contents = [s["content"] for s in bundle["signals"]]
+    assert contents[0] == "AIG pricing concern"
+
+
+def test_content_leg_cap_is_passed_through_as_each_sub_legs_k(facade):
+    """`content_leg_cap` is the `k` each sub-leg is asked for — the actual
+    cap enforcement is server-side (the RPC's `p_k` / the facade primitive's
+    own `k` param), so what `retrieve_context` owns and this asserts is that
+    the caller's `content_leg_cap` reaches both calls verbatim, not some
+    other default."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+
+    seen_k: dict[str, int] = {}
+
+    def fake_keyword(self, ent, question, k=30):
+        seen_k["keyword"] = k
+        return []
+
+    def fake_embedding(self, ent, vec, k=30):
+        seen_k["embedding"] = k
+        return []
+
+    with _patch_embed(), _patch_candidates([]), \
+         patch.object(GraphFacade, "search_signals_by_content", fake_keyword), \
+         patch.object(GraphFacade, "signal_candidates_by_embedding", fake_embedding):
+        retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                         content_leg=True, content_leg_cap=7)
+
+    assert seen_k == {"keyword": 7, "embedding": 7}
+
+
+def test_content_leg_failure_is_best_effort_and_degrades_to_leg_a_b(facade):
+    """A Leg C read failure (both sub-legs) logs and degrades to the Leg A+B
+    bundle — never breaks the answer, matching every other leg's contract."""
+    from app.graph.facade import GraphFacade
+    from app.graph.retrieval import retrieve_context
+    from app.graph.types import Signal
+
+    now = datetime.now(timezone.utc)
+    recent_sig = Signal(
+        enterprise_id="ent-A", source_type="customer_voice", kind="feature_request",
+        content="still here", valid_at=now,
+    )
+    facade.write_signal("ent-A", recent_sig)
+
+    def _boom(self, *a, **k):
+        raise RuntimeError("rpc unavailable")
+
+    with _patch_embed(), _patch_candidates([]), \
+         patch.object(GraphFacade, "search_signals_by_content", _boom), \
+         patch.object(GraphFacade, "signal_candidates_by_embedding", _boom):
+        bundle = retrieve_context(facade, "ent-A", "what's the latest on AIG",
+                                  content_leg=True)
+
+    assert bundle["empty"] is False
+    assert [s["content"] for s in bundle["signals"]] == ["still here"]
+
+
+# ── ask_runner._retrieve_kg_bundle: content_leg wiring at the caller boundary ─
+#
+# `_retrieve_kg_bundle` is the ONE function backing every KG-grounded caller
+# (the direct Ask answer path, a custom-skill grounding, and the two
+# voice-of-customer paths). These assert the wiring decision itself — the
+# answer path gets Leg C by default; the two VoC-scale callers opt out — by
+# capturing what `retrieve_context` actually receives, not by exercising the
+# real KG.
+
+
+def test_retrieve_kg_bundle_defaults_content_leg_true(isolated_settings, monkeypatch):
+    """The answer-path default: a caller that passes no `content_leg`
+    override (the direct Ask path, `qa_agent._kg_grounding`, ask_runner's
+    wave-2 kg gather) gets Leg C enabled."""
+    from app import ask_runner
+
+    seen = {}
+
+    def fake_retrieve_context(facade, enterprise_id, question, **kwargs):
+        seen.update(kwargs)
+        return {"signals": [], "themes": [], "decisions": [], "hypotheses": [],
+                "outcomes": [], "kg_refs": [], "token_estimate": 0,
+                "signals_dropped": 0, "empty": True}
+
+    with patch("app.graph.retrieval.retrieve_context", fake_retrieve_context):
+        ask_runner._retrieve_kg_bundle("ent-A", "what's the latest on AIG")
+
+    assert seen.get("content_leg") is True
+
+
+def test_retrieve_kg_bundle_voc_scale_callers_opt_out_of_content_leg(isolated_settings, monkeypatch):
+    """The two VoC-scale callers (`call_digest.build_kg_context`,
+    `qa_agent`'s pinned voice-of-customer report) must NOT silently change
+    what their calibrated, widened retrieval counts — this is the explicit
+    `content_leg=False` opt-out both pass."""
+    from app import ask_runner
+
+    seen = {}
+
+    def fake_retrieve_context(facade, enterprise_id, question, **kwargs):
+        seen.update(kwargs)
+        return {"signals": [], "themes": [], "decisions": [], "hypotheses": [],
+                "outcomes": [], "kg_refs": [], "token_estimate": 0,
+                "signals_dropped": 0, "empty": True}
+
+    with patch("app.graph.retrieval.retrieve_context", fake_retrieve_context):
+        ask_runner._retrieve_kg_bundle(
+            "ent-A", "show me all the feedback",
+            scale={"k": 40}, content_leg=False,
+        )
+
+    assert seen.get("content_leg") is False
+    assert seen.get("k") == 40, "the scale kwargs must still reach retrieve_context"
+
+
+def test_call_digest_kg_context_opts_out_of_content_leg(isolated_settings, monkeypatch):
+    """`call_digest.build_kg_context` — one of the two VoC-scale callers —
+    passes `content_leg=False` at its own call site, not relying on a caller
+    upstream to remember it. `_retrieve_kg_bundle` is imported LAZILY inside
+    `build_kg_context` (see that function's docstring on why), so the patch
+    target is `app.ask_runner`'s own attribute — a fresh `from ... import`
+    re-resolves it there every call."""
+    from app import ask_runner, call_digest
+
+    seen = {}
+
+    def fake_bundle(enterprise_id, question, *, scale=None, content_leg=True, **kw):
+        seen["content_leg"] = content_leg
+        seen["scale"] = scale
+        return None
+
+    monkeypatch.setattr(ask_runner, "_retrieve_kg_bundle", fake_bundle)
+    call_digest.build_kg_context("ent-A", "show me all the feedback", live_calls=False)
+
+    assert seen["content_leg"] is False
+    assert seen["scale"] is not None
+
+
 # ─────────────────────────── retrieval: budget + empty ───────────────────────────
 
 
