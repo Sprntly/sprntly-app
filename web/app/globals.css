@@ -26375,112 +26375,93 @@
    NAV had the same disease — fifteen rows — so the primitive comes to main
    ahead of that branch and is used to fold six of them away. Kept byte-for-
    byte apart from this note, so the merge with that branch is a no-op. */
-/* The nav is a RAIL at the edge of the pane, not a column inside the content.
-   `.pset-body` caps every pane at 860px, which would put the rail in the
-   middle of the screen — so a pane that uses this primitive opts out of that
-   cap and the content column keeps its own readable width instead.
-   `:has()` rather than a modifier class so no pane has to remember to add
-   one; using the primitive is the whole opt-in. */
-.pset-body:has(.setpane-shell) {
-  max-width: none;
-}
-
+/* The views run ACROSS THE TOP of the pane, under its header. `.pset-body`
+   caps a pane at 860px, which is the right measure for the card and for the
+   row above it too - so unlike the old right-hand rail this needs no opt-out
+   of that cap. */
 .setpane-shell {
-  container-type: inline-size;
-  container-name: setpane;
-}
-
-.setpane-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 216px;
-  gap: 40px;
-  align-items: start;
-}
-
-/* Prose and forms still want a comfortable measure — only the RAIL moves to
-   the edge, not the card with it. */
-.setpane-main {
-  min-width: 0;
-  max-width: 820px;
-}
-
-.setpane-nav {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  position: sticky;
-  top: 12px;
-  padding-left: 18px;
-  border-left: 1px solid var(--line);
+  min-width: 0;
+}
+
+.setpane-main {
+  min-width: 0;
+}
+
+/* PLAIN LABELS ON A RULE, not buttons in boxes. Six outlined pills read as six
+   things to press, which is a lot of chrome for what is really one question -
+   which view am I looking at - and the boxes competed with the actual buttons
+   on the card below. The labels carry themselves; only the current one is
+   marked, by weight and a rule under it that sits ON the row's own border.
+
+   Nothing wraps: six items reflowing to a second line stop reading as one set
+   of views, so the row scrolls instead. */
+.setpane-nav {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 22px;
+  margin: 0 0 22px;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  /* The scroll is a fallback for a narrow pane, not a feature to decorate. */
+  scrollbar-width: none;
+}
+
+.setpane-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .setpane-nav-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  /* The bottom padding is what puts the active rule on the nav's own border
+     rather than floating above it. */
+  padding: 0 0 12px;
   border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--ink-2);
+  border-radius: 0;
+  background: none;
+  color: var(--ink-3);
   font-size: 13px;
-  text-align: left;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
+  transition: color 0.12s, box-shadow 0.12s;
 }
 
 .setpane-nav-item:hover {
-  background: var(--surface-3, rgba(18, 32, 26, 0.05));
   color: var(--ink);
 }
 
+/* `inset` box-shadow rather than a border, so the marked item does not grow
+   2px taller than the rest and shunt the row. */
 .setpane-nav-item.active {
-  background: var(--surface-3, rgba(18, 32, 26, 0.06));
   color: var(--ink);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ink);
 }
 
 /* The one number each section is about, readable without opening it. */
 .setpane-nav-hint {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--ink-4);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+.setpane-nav-item:hover .setpane-nav-hint,
 .setpane-nav-item.active .setpane-nav-hint {
-  color: var(--ink-2);
+  color: var(--ink-3);
 }
 
-/* Measured against the PANE's own width, not the viewport: this primitive is
-   shared, and the settings sidebar already takes 228px of the screen. Below
-   the split point the rail becomes a scrollable row above the card — a 216px
-   rail beside a narrow card would squeeze both. */
-@container setpane (max-width: 720px) {
-  .setpane-split {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .setpane-nav {
-    position: static;
-    flex-direction: row;
-    gap: 4px;
-    overflow-x: auto;
-    padding: 0 0 2px;
-    border-left: none;
-    border-bottom: 1px solid var(--line);
-    order: -1;
-  }
-
+@media (prefers-reduced-motion: reduce) {
   .setpane-nav-item {
-    width: auto;
-    white-space: nowrap;
-  }
-
-  .setpane-nav-hint {
-    display: none;
+    transition: none;
   }
 }
 

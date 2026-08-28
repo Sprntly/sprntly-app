@@ -303,12 +303,20 @@ export type SettingsPaneNavItem = {
 }
 
 /**
- * Split a settings pane into one visible card plus a nav beside it.
+ * Split a settings pane into one visible card plus a row of pills naming the
+ * rest.
  *
  * The problem it solves: a pane like Billing had six stacked cards, so the
  * whole surface was a long scroll and nothing was findable. Showing one card
  * at a time and listing the rest turns "scroll until you see it" into "read
  * the list, click the thing".
+ *
+ * The list sits ACROSS THE TOP, under the pane's header, not in a rail down
+ * the right. A rail on the far edge splits navigation across both sides of
+ * the screen: you read the header, then the card, and the six things you
+ * could have been looking at instead are somewhere you had no reason to look.
+ * Directly under the title they are the first thing after it, which is where
+ * a set of views belongs.
  *
  * NAVIGATION, NOT TABS — deliberately. These are separate views of one
  * subject, the way a sidebar switches sections, so it is a `<nav>` with
@@ -337,13 +345,7 @@ export function SettingsPaneNav({
   children: ReactNode
 }) {
   return (
-    // The shell exists to be a container-query context: this is a shared
-    // primitive, so it adapts to the width it is actually given rather than to
-    // the viewport (the settings sidebar takes 228px of it, and a future pane
-    // may be narrower still).
     <div className="setpane-shell">
-    <div className="setpane-split">
-      <div className="setpane-main">{children}</div>
       <nav className="setpane-nav" aria-label={label}>
         {items.map((item) => {
           const on = item.id === active
@@ -361,7 +363,7 @@ export function SettingsPaneNav({
           )
         })}
       </nav>
-    </div>
+      <div className="setpane-main">{children}</div>
     </div>
   )
 }
