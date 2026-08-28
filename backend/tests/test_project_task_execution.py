@@ -119,19 +119,33 @@ def test_execute_tool_description_length_and_negative_space():
     assert "analysis" not in weak.lower()
 
 
-def test_execute_tool_registered_in_both_agents():
-    # Post-collapse: registration lives at each surface's SurfaceScope
-    # construction; dispatch is single-sourced on the unified engine's
-    # sixth ladder branch (`qa_agent._try_scoped_tool_answer`) — checked
-    # ONCE rather than duplicated per surface, since both surfaces share it.
-    from app import ask_job_runner, qa_agent
-    from app.routes import projects as routes_projects
+def test_execute_tool_registered_in_both_agents(monkeypatch):
+    # Post-collapse: tool registration for BOTH surfaces relocated into
+    # `ProjectContextAssembler.assemble` (the 6 project depth tools ride
+    # `SurfaceScope.extra_tools`); dispatch is single-sourced on the unified
+    # engine's sixth ladder branch (`qa_agent._try_scoped_tool_answer`) — checked
+    # ONCE, since both surfaces share it. Retargeted from the deleted
+    # `_respond_as_group_agent` / `_build_private_scope` source-scans to a
+    # behavioural check on the assembled scope (gate stubbed; the tool list is
+    # DB-independent).
+    from app import project_task_execution, qa_agent
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+    from app.db import projects as projects_db
 
-    group_src = inspect.getsource(routes_projects._respond_as_group_agent)
-    assert "project_task_execution.EXECUTE_TASK_TOOL" in group_src
+    monkeypatch.setattr(projects_db, "project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr(projects_db, "is_project_member", lambda *a, **k: True)
 
-    individual_src = inspect.getsource(ask_job_runner._build_private_scope)
-    assert "project_task_execution.EXECUTE_TASK_TOOL" in individual_src
+    execute_name = project_task_execution.EXECUTE_TASK_TOOL["name"]
+    for surface in ("private", "group"):
+        req = AssembleRequest(
+            user_id="u1", company_id="c1", dataset="", conversation_id=None,
+            question="q", workspace_id="w1",
+            params={"project_id": 9, "surface": surface},
+        )
+        scope = ProjectContextAssembler().assemble(req)
+        names = [t["name"] for t in scope.extra_tools]
+        assert execute_name in names, f"the {surface} scope must register execute_task"
 
     dispatch_src = inspect.getsource(qa_agent._try_scoped_tool_answer)
     assert 'name == "execute_task"' in dispatch_src

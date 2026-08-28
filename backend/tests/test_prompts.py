@@ -88,7 +88,32 @@ def test_company_facts_addendum_has_no_blanket_authority_language():
 
 
 def test_company_facts_addendum_length_within_bounds():
-    assert 400 <= len(prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM) <= 1600
+    # Upper bound raised from 1600 when the addendum stopped describing three
+    # identity fields and started describing the whole onboarding capture plus
+    # the captured-versus-connected routing rule. Still a bloat guard.
+    assert 400 <= len(prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM) <= 3200
+
+
+def test_company_facts_addendum_routes_stated_answers_to_configuration():
+    """The reported failure: asked for the north star, chat said no connected
+    source states one and sent the team to Connectors — for a value they had
+    already chosen in onboarding. The addendum has to say which questions this
+    block answers, and that a connector is not how they get answered."""
+    a = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    for needle in ("north star", "Connected sources record what HAPPENED",
+                   "never suggest connecting a data source"):
+        assert needle in a, f"addendum missing {needle!r}"
+
+
+def test_company_facts_addendum_names_where_a_missing_field_is_set():
+    """A genuinely unset field sends the user to the Settings section that owns
+    it — the alternative the model reached for otherwise was Connectors, which
+    fills none of them."""
+    a = prompts.ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    for section in ("Settings → Metrics", "Settings → Business Context",
+                    "Settings → Company Profile",
+                    "Settings → Process & Planning"):
+        assert section in a, f"addendum missing {section!r}"
 
 
 def test_company_facts_addendum_frames_configuration_not_verified_fact():

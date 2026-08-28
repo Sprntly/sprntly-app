@@ -150,6 +150,12 @@ export interface ShellTurn {
   streamDropped?: boolean
   stopped?: boolean
   error?: string | null
+  /** A TYPED provider refusal for this turn — out of credits, rate limited,
+   *  overloaded. Distinct from `error`, which stays the raw RECORD of what
+   *  failed and is never shown; this is the server's user-safe sentence and is
+   *  the thing the failed turn renders. `needsAdmin` marks the case a retry
+   *  cannot fix. */
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   timedOut?: boolean
   /** Driven by the turn's own persisted clock, never `Date.now()` at render. */
   createdAt?: number
@@ -237,8 +243,8 @@ export interface ChatSurfaceDescriptor {
   // ── Transcript ────────────────────────────────────────────────────────────
   transcript: {
     agentName: string
-    /** One label everywhere: main renders "Product Coworker" and both
-     *  project surfaces pass the shared `AGENT_BADGE` constant. */
+    /** Role pill next to the agent name. The PM agent renders none since the
+     *  "Product Coworker" pill was removed (owner, 2026-08-24). */
     agentBadge?: string | null
     /** project-group: speaker heads, role chips, avatars, start-aligned
      *  non-self turns (mirrors `SurfaceScope.multi_party`). */
@@ -393,6 +399,15 @@ export type ChatIntentExecutorAdapter = Partial<Omit<ChatIntentExecutors, "onCla
  * Typed structurally against the host so this module never imports the
  * main-chat screen.
  */
+/** Structural mirror of `GoalAnalysisPlan`'s `PlanDecision`. Named here rather
+ *  than imported for the reason stated at the top of this file: this module
+ *  describes its host's fields structurally and does not depend on them. */
+export type GoalPlanDecision = {
+  excluded_sources: string[]
+  hypotheses: string[]
+  definition_text?: string
+}
+
 export interface MapMainTurnsDeps {
   // in-flight / last-turn state
   animatedTurnIds: MutableRefObject<Set<string>>
@@ -474,6 +489,44 @@ export interface MapMainTurnsDeps {
   onSubmitTurnEdit?(turn: { id: string; query: string }, text: string): void
   onCancelTurnEdit?: () => void
   submitClarifyAnswers: (answers: ClarifyAnswer[]) => void | Promise<void>
+  /** Goal Analysis gates, answered in the thread.
+   *
+   *  REQUIRED, and deliberately so — a surface without the feature passes
+   *  `undefined` EXPLICITLY. As optional fields they could be left off the deps
+   *  object with a clean `tsc`, and that is exactly how this feature shipped
+   *  inert: `mapDeps` never passed the handlers, every button short-circuited
+   *  through `confirmGoalDefinition?.(…)`, and nothing anywhere complained.
+   *  Naming them costs a surface one line and makes dropping them a build
+   *  error. */
+  goalGateBusyTurnId: string | null | undefined
+  confirmGoalDefinition:
+    | ((tabId: string, turnId: string, runId: number,
+        definition: string) => void | Promise<void>)
+    | undefined
+  approveGoalPlan:
+    | ((tabId: string, turnId: string, runId: number,
+        decision: GoalPlanDecision,
+        // The plan as approved, so the settled record can keep showing WHAT was
+        // agreed. Structurally typed for the reason at the top of this file:
+        // this module names its host's shapes, it does not import them.
+        // THE WHOLE PLAN, not a summary. The settled record re-renders the
+        // plan itself now, so it needs every field the live gate had — the
+        // witnesses, the gaps, what it said it would produce. Structurally
+        // typed for the reason at the top of this file: this module names its
+        // host's shapes, it does not import them.
+        plan?: {
+          goal_text?: string
+          definition_text?: string
+          currency?: string
+          total_signals?: number
+          sources?: { source_type: string; label: string;
+                      signal_count: number; witnesses: string }[]
+          cannot_answer?: { question: string; because: string; remedy: string }[]
+          will_produce?: string[]
+          excluded_sources?: string[]
+          hypotheses?: string[]
+        }) => void | Promise<void>)
+    | undefined
   setViewerAttachment: (a: {
     name: string
     content: string

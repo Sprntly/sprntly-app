@@ -533,6 +533,79 @@ def test_generate_refuses_a_foreign_conversation(docs_env, monkeypatch):
     assert r.status_code == 404
 
 
+def test_generate_accepts_the_caller_s_own_dataset_and_threads_it_through(
+    docs_env, monkeypatch
+):
+    """`company_client` seeds its company under slug "acme" — the caller's own
+    dataset. Ownership-gated exactly like routes/ask.py's `require_owned_dataset`
+    call, and threaded into `generate_into` for the grounding fallback (see
+    custom_artifact_generate.py) — this only asserts it reaches the writer;
+    what the writer does with it is test_custom_artifact_generate.py's job."""
+    import app.routes.custom_artifacts as mod
+
+    captured = {}
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: captured.update(kw))
+
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "issues report", "task": "our biggest issues", "dataset": "acme"},
+    )
+    assert r.status_code == 200
+    assert captured["dataset"] == "acme"
+
+
+def test_generate_refuses_a_foreign_dataset(docs_env, monkeypatch):
+    """A dataset slug owned by a DIFFERENT company must 404 — never ground a
+    document on another tenant's corpus, and never disclose which slugs exist
+    by returning a different status for "not yours" vs "doesn't exist"."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    outsider = "outsider-" + uuid.uuid4().hex[:8]
+    seed_company(user_id=outsider, slug="rival")
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t", "dataset": "rival"},
+    )
+    assert r.status_code == 404
+
+
+def test_generate_refuses_an_unowned_dataset_slug(docs_env, monkeypatch):
+    """A slug that maps to no company at all — same 404, same non-disclosure,
+    as a slug owned by someone else."""
+    import app.routes.custom_artifacts as mod
+
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: None)
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t", "dataset": "ghost-dataset-nobody-owns"},
+    )
+    assert r.status_code == 404
+
+
+def test_generate_with_no_dataset_is_unchanged(docs_env, monkeypatch):
+    """Omitting `dataset` entirely (an older frontend build) must behave
+    exactly as it did before this field existed — no gate, no dataset threaded
+    through, row created normally."""
+    import app.routes.custom_artifacts as mod
+
+    captured = {}
+    monkeypatch.setattr(mod, "generate_into", lambda **kw: captured.update(kw))
+    ctx = company_client(monkeypatch)
+
+    r = ctx.client.post(
+        "/v1/custom-artifacts/generate",
+        json={"kind": "memo", "task": "t"},
+    )
+    assert r.status_code == 200
+    assert captured["dataset"] == ""
+
+
 def test_the_generation_handler_is_async_not_a_threadpool_hog(docs_env):
     """STRUCTURAL, because the cost is invisible in any functional test.
 

@@ -6,8 +6,10 @@
 // a full LLM round-trip) before any branch knows whether the message becomes a
 // chat turn or a command that seeds its own turn. That await sat in front of
 // every render, so the composer cleared into an empty screen for seconds and the
-// send read as dropped. The fix renders a PENDING-SEND placeholder — the user's
-// words plus a thinking skeleton — on the send's own commit.
+// send read as dropped. The fix renders the user's message on the send's own
+// commit: a PENDING-SEND placeholder bridges the first microtasks, then the REAL
+// optimistic thread turn (message + thinking skeleton) supersedes it before the
+// classify await, so the classify window is never blank.
 //
 // The hazard this suite exists to pin is the DUPLICATE: the command flows
 // (openPrdInTab's seedTurn / seedCommandTurn) render and persist their own turn,
@@ -173,13 +175,20 @@ describe("ChatScreen — the send renders before the dispatch decision", () => {
     await typeAndSend("why are enterprise users asking for this?")
 
     // The envelope has NOT resolved — this is the window that used to be blank.
-    const pending = document.querySelector('[data-testid="pending-send"]')
-    expect(pending).toBeTruthy()
-    expect(within(pending as HTMLElement).getByText("why are enterprise users asking for this?")).toBeTruthy()
+    // The optimistic message now renders as the REAL thread turn on the send's own
+    // commit (superseding the earlier pending-send placeholder in this window), so
+    // observe the user bubble directly.
+    const bubble = Array.from(document.querySelectorAll(".bc-user-bubble")).find(
+      (el) => el.textContent === "why are enterprise users asking for this?",
+    )
+    expect(bubble).toBeTruthy()
     // …and, once past the 400ms rung-0 gate, something is visibly working so the
-    // wait reads as progress. (Below 400ms nothing renders on purpose — a
-    // spinner that appears and vanishes inside half a second reads as a glitch.)
-    await waitFor(() => expect((pending as HTMLElement).querySelector(".cw")).toBeTruthy())
+    // wait reads as progress — and specifically NOT the "No response was generated"
+    // failure copy the turn would otherwise fall through to with no reply yet.
+    // (Below 400ms nothing renders on purpose — a spinner that appears and vanishes
+    // inside half a second reads as a glitch.)
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
+    expect(document.body.textContent).not.toContain("No response was generated")
     // The dispatch really is still pending (not a resolved-fast false positive).
     expect(runAskGeneration).not.toHaveBeenCalled()
 
@@ -193,8 +202,12 @@ describe("ChatScreen — the send renders before the dispatch decision", () => {
     await typeAndSend("what changed in onboarding last week?")
 
     // The text left the composer AND landed on screen in the same commit — the
-    // old bug was the first half happening without the second.
-    expect(document.querySelector('[data-testid="pending-send"]')).toBeTruthy()
+    // old bug was the first half happening without the second. The message now
+    // renders as the real optimistic turn rather than the pending-send placeholder.
+    const rendered = Array.from(document.querySelectorAll(".bc-user-bubble")).some(
+      (el) => el.textContent === "what changed in onboarding last week?",
+    )
+    expect(rendered).toBe(true)
     const composer = document.querySelector(
       ".cx-input",
     ) as HTMLTextAreaElement

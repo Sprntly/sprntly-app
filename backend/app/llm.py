@@ -22,6 +22,7 @@ import re
 import threading
 import time as _time
 from functools import lru_cache
+from typing import Any
 
 import anthropic
 from anthropic import Anthropic
@@ -286,6 +287,46 @@ def _attempt_delay(attempt: int) -> float:
     return _BACKOFF_BASE_S * (4 ** attempt) * (1 + random.random() * 0.25)
 
 
+def _anthropic_kwargs(client: LLMClient, kwargs: dict) -> dict:
+    """Move `temperature` off the signature and into the request body.
+
+    `anthropic` 1.0.0 REMOVED `temperature` (and `top_p`/`top_k`) from
+    `messages.create()`. Passing one is not an API rejection — it is a plain
+    Python `TypeError` raised before any request is made, and `ask_planner`
+    passes `temperature=0`. Its caller catches that and logs "answering
+    unplanned", so the product does not error: it silently loses its router,
+    and every question falls through to the generic answer path. That is how
+    "show me the PRDs I created" came to be answered out of the knowledge
+    graph and a Slack channel index, naming PRD ids that do not exist.
+
+    `extra_body` is the SDK's own documented escape hatch for exactly this, it
+    lands the value in the same place on the wire, and it exists on BOTH
+    majors — so this is version-agnostic rather than a bet on which SDK a
+    deploy happens to resolve. The models here (`claude-sonnet-4-6`,
+    `claude-haiku-4-5`) still accept the parameter server-side; only the
+    client signature dropped it. Deleting `temperature` instead would have
+    been the smaller diff and the wrong one: sixteen call sites pin it to 0
+    for determinism, several saying so in as many words ("Pin to
+    temperature=0 for deterministic screen matching"), and a router that
+    answers differently to the same question twice is a worse router.
+
+    ANTHROPIC ONLY. `app.openai_client` reads `kwargs["temperature"]` off this
+    same dict and drops it for the GPT-5 family itself, so the OpenAI shim
+    must keep receiving it where it already looks. Metering leaves the client
+    object's type intact (it swaps `.messages`), which is what makes the
+    isinstance check here reliable.
+    """
+    if "temperature" not in kwargs or not isinstance(client, Anthropic):
+        return kwargs
+    out = dict(kwargs)
+    temperature = out.pop("temperature")
+    extra_body = dict(out.get("extra_body") or {})
+    # A caller that set it explicitly wins — this only fills the gap.
+    extra_body.setdefault("temperature", temperature)
+    out["extra_body"] = extra_body
+    return out
+
+
 def _create_with_retries(
     client: LLMClient, *, stream: bool = False, background: bool = False,
     on_delta=None, on_json_delta=None, **kwargs
@@ -327,6 +368,9 @@ def _create_with_retries(
     low-priority lane (capped, and always behind interactive waiters) so a
     user-facing call is never queued behind warm work.
     """
+    # Once, before the retry loop — every attempt sends the same request, and
+    # the translation is not something to redo per attempt.
+    kwargs = _anthropic_kwargs(client, kwargs)
     _wait_start = _time.monotonic()
     _llm_gate.acquire(background=background)
     waited = _time.monotonic() - _wait_start
@@ -400,6 +444,132 @@ def _create_with_retries(
         _llm_gate.release(background=background)
 
 
+# --- Prompt-cache TTL tiers -------------------------------------------------
+# Anthropic prices a cache WRITE by the TTL the request asks for: the bare
+# `{"type": "ephemeral"}` block is the 5-minute tier at 1.25x the input rate,
+# and an explicit `ttl: "1h"` is the 1-hour tier at 2x. A read is 0.1x either
+# way. So the tiers are not strictly ordered — 1h is cheaper per call only when
+# entries actually survive to be read.
+#
+# The rule of thumb this codebase uses: pick 1h when the measured share of
+# calls landing within an hour of the previous one is comfortably above the
+# ~55% break-even, and 5m otherwise. `compose_top_insights` is the clear case
+# (measured over 21 days of production: 14.8% of calls fall within 5 minutes of
+# the previous one, 86.3% within an hour) — see app/graph/gateway.py.
+CACHE_TTL_5M = "5m"
+CACHE_TTL_1H = "1h"
+
+# Minimum cacheable prefix, in TOKENS, per model family. A prefix shorter than
+# this is NOT cached and the API says nothing about it — the response simply
+# comes back with `cache_creation_input_tokens: 0`. Attaching `cache_control`
+# below the floor is therefore not a cheap no-op to be safe about: it burns one
+# of the four breakpoints a request is allowed and makes the telemetry read as
+# "we cache here" when we do not. Sized from Anthropic's published per-model
+# minimums; keep in sync when a model tier is added.
+_MIN_CACHEABLE_TOKENS = {
+    "claude-haiku-4-5": 4096,
+    "claude-opus-4-7": 2048,
+    "claude-sonnet-4-6": 1024,
+}
+# Fail SAFE, not open: an unknown model gets the strictest floor, so a new tier
+# can only ever under-cache (a missed saving) rather than emit dead breakpoints.
+_DEFAULT_MIN_CACHEABLE_TOKENS = 4096
+# Prose runs ~4 chars/token. Only ever used to compare against the floors above,
+# where erring high costs a cache we could have had and erring low costs a dead
+# breakpoint — so this stays deliberately conservative.
+_CHARS_PER_TOKEN = 4
+
+
+def _create_maybe_batched(
+    client, *, batch: bool, label: str = "", batch_deadline_s: float | None = None,
+    stream: bool = False, background: bool = False, on_delta=None,
+    on_json_delta=None, **kwargs,
+):
+    """`_create_with_retries`, except a caller with no one waiting can pay half.
+
+    Anthropic's Message Batches API runs the SAME request for 50% of the price;
+    the trade is latency (minutes, not seconds). `batch=True` means "this work
+    is not on anyone's request path" — background ingest, a catalog backfill —
+    and it is opt-in per call site rather than a global default because only the
+    call site knows whether anything is waiting.
+
+    Falls back to the ordinary synchronous path whenever batching does not work
+    out (`run_batch` returns None: switch off, non-Anthropic key, API error,
+    deadline). ONE shape can never batch, and it is refused here rather than in
+    `app.llm_batch` because the reason is local to this module:
+
+      * PER-DELTA CALLBACKS. A batch returns one finished message; there are no
+        deltas to forward, so a caller that passed `on_delta`/`on_json_delta`
+        must keep the live path or it would silently stop streaming.
+
+    `stream` and a per-request `timeout` do NOT refuse a batch, which they used
+    to. Both exist for one reason — a large generation on the synchronous path
+    trips the HTTP read timeout — and a batch performs no synchronous read, so
+    neither applies to it. Refusing on them meant every long-output skill
+    (`prd-author`, `evidence-brief`, `implementation-spec`,
+    `ideation-prioritize` — see `graph.gateway._LONG_OUTPUT_SKILLS`) had
+    `batch=True` silently downgraded to a full-price live call, which is most of
+    the background generation in the product.
+
+    They are instead dropped for the BATCH attempt and kept for the FALLBACK.
+    That distinction is load-bearing: `run_batch` returns None on a switched-off
+    flag, a non-Anthropic key, an API error or a deadline, and the fallback then
+    runs the very generation the long-output transport exists for — Part B
+    averages ~185s against a 120s default read timeout, so falling back without
+    the streaming transport would trade a batch miss for a guaranteed
+    `httpx.ReadTimeout`.
+
+    `timeout` is also not a Messages-API body parameter — it is an SDK request
+    option — so it could not go into a batch request's `params` even if the
+    semantics fit.
+
+    The batched request is otherwise byte-identical to the one the sync path
+    would send, which is the point: `_build_base_kwargs` produced it, both paths
+    consume it, and neither can drift from the other.
+    """
+    can_batch = batch and on_delta is None and on_json_delta is None
+    if can_batch:
+        from app.llm_batch import BatchRequest, run_batch
+
+        # Strip the SDK request option; the body is what a batch carries.
+        batch_kwargs = {k: v for k, v in kwargs.items() if k != "timeout"}
+        results = run_batch(
+            [BatchRequest("r0", batch_kwargs)],
+            label=label,
+            **({"deadline_s": batch_deadline_s}
+               if batch_deadline_s is not None else {}),
+        )
+        if results and "r0" in results:
+            return results["r0"]
+    # Fallback keeps the caller's original transport, timeout included.
+    return _create_with_retries(
+        client, stream=stream, background=background, on_delta=on_delta,
+        on_json_delta=on_json_delta, **kwargs,
+    )
+
+
+def _cache_control(ttl: str | None) -> dict:
+    """The `cache_control` block for a TTL tier.
+
+    `None` / `"5m"` emits the bare ephemeral block — the API's 5-minute default,
+    billed at 1.25x input. `"1h"` emits the explicit 1-hour block, billed at 2x.
+    """
+    if ttl == CACHE_TTL_1H:
+        return {"type": "ephemeral", "ttl": CACHE_TTL_1H}
+    return {"type": "ephemeral"}
+
+
+def _is_cacheable(text: str, model: str) -> bool:
+    """Whether `text` is long enough to actually produce a cache entry on `model`.
+
+    Guards the silent-no-op case described on `_MIN_CACHEABLE_TOKENS`: the
+    triage path, for instance, sends ~2.5k tokens to haiku, whose floor is 4096,
+    so marking it cacheable would look like a fix and change nothing.
+    """
+    floor = _MIN_CACHEABLE_TOKENS.get(model, _DEFAULT_MIN_CACHEABLE_TOKENS)
+    return len(text) >= floor * _CHARS_PER_TOKEN
+
+
 def _build_base_kwargs(
     *,
     model: str,
@@ -408,40 +578,59 @@ def _build_base_kwargs(
     user: str,
     user_cacheable_prefix: str | None,
     temperature: float | None = None,
+    cache_ttl: str | None = None,
 ) -> dict:
     """Build the kwargs dict passed to `messages.create`.
 
-    If `user_cacheable_prefix` is None, returns the simple `content=str` form
-    used by every existing caller — behavior is unchanged. Otherwise builds
-    content as a list of text blocks, with `cache_control: ephemeral` on the
-    prefix (and on the system prompt when it's substantial enough to be
-    worth caching).
+    Prompt caching is applied wherever it can actually pay off:
+
+      * `system` is cached whenever it clears the acting model's minimum
+        cacheable prefix — on BOTH the plain and the prefixed branch. It used
+        to be cached only on the prefixed branch, so every skill-less caller
+        with a large static system prompt (`app.ask_planner` most visibly,
+        whose ~7k-char block is documented as "STATIC and TENANT-INVARIANT so
+        one cache entry serves every company") silently paid full input price
+        on every call. The comment described the intent; the code only
+        implemented half of it.
+      * `user_cacheable_prefix`, when given, is cached under the same TTL.
+
+    A `system` short enough to be uncacheable keeps the plain-string form, so
+    the request shape for small callers is byte-identical to before.
+
+    `cache_ttl` selects the pricing tier for both blocks — see `_cache_control`.
+    One tier per request, deliberately: the two blocks are always written and
+    read together, and a single tier keeps `app.llm_metering` able to price the
+    response's single `cache_creation_input_tokens` total unambiguously.
 
     `temperature` (when not None) is threaded straight through to
     `messages.create` — omitted entirely when None so the API default (1.0) is
     used, keeping every existing caller byte-identical.
     """
+    cc = _cache_control(cache_ttl)
+    cache_system = _is_cacheable(system, model)
+
     if user_cacheable_prefix is None:
         base = {
             "model": model,
             "max_tokens": max_tokens,
-            "system": system,
+            "system": (
+                [{"type": "text", "text": system, "cache_control": cc}]
+                if cache_system
+                else system
+            ),
             "messages": [{"role": "user", "content": user}],
         }
         if temperature is not None:
             base["temperature"] = temperature
         return base
+
     system_param: list[dict] = [
-        {"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}
-        if len(system) > 1000
+        {"type": "text", "text": system, "cache_control": cc}
+        if cache_system
         else {"type": "text", "text": system}
     ]
     content = [
-        {
-            "type": "text",
-            "text": user_cacheable_prefix,
-            "cache_control": {"type": "ephemeral"},
-        },
+        {"type": "text", "text": user_cacheable_prefix, "cache_control": cc},
         {"type": "text", "text": user},
     ]
     base = {
@@ -501,6 +690,77 @@ def _unwrap_response_envelope(out, schema):
     return inner
 
 
+def build_json_kwargs(
+    *,
+    system: str,
+    user: str,
+    model: str = DEFAULT_MODEL,
+    max_tokens: int = 16000,
+    schema: dict | None = None,
+    user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
+    temperature: float | None = None,
+    timeout: float | None = None,
+) -> dict:
+    """Build the exact `messages.create` kwargs `call_json` sends — model,
+    max_tokens, system, messages, and (when `schema` is given) the forced
+    `submit_response` tool + `tool_choice`.
+
+    `call_json` calls this and hands the result straight to
+    `_create_maybe_batched`, so a LIVE `call_json(...)` call and a BATCHED
+    request built from the same arguments (e.g.
+    `app.llm_batch.BatchRequest(custom_id, build_json_kwargs(...))`) are
+    byte-identical params — the same "cannot drift" guarantee
+    `_build_base_kwargs` already gives the sync/per-call-batch seam inside
+    `_create_maybe_batched`, one layer up: a caller assembling a BULK batch
+    (many `BatchRequest`s handed to `app.llm_batch.run_batch` directly, rather
+    than the one-request-per-call `batch=True` opt-in below) uses this same
+    function so its requests can never diverge from what the live path would
+    have sent.
+    """
+    kwargs: dict = _build_base_kwargs(
+        model=model,
+        max_tokens=max_tokens,
+        system=system,
+        user=user,
+        user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
+        temperature=temperature,
+    )
+    if timeout is not None:
+        # Per-request read-timeout override (an SDK request option) — used for
+        # long generations that exceed the client default.
+        kwargs["timeout"] = timeout
+    if schema is not None:
+        kwargs["tools"] = [{
+            "name": "submit_response",
+            "description": "Submit the structured response. All fields required.",
+            "input_schema": schema,
+        }]
+        kwargs["tool_choice"] = {"type": "tool", "name": "submit_response"}
+    return kwargs
+
+
+def parse_tool_response(msg, schema: dict | None) -> dict:
+    """Extract the structured dict from a forced `submit_response` tool-use
+    Message — the same parsing `call_json`'s schema branch applies to a live
+    response.
+
+    Shared so a BATCHED result (one of the raw Anthropic `Message` objects
+    `app.llm_batch.run_batch` returns, keyed by `custom_id`) parses IDENTICALLY
+    to the live path; only the transport differs, never the interpretation of
+    the response. Raises the same 502 `HTTPException` `call_json` would for a
+    response that never invoked the tool.
+    """
+    for block in msg.content:
+        if block.type == "tool_use" and block.name == "submit_response":
+            out = dict(block.input) if not isinstance(block.input, dict) else block.input
+            return _unwrap_response_envelope(out, schema)
+    raise HTTPException(
+        502, "LLM did not invoke the structured response tool"
+    )
+
+
 def call_json(
     *,
     system: str,
@@ -509,14 +769,23 @@ def call_json(
     max_tokens: int = 16000,
     schema: dict | None = None,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
     on_json_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> dict:
     """Call Claude expecting a strict JSON object response.
+
+    `batch=True` routes the call through the Message Batches API at half price
+    when nothing is waiting on it — see `_create_maybe_batched`. It is a pure
+    cost/latency trade: the request, the response handling, and the returned
+    value are identical either way, and any problem falls back to the live path.
 
     If `schema` is provided, uses Anthropic tool-use with a forced tool_choice
     — the SDK validates the structured input and returns a real dict, which
@@ -537,43 +806,35 @@ def call_json(
     prompt is also substantial (>1000 chars), it gets the same treatment.
     """
     client = get_client()
-    base_kwargs: dict = _build_base_kwargs(
-        model=model,
-        max_tokens=max_tokens,
+    base_kwargs: dict = build_json_kwargs(
         system=system,
         user=user,
+        model=model,
+        max_tokens=max_tokens,
+        schema=schema,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
         temperature=temperature,
+        timeout=timeout,
     )
-    if timeout is not None:
-        # Per-request read-timeout override (an SDK request option) — used for
-        # long generations that exceed the client default.
-        base_kwargs["timeout"] = timeout
     if schema is not None:
-        tool = {
-            "name": "submit_response",
-            "description": "Submit the structured response. All fields required.",
-            "input_schema": schema,
-        }
-        msg = _create_with_retries(
+        msg = _create_maybe_batched(
             client,
+            batch=batch,
+            label=batch_label,
+            batch_deadline_s=batch_deadline_s,
             stream=stream,
             background=background,
             on_json_delta=on_json_delta,
             **base_kwargs,
-            tools=[tool],
-            tool_choice={"type": "tool", "name": "submit_response"},
         )
         _capture_meta(meta_out, msg, model)
-        for block in msg.content:
-            if block.type == "tool_use" and block.name == "submit_response":
-                out = dict(block.input) if not isinstance(block.input, dict) else block.input
-                return _unwrap_response_envelope(out, schema)
-        raise HTTPException(
-            502, "LLM did not invoke the structured response tool"
-        )
+        return parse_tool_response(msg, schema)
 
-    msg = _create_with_retries(client, stream=stream, background=background, **base_kwargs)
+    msg = _create_maybe_batched(
+        client, batch=batch, label=batch_label, batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, **base_kwargs,
+    )
     _capture_meta(meta_out, msg, model)
     text = "".join(b.text for b in msg.content if b.type == "text").strip()
     # Tolerate accidental fences
@@ -597,14 +858,23 @@ def call_md(
     model: str = DEFAULT_MODEL,
     max_tokens: int = 16000,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     stream: bool = False,
     timeout: float | None = None,
     background: bool = False,
     temperature: float | None = None,
     on_delta=None,
+    batch: bool = False,
+    batch_label: str = "",
+    batch_deadline_s: float | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
+
+    `batch=True` is the same half-price opt-in `call_json` takes — see
+    `_create_maybe_batched`. It matters most on THIS branch: markdown callers
+    are where the long-output skills live (prd-author and friends), and those
+    are exactly the background generations worth batching.
 
     `stream=True` streams the response (required for long/large outputs; avoids
     the read timeout) and `timeout` overrides the per-request read timeout for
@@ -627,12 +897,15 @@ def call_md(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
         temperature=temperature,
     )
     if timeout is not None:
         kwargs["timeout"] = timeout
-    msg = _create_with_retries(
-        get_client(), stream=stream, background=background, on_delta=on_delta, **kwargs
+    msg = _create_maybe_batched(
+        get_client(), batch=batch, label=batch_label,
+        batch_deadline_s=batch_deadline_s,
+        stream=stream, background=background, on_delta=on_delta, **kwargs
     )
     _capture_meta(meta_out, msg, model)
     return "".join(b.text for b in msg.content if b.type == "text").strip()
@@ -648,6 +921,7 @@ def run_tool_loop(
     max_tokens: int = 8000,
     max_iters: int = 5,
     user_cacheable_prefix: str | None = None,
+    cache_ttl: str | None = None,
     meta_out: dict | None = None,
     force_tool: str | None = None,
 ) -> str:
@@ -680,6 +954,7 @@ def run_tool_loop(
         system=system,
         user=user,
         user_cacheable_prefix=user_cacheable_prefix,
+        cache_ttl=cache_ttl,
     )
     system_param = base["system"]
     messages = base["messages"]
@@ -720,6 +995,19 @@ def run_tool_loop(
                     {"type": "tool_result", "tool_use_id": b.id, "content": str(out)}
                 )
         messages.append({"role": "user", "content": results})
+    # Exhaustion guard: the `for` completed without an early `return` at
+    # `stop_reason != "tool_use"`, i.e. the model called a tool on every one of
+    # the `max_iters` turns and never composed a closing text turn. If it also
+    # never set `final_text` on any turn, the loop returns "" — the invisible
+    # empty-answer failure mode (this used to be a bare `return` with no log).
+    # Warn so the failure stops being silent in the logs; the caller
+    # (`_try_scoped_tool_answer`) now degrades an empty return to a real answer.
+    if not final_text.strip():
+        logger.warning(
+            "run_tool_loop exhausted max_iters=%s with no closing text turn — "
+            "returning empty text (model called tools every turn)",
+            max_iters,
+        )
     return final_text
 
 
@@ -744,8 +1032,12 @@ def call_with_web_search(
     When `skill` is set, the bound skill's method text (and the named
     `skill_module`, if any) is PREPENDED to the system prompt under a
     "## METHOD (skill: <id> @<hash>)" delimiter — the caller's own system
-    prompt stays as the agent-specific layer after it. The web-search path has
-    no cacheable-prefix mechanism, so the method rides the system prompt here.
+    prompt stays as the agent-specific layer after it. On this path the method
+    rides the SYSTEM prompt rather than the user-message prefix
+    `_build_base_kwargs` uses, and it carries its own cache breakpoint --
+    the method block is sent as its own cache-controlled system block, with the
+    module and the caller's system layer in a second, uncached block after it
+    (see the comment at the split for why the boundary is where it is).
 
     TOLERANT of a `skill` that names no vendored directory, for the same reason
     `graph.gateway._build_method_prefix` is: every research pass on this path
@@ -766,6 +1058,10 @@ def call_with_web_search(
     accumulated final Message keeps `_capture_meta` and content extraction
     unchanged.
     """
+    # `system_param` is what actually goes on the wire: a plain string for the
+    # method-less callers (byte-identical to before), or a TWO-BLOCK list that
+    # puts a cache breakpoint after the stable method text. See below.
+    system_param: Any = system
     if skill is not None:
         # Imported lazily to avoid a module-load cycle (loader -> config -> ...).
         from app.skills.loader import UnknownSkillError, get_skill
@@ -776,18 +1072,55 @@ def call_with_web_search(
             spec = None  # not vendored -> run method-less; see the docstring
         if spec is not None:
             method = f"## METHOD (skill: {spec.id} @{spec.content_hash})\n{spec.method}"
+            # Everything AFTER the stable method: the optional module, then the
+            # caller's own system layer. Kept in exactly the order the single
+            # concatenated string used to have, so the model reads the same
+            # prompt it always did.
+            tail = ""
             if skill_module:
                 module_text = spec.modules[skill_module]
-                method += f"\n\n### MODULE: {skill_module}\n{module_text}"
-            system = f"{method}\n{system}"
+                tail += f"\n\n### MODULE: {skill_module}\n{module_text}"
+            tail += f"\n{system}"
+            # WHY THE SPLIT. This path used to send one concatenated string with
+            # no `cache_control` at all -- the docstring's "no cacheable-prefix
+            # mechanism". The whole string is unusable as a cache key because two
+            # of its three parts move on EVERY call: `skill_module` and the
+            # caller's `system` (competitive_intel appends a per-pass
+            # "### THIS PASS" focus). The skill's own SKILL.md does not move --
+            # it is byte-stable across every pass of a run, across runs, and
+            # across tenants -- so the breakpoint goes right after it.
+            #
+            # Anthropic renders the prefix as tools -> system -> messages, so a
+            # breakpoint here also caches the tool definition ahead of it (the
+            # web_search block is ~2.2k tokens on its own, and `max_searches` is
+            # read once per run, so it is stable for the run too).
+            #
+            # Guarded on `_is_cacheable` for the same reason `_build_base_kwargs`
+            # is: a block under the model's minimum cacheable prefix silently
+            # produces no cache entry while still burning one of the four
+            # breakpoints a request is allowed.
+            if _is_cacheable(method, model):
+                system_param = [
+                    {"type": "text", "text": method,
+                     "cache_control": _cache_control(None)},
+                    {"type": "text", "text": tail},
+                ]
+            else:
+                system_param = f"{method}{tail}"
     msg = _create_with_retries(
         get_client(),
         stream=True,
         model=model,
         max_tokens=max_tokens,
-        system=system,
+        system=system_param,
         messages=[{"role": "user", "content": user}],
         tools=[{
+            # DELIBERATELY the 2025 tool. The 20260209 variant adds dynamic
+            # filtering that runs code execution under the hood; measured on a
+            # 4-search competitive-intel-shaped query against sonnet-4-6 it cost
+            # 291,691 input tokens in 319s versus 38,691 in 46s here -- 7.5x the
+            # tokens and 7x the latency. Do not "upgrade" this without re-running
+            # that comparison.
             "type": "web_search_20250305",
             "name": "web_search",
             "max_uses": max_searches,

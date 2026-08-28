@@ -793,20 +793,16 @@ def test_delegation_create_publishes_event_to_both_parties(isolated_settings, mo
         assert payload["status"] == "assigned"
 
 
-def test_delegation_self_assign_publishes_event(isolated_settings, monkeypatch):
-    """Self-assign (assigner == assignee): the genesis publish still fires to
-    that user's own per-user channel — the one-channel case."""
+def test_self_delegation_declines_no_row_no_publish(isolated_settings, monkeypatch):
+    """Retargeted: self-assign (assigner == assignee) is no longer a delivered
+    hand-off — the rewrite added a self-delegation GUARD (a spurious Bob→Bob
+    delegate_task fired alongside a completion was polluting the ledger). It now
+    DECLINES deterministically: no brief, no `project_delegations` row, and no
+    `delegation.event` publish."""
     ctx = company_client(monkeypatch)
     project, _ = _seed_project_with_assignee(ctx)
     _stub_brief_llm(monkeypatch)
 
-    monkeypatch.setattr(
-        project_delegation, "status_dto",
-        lambda did: {
-            "delegation_id": did, "status": "assigned",
-            "status_at": "2026-08-10T00:00:00Z", "task_summary": "x",
-        },
-    )
     published: list[tuple[str, str]] = []
     monkeypatch.setattr(
         project_delegation, "publish_broadcast",
@@ -814,13 +810,16 @@ def test_delegation_self_assign_publishes_event(isolated_settings, monkeypatch):
     )
 
     # The assigner (full_name "Alex Assigner") is a member of their own project,
-    # so a hand-off to "Alex" resolves to self.
+    # so a hand-off to "Alex" resolves to self — and is declined.
     result = _delegate(project, ctx.user_id, assignee="Alex")
-    assert "Sent the brief" in result
+    assert "Sent the brief" not in result
+    assert "only hand tasks off to" in result.lower()
 
-    event_topics = [t for t, e in published if e == "delegation.event"]
-    assert event_topics, published
-    assert all(t == f"project:{project['id']}:user:{ctx.user_id}" for t in event_topics)
+    # The ledger is never polluted with a self-row, and nothing is broadcast.
+    from app.db import project_delegations as pd_db
+
+    assert pd_db.list_delegations_for_project(project["id"]) == []
+    assert [e for _t, e in published if e == "delegation.event"] == []
 
 
 def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, monkeypatch):

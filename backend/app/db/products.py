@@ -51,19 +51,23 @@ def get_company_website(company_id: str) -> str | None:
 
 
 def get_primary_product(company_id: str) -> dict | None:
-    """Return `{"name": str, "website": str}` for the company's ONE product
-    row — the `is_primary` row when one exists, else the most-recently
-    created (same ordering as `get_company_website`; `LIMIT 1` so this never
-    fans out across a company's other products). `website` is `""` when the
-    row's website column is empty/NULL — the caller decides what to do with a
-    missing website. Returns None when the company has no product row at all.
+    """Return `{"name", "website", "positioning", "users_description"}` for the
+    company's ONE product row — the `is_primary` row when one exists, else the
+    most-recently created (same ordering as `get_company_website`; `LIMIT 1`
+    so this never fans out across a company's other products). Every string
+    field is `""` (not None) when its column is empty/NULL — the caller decides
+    what to do with a missing one. Returns None when the company has no
+    product row at all.
     """
     if not company_id:
         return None
     rows = (
         require_client()
         .table("products")
-        .select("name, website, is_primary, created_at")
+        .select(
+            "name, website, is_primary, created_at, positioning, "
+            "users_description"
+        )
         .eq("company_id", company_id)
         .order("is_primary", desc=True)   # primary row first
         .order("created_at", desc=True)   # then most-recent
@@ -77,4 +81,10 @@ def get_primary_product(company_id: str) -> dict | None:
     return {
         "name": (row.get("name") or "").strip(),
         "website": (row.get("website") or "").strip(),
+        # Onboarding's "how we position it" / "who our users are" answers.
+        # They ride here rather than in a second read because this helper is
+        # the answer prompt's product row, and a question about positioning
+        # was reaching the model with nothing but the product's name.
+        "positioning": (row.get("positioning") or "").strip(),
+        "users_description": (row.get("users_description") or "").strip(),
     }

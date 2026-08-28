@@ -1,10 +1,11 @@
-"""Monthly scheduled intelligence reports (app.monthly_reports).
+"""Scheduled intelligence reports (app.monthly_reports).
 
 Covers the three layers separately, mirroring the brief's test split:
 
-  - the PURE due decision (`due_specs`): monthly cadence forced over the
-    company's brief schedule, the 24h window, and BOTH once-per-cycle
-    ledgers — the durable saved-report row and the in-memory attempt guard;
+  - the PURE due decision (`due_specs`): the per-spec calendar (quarterly for
+    competitive + market intelligence, monthly for 3P feedback), the absence
+    of a window cliff, and BOTH once-per-period ledgers — the durable
+    saved-report row and the in-memory attempt guard;
   - the RUN (`run_and_deliver`): a real payload becomes a `reports` row with
     the canonical question marker and is ingested into the KG; a degraded
     payload saves nothing, ingests nothing, and is not retried this cycle;
@@ -27,17 +28,12 @@ from app import monthly_reports as mr
 
 UTC = timezone.utc
 
-# 2026-06-01 is the first Monday of June 2026 — with the default schedule
-# (Monday 06:00, UTC fallback timezone) the monthly fire instant is 06:00 UTC
-# that day.
+# A mid-period instant, used by the run/ingest tests below where the calendar
+# is irrelevant. The cadence tests state their own dates.
 FIRE = datetime(2026, 6, 1, 6, 0, tzinfo=UTC)
 
 COMPANY = {"id": "co-mr-1", "slug": "acme", "owner_timezone": None,
            "notification_settings": {}}
-
-DEFAULT_SCHEDULE = {"weekday": 0, "hour": 6, "minute": 0,
-                    "frequency": "weekly", "anchor": None}
-
 
 @pytest.fixture(autouse=True)
 def _db(isolated_settings):
@@ -70,27 +66,30 @@ def _payload(answer="## Competitive review\n\nAcme shipped X.",
             "confidence": 0.6, "_skill": skill, "_report": True}
 
 
-def _due_skills(now, tz=None, schedule=None) -> list[str]:
+def _due_skills(now, tz=None) -> list[str]:
     """The skills due right now. Asserted per-skill rather than as "the list
     is empty": the roster holds several INDEPENDENT specs, so suppressing one
     (a saved row, a spent attempt) must leave the others due — an emptiness
     check would pass today only because the roster happened to be short."""
     return [s.skill for s in mr.due_specs(
-        COMPANY["id"], now, tz or ZoneInfo("UTC"),
-        schedule or DEFAULT_SCHEDULE,
-    )]
+        COMPANY["id"], now, tz or ZoneInfo("UTC"))]
 
 
-# ─── due_specs: the pure monthly decision ────────────────────────────────────
+# ─── due_specs: the pure calendar decision ───────────────────────────────────
+#
+# Two cadences now. Competitive + market intelligence run QUARTERLY (1 Jan /
+# 1 Apr / 1 Jul / 1 Oct); 3P feedback runs MONTHLY (the 1st). Assertions are
+# per-skill rather than "the due list is empty" — with specs on different
+# calendars an emptiness check passes on a sibling that simply is not due yet
+# and proves nothing.
+
+QUARTERLY = [s.skill for s in mr.MONTHLY_REPORT_SPECS
+             if s.cadence == mr.CADENCE_QUARTERLY]
+MONTHLY = [s.skill for s in mr.MONTHLY_REPORT_SPECS
+           if s.cadence == mr.CADENCE_MONTHLY]
 
 
-def test_due_inside_window_with_no_prior_run():
-    due = mr.due_specs(COMPANY["id"], FIRE + timedelta(hours=2),
-                       ZoneInfo("UTC"), DEFAULT_SCHEDULE)
-    assert [s.skill for s in due] == [s.skill for s in mr.MONTHLY_REPORT_SPECS]
-
-
-def _save_report_at(spec, when: datetime, *, question=None):
+def _save_report_at(spec, when: datetime, *, question=None, html="## body"):
     """Seed a scheduled report row with an EXPLICIT created_at.
 
     `db.save_report` stamps the wall clock, which would make every cadence
@@ -103,108 +102,299 @@ def _save_report_at(spec, when: datetime, *, question=None):
         "company_id": COMPANY["id"],
         "skill": spec.skill,
         "title": "t",
-        "html": "## body",
+        "html": html,
         "question": question or spec.question,
         "created_at": when.isoformat(),
     }).execute()
 
 
+def test_the_roster_covers_both_cadences():
+    """Guards the split itself: if a spec loses its cadence the tests below
+    would silently assert nothing."""
+    assert QUARTERLY and MONTHLY
+    assert len(QUARTERLY) + len(MONTHLY) == len(mr.MONTHLY_REPORT_SPECS)
+
+
+def test_period_start_pins_the_quarter_and_the_month():
+    """The whole calendar, stated once. Every month maps to the quarter that
+    contains it, not to the nearest boundary."""
+    utc = ZoneInfo("UTC")
+    for month, quarter in ((1, 1), (2, 1), (3, 1), (4, 4), (6, 4),
+                           (7, 7), (9, 7), (10, 10), (12, 10)):
+        now = datetime(2026, month, 15, 12, 0, tzinfo=UTC)
+        assert mr.period_start(now, utc, mr.CADENCE_QUARTERLY).month == quarter
+        assert mr.period_start(now, utc, mr.CADENCE_MONTHLY).month == month
+
+
 def test_a_company_with_no_report_at_all_is_due_immediately():
-    """A tenant that has never had this report does not wait for a fire
-    instant — it is inside the previous cycle, which nothing satisfied.
+    """A tenant that has never had this report does not wait for a boundary.
 
-    This is what makes onboarding and backfill work: a company added
-    mid-month gets its reports on the next tick instead of waiting weeks for
-    a calendar boundary it happens to have missed.
+    THIS IS THE JOIN RUN. A company that finishes onboarding mid-period has no
+    report for that period, so the next tick runs every spec once — no
+    onboarding hook, no separate first-run path. It is also what backfills a
+    tenant the scheduler never reached.
     """
+    mid_quarter = datetime(2026, 5, 12, 9, 0, tzinfo=UTC)
     assert [s.skill for s in mr.due_specs(
-        COMPANY["id"], FIRE - timedelta(hours=1),
-        ZoneInfo("UTC"), DEFAULT_SCHEDULE,
-    )] == [s.skill for s in mr.MONTHLY_REPORT_SPECS]
+        COMPANY["id"], mid_quarter, ZoneInfo("UTC"))] == [s.skill for s in mr.MONTHLY_REPORT_SPECS]
 
 
-def test_an_up_to_date_company_waits_for_the_next_fire_instant():
-    """Timing still governs a tenant in good standing: with this cycle's
-    report saved, the next run waits for the next fire instant rather than
-    happening the moment the tick notices a new month is near."""
+def test_a_quarterly_report_is_satisfied_for_the_whole_quarter():
     spec = mr.MONTHLY_REPORT_SPECS[0]
-    _save_report_at(spec, FIRE + timedelta(hours=1))
+    assert spec.cadence == mr.CADENCE_QUARTERLY
+    _save_report_at(spec, datetime(2026, 4, 1, 7, 0, tzinfo=UTC))
 
-    # Deep inside the satisfied cycle, and right up to the next fire.
-    assert spec.skill not in _due_skills(FIRE + timedelta(days=20))
-    next_fire = datetime(2026, 7, 6, 6, 0, tzinfo=UTC)  # first Monday of July
-    assert spec.skill not in _due_skills(next_fire - timedelta(hours=1))
-    # ...and due again once the new cycle opens.
-    assert spec.skill in _due_skills(next_fire + timedelta(hours=1))
+    # Deep inside Q2, and right up to the last hour of it.
+    assert spec.skill not in _due_skills(datetime(2026, 5, 20, 9, 0, tzinfo=UTC))
+    assert spec.skill not in _due_skills(datetime(2026, 6, 30, 23, 0, tzinfo=UTC))
+    # ...and due again the moment Q3 opens.
+    assert spec.skill in _due_skills(datetime(2026, 7, 1, 16, 0, tzinfo=UTC))
 
 
-def test_still_due_days_after_the_fire_instant():
-    """There is NO window cliff — the whole cycle counts as due.
+def test_the_monthly_report_reruns_while_the_quarterly_one_waits():
+    """The point of the split: in the second month of a quarter, 3P feedback
+    is due again and the quarterly pair is not."""
+    for spec in mr.MONTHLY_REPORT_SPECS:
+        _save_report_at(spec, datetime(2026, 4, 1, 7, 0, tzinfo=UTC))
 
-    This is the property the 24h window got wrong. Tenants cluster on two fire
-    slots, the tick walks them sequentially, and a single report costs tens of
-    minutes; whoever sorted last would fall out of a one-day window and get
-    nothing at all that month. Being due until the next fire instant is what
-    lets a slow pass, an outage, or a restart catch up.
+    may = _due_skills(datetime(2026, 5, 1, 16, 0, tzinfo=UTC))
+    assert sorted(may) == sorted(MONTHLY)
+
+
+def test_no_window_cliff_inside_a_period():
+    """Missing the 1st must not cost the period.
+
+    The tick walks companies SEQUENTIALLY and one report costs roughly 25
+    minutes of sweep plus extraction, so 40 tenants x 3 reports cannot fit in
+    any narrow window — whoever sorts last would get nothing at all. Being due
+    until a saved row closes the period is what lets a slow pass, an outage or
+    a restart catch up.
     """
-    for days in (2, 9, 20, 27):
+    for day in (2, 9, 20, 27):
+        now = datetime(2026, 5, day, 9, 0, tzinfo=UTC)
         assert [s.skill for s in mr.due_specs(
-            COMPANY["id"], FIRE + timedelta(days=days),
-            ZoneInfo("UTC"), DEFAULT_SCHEDULE,
-        )] == [s.skill for s in mr.MONTHLY_REPORT_SPECS], f"day {days}"
+            COMPANY["id"], now, ZoneInfo("UTC"))] == [s.skill for s in mr.MONTHLY_REPORT_SPECS], f"day {day}"
 
 
-def test_a_saved_report_still_ends_the_cycle_however_wide_the_window():
-    """The wide window is only safe because the durable ledger closes the
-    cycle — catching up must never become double-firing."""
+def test_a_saved_report_closes_the_period_however_open_the_window():
+    """The open window is only safe because the durable ledger closes the
+    period — catching up must never become double-firing."""
     from app import db
 
     spec = mr.MONTHLY_REPORT_SPECS[0]
     db.save_report(COMPANY["id"], skill=spec.skill, title="t",
                    html="## body", question=spec.question)
-    assert spec.skill not in _due_skills(FIRE + timedelta(days=21))
+    assert spec.skill not in _due_skills(datetime.now(UTC) + timedelta(days=3))
 
 
-def test_monthly_cadence_is_forced_over_the_brief_frequency():
-    """A company on a DAILY brief cadence still gets reports monthly.
+def test_the_opening_day_waits_for_each_spec_s_own_hour():
+    """On the 1st every report holds until ITS hour, and they are staggered.
 
-    Stated against a satisfied cycle, because that is where the two cadences
-    actually diverge: with this month's report saved, the second Monday is a
-    brief day but not a report day. (With nothing saved the company is due on
-    any day — that is the catch-up rule, not the daily cadence leaking in.)
+    The stagger is the load control: the tick walks companies sequentially and
+    one report costs tens of minutes, so three reports opening together would
+    queue a tenant's whole set behind one sweep. Asserted as a sequence rather
+    than per-spec, because what matters is that they do not coincide.
+
+    Only the first day is gated — a period whose opening tick was missed is
+    due at any hour after it (see the no-cliff test), or the gate would become
+    the window cliff it replaced.
     """
-    schedule = dict(DEFAULT_SCHEDULE, frequency="daily_weekdays")
-    spec = mr.MONTHLY_REPORT_SPECS[0]
-    _save_report_at(spec, FIRE + timedelta(hours=1))
+    for spec in mr.MONTHLY_REPORT_SPECS:
+        _save_report_at(spec, datetime(2026, 4, 1, 7, 0, tzinfo=UTC))
 
-    second_monday = datetime(2026, 6, 8, 7, 0, tzinfo=UTC)
-    assert spec.skill not in [s.skill for s in mr.due_specs(
-        COMPANY["id"], second_monday, ZoneInfo("UTC"), schedule)]
-    # ...and the next month's first Monday fires as usual.
-    july_fire = datetime(2026, 7, 6, 7, 0, tzinfo=UTC)
-    assert spec.skill in [s.skill for s in mr.due_specs(
-        COMPANY["id"], july_fire, ZoneInfo("UTC"), schedule)]
+    day = lambda h: datetime(2026, 7, 1, h, 0, tzinfo=UTC)  # noqa: E731
+    assert _due_skills(day(7)) == []
+    assert _due_skills(day(9)) == [mr.CIR_SPEC.skill]
+    assert sorted(_due_skills(day(12))) == sorted(
+        [mr.CIR_SPEC.skill, mr.MI_SPEC.skill])
+    # 3P feedback is monthly, so July opens its period too — by 16:00 all three.
+    assert sorted(_due_skills(day(16))) == sorted(
+        [s.skill for s in mr.MONTHLY_REPORT_SPECS])
 
 
-def test_fire_instant_tracks_the_company_timezone():
-    """Monday 06:00 in New York is 10:00 UTC (EDT), so 07:00 UTC is still the
-    previous cycle there while a UTC company has already fired.
+def test_has_current_report_tracks_the_spec_s_own_period():
+    """The freshness check `qa_agent` routes on.
 
-    Seeded with May's report so the tenant is up to date going in — otherwise
-    the catch-up rule makes it due at any hour and the timezone has nothing to
-    show.
+    Deliberately the SAME period the scheduler uses: "there is a report for
+    this quarter" is exactly the condition under which the graph holds the
+    current picture, so a chat question can be answered from signals instead
+    of buying another sweep. A separate freshness constant would be one more
+    thing to keep in step with the cadence.
     """
-    ny = ZoneInfo("America/New_York")
+    spec = mr.CIR_SPEC
+    assert spec.cadence == mr.CADENCE_QUARTERLY
+    q3 = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+
+    # Nothing saved at all -> the sweep must still run.
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is False
+
+    # LAST quarter's report is not this quarter's picture.
+    _save_report_at(spec, datetime(2026, 5, 2, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is False
+
+    # This quarter's is.
+    _save_report_at(spec, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], spec, q3) is True
+
+
+def test_has_current_report_is_per_spec():
+    """A saved competitive report must not make the market question answer
+    from a graph that holds no market findings."""
+    q3 = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 7, 1, 9, 0, tzinfo=UTC))
+    assert mr.has_current_report(COMPANY["id"], mr.CIR_SPEC, q3) is True
+    assert mr.has_current_report(COMPANY["id"], mr.MI_SPEC, q3) is False
+
+
+def test_a_current_report_does_not_cover_a_subject_it_never_mentions():
+    """The saved report makes the graph authoritative about WHAT IT COVERED.
+
+    A quarterly competitive review of Globex and Initech says nothing about a
+    fourth company the customer has never tracked — but it used to suppress
+    the sweep all the same, so "give me a competitive review on Umbrella" was
+    answered out of a knowledge graph that had never heard of Umbrella. A
+    subject the document does not mention is not covered, and the engine goes
+    to the web for it.
+    """
+    now = datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 7, 1, 9, 0, tzinfo=UTC),
+                    html="<h2>Review</h2><p>Globex shipped X. Initech raised.</p>")
+
+    # No subject named -> freshness alone decides, exactly as before.
+    assert mr.has_current_report(COMPANY["id"], mr.CIR_SPEC, now) is True
+    # A subject the report covers -> still answered from the graph.
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="Globex") is True
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="globex") is True
+    # A subject it never mentions -> sweep.
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, now, entity="Umbrella") is False
+
+
+def test_a_covered_subject_still_obeys_the_period():
+    """Coverage is an ADDITIONAL condition, never a replacement for freshness:
+    last quarter's report mentioning Globex must not answer this quarter's
+    question about Globex."""
+    _save_report_at(mr.CIR_SPEC, datetime(2026, 5, 2, 9, 0, tzinfo=UTC),
+                    html="<p>Globex shipped X.</p>")
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, datetime(2026, 8, 15, 12, 0, tzinfo=UTC),
+        entity="Globex") is False
+
+
+def test_has_current_report_ignores_a_human_chat_report():
+    """Only a SCHEDULED row counts. A human running the same skill in chat
+    saves a row carrying their own words, and that report was never ingested
+    into the graph — answering from the KG on the strength of it would cite
+    signals that are not there."""
+    from app import db
+
+    db.save_report(COMPANY["id"], skill=mr.CIR_SPEC.skill, title="t",
+                   html="## body", question="what are rivals charging?")
+    assert mr.has_current_report(
+        COMPANY["id"], mr.CIR_SPEC, datetime(2026, 8, 15, 12, 0, tzinfo=UTC)
+    ) is False
+
+
+def test_every_report_engine_is_told_which_subject_was_asked_about():
+    """The three reports are ONE behaviour to a user asking a question, so the
+    subject has to reach all three engines, not just the one whose bug was
+    reported.
+
+    Each does something different with it — CIR turns it into the competitor
+    set to research, PF uses it to decide whether its stored capture can
+    answer at all, MI carries the question straight into its sweep — but a
+    branch that drops it puts that engine back to answering about a subject
+    from a graph that holds nothing about it.
+
+    A source scan for the same reason the spec guard above is one:
+    `qa_agent.answer` is a thousand-line function and the engines are tested
+    directly in their own files.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "qa_agent.py").read_text(
+        encoding="utf-8")
+    for module in ("competitive_intel", "public_feedback"):
+        call = re.search(rf"{module}\.answer\((.*?)\n        \)", src, re.S)
+        assert call, f"no {module}.answer dispatch found"
+        assert "entity=_plan_entity(plan)" in call.group(1), (
+            f"{module}.answer is not told which subject was asked about — a "
+            "question about one it has never covered would be answered off "
+            "stale stored work instead of going to the web")
+
+
+def test_qa_agent_guards_each_report_branch_with_its_own_spec():
+    """`qa_agent` skips the paid sweep when this period's report is already in
+    the graph — for ALL THREE reports, each consulting ITS OWN spec.
+
+    Covering only some of them is its own bug: the three reports are one
+    behaviour to a user asking a question in chat, and a half-guarded set
+    means two questions answer instantly while the third quietly costs six
+    minutes and a paid sweep.
+
+    A source scan rather than a dispatch test on purpose: `qa_agent.answer` is
+    a thousand-line function and exercising it end to end costs far more than
+    it proves here. `has_current_report` is tested directly above; what is
+    left to get wrong is the wiring — a competitive branch checking MI_SPEC
+    would either sweep forever or never sweep, silently, and neither shows up
+    in any other test.
+    """
+    import re
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parents[1] / "app" / "qa_agent.py").read_text(
+        encoding="utf-8")
+    for skill_id, spec_name in (
+        ("competitive-intelligence-review", "CIR_SPEC"),
+        ("market-intelligence-report", "MI_SPEC"),
+        ("public-feedback-report", "PF_SPEC"),
+    ):
+        block = re.search(
+            rf'decision\.skill_id == "{re.escape(skill_id)}"(.{{0,200}})',
+            src, re.S,
+        )
+        assert block, f"no routing branch found for {skill_id}"
+        guard = block.group(1)
+        assert "has_current_report" in guard, (
+            f"{skill_id} still sweeps unconditionally — a saved report for "
+            "this period is already in the KG and answers in seconds")
+        assert f"monthly_reports.{spec_name}" in guard, (
+            f"{skill_id} is guarded by the wrong spec (expected {spec_name})")
+        # ...and the guard must ask about the SUBJECT, not just the period. A
+        # branch that drops `entity` suppresses the sweep for a company the
+        # saved report never looked at, which is the whole failure this
+        # threading closes — and it is invisible in every other test.
+        assert "entity=_plan_entity(plan)" in guard, (
+            f"{skill_id} decides on freshness alone — a question about a "
+            "subject the saved report never covered would be answered from a "
+            "graph that holds nothing about it")
+
+
+def test_the_report_hours_are_distinct():
+    """Guards the stagger itself: if two specs drift onto the same hour the
+    test above still passes on one of them, but the load control is gone."""
+    hours = [s.hour for s in mr.MONTHLY_REPORT_SPECS]
+    assert len(set(hours)) == len(hours), hours
+
+
+def test_the_period_boundary_tracks_the_company_timezone():
+    """10:00 on 1 July in Auckland (UTC+12) is 22:00 UTC on 30 June, so a New
+    Zealand tenant opens its quarter while a UTC one is still in the old
+    period — the boundary is local, not a single global instant."""
+    nz = ZoneInfo("Pacific/Auckland")
     spec = mr.MONTHLY_REPORT_SPECS[0]
-    _save_report_at(spec, datetime(2026, 5, 4, 10, 30, tzinfo=UTC))
+    _save_report_at(spec, datetime(2026, 4, 1, 7, 0, tzinfo=UTC))
 
-    early = datetime(2026, 6, 1, 7, 0, tzinfo=UTC)
-    assert spec.skill not in [s.skill for s in mr.due_specs(
-        COMPANY["id"], early, ny, DEFAULT_SCHEDULE)]
-    at_fire = datetime(2026, 6, 1, 10, 30, tzinfo=UTC)
+    # 30 June 20:30 UTC == 1 July 08:30 in Auckland: past CIR's hour there.
+    crossed = datetime(2026, 6, 30, 20, 30, tzinfo=UTC)
     assert spec.skill in [s.skill for s in mr.due_specs(
-        COMPANY["id"], at_fire, ny, DEFAULT_SCHEDULE)]
-
+        COMPANY["id"], crossed, nz)]
+    # Same instant, a UTC tenant is still inside Q2.
+    assert spec.skill not in [s.skill for s in mr.due_specs(
+        COMPANY["id"], crossed, ZoneInfo("UTC"))]
 
 def test_saved_scheduled_report_suppresses_the_cycle():
     """The durable ledger: a reports row carrying the spec's canonical
@@ -214,7 +404,7 @@ def test_saved_scheduled_report_suppresses_the_cycle():
     spec = mr.MONTHLY_REPORT_SPECS[0]
     db.save_report(COMPANY["id"], skill=spec.skill, title="t",
                    html="## body", question=spec.question)
-    due = _due_skills(FIRE + timedelta(hours=2))
+    due = _due_skills(FIRE + timedelta(hours=10))
     assert spec.skill not in due
     # ...and only that spec: each report keeps its own ledger.
     assert [s.skill for s in mr.MONTHLY_REPORT_SPECS[1:]] == due
@@ -231,7 +421,7 @@ def test_a_human_chat_report_does_not_suppress_the_scheduled_cycle():
     # Named explicitly, not `!= []`: with several specs on the roster an
     # emptiness check would pass on a sibling still being due, proving nothing
     # about the one whose human-authored row is under test.
-    assert spec.skill in _due_skills(FIRE + timedelta(hours=2))
+    assert spec.skill in _due_skills(FIRE + timedelta(hours=10))
 
 
 def test_a_spent_attempt_backs_off_rather_than_forfeiting_the_month():
@@ -247,7 +437,9 @@ def test_a_spent_attempt_backs_off_rather_than_forfeiting_the_month():
     mr._last_attempt[(COMPANY["id"], spec.skill)] = attempt
 
     # Inside the backoff: held off, so the paid sweep isn't re-bought hourly.
-    due = _due_skills(attempt + timedelta(hours=3))
+    # Read after the LAST spec's hour, so the siblings below are gated only by
+    # their own ledgers and not by the opening-day clock.
+    due = _due_skills(attempt + timedelta(hours=9))
     assert spec.skill not in due
     # A spent attempt on one report never stands in for another's.
     assert [s.skill for s in mr.MONTHLY_REPORT_SPECS[1:]] == due
@@ -503,7 +695,7 @@ def test_the_period_comes_from_the_timestamp_not_the_title():
 def _run_tick(now, companies, due, ran):
     from app import scheduler as sched_mod
 
-    def _fake_due(company_id, when, tz, schedule):
+    def _fake_due(company_id, when, tz):
         return due.get(company_id, [])
 
     def _fake_run(company, spec, when=None):
@@ -549,7 +741,7 @@ def test_tick_repairs_a_report_that_was_saved_but_never_ingested():
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
          patch.object(mr, "due_specs",
-                      side_effect=lambda cid, when, tz, sched: []), \
+                      side_effect=lambda cid, when, tz: []), \
          patch.object(mr, "run_and_deliver",
                       side_effect=AssertionError("no sweep may run")), \
          patch.object(mr, "pending_ingests",
@@ -586,7 +778,7 @@ def test_tick_isolates_a_failing_repair():
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
          patch.object(mr, "due_specs",
-                      side_effect=lambda cid, when, tz, sched: []), \
+                      side_effect=lambda cid, when, tz: []), \
          patch.object(mr, "pending_ingests",
                       side_effect=lambda cid: [(spec, report)]), \
          patch.object(mr, "ingest_saved_report", side_effect=_repair):
@@ -617,7 +809,7 @@ def test_tick_isolates_a_failing_company():
 
     with patch.object(sched_mod, "list_companies", return_value=companies), \
          patch.object(mr, "due_specs",
-                      side_effect=lambda cid, when, tz, sched: [spec]), \
+                      side_effect=lambda cid, when, tz: [spec]), \
          patch.object(mr, "run_and_deliver", side_effect=_fake_run):
         asyncio.run(sched_mod._run_monthly_reports_tick(
             now=FIRE + timedelta(hours=1)))

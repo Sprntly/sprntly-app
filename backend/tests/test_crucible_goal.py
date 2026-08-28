@@ -86,11 +86,27 @@ def test_the_confirmation_shows_the_definition_and_says_it_is_theirs():
 
 def test_no_definition_anywhere_asks_rather_than_inventing_one():
     """The staging test tenant has no KPI tree at all, so this is the path the
-    live verification will actually take."""
+    live verification will actually take.
+
+    PINS THE BEHAVIOUR, NOT THE SPELLING. This asserted `"can't find" in
+    out.ask`, which is the wording rather than the rule — so it broke on an
+    intentional copy change (§5 requirement 1: the ask must not OPEN with what
+    was not found, because the search block above it has already said so) while
+    never having checked the thing it is named for. What matters is that
+    nothing was invented and that the user is asked."""
     out = resolve_with(KpiTreeSource(None), goal="improve activation")
     assert out.status == "needs_input"
     assert out.definition is None
-    assert "can't find" in out.ask
+    assert out.ask, "a miss has to produce a question"
+    # §5 req 1: the ask must reference the SEARCH before the gap. Asserted as a
+    # property — the first sentence mentions where it looked — rather than by
+    # pinning a phrase, which is the fragility the old assertion had and which
+    # a previous rewrite of this test reintroduced with "what is counted".
+    first = out.ask.split(".")[0].lower()
+    assert any(w in first for w in ("checked", "looked", "searched")), (
+        f"the ask opens without referencing the search: {first!r}")
+    # And it asks the user for a definition rather than proposing one.
+    assert out.definition is None
 
 
 def test_the_ask_says_why_guessing_would_be_worse():
@@ -410,3 +426,22 @@ def test_a_broken_source_does_not_end_stage_0():
     out = resolve(company_id="co", raw_goal_text="improve net revenue retention",
                   currency="accounts", sources=[Exploding(), KpiTreeSource(tree)])
     assert out.status == "candidate"
+
+
+def test_the_ask_claims_no_store_it_did_not_actually_search():
+    """`resolve()` is handed ONE source — `KpiTreeSource`. It never searches the
+    metric registry, and on the path where `load_kpi_tree` raises the caller
+    passes `None`, so even the tree was not really read.
+
+    An earlier wording said "I checked your KPI tree and the metrics you
+    record", which claimed a search that never happened and would have claimed
+    the tree on the unreadable path too. A false claim about diligence is worse
+    than a joyless one — the per-store detail belongs to the search block, which
+    knows its own "could not be read" state."""
+    out = resolve_with(KpiTreeSource(None), goal="improve activation")
+    ask = out.ask.lower()
+    for store in ("kpi tree", "metrics you record", "amplitude", "registry"):
+        assert store not in ask, (
+            f"the ask names {store!r}, which this resolver did not search")
+    # It still opens with the search, which is §5 requirement 1.
+    assert any(w in ask.split(".")[0] for w in ("looked", "checked", "searched"))

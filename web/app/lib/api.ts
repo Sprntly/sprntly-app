@@ -503,6 +503,10 @@ export type AskResponse = {
   unanswered: string
   /** Skill id the backend attributed the answer to (e.g. voice-of-customer-report). */
   _skill?: string | null
+  /** True when this answer IS a report document (not a pointed answer or a
+   *  degraded apology from the same pipeline). The backend stamps it on the one
+   *  return that is a document, and `report_capture` gates on the same field. */
+  _report?: boolean
   /** Present only when the Jira agent proposed a change awaiting confirmation. */
   _pending_jira_change?: PendingJiraChange
   /** Present only when the ticket-update agent proposed a rewrite awaiting
@@ -612,6 +616,11 @@ export type GoalRun = {
   coverage_notes: { reason: string; actual: string }[]
   claim_count: number
   conversation_id: number | null
+  /** The `custom_artifacts` row this run's report was rendered into, or null
+   *  when nobody has asked for one yet. An ID ONLY — the body is fetched by
+   *  `goalAnalysisApi.document`, so a listing of runs never carries N report
+   *  bodies. */
+  artifact_id: number | null
   created_at: string | null
   finished_at: string | null
 }
@@ -619,6 +628,18 @@ export type GoalRun = {
 export type GoalFinding = {
   id: number
   statement: string
+  /** The theme alone. `statement` embeds it mid-clause behind two numbers the
+   *  chips repeat, so the card leads with this instead. Absent on runs stored
+   *  before it shipped — fall back to `statement`. */
+  label?: string
+  /** One claim in its source's own words, already linted as part of the
+   *  statement it came from. Empty when the statement had no example. */
+  example?: string
+  /** What to DO about this finding, and why — merged in from the run's meta.
+   *  Absent on most findings: only the top few get one, and any suggestion
+   *  that quoted a figure, promised an outcome or failed the lint was dropped
+   *  rather than repaired. */
+  recommendation?: { action: string; because: string }
   claim_ids: string[]
   adjudication: string | null
   /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
@@ -626,7 +647,16 @@ export type GoalFinding = {
   impact_value: number | null
   currency: string | null
   confidence_band: string | null
+  /** The source DOCUMENTS this finding rests on, most-cited first, e.g.
+   *  `["slack/#demos (14)", "fireflies-sync-batch-3 (4)", "+3 more documents"]`.
+   *  Rendered beside the finding: without it "8 claims concern X" cannot be
+   *  checked against anything. */
+  surfaced_by: string[]
   assumed_params: { name: string; basis: string }[]
+  /** `deep` for the leading few, `shallow` for the rest — the engine examines
+   *  the top of the ranking in depth and says so, rather than presenting every
+   *  row as equally analysed. */
+  tier?: string | null
   impact: { value: number | null; affected_population: number | null }
   confidence: {
     band: string
@@ -646,17 +676,178 @@ export type GoalRejection = {
   claim_ids: string[]
 }
 
+/** One source the run will read: how much of it there is, and what it can
+ *  actually witness. These counts are an INVENTORY — the plan step reads no
+ *  content, which is why it returns in about a second rather than minutes. */
+export type GoalPlanSource = {
+  source_type: string
+  signal_count: number
+  label: string
+  witnesses: string
+}
+
+/** Something this run will NOT be able to answer. `remedy` is not decoration:
+ *  a gap Sprntly can close is a next step, and stating the gap without the fix
+ *  is the shrug this whole step exists to remove. */
+export type GoalPlanGap = {
+  question: string
+  because: string
+  remedy: string
+}
+
+/** What the run will do, said BEFORE it does it. This is what the user
+ *  approves, and it stays on the run afterwards as the record of what was
+ *  read. */
+export type GoalRunPlan = {
+  goal_text: string
+  definition_text: string
+  currency: string
+  total_signals: number
+  sources: GoalPlanSource[]
+  cannot_answer: GoalPlanGap[]
+  will_produce: string[]
+  /** Source types the user dropped at the plan step. */
+  excluded_sources?: string[]
+  /** The user's own hypotheses, carried into the run. */
+  hypotheses?: string[]
+  /** Where the proposed definition came from, in words fit to render. Empty
+   *  on a run that reached its plan through the old clarification gate, where
+   *  the definition is the reader's own and needs no attribution. */
+  definition_source?: string
+  /** The calculation being assumed, stated so it can be argued with. */
+  definition_note?: string
+  /** False until a person has said yes to `definition_text`. */
+  definition_adopted?: boolean
+  /** How the surviving findings get ordered. RICE by default; named in the
+   *  plan so it is a choice the reader can override rather than a convention
+   *  they discover in the output. */
+  framework?: string
+}
+
+/** What the run has decided so far, written as it goes.
+ *
+ *  EVERY FIELD OPTIONAL, and the reason is not defensiveness. A run publishes
+ *  this in three writes, so a poll can land between any two of them; and runs
+ *  that finished before this shipped have no `progress` at all. The panel
+ *  renders whatever is present and says nothing about what is not. */
+export type GoalRunProgress = {
+  step?: "grouping" | "analysing" | "done"
+  signals_read?: number
+  claims?: number
+  /** Signals dropped before projection, by REASON — they are two different
+   *  rules and attributing both to a missing date prints a number that
+   *  contradicts the run's own coverage note. */
+  retired?: number
+  undated?: number
+  /** Distinct source types among the CLAIMS, not among the rows read. */
+  sources?: number
+  /** CLAIM counts, and named so. `claims_themed + claims_unthemed === claims`,
+   *  never `groups` — rendering them as the parts of a theme count invites an
+   *  arithmetic that can never hold. */
+  claims_themed?: number
+  claims_unthemed?: number
+  /** THE BALANCING TOTAL — includes one pseudo-group per ungroupable claim,
+   *  because `_cluster` keys each of those as its own cluster.
+   *
+   *  DELIBERATELY RENDERED NOWHERE. It exists so the funnel stays checkable
+   *  (`groups === themes + ungroupable_groups`, and `themes === findings +
+   *  drops`)
+   *  from stored data, by a test or by anyone auditing a run — showing it
+   *  beside `themes` would put two theme-shaped numbers on one screen, which
+   *  is the confusion this field's own history is made of. Do not add a render
+   *  site; use `themes`. */
+  groups?: number
+  /** What a reader means by a theme: `groups` minus the ungroupable GROUPS —
+   *  not the ungroupable claim count, which is a different number whenever one
+   *  ungroupable cluster holds more than one claim. This is the number the
+   *  headline shows. */
+  themes?: number
+  /** Ungroupable CLUSTERS, as distinct from `dropped.ungroupable` (claims).
+   *  Published so `groups === themes + ungroupable_groups` can be checked from
+   *  the payload; `dropped.ungroupable` does NOT satisfy that identity. */
+  ungroupable_groups?: number
+  findings?: number
+  conflicts?: number
+  deep?: number
+  /** Per rule, every key present even at zero. */
+  dropped?: Record<string, number>
+  /** TRUE means the echo rule never ran, which is NOT the same as dropping
+   *  nothing — the panel must say so rather than render a zero. */
+  echo_check_skipped?: boolean
+}
+
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
-  /** Stage 0's question and its prefilled proposal, when the run is waiting. */
+  /** Stage 0's question and its prefilled proposal, when the run is waiting —
+   *  and, once a definition is locked, the plan the user is asked to approve.
+   *  The plan SURVIVES into `ready`: it is the only record of what was read,
+   *  and a report that cannot say what it read is not auditable. */
   prioritisation?: {
     ask?: string
     resolution?: string
     proposed_definition?: string
     proposed_source?: string | null
     conflicts?: unknown[]
+    /** §6: the calculation being assumed, in one sentence, editable. */
+    method_note?: string
+    plan?: GoalRunPlan
+    progress?: GoalRunProgress
+    /** Per-finding extras in RANK ORDER — the theme, the example quote and the
+     *  recommendation. Carried here rather than as columns on
+     *  `crucible_findings`, which would need a migration against the shared
+     *  Supabase. Merged into the findings positionally by the renderer, and
+     *  only when the lengths agree. */
+    /** Per-finding relevance verdicts in RANK ORDER: the reason a finding does
+     *  NOT bear on the goal, or null. Split at render, so a finding judged
+     *  irrelevant MOVES to an appendix with its reason rather than being
+     *  dropped — a wrong verdict has to stay recoverable. */
+    set_aside_by_rank?: (string | null)[]
+    findings_extra_by_rank?: {
+      label?: string
+      example?: string
+      recommendation?: { action: string; because: string }
+    }[]
   }
+}
+
+/** A run's report, as an editable document.
+ *
+ *  THE RUN IS IMMUTABLE; THIS IS A DOCUMENT ABOUT THE RUN. The findings and
+ *  the ruled-out ledger are never rewritten — they are what makes the analysis
+ *  reproducible. The prose lives here, in an ordinary team document, and the
+ *  moment anyone changes it the report DETACHES: it stops being regenerated
+ *  from the run, and says so. */
+export type GoalReportDoc = {
+  /** The run this report is about. */
+  run_id: number
+  /** The `custom_artifacts` id — so the ordinary document PATCH saves it, and
+   *  the ordinary editor edits it. */
+  id: number
+  kind: string
+  title: string
+  status: "generating" | "ready" | "failed"
+  body_html: string
+  /** Optimistic-concurrency counter, same contract as `CustomArtifactDoc`. */
+  version: number
+  updated_at: string | null
+  updated_by: string | null
+  /** True once the body no longer matches what the run rendered — i.e. someone
+   *  edited it, by hand or through chat. The banner exists because a reader
+   *  must be able to tell prose from findings. */
+  detached: boolean
+}
+
+/** A "Save as document" copy: a free-standing team document with no run behind
+ *  it, which is why it can never be detached from one. */
+export type GoalReportFork = {
+  id: number
+  title: string
+  kind: string
+  version: number
+  conversation_id: number | null
+  run_id: null
+  detached: false
 }
 
 export const goalAnalysisApi = {
@@ -673,6 +864,58 @@ export const goalAnalysisApi = {
    *  may be an edit of what we proposed. */
   confirm: (runId: number, definition_text: string) =>
     api.post<GoalRun>(`/v1/crucible/${runId}/confirm`, { definition_text }),
+  /** The SECOND gate. The plan said what would be read and what could not be
+   *  answered; this is the user saying go, having seen both — optionally
+   *  having dropped a source, or told us what they already believe.
+   *
+   *  Both lists are ALWAYS sent, including empty. The body is the whole of the
+   *  user's answer to the plan, so an omitted key would silently mean
+   *  "changed nothing" — which is a different statement from "excluded
+   *  nothing" only when it is wrong. */
+  approve: (
+    runId: number,
+    opts?: {
+      excluded_sources?: string[]
+      hypotheses?: string[]
+      /** THE DEFINITION, ADOPTED BY THIS CALL. Omitted means "yes, as
+       *  written" and the server locks the proposal it stored — which is the
+       *  one the card rendered. Sent only when the reader actually changed it,
+       *  so an unedited approve cannot round-trip a definition through the
+       *  client and back, where a stale card could quietly overwrite it. */
+      definition_text?: string
+    },
+  ) =>
+    api.post<GoalRun>(`/v1/crucible/${runId}/approve`, {
+      excluded_sources: opts?.excluded_sources ?? [],
+      hypotheses: opts?.hypotheses ?? [],
+      ...(opts?.definition_text ? { definition_text: opts.definition_text } : {}),
+    }),
+
+  /** This run's report document, or a 404 when it has none yet. */
+  document: (runId: number) =>
+    api.get<GoalReportDoc>(`/v1/crucible/${runId}/document`),
+  /** Render the run into an editable document and link it. IDEMPOTENT — a
+   *  second call returns the FIRST document untouched, edits included. It has
+   *  to be: this is what "Edit" calls, so a re-render on the second press
+   *  would mean reopening your own edited report is what destroys it. */
+  createDocument: (runId: number) =>
+    api.post<GoalReportDoc>(`/v1/crucible/${runId}/document`, {}),
+  /** Save a SEPARATE copy as an ordinary team document — the fork half. The
+   *  run's own report keeps its link and is left exactly as it was. Copies
+   *  what the report says right now, edits included. */
+  forkDocument: (runId: number) =>
+    api.post<GoalReportFork>(`/v1/crucible/${runId}/document/fork`, {}),
+  /** Apply a plain-language edit to this run's report.
+   *
+   *  The target is the RUN IN THE URL — the report the user has open. No id in
+   *  the body can redirect the write, which is the same rule `edit_prd` keeps
+   *  and for the same reason. Live on call; there is no confirm step. */
+  chatEditDocument: (runId: number, instruction: string) =>
+    api.post<{
+      document: GoalReportDoc
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/crucible/${runId}/document/chat-edit`, { instruction }),
 }
 
 export const askApi = {
@@ -688,6 +931,12 @@ export const askApi = {
       project_id?: number
       evidence_id?: number
       ticket_set_id?: number
+      /** The report or document the side panel is SHOWING — the same
+       *  `{kind, id}` the classify call already gets from
+       *  `openArtifactForPanel`. It does not fetch anything: the backend
+       *  grounds on every artifact of `conversation_id` and uses this only to
+       *  put the one on screen FIRST. Omit and the thread's newest leads. */
+      open_artifact?: { kind: "report" | "document"; id: number } | null
       /** Individual-project-chat send identity (project branch only): the
        *  idempotency key the server persists the user turn under, and links
        *  the answer to via ask_job_id. Ignored server-side on every other
@@ -722,6 +971,9 @@ export const askApi = {
       // open ticket set instead — one primary artifact per tab.
       ...(opts?.evidence_id != null ? { evidence_id: opts.evidence_id } : {}),
       ...(opts?.ticket_set_id != null ? { ticket_set_id: opts.ticket_set_id } : {}),
+      // Which of this thread's own reports/documents the reader is looking at,
+      // so "summarize the report" answers from the one on screen.
+      ...(opts?.open_artifact != null ? { open_artifact: opts.open_artifact } : {}),
       ...(opts?.client_message_id != null ? { client_message_id: opts.client_message_id } : {}),
       // Structured attachments (project branch): the server persists them onto
       // the user turn and folds their text into the answer's question.
@@ -1050,8 +1302,23 @@ export type ChatIntentEnvelope = {
    *  which is why the union is wider than any one surface handles. */
   intent:
     | "answer"
+    /** A business GOAL the user wants moved — "increase revenue by 5%",
+     *  "reduce churn". Hands off to Goal Analysis, which stops and asks what
+     *  the metric means, states what it will read, and waits for approval
+     *  before reading anything. The backend gates it on the `crucible`
+     *  entitlement and fails CLOSED, so a company without the module never
+     *  receives this intent. */
+    | "analyse_goal"
     | "generate_prd"
     | "edit_prd"
+    /** Change the REPORT or DOCUMENT open beside this chat — dispatches
+     *  POST /v1/reports/{id}/chat-edit or
+     *  POST /v1/custom-artifacts/{id}/chat-edit with `instruction`. The target
+     *  rides `open_artifact`, re-read server-side; the client never picks it,
+     *  for the reason `artifact_chat_edit.py` states at length. Downgraded to
+     *  `answer` server-side when nothing is open or nothing was asked to
+     *  change. */
+    | "edit_artifact"
     | "generate_tickets"
     | "generate_prototype"
     | "multi_agent"
@@ -1102,6 +1369,13 @@ export type ChatIntentEnvelope = {
      *  (POST /v1/share/slack/send), because a message in a team channel is
      *  public and cannot be taken back. */
     | "share_to_slack"
+    /** "Create a project for the billing revamp" — make the CONTAINER (POST
+     *  /v1/projects), not a document. `task` carries the name the planner
+     *  extracted, in the user's own words, and is the whole argument: a
+     *  task-less create is downgraded to `answer` server-side, because an
+     *  untitled container is worse than a question back. The client confirms
+     *  in the thread and opens the new project. */
+    | "create_project"
     /** The private project chat's classify route ONLY (`POST /{project_id}/
      *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
      *  main chat runs, so a `switch (envelope.intent)` consumer that never
@@ -1147,6 +1421,20 @@ export type ChatIntentEnvelope = {
    *  writing in. Never send this back — it is for the user, not the executor. */
   artifact_template_name: string | null
   reason: string
+  /** `edit_artifact` only — WHICH document the edit targets: the report or
+   *  team document the tab said it had open, re-read under the caller's
+   *  company so the title is the stored one and the id is provably theirs.
+   *  Null on every other verdict. */
+  open_artifact?: { kind: string; id: number; title?: string | null } | null
+  /** True when this turn will answer with a REPORT DOCUMENT — the planner
+   *  resolved one of the report pipelines (voice-of-customer, public feedback,
+   *  competitive / market intelligence, company research).
+   *
+   *  The intent stays `answer`: the ask path runs it exactly as before. What
+   *  changes is WHERE the document is written — the panel's Reports tab, in its
+   *  generating state, the same posture a PRD build takes — instead of streaming
+   *  a report through the chat thread it is about to appear beside. */
+  report?: boolean
   /** Set ONLY when the intent decision failed because the LLM provider refused
    *  the request (out of credits, rate limited, overloaded).
    *
@@ -1326,6 +1614,12 @@ export const chatIntentApi = {
        *  every leg workspace-wide — the request body is byte-identical to
        *  before. */
       contextSource?: { kind: string; params: Record<string, unknown> } | null
+      /** The report or team document the side panel is CURRENTLY showing, so
+       *  "the report" and "that document" have a referent. The backend re-reads
+       *  it under the caller's company — the title that reaches the planner's
+       *  prompt and the id an edit acts on both come from the stored row, never
+       *  from here. Omitted when the panel is closed or on a PRD. */
+      openArtifact?: { kind: "report" | "document"; id: number } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -1334,6 +1628,10 @@ export const chatIntentApi = {
       ...(opts?.prdId != null ? { prd_id: opts.prdId } : {}),
       ...(opts?.hasAttachments ? { has_attachments: true } : {}),
       ...(opts?.contextSource ? { context_source: opts.contextSource } : {}),
+      // What the side panel is showing besides a PRD. The planner is told about
+      // it, which is what gives "convert that section into a table" a referent
+      // instead of an answer that prints the rewritten section into the chat.
+      ...(opts?.openArtifact ? { open_artifact: opts.openArtifact } : {}),
     })
     // Guarded so a console-less environment (SSR, a jsdom run without one)
     // can never turn a diagnostic into a broken send.
@@ -5239,6 +5537,23 @@ export const attachmentsApi = {
     ),
 }
 
+/** The structured reply persisted alongside an assistant turn's `content`.
+ *
+ *  `content` is a string, so for as long as it was the only thing saved, every
+ *  turn lost whatever it showed beyond prose the moment it was written. "Show
+ *  me the PRDs I created" rendered twelve clickable rows live and, on the next
+ *  reload, rendered only the sentence announcing them — an answer promising
+ *  "click one to open it" above nothing. This is what survives instead.
+ *
+ *  `artifact_list` is the listing's own rows, in the backend's wire shape
+ *  (`ChatIntentEnvelope.artifact_list`), so a restored turn hands `ChatBubble`
+ *  exactly what the live turn handed it. Absent/null → the turn restores from
+ *  `content`, exactly as every row written before this did. */
+export type PersistedTurnReply = Partial<AskResponse> & {
+  answer?: string
+  artifact_list?: ChatArtifactItem[] | null
+}
+
 export type ConversationTurn = {
   id: number
   conversation_id: number
@@ -5246,6 +5561,7 @@ export type ConversationTurn = {
   content: string
   created_at: string
   attachments?: TurnAttachment[] | null
+  reply?: PersistedTurnReply | null
 }
 
 export const conversationsApi = {
@@ -5272,17 +5588,24 @@ export const conversationsApi = {
     api.get<{ turns: ConversationTurn[] }>(`/v1/conversations/${conversationId}/turns`),
   /** Add a turn to a conversation. `attachments` carries the extracted text of
    *  files attached to this turn (persisted so a reloaded thread and the
-   *  chat→PRD flow can still ground on documents attached earlier). */
+   *  chat→PRD flow can still ground on documents attached earlier).
+   *
+   *  `reply` is the assistant turn's STRUCTURED payload — everything the turn
+   *  showed beyond its prose, which `content` alone cannot hold (see
+   *  `PersistedTurnReply`). Omitted on user turns, and the backend drops it on
+   *  one regardless. */
   addTurn: (
     conversationId: number,
     role: "user" | "assistant",
     content: string,
     attachments?: TurnAttachment[],
+    reply?: PersistedTurnReply | null,
   ) =>
     api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
       role,
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
+      ...(reply ? { reply } : {}),
     }),
   /** REWIND the conversation to just before `turnId` — deletes that turn and
    *  every turn after it. `turnId` must be a USER turn: you rewind to a
@@ -5640,6 +5963,20 @@ export const customArtifactsApi = {
       .get<{ artifacts: Omit<CustomArtifactDoc, "body_html">[] }>("/v1/custom-artifacts")
       .then((r) => r.artifacts),
   get: (id: number) => api.get<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`),
+  /** Apply a chat instruction to this document and return the saved row.
+   *
+   *  Target is the URL, never a body field — see `reportsApi.chatEdit`. 409
+   *  when a colleague (or the user's own editor tab) saved while the edit was
+   *  running: the instruction was written about text that has since moved, so
+   *  it is refused rather than replayed onto a document it was not about.
+   *
+   *  `sections_changed: []` means it was a question, and nothing was written. */
+  chatEdit: (id: number, instruction: string) =>
+    api.post<{
+      artifact: CustomArtifactDoc
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/custom-artifacts/${id}/chat-edit`, { instruction }),
   /** The documents born in one chat, newest first — what re-attaches a thread's
    *  document to its panel after a reload. Bodies omitted; opening one fetches
    *  it via `get`. Company-scoped server-side as well as conversation-scoped. */
@@ -5669,12 +6006,20 @@ export const customArtifactsApi = {
   ) => api.patch<CustomArtifactDoc>(`/v1/custom-artifacts/${id}`, body),
   remove: (id: number) => api.delete<{ deleted: boolean }>(`/v1/custom-artifacts/${id}`),
   /** Start an LLM generation. Returns immediately with a `generating` row to
-   *  open and poll — the document lands on that same row. */
+   *  open and poll — the document lands on that same row.
+   *
+   *  `dataset`, when supplied, is what lets the backend ground a THIN-context
+   *  document (a fresh "generate a report on X" with no prior thread to draw
+   *  on) on a real answer instead of writing one honestly reporting it has
+   *  nothing to say — see custom_artifact_generate.py's `_ground_thin_context`.
+   *  Ownership-gated server-side exactly like `askApi.start`'s own `dataset`;
+   *  omit it and generation behaves exactly as it did before this existed. */
   generate: (body: {
     kind: string
     task: string
     context?: string
     conversation_id?: number | null
+    dataset?: string
   }) => api.post<CustomArtifactDoc>("/v1/custom-artifacts/generate", body),
 }
 
@@ -5686,6 +6031,36 @@ export const reportsApi = {
   /** One captured report including its HTML body. The artifact listing omits the
    *  body (it would carry N full documents), so the viewer fetches it on open. */
   get: (reportId: number) => api.get<ReportDoc>(`/v1/reports/${reportId}`),
+
+  /** Apply a chat instruction to this report and return the new body.
+   *
+   *  The TARGET IS THE URL, never a body field: the caller names the report the
+   *  user has open, and nothing in the request can redirect the write. Same
+   *  rule as the PRD's chat-edit, same reason — see backend
+   *  `app/artifact_chat_edit.py`.
+   *
+   *  `sections_changed: []` means the editor judged the instruction was a
+   *  question rather than an edit, and NOTHING was written — the caller says so
+   *  instead of claiming a change. */
+  /** Save a hand edit made in the panel. The body is the report's own text —
+   *  markdown for everything the pipelines write today.
+   *
+   *  Last-write-wins: `reports` carries no version column (a report was written
+   *  once by a pipeline and only ever read until this existed), so two people
+   *  editing the same report at the same moment is the race this does not cover.
+   *  See the route's own note. */
+  update: (reportId: number, body: { html: string }) =>
+    api.patch<{ id: number; title: string; html: string }>(`/v1/reports/${reportId}`, body),
+
+  chatEdit: (reportId: number, instruction: string) =>
+    api.post<{
+      id: number
+      title: string
+      skill: string
+      html: string
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/reports/${reportId}/chat-edit`, { instruction }),
 
   /** Every report captured in one chat thread, newest first — what the chat
    *  panel's Reports tab lists. Bodies are omitted; opening a row fetches that
@@ -5921,7 +6296,6 @@ export type ProjectListItem = {
   updated_at: string
   artifact_counts: Partial<Record<ProjectArtifactType, number>>
   member_count: number
-  has_group_chat: boolean
   memory_count: number
 }
 
@@ -5948,11 +6322,9 @@ export type ProjectMember =
     }
 
 /** `GET /v1/projects/{id}` — the project row plus its member roster
- *  (human members + the prepended virtual agent member, AD-P6) and the
- *  project's single group-chat id (`null` until a group chat has been
- *  created for this project). Membership-gated server-side: a same-tenant
- *  non-member gets 403, a foreign-tenant project id 404s
- *  (`ApiError.status`, never a crash). */
+ *  (human members + the prepended virtual agent member, AD-P6).
+ *  Membership-gated server-side: a same-tenant non-member gets 403, a
+ *  foreign-tenant project id 404s (`ApiError.status`, never a crash). */
 export type ProjectDetail = {
   id: number
   company_id: string
@@ -5963,7 +6335,6 @@ export type ProjectDetail = {
   created_at: string
   updated_at: string
   members: ProjectMember[]
-  group_chat_id: number | null
 }
 
 /** `GET /v1/projects/{id}/memory/summary` — the cached synthesized
@@ -6022,55 +6393,6 @@ export type ProjectMemoryEntry = {
   updated_at: string
 }
 
-/** One row from `GET/POST /v1/projects/{id}/group/turns`
- *  (`backend/app/db/conversations.py`'s `list_group_turns`/`post_group_turn`).
- *  A human turn carries `author_user_id`/`author_name`/`author_job_role`; an
- *  agent turn (the `@Sprntly`-mention reply) carries `author_user_id: null`
- *  and `role: "assistant"` — the only conversation_turns rows with a
- *  `role`/author split at all, since single-owner individual chats never
- *  needed one. */
-export type GroupTurn = {
-  id: number
-  role: "user" | "assistant"
-  content: string
-  author_user_id: string | null
-  author_name: string | null
-  author_job_role: string | null
-  /** The send-identity key. On a human turn it is the poster's own
-   *  idempotency key; on the agent reply it is the SAME key the originating
-   *  ask carried. Lets the poster recognise its own turn/reply realtime echo
-   *  (id-precise correlation, never a timing guess). Null on turns written
-   *  before the key existed / by the cross-user helpers. */
-  client_message_id?: string | null
-  created_at: string
-  /** Artifact-open candidates for this turn (the same disambiguation shape
-   *  `/v1/ask`'s `open_artifact` intent returns). NOT YET populated by
-   *  `list_group_turns`/`post_group_turn` today — group turns carry no
-   *  artifact-resolution envelope yet (that's a `/v1/ask`-only mechanism).
-   *  Optional and wired here so `ProjectGroupChat` composes the real
-   *  `OpenArtifactChips` primitive rather than a bespoke one the day the
-   *  backend starts sending this. */
-  open_candidates?: OpenArtifactCandidate[]
-  /** The FULL structured reply persisted on an assistant turn
-   *  (`conversation_turns.reply` jsonb): the engine's `AskResponse`
-   *  (answer/key_points/citations), optionally merged with the classify
-   *  envelope's card data (`artifact_list`, nested `open.candidates`).
-   *  Null/absent for human turns and for assistant turns persisted before
-   *  the column existed — those render from `content` alone. */
-  reply?: (AskResponse & {
-    artifact_list?: ChatArtifactItem[]
-    open?: { candidates?: OpenArtifactCandidate[] } | null
-  }) | null
-  /** The latest agent run-status, attached by the backend onto the HUMAN turn
-   *  whose id == the run's `source_turn_id` (already mapped to the FE
-   *  vocabulary at the DTO edge: running/done/failed/declined). Drives the
-   *  group chat's "thinking" pending state so a reply that's still generating
-   *  never flashes a false "Sprntly stayed out". Null/absent on turns with no
-   *  associated run. */
-  run_status?: "queued" | "running" | "done" | "failed" | "declined" | null
-  error_class?: string | null
-}
-
 /** Response from `POST /v1/projects/{id}/individual` — the caller's durable
  *  individual project chat (`conversations.kind='individual'`, scoped
  *  project_id+user_id). Get-or-create, idempotent per (project, caller):
@@ -6090,11 +6412,10 @@ export type IndividualChatConversation = {
  *  (`backend/app/db/conversations.py`'s `list_individual_turns`) — the
  *  caller's OWN individual project chat, never another member's (own-
  *  conversation read gate, the read-side counterpart of the delegate-tool's
- *  cross-user write). No `author_user_id`/`author_name` split like
- *  `GroupTurn`: an individual chat is single-owner, so a `role: "user"` row
- *  is always the caller and a `role: "assistant"` row is always the agent
- *  (either a normal reply or a delegated brief delivered with no paired
- *  question). */
+ *  cross-user write). No `author_user_id`/`author_name` split: an individual
+ *  chat is single-owner, so a `role: "user"` row is always the caller and a
+ *  `role: "assistant"` row is always the agent (either a normal reply or a
+ *  delegated brief delivered with no paired question). */
 export type IndividualTurn = {
   id: number
   role: "user" | "assistant"
@@ -6105,20 +6426,6 @@ export type IndividualTurn = {
    *  session turn against its now-persisted history row by this key
    *  instead of the numeric id (which the session turn never has). */
   client_message_id?: string | null
-}
-
-/** Response from `GET /v1/projects/{id}/individual/unread` and
- *  `POST /v1/projects/{id}/individual/read` — the caller's OWN derived
- *  unread signal for their individual project chat (AD-P3/AD-P20: `unread`
- *  is derived server-side at read time from a stored read cursor, never a
- *  stored boolean). `latest_turn_id` is `null` when the chat has no turns
- *  yet; `last_read_turn_id` is `0` when the caller has never read it. The
- *  `/read` route omits `unread`/`latest_turn_id` (it only reports the
- *  cursor it just advanced to), so those two fields are optional here. */
-export type IndividualUnreadStatus = {
-  unread?: boolean
-  latest_turn_id?: number | null
-  last_read_turn_id: number
 }
 
 /** Response from `POST /v1/projects/{id}/artifacts/from-chat` — the freshly
@@ -6187,9 +6494,17 @@ export const projectsApi = {
    *  `prd_id` is only meaningful for `origin: "prd_auto"` — the create-
    *  modal's "Auto · from PRD" tab sends the forked PRD's id so the server
    *  can dedupe (first-write-wins, AD-P9): re-selecting an already-forked
-   *  PRD returns the EXISTING project instead of a new one. */
-  create: (payload: { name: string; origin?: "manual" | "prd_auto" | "artifact"; prd_id?: number }) =>
-    api.post<ProjectListItem>("/v1/projects", payload),
+   *  PRD returns the EXISTING project instead of a new one. `seed_text` is
+   *  an optional free-text "why" for manual/artifact origins — when
+   *  non-empty the server seeds a grounded origin-memory entry from it;
+   *  omit or leave empty to no-op (`prd_auto`'s "why" always comes from the
+   *  PRD fork hook instead, never this field). */
+  create: (payload: {
+    name: string
+    origin?: "manual" | "prd_auto" | "artifact"
+    prd_id?: number
+    seed_text?: string
+  }) => api.post<ProjectListItem>("/v1/projects", payload),
   /** Add an existing user to the project by email
    *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`
    *  404 when no account exists for that email — inviting a
@@ -6346,69 +6661,17 @@ export const projectsApi = {
    *  none exists yet. */
   memoryInsight: (id: number | string) =>
     api.get<ProjectMemoryInsight | null>(`/v1/projects/${encodeURIComponent(String(id))}/memory/insight`),
-  /** Poll read (AD-P4 — no realtime in v1): group turns after the `since`
-   *  cursor (a turn id), ascending. `since` omitted fetches the whole
-   *  history. Empty (never a crash) when the group chat hasn't been
-   *  created yet — `backend/app/routes/projects.py`'s
-   *  `list_group_turns_route` returns `{turns: []}` in that case. */
-  groupTurns: (id: number | string, since?: number) =>
-    api
-      .get<{ turns: GroupTurn[] }>(
-        `/v1/projects/${encodeURIComponent(String(id))}/group/turns${since != null ? `?since=${since}` : ""}`,
-      )
-      .then((r) => r.turns),
-  /** Post a human turn to the project's group chat (create-if-absent
-   *  server-side). An `@Sprntly` mention in `content` triggers ONE
-   *  best-effort agent reply — the POST resolves only after that reply
-   *  attempt completes (or is skipped for a non-mention), so the caller's
-   *  busy state should span the whole request, not just the network hop. */
-  postGroupTurn: (
-    id: number | string,
-    content: string,
-    opts?: {
-      /** The pinned skill riding this send (its trigger is ALREADY spliced
-       *  into `content` by the engine — the same single splice rule every
-       *  surface uses; this field additionally names the pick on the wire). */
-      pinned_skill?: { id: string; trigger: string; label?: string } | null
-      /** Resolved attachment refs ({name, content, key?, mime?, size?}) —
-       *  persisted on the turn and folded into the agent's question
-       *  server-side (mirrors the private surface's attachment ride). */
-      attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[]
-      /** The idempotency key: a retry/double-submit carrying the same id
-       *  replays the original turn instead of double-posting. */
-      client_message_id?: string
-      /** The PRD open in the artifact drawer beside this group chat — the
-       *  explicit `edit_prd` target (parity with main chat's own open-tab
-       *  `prd_id`). `null`/omitted means no PRD is open, so an in-band edit
-       *  request gets the "open a PRD" clarify rather than a guess. */
-      prd_id?: number | null
-    },
-  ) =>
-    api.post<GroupTurn>(`/v1/projects/${encodeURIComponent(String(id))}/group/turns`, {
-      content,
-      ...(opts?.pinned_skill ? { pinned_skill: opts.pinned_skill } : {}),
-      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
-      ...(opts?.client_message_id ? { client_message_id: opts.client_message_id } : {}),
-      ...(opts?.prd_id != null ? { prd_id: opts.prd_id } : {}),
-    }),
   /** Get-or-create the caller's durable individual project chat
-   *  (create-if-absent, idempotent — mirrors the group chat's own
-   *  `POST .../group`, one level down). Called once per chat session
-   *  (the result is cached client-side) so every ask on this thread
-   *  reuses the SAME `conversation_id`. */
+   *  (create-if-absent, idempotent). Called once per chat session (the
+   *  result is cached client-side) so every ask on this thread reuses the
+   *  SAME `conversation_id`. */
   individualChat: (id: number | string) =>
     api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/individual`),
-  /** Get-or-create the project's ONE shared group chat (a real `conversations`
-   *  row, `kind='group'`, per project) and return it — its `id` is what the
-   *  rebuilt group chat mount binds to and threads into main's unscoped
-   *  `/v1/ask`. Mirrors `individualChat` one level up (per-project vs per-user). */
-  groupChat: (id: number | string) =>
-    api.post<IndividualChatConversation>(`/v1/projects/${encodeURIComponent(String(id))}/group`),
-  /** Load-on-open read of the caller's own individual project chat (create-if-
-   *  absent NOT implied — mirrors `groupTurns`'s poll shape one level down).
-   *  `since` omitted fetches the whole history. Empty (never a crash) when
-   *  the caller hasn't opened this chat yet — `list_individual_turns_route`
-   *  returns `{turns: []}` in that case, same as the group-chat route. */
+  /** Load-on-open read of the caller's own individual project chat
+   *  (create-if-absent NOT implied). `since` omitted fetches the whole
+   *  history. Empty (never a crash) when the caller hasn't opened this chat
+   *  yet — `list_individual_turns_route` returns `{turns: []}` in that
+   *  case. */
   individualTurns: (id: number | string, since?: number) =>
     api
       .get<{ turns: IndividualTurn[] }>(
@@ -6447,22 +6710,6 @@ export const projectsApi = {
   removeMember: (id: number | string, userId: string) =>
     api.delete<{ removed: true }>(
       `/v1/projects/${encodeURIComponent(String(id))}/members/${encodeURIComponent(userId)}`,
-    ),
-  /** The caller's OWN derived unread signal for their individual project
-   *  chat (`GET /v1/projects/{id}/individual/unread`, AD-P3/AD-P20 — no
-   *  stored boolean; derived server-side from the read cursor). Never
-   *  throws on "chat not opened yet" — the route returns the zero-state
-   *  `{unread: false, latest_turn_id: null, last_read_turn_id: 0}`. */
-  individualUnread: (id: number | string) =>
-    api.get<IndividualUnreadStatus>(`/v1/projects/${encodeURIComponent(String(id))}/individual/unread`),
-  /** Advance the caller's OWN read cursor to the latest turn in their
-   *  individual project chat (`POST /v1/projects/{id}/individual/read`) —
-   *  clears the rail badge. Advance-only server-side (a stale re-post can
-   *  never move the cursor backward); safe to call every time the
-   *  individual chat is opened, not just the first time. */
-  markIndividualRead: (id: number | string) =>
-    api.post<{ last_read_turn_id: number }>(
-      `/v1/projects/${encodeURIComponent(String(id))}/individual/read`,
     ),
   /** Append one lifecycle event to a delegation
    *  (`POST /v1/projects/{id}/delegations/{delegationId}/events`) — server-

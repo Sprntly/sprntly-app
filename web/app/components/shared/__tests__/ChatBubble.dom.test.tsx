@@ -236,4 +236,67 @@ describe("ChatBubble humanAlign — third-party turns in a multi-party thread", 
     expect(container.querySelector('[class*="otherRow"]')).toBeNull()
     expect(container.querySelector(".bc-user-bubble")?.textContent).toBe("On it.")
   })
+
+  it("shows the generic interruption when there is no typed provider notice", () => {
+    // The default must not move: a backend detail string is meaningless to the
+    // reader, and the tenant-gate 404 must read as an interruption with no hint
+    // that the row exists somewhere else.
+    const { container } = render(
+      <ChatBubble turnId="e1" agentName="Sprntly" isLast
+        error="Traceback: KeyError 'x'" onAskAgain={() => {}} />,
+    )
+    const txt = container.textContent ?? ""
+    expect(txt).toContain("There was an interruption")
+    expect(txt).not.toContain("KeyError")
+    expect(container.querySelector(".cw-btn")).not.toBeNull()
+    cleanup()
+  })
+
+  it("says the account is out of credits instead of 'an interruption'", () => {
+    // Observed on staging with `credit_balance: 0`: the durable turn said
+    // "There was an interruption, try again" while a toast — transient, and
+    // gone entirely after a reload — carried the actual reason. The notice is
+    // a TYPED, server-authored, user-safe sentence, not a raw error.
+    const { container } = render(
+      <ChatBubble turnId="e2" agentName="Sprntly" isLast
+        error="AskFailedError: provider_limit"
+        providerNotice={{
+          message: "Sprntly's AI provider has hit a usage limit — the account is out of credits.",
+          needsAdmin: true,
+        }}
+        onAskAgain={() => {}} />,
+    )
+    const txt = container.textContent ?? ""
+    expect(txt).toContain("out of credits")
+    expect(txt).not.toContain("There was an interruption")
+    cleanup()
+  })
+
+  it("hides Ask again when only an admin can clear the failure", () => {
+    // A retry on an out-of-credits account is a control that cannot act, which
+    // is worse than none: it reads as though the failure were transient.
+    const { container } = render(
+      <ChatBubble turnId="e3" agentName="Sprntly" isLast
+        error="AskFailedError"
+        providerNotice={{ message: "Out of credits.", needsAdmin: true }}
+        onAskAgain={() => {}} />,
+    )
+    expect(container.querySelector(".cw-btn")).toBeNull()
+    cleanup()
+  })
+
+  it("keeps Ask again for a transient overload", () => {
+    // The control: `needsAdmin: false` is a provider overload, where retrying
+    // is exactly the right thing to offer.
+    const { container } = render(
+      <ChatBubble turnId="e4" agentName="Sprntly" isLast
+        error="AskFailedError"
+        providerNotice={{ message: "The provider is overloaded.", needsAdmin: false }}
+        onAskAgain={() => {}} />,
+    )
+    const txt = container.textContent ?? ""
+    expect(txt).toContain("overloaded")
+    expect(container.querySelector(".cw-btn")).not.toBeNull()
+    cleanup()
+  })
 })

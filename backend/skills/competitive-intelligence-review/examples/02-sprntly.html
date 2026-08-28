@@ -1,0 +1,437 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Competitive Review — Sprntly</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+:root{--green:#1A6B47;--ink:#1F241F;--sub:#5B615B;--page:#FFFFFF;--desk:#F7F7F5;--rule:#E3E1D8;
+--happy:#E7F1EA;--happy-t:#1A6B47;--edge:#FBF0DC;--edge-t:#8A5A12;--fail:#F9E7E4;--fail-t:#9C3223;--cool:#E9EEF4;--cool-t:#2E4A6B;}
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:var(--desk);font-family:'Inter',sans-serif;color:var(--ink);font-size:15px;line-height:1.62;padding:24px 16px 80px}
+.frame{max-width:960px;margin:0 auto}
+.page{background:var(--page);border:1px solid #DDDBD3;border-radius:2px;box-shadow:0 1px 2px rgba(31,36,31,.06),0 14px 36px rgba(31,36,31,.08);padding:58px 62px 68px}
+h1{font:600 35px/1.13 'Spectral',serif;letter-spacing:-.012em;margin-bottom:16px}
+.opener{font:400 17.5px/1.55 'Spectral',serif;color:#3A403A;margin-bottom:22px}
+.opener b{font-weight:600;color:var(--ink)}
+.eyebrow{font:600 10.5px/1 'Inter',sans-serif;letter-spacing:.14em;text-transform:uppercase;color:var(--green);margin:42px 0 10px;padding-top:20px;border-top:1px solid var(--rule)}
+.eyeburb{font-size:13px;color:var(--sub);margin:-4px 0 12px}
+h2{font:600 21px/1.25 'Spectral',serif;margin:26px 0 3px}
+h3{font:600 11px/1 'Inter',sans-serif;letter-spacing:.11em;text-transform:uppercase;color:var(--sub);margin:20px 0 7px}
+p{margin-bottom:10px}
+.t{font:600 8.5px/1 'IBM Plex Mono',monospace;padding:3px 4px;border-radius:3px;vertical-align:2px;margin-left:3px;letter-spacing:.03em}
+.t.h{background:var(--happy);color:var(--happy-t)} .t.s{background:var(--edge);color:var(--edge-t)} .t.i{background:var(--cool);color:var(--cool-t)} .t.v{background:#EFE4F0;color:#6B3572}
+table{width:100%;border-collapse:collapse;font-size:12.5px;background:#fff;border:1px solid var(--rule);border-radius:6px;overflow:hidden;margin:11px 0 6px}
+th{font:600 9.5px/1.3 'Inter',sans-serif;letter-spacing:.09em;text-transform:uppercase;color:var(--sub);text-align:left;padding:9px;border-bottom:1px solid var(--rule);background:#FCFBF8;vertical-align:bottom}
+td{padding:9px;border-bottom:1px solid #F0EEE7;vertical-align:top}
+tr:last-child td{border-bottom:none}
+td.us,th.us{background:#F4F9F6}
+.cls{display:inline-block;font:600 8.5px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;letter-spacing:.04em;white-space:nowrap}
+.cls.new{background:var(--happy);color:var(--happy-t)} .cls.par{background:#EFEDE6;color:var(--sub)} .cls.dep{background:var(--fail);color:var(--fail-t)} .cls.mkt{background:var(--cool);color:var(--cool-t)} .cls.beta{background:var(--edge);color:var(--edge-t)}
+.sev{display:inline-block;font:600 9px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;white-space:nowrap}
+.sev.rm{background:var(--fail);color:var(--fail-t)} .sev.rs{background:var(--edge);color:var(--edge-t)} .sev.dn{background:#EFEDE6;color:var(--sub)}
+.def{display:inline-block;font:600 9px/1 'IBM Plex Mono',monospace;padding:4px 6px;border-radius:4px;background:var(--fail);color:var(--fail-t);white-space:nowrap}
+.def.some{background:var(--edge);color:var(--edge-t)} .def.yes{background:var(--happy);color:var(--happy-t)}
+.callout{border:1px solid var(--rule);border-left:3px solid var(--green);background:#FCFBF8;border-radius:0 6px 6px 0;padding:14px 17px;margin:13px 0}
+.callout.warn{border-left-color:var(--fail-t)}
+.callout .lbl{font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--green);display:block;margin-bottom:6px}
+.callout.warn .lbl{color:var(--fail-t)}
+.q{font-family:'Spectral',serif;font-style:italic;font-size:15px;line-height:1.55;border-left:2px solid #D8D5C9;padding:2px 0 2px 14px;margin:10px 0;color:#3A403A}
+.q .attr{display:block;font:400 11px/1.5 'IBM Plex Mono',monospace;font-style:normal;color:var(--sub);margin-top:5px}
+.radarwrap{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:16px 0 4px}
+.rc{border:1px solid var(--rule);border-radius:8px;background:#FCFBF8;padding:14px 12px 8px}
+.rc .cap{font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--green);text-align:center;margin-bottom:4px}
+.stat{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:9px;margin:12px 0}
+.stat .b{border:1px solid var(--rule);border-radius:6px;padding:11px 13px;background:#FCFBF8}
+.stat .b.me{background:#EDF5F0;border-color:#BCD9C8}
+.stat .n2{font:600 18px/1.15 'IBM Plex Mono',monospace;display:block;color:var(--ink)}
+.stat .k{font:600 9px/1.3 'Inter',sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--green);display:block;margin-bottom:5px}
+.stat .d{font-size:10.5px;color:var(--sub);line-height:1.4;display:block;margin-top:4px}
+.rec{border:1px solid var(--rule);border-radius:8px;margin:14px 0;overflow:hidden}
+.rec .hd{background:#F4F9F6;border-bottom:1px solid var(--rule);padding:12px 16px}
+.rec .num{font:600 10px/1 'IBM Plex Mono',monospace;color:var(--green);letter-spacing:.1em;display:block;margin-bottom:5px}
+.rec .ttl{font:600 17px/1.3 'Inter',sans-serif}
+.rec .bd{padding:14px 16px}
+.rec .row{display:grid;grid-template-columns:100px 1fr;gap:12px;padding:7px 0;border-bottom:1px solid #F2F0EA;font-size:13px}
+.rec .row:last-child{border-bottom:none}
+.rec .rk{font:600 9.5px/1.4 'IBM Plex Mono',monospace;letter-spacing:.06em;text-transform:uppercase;color:var(--sub)}
+.srcgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:10px;margin:12px 0}
+.srcbox{border:1px solid var(--rule);border-radius:6px;background:#FCFBF8;padding:11px 13px;font-size:11.5px;line-height:1.55;color:var(--sub)}
+.srcbox b{display:block;font:600 9.5px/1 'IBM Plex Mono',monospace;letter-spacing:.09em;text-transform:uppercase;color:var(--green);margin-bottom:6px}
+ul{margin:0 0 10px 18px} li{margin-bottom:5px}
+ul.tight li{margin-bottom:3px}
+.legend{font:400 11px/1.6 'IBM Plex Mono',monospace;color:var(--sub);margin-top:5px}
+.src{font-size:11.5px;color:var(--sub)}
+.metaline{font:400 11px/1.7 'IBM Plex Mono',monospace;color:#9A968A;border-top:1px solid var(--rule);margin-top:34px;padding-top:12px}
+@media(max-width:820px){.page{padding:32px 20px 42px}.radarwrap{grid-template-columns:1fr}.rec .row{grid-template-columns:1fr}}
+
+.pos{display:grid;grid-template-columns:108px repeat(3,1fr);grid-auto-rows:minmax(88px,auto);gap:4px;margin:14px 0 0;font-size:11.5px}
+.pos .axl{display:flex;align-items:center;justify-content:flex-end;padding-right:9px;font:600 9.5px/1.3 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);text-align:right}
+.c{border:1px solid var(--rule);border-radius:5px;padding:9px;background:#FCFBF8}
+.c.me{background:#EDF5F0;border-color:#BCD9C8}
+.c b{display:block;font:600 12px/1.3 'Inter',sans-serif;margin-bottom:3px}
+.c span{color:var(--sub);font-size:11px;line-height:1.4;display:block}
+.xax{display:grid;grid-template-columns:108px repeat(3,1fr);gap:4px;font:600 9.5px/1 'Inter',sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--sub);margin-bottom:14px}
+.xax div{text-align:center;padding-top:5px}
+.y{color:var(--happy-t);font-weight:600}.n{color:#C4C0B2}.pt{color:var(--edge-t);font-weight:600}
+@media(max-width:820px){.pos,.xax{grid-template-columns:1fr}.pos .axl{justify-content:flex-start;text-align:left;padding:6px 0 0}}
+
+.brandline{font:600 10px/1 'IBM Plex Mono',monospace;letter-spacing:.16em;text-transform:uppercase;color:var(--green);margin-bottom:18px;display:flex;align-items:center;gap:9px}
+.brandline::before{content:"";width:7px;height:7px;border-radius:50%;border:2px solid var(--green);flex:none}
+.brandline::after{content:"";flex:1;height:1px;background:var(--rule)}
+
+@page{size:A4;margin:14mm 12mm}
+@media print{
+ body{background:#fff;padding:0;font-size:10.5px;line-height:1.55;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+ .frame{max-width:none}
+ .page{border:none;border-radius:0;box-shadow:none;padding:0}
+ h1{font-size:27px;margin-bottom:12px}
+ .opener{font-size:13.5px;margin-bottom:15px}
+ .eyebrow{margin:26px 0 8px;padding-top:14px;break-after:avoid;page-break-after:avoid}
+ .eyeburb{break-after:avoid;page-break-after:avoid;font-size:10.5px}
+ h2,h3{break-after:avoid;page-break-after:avoid}
+ h2{font-size:17px;margin:18px 0 3px}
+ table{font-size:9px;break-inside:auto}
+ th{font-size:7.5px;padding:6px}
+ td{padding:6px}
+ tr{break-inside:avoid;page-break-inside:avoid}
+ thead{display:table-header-group}
+ .callout,.srcbox,.rc,.stat .b,.pos,.q{break-inside:avoid;page-break-inside:avoid}
+ .rec{break-inside:auto}
+ .rec .hd{break-after:avoid;page-break-after:avoid}
+ .rec .row{break-inside:avoid;page-break-inside:avoid}
+ table{break-inside:auto}
+ .radarwrap{break-inside:avoid;page-break-inside:avoid;gap:10px;margin:10px 0 4px;grid-template-columns:1fr 1fr}
+ .rec .row{grid-template-columns:88px 1fr}
+ .pos,.xax{grid-template-columns:92px repeat(3,1fr)}
+ .pos .axl{justify-content:flex-end;text-align:right;padding:0 7px 0 0}
+ .rc{padding:8px 6px 4px}
+ .rc svg{max-width:292px}
+ .rc .cap{font-size:8px}
+ .eyeburb{break-inside:avoid;page-break-inside:avoid}
+ p{orphans:3;widows:3}
+ .pos{grid-auto-rows:minmax(70px,auto);font-size:9px}
+ .c b{font-size:10px} .c span{font-size:9px}
+ .stat .n2{font-size:15px} .stat .d{font-size:9px}
+ .rec .row{font-size:10px}
+ .legend,.src{font-size:9px}
+ .metaline{font-size:8.5px;break-inside:avoid;page-break-inside:avoid}
+ .brandline{font-size:8.5px}
+ .t{font-size:7px}
+ .cls,.sev,.def{font-size:7px;padding:3px 4px}
+}
+</style></head><body><div class="frame"><div class="page">
+
+<div class="brandline">Generated by Sprntly AI</div>
+<h1>Where Sprntly Stands</h1>
+
+<div class="opener"><b>The five-agent loop is no longer the differentiator — it is the category's entry ticket.</b> Productboard shipped a specification agent, a post-launch evaluation agent, scheduled recurring runs, user-authored skills and an MCP server to Claude Code and Cursor, all between 15 April and 12 August 2026. Linear shipped Code Intelligence in May, cloud coding sessions in June and Loops — recurring agent work on a schedule — in July, and gives its agent away on every plan including free. Of twelve capabilities benchmarked, <b>we hold none alone</b>, and the one we share with only one other company is anomaly detection on live metrics.</div>
+<div class="opener" style="margin-bottom:0"><b>The threat that could remove the business is not a feature — it is who owns the context layer.</b> Sprntly's stated moat is accumulated organisational context that compounds per customer. Both Linear and Productboard are now building exactly that inside the system of record, where the data already lives and no integration is required. Linear's founder published a piece in March arguing the old model is finished, and named the replacement the shared product system that turns context into execution. Meanwhile Anthropic ships a free product-management plugin for Cowork and Claude Code covering spec writing, brainstorming and metric review. That is the section to read first.</div>
+
+<div class="eyebrow">The competitor set, and how it was derived</div>
+<div class="eyeburb">No set was supplied, so it was reasoned from the job Sprntly is hired for: a product manager at a startup or scale-up turning scattered signal into shipped, measured product. The budget line is product-team seat spend.</div>
+<table>
+<thead><tr><th style="width:15%">Bucket</th><th style="width:22%">Who</th><th>Why they are in</th></tr></thead>
+<tbody>
+<tr><td><strong>Direct</strong></td><td><strong>Productboard Spark</strong></td><td>Same job, same buyer, same budget line. An agentic product system spanning market signals, feedback, strategy, discovery, prioritisation, release planning and post-launch evaluation <span class="t h">H</span> — the identical arc to our five agents.</td></tr>
+<tr><td><strong>Direct</strong></td><td><strong>ChatPRD</strong></td><td>Same buyer and budget, narrower job. Named by our own site metadata as a comparison target. Claims 100,000+ product managers <span class="t v">V</span>, which makes it the default incumbent in the PM's mind at the moment of purchase.</td></tr>
+<tr><td><strong>Adjacent</strong></td><td><strong>Linear</strong></td><td>Different product, same budget, and now explicitly claiming our territory. Linear Agent, Skills, Automations, Code Intelligence and Coding Sessions turn the issue tracker into the planning and execution layer <span class="t h">H</span>.</td></tr>
+<tr><td><strong>Substitute</strong></td><td><strong>Claude Code + Cowork</strong></td><td>Solves the job without buying the category. Anthropic publishes an official product-management plugin covering the PM workflow across six skills and six slash commands <span class="t h">H</span>, and a community marketplace carries 100+ more.</td></tr>
+<tr><td><strong>Entrant</strong></td><td><strong>Amplitude</strong></td><td>Not a competitor for "what to build" a year ago; is one now. On 17 February 2026 it launched a Global Agent plus four specialised agents to close the gap between shipping software and knowing what to build next <span class="t h">H</span> — our sentence, from the measurement side.</td></tr>
+</tbody></table>
+<p class="legend">Considered and excluded: <strong>Aha!</strong> and <strong>Jira/Atlassian</strong> (enterprise roadmapping and delivery, different buyer at our stage) · <strong>Dovetail</strong> and <strong>Kraftful</strong> (research and feedback synthesis only — one step of the loop, and Productboard Spark already absorbs that step) · <strong>Notion</strong> (workspace, not a product system). Each would add a column and no decision.</p>
+
+<div class="eyebrow">Where we win and where we lose</div>
+<div class="eyeburb">Eight dimensions that decide this category, scored 0–5. Scoring is judgment <span class="t i">I</span>; the facts underneath are sourced throughout. Sprntly is scored on shipped capability, not roadmap — two of five agents are marked available now on our own site, one partly, two as coming soon <span class="t v">V</span>. Run twice, because averaging a specialist into one chart hides the shape worth seeing.</div>
+<div class="radarwrap">
+<div class="rc"><div class="cap">Against the platform players</div><svg viewBox="-25 0 550 470" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:500px;display:block;margin:0 auto">
+<polygon points="250.0,205.0 271.2,213.8 280.0,235.0 271.2,256.2 250.0,265.0 228.8,256.2 220.0,235.0 228.8,213.8" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,175.0 292.4,192.6 310.0,235.0 292.4,277.4 250.0,295.0 207.6,277.4 190.0,235.0 207.6,192.6" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,145.0 313.6,171.4 340.0,235.0 313.6,298.6 250.0,325.0 186.4,298.6 160.0,235.0 186.4,171.4" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,115.0 334.9,150.1 370.0,235.0 334.9,319.9 250.0,355.0 165.1,319.9 130.0,235.0 165.1,150.1" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,85.0 356.1,128.9 400.0,235.0 356.1,341.1 250.0,385.0 143.9,341.1 100.0,235.0 143.9,128.9" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="85.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="400.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="385.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="100.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<text x="250.0" y="69.4" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Signal breadth</text>
+<text x="369.2" y="118.8" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Org context depth</text>
+<text x="418.6" y="238.0" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Evidence discipline</text>
+<text x="369.2" y="357.2" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Handoff to coding agents</text>
+<text x="250.0" y="406.6" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Codebase awareness</text>
+<text x="130.8" y="357.2" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Closed-loop measurement</text>
+<text x="81.4" y="238.0" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Installed base</text>
+<text x="130.8" y="118.8" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Time to first value</text>
+<polygon points="250.0,115.0 313.6,171.4 370.0,235.0 313.6,298.6 250.0,265.0 228.8,256.2 250.0,235.0 165.1,150.1" fill="#1A6B47" fill-opacity="0.10" stroke="#1A6B47" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,115.0 356.1,128.9 400.0,235.0 356.1,341.1 250.0,355.0 165.1,319.9 100.0,235.0 207.6,192.6" fill="#9C3223" fill-opacity="0.10" stroke="#9C3223" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,145.0 356.1,128.9 340.0,235.0 356.1,341.1 250.0,385.0 207.6,277.4 100.0,235.0 143.9,128.9" fill="#2E4A6B" fill-opacity="0.10" stroke="#2E4A6B" stroke-width="2" stroke-linejoin="round"/>
+<rect x="80" y="418" width="11" height="11" rx="2" fill="#1A6B47" fill-opacity="0.25" stroke="#1A6B47" stroke-width="1.6"/><text x="97" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Us</text>
+<rect x="180" y="418" width="11" height="11" rx="2" fill="#9C3223" fill-opacity="0.25" stroke="#9C3223" stroke-width="1.6"/><text x="197" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Productboard</text>
+<rect x="340" y="418" width="11" height="11" rx="2" fill="#2E4A6B" fill-opacity="0.25" stroke="#2E4A6B" stroke-width="1.6"/><text x="357" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Linear</text>
+</svg></div>
+<div class="rc"><div class="cap">Against the specialists</div><svg viewBox="-25 0 550 470" xmlns="http://www.w3.org/2000/svg" style="width:100%;max-width:500px;display:block;margin:0 auto">
+<polygon points="250.0,205.0 271.2,213.8 280.0,235.0 271.2,256.2 250.0,265.0 228.8,256.2 220.0,235.0 228.8,213.8" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,175.0 292.4,192.6 310.0,235.0 292.4,277.4 250.0,295.0 207.6,277.4 190.0,235.0 207.6,192.6" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,145.0 313.6,171.4 340.0,235.0 313.6,298.6 250.0,325.0 186.4,298.6 160.0,235.0 186.4,171.4" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,115.0 334.9,150.1 370.0,235.0 334.9,319.9 250.0,355.0 165.1,319.9 130.0,235.0 165.1,150.1" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<polygon points="250.0,85.0 356.1,128.9 400.0,235.0 356.1,341.1 250.0,385.0 143.9,341.1 100.0,235.0 143.9,128.9" fill="none" stroke="#EDEBE3" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="85.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="400.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="356.1" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="250.0" y2="385.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="341.1" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="100.0" y2="235.0" stroke="#E3E1D8" stroke-width="1"/>
+<line x1="250" y1="235" x2="143.9" y2="128.9" stroke="#E3E1D8" stroke-width="1"/>
+<text x="250.0" y="69.4" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Signal breadth</text>
+<text x="369.2" y="118.8" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Org context depth</text>
+<text x="418.6" y="238.0" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Evidence discipline</text>
+<text x="369.2" y="357.2" text-anchor="start" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Handoff to coding agents</text>
+<text x="250.0" y="406.6" text-anchor="middle" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Codebase awareness</text>
+<text x="130.8" y="357.2" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Closed-loop measurement</text>
+<text x="81.4" y="238.0" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Installed base</text>
+<text x="130.8" y="118.8" text-anchor="end" font-family="Inter,sans-serif" font-size="9.5" font-weight="600" fill="#5B615B">Time to first value</text>
+<polygon points="250.0,115.0 313.6,171.4 370.0,235.0 313.6,298.6 250.0,265.0 228.8,256.2 250.0,235.0 165.1,150.1" fill="#1A6B47" fill-opacity="0.10" stroke="#1A6B47" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,175.0 313.6,171.4 310.0,235.0 334.9,319.9 250.0,295.0 250.0,235.0 130.0,235.0 143.9,128.9" fill="#9C3223" fill-opacity="0.10" stroke="#9C3223" stroke-width="2" stroke-linejoin="round"/>
+<polygon points="250.0,145.0 292.4,192.6 310.0,235.0 356.1,341.1 250.0,385.0 228.8,256.2 100.0,235.0 186.4,171.4" fill="#2E4A6B" fill-opacity="0.10" stroke="#2E4A6B" stroke-width="2" stroke-linejoin="round"/>
+<rect x="80" y="418" width="11" height="11" rx="2" fill="#1A6B47" fill-opacity="0.25" stroke="#1A6B47" stroke-width="1.6"/><text x="97" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Us</text>
+<rect x="180" y="418" width="11" height="11" rx="2" fill="#9C3223" fill-opacity="0.25" stroke="#9C3223" stroke-width="1.6"/><text x="197" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">ChatPRD</text>
+<rect x="320" y="418" width="11" height="11" rx="2" fill="#2E4A6B" fill-opacity="0.25" stroke="#2E4A6B" stroke-width="1.6"/><text x="337" y="428" font-family="Inter,sans-serif" font-size="11.5" font-weight="600" fill="#1F241F">Claude Code</text>
+</svg></div>
+</div>
+<p><strong>Read the left chart first.</strong> Our shape sits almost entirely inside Productboard's. There is no axis on that chart where we extend past them — including evidence discipline, which we have treated as ours. Productboard ships feedback analysis with citations and per-quote customer attribution, and Spark asks a clarifying question rather than proceeding on an uncertain instruction. Linear extends past us on org context, codebase awareness, handoff, installed base and time to first value; it is behind us only on signal breadth and evidence discipline, and it is not trying to win those.</p>
+<p><strong>The right chart is the uncomfortable one.</strong> ChatPRD does one step of the loop and does not touch measurement at all, yet it beats us on installed base and time to first value — the two axes that decide a first purchase. Claude Code, which is not a product-management company, matches or beats us on four of eight. The single axis where our shape extends past everything on both charts is signal breadth, and that is an integration count, which is expensive to hold and cheap to copy.</p>
+<p class="legend">Amplitude is not plotted. It competes on the same outcome from a different axis — measurement inward rather than signal outward — and averaging it into either chart would flatten the one thing worth seeing about it. It is scored in the feature benchmark and rated in the threat scan.</p>
+
+<div class="eyebrow">Scale benchmark</div>
+<div class="eyeburb">Where each competitor actually sits. Most recent figure available for each; several are private and say so.</div>
+<table>
+<thead><tr><th style="width:13%">Company</th><th style="width:19%">Scale</th><th style="width:15%">Funding</th><th style="width:22%">Their differentiator</th><th>What they take from us</th></tr></thead>
+<tbody>
+<tr><td class="us"><strong>Us</strong></td><td class="us">Pre-launch; waitlist and a small design-partner group <span class="t v">V</span></td><td class="us"><span class="src">not disclosed</span></td><td class="us">Five-agent loop end to end, breadth of signal sources</td><td class="us">&mdash;</td></tr>
+<tr><td><strong>Productboard</strong></td><td><strong>6,000+</strong> organisations <span class="t v">V</span></td><td><span class="src">private</span></td><td>A decade of feedback taxonomy, now agentic across the whole arc</td><td>The entire loop, from the same buyer, with the data already in place</td></tr>
+<tr><td><strong>Linear</strong></td><td><strong>40,000+</strong> organisations <span class="t v">V</span></td><td>$82M Series C at $1.25B, June 2025 <span class="t s">S</span></td><td>The system of record becoming the context layer</td><td>Planning, spec and handoff — bundled free into a seat they already own</td></tr>
+<tr><td><strong>ChatPRD</strong></td><td><strong>100,000+</strong> PMs, 750,000+ docs, June 2026 <span class="t v">V</span></td><td>Bootstrapped, no outside funding <span class="t h">H</span></td><td>Founder credibility and output that needs less rewriting</td><td>The PM's first AI purchase, at $15</td></tr>
+<tr><td><strong>Amplitude</strong></td><td><strong>4,500+</strong> customers <span class="t v">V</span>; Nasdaq: AMPL</td><td><span class="src">public</span></td><td>Owns the behavioural data the recommendation depends on</td><td>Measurement and root cause — our loop's closing step</td></tr>
+<tr><td><strong>Anthropic</strong></td><td><span class="src">Cowork on Pro and Max; PM plugin free</span></td><td>$30B raised in Q1 2026 <span class="t s">S</span></td><td>The substrate everyone else hands off to</td><td>The whole job, for the price of a seat the PM already has</td></tr>
+</tbody></table>
+<p class="legend">Amplitude's last revenue figure I could source is ARR of $312M, up 11%, reported for a quarter that <em>predates</em> the February 2026 agent launch <span class="t s">S</span> — it is stale for this window and should not be quoted as current. A current-quarter figure is an open pull. Productboard and ChatPRD do not disclose revenue; the customer counts above are the companies' own claims about themselves <span class="t v">V</span>, not independent measurements.</p>
+<p>The number that matters here is not revenue. It is that <strong>three of five competitors reach the buyer through a seat they already sold</strong>. Linear is inside 40,000 organisations and gives Linear Agent away on every plan, including free. Productboard is inside 6,000 and is folding its AI into the existing workspace rather than pricing it separately. Anthropic is already on the PM's desktop. Only ChatPRD acquired its 100,000 PMs the way we would have to — one at a time, at $15.</p>
+
+<div class="eyebrow">Market position</div>
+<div class="eyeburb">Distribution reach against how much of the signal-to-shipped loop the product covers. Placement is our read <span class="t i">I</span>; the facts behind it are sourced throughout.</div>
+<div class="pos">
+<div class="axl">Large reach</div>
+<div class="c"><b>ChatPRD</b><span>100k+ PMs. Documents only — a competitor's own summary calls it purely a document generation tool.</span></div>
+<div class="c"><b>Linear · Claude Code</b><span>Linear: 40k orgs, plan through code, no multi-source signal or measurement. Claude: spec and code, no org signal layer.</span></div>
+<div class="c"><b>&mdash;</b><span>Nobody with large reach yet covers the full loop.</span></div>
+<div class="axl">Mid reach</div>
+<div class="c"><b>&mdash;</b></div>
+<div class="c"><b>Amplitude</b><span>4,500 customers. Feedback, experimentation, measurement. No spec or build step.</span></div>
+<div class="c"><b>Productboard Spark</b><span>6,000 orgs. Signals through post-launch evaluation, with MCP into coding agents.</span></div>
+<div class="axl">Emerging</div>
+<div class="c"><b>&mdash;</b></div>
+<div class="c"><b>&mdash;</b></div>
+<div class="c me"><b>Us</b><span>Full loop by design; two of five agents live, two coming soon. No installed base.</span></div>
+</div>
+<div class="xax"><div></div><div>Single step</div><div>Partial loop</div><div>Full loop</div></div>
+<p>We occupy the bottom-right square, and <strong>Productboard occupies the square directly above it</strong> — the same column, one row up, with 6,000 organisations already loaded with the feedback history our loop needs to run. That is the plainest statement of our position: our differentiator is loop completeness, and the company beside us in that column already has it and shipped into it roughly every third day this summer. The top-right square is empty, which is the opportunity; it is also the square Linear is walking toward from the left.</p>
+
+<div class="eyebrow">Feature benchmark</div>
+<div class="eyeburb">Capability by capability. The radar shows the shape; this shows which specific features are commodity and which belong to one company. Rows reflect what is observable on each company's own surface — product page, changelog, docs or a dated announcement.</div>
+<table>
+<thead><tr><th style="width:24%">Capability</th><th class="us" style="width:8%">Us</th><th style="width:9%">Product&shy;board</th><th style="width:7%">Linear</th><th style="width:8%">ChatPRD</th><th style="width:8%">Claude</th><th style="width:8%">Ampli&shy;tude</th><th style="width:16%">Status</th></tr></thead>
+<tbody>
+<tr><td>AI spec / PRD generation</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td><strong>User-authored agentic skills</strong></td><td class="us n">&mdash;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="pt">partial</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td><strong>Scheduled / recurring autonomous runs</strong></td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td>MCP handoff to coding agents</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td><span class="cls par">Table stakes</span></td></tr>
+<tr><td>Multi-source signal ingestion</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="pt">partial</td><td class="pt">partial</td><td class="pt">partial</td><td class="y">&#10003;</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td>Feedback synthesis with citations</td><td class="us y">&#10003;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="n">&mdash;</td><td class="pt">partial</td><td class="y">&#10003;</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td><strong>Codebase-aware context</strong></td><td class="us n">&mdash;</td><td class="y">&#10003;</td><td class="y">&#10003;</td><td class="pt">partial</td><td class="y">&#10003;</td><td class="pt">partial</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td>Design-tool prototyping</td><td class="us n">soon</td><td class="pt">partial</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td class="pt">partial</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td><strong>Post-launch closed-loop measurement</strong></td><td class="us n">soon</td><td class="y">&#10003;</td><td class="pt">partial</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y">&#10003;</td><td><span class="cls beta">Contested</span></td></tr>
+<tr><td>Writes code / opens pull requests</td><td class="us n">&mdash;</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td><span class="cls dep">Linear &amp; Claude only</span></td></tr>
+<tr><td><strong>Live-metric anomaly detection + root cause</strong></td><td class="us y"><strong>&#10003;</strong></td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="n">&mdash;</td><td class="y"><strong>&#10003;</strong></td><td><span class="cls new">Us &amp; Amplitude only</span></td></tr>
+<tr><td>Published entry price under $20/seat</td><td class="us n">not published</td><td class="y">&#10003; $19</td><td class="y">&#10003; $10</td><td class="y">&#10003; $15</td><td class="y">&#10003;</td><td class="n"><span class="src">not sourced</span></td><td><span class="cls new">Their gap is ours</span></td></tr>
+</tbody></table>
+<p>Four of twelve capabilities are table stakes, and <strong>at least three of those four were differentiators twelve months ago</strong>: user-authored skills, scheduled autonomous runs and MCP handoff all became standard during the last two quarters. We hold no row alone. We share one row with one company — anomaly detection and root cause on live metrics, alongside Amplitude, which owns the underlying behavioural data and therefore holds it from a stronger position than we do.</p>
+<div class="callout warn"><span class="lbl">The row that should change a decision</span>Scheduled recurring autonomous runs are our headline consumer feature — the Monday morning brief. That row is now table stakes. Productboard shipped scheduled tasks on 13 May 2026 and named competitive scans, feedback digests and strategy reviews as the use case. Linear shipped the same capability as Loops. Anthropic ships scheduled tasks in Cowork. The Monday brief is still a good product; it is no longer a reason to switch, and the deck and site should stop treating it as one.</div>
+
+<div class="eyebrow">What they launched</div>
+<div class="eyeburb">The launches that changed a position, dated and classified — 15 April to 20 August 2026. <span class="cls new">net-new</span> opened a capability nobody had · <span class="cls par">parity</span> closed a gap · <span class="cls beta">beta</span> announced, not GA · <span class="cls mkt">market</span> same product, new ground · <span class="cls dep">retired</span> sunset. Routine releases are counted in the pattern line rather than listed; the full dated logs are on each company's changelog, linked in sources.</div>
+
+<h2>Productboard</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>15 Apr</td><td>Spark spec job — problem statement or brief to an engineering-ready spec, without inventing answers where context is missing <span class="t h">H</span></td><td><span class="cls beta">beta</span></td></tr>
+<tr><td>28 Apr</td><td>Spark skills — personal, workspace and system skills; slash commands; sandboxed Python and shell scripts <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>13 May</td><td>Scheduled tasks — recurring PM workflows on a cadence, named for competitive scans, feedback digests and strategy reviews <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>28 May</td><td>Company Knowledge — a curated, admin-managed home for company-level product context <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>4 Jun</td><td>MCP server, so coding agents read specs directly from Spark — plus a post-launch evaluation skill covering metrics recap, quantitative analysis and recommended next action <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>12 Aug</td><td>MCP extended to create and edit entities, write driver fields and manage relationships from Claude and Cursor <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> roughly 39 dated Spark releases between 15 April and 17 August — about 4 in April, 9 in May, 9 in June, 12 in July and 5 by 17 August. Rising month over month, and majority net-new. Also in the window: specification tabs, entity creation from chat, GitHub MCP, per-quote customer attribution on findings, and <strong>two deprecations</strong> — legacy sentiment analysis (4 Jun) and the daily and weekly digests (17 Jul). The deprecations matter as much as the launches: they are retiring the pre-agent surfaces rather than maintaining both.</p>
+
+<h2>Linear</h2>
+<table>
+<thead><tr><th style="width:11%">Date</th><th>Shipped</th><th style="width:14%">Class</th></tr></thead>
+<tbody>
+<tr><td>24 Mar</td><td>Linear Agent, Skills and Automations in public beta; Agent and Skills included on all plans <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>14 May</td><td>Code Intelligence — controlled codebase access so the agent reasons about how the product actually works <span class="t h">H</span></td><td><span class="cls beta">beta</span></td></tr>
+<tr><td>11 Jun</td><td>Coding sessions — the agent writes code using Claude Code and Codex, opens a PR, tags a reviewer <span class="t h">H</span></td><td><span class="cls new">net-new</span></td></tr>
+<tr><td>29 Jul</td><td>Loops — recurring agent work on a schedule or in response to events, billed against AI credits <span class="t h">H</span></td><td><span class="cls par">parity</span></td></tr>
+</tbody></table>
+<p class="legend"><strong>Pattern:</strong> eight major agent releases since March, roughly monthly, and the sequence matters more than the count — agent, then codebase, then code review (Diffs, 28 May), then code, then recurring work. That is the loop we describe, assembled in eight months inside a tool 40,000 organisations already pay for. Also in the window: agent-drafted project updates and Okta-managed MCP access from Claude. Linear reports 75%+ of enterprise workspaces have agents installed and 25% of issues created by agents <span class="t v">V</span>.</p>
+
+<h2>Amplitude, ChatPRD and Anthropic</h2>
+<p><strong>Amplitude — 17 Feb, three <span class="cls new">net-new</span> in one release <span class="t h">H</span>.</strong> A Global Agent that investigates root causes and acts; four specialised agents for dashboard monitoring, session replay, web experimentation and feedback; and MCP and Skills updates carrying behavioural data into Claude, Cursor, Figma, Lovable, Notion and GitHub. <em>Pattern:</em> one dense release rather than a cadence, landing squarely on the two agents we have not shipped. Nothing later surfaced in the searches run for this review, but Amplitude's changelog was not checked directly — treat the quiet as unverified, not confirmed.</p>
+<p><strong>ChatPRD — three <span class="cls par">parity</span> releases, no net-new <span class="t s">S</span>.</strong> Seven AI-first team templates (Feb); an MCP server for Cursor, Claude Desktop, Claude Code, Windsurf and VS Code; Projects for reusing context, Multi Doc Mode, and SOC 2 Type II with SSO on Enterprise (both by June). <em>Pattern:</em> dates are soft because <strong>ChatPRD publishes no dated changelog</strong> — these are reconstructed from third-party reviews. A competitor whose shipping is not publicly observable can only be tracked on outcome, and the outcome reported is a doubling of documents created in roughly six months <span class="t v">V</span>. Treat the silence as unmeasured, not as stillness.</p>
+<p><strong>Anthropic — two <span class="cls new">net-new</span>, two <span class="cls mkt">market</span> <span class="t h">H</span>.</strong> Cowork research preview on 12 Jan, an agent operating on local folders in a VM with sub-agent coordination; the official product-management plugin in February, six skills and six slash commands; an enterprise deployment session on 24 Feb; Windows and full cross-platform rollout from 3 Apr. <em>Pattern:</em> the market moves matter more than the launches, because they take a developer tool and put it in front of the non-engineer buyer. The plugin repository carried 6,526 stars as of February <span class="t h">H</span>, and a community marketplace lists 100+ PM skills. This is the surface we hand off to, and it is filling in above us.</p>
+
+<div class="eyebrow">Threat scan</div>
+<div class="eyeburb">Is anything happening that takes the business away rather than dents it, and are we defending it? <span class="def yes">named</span> we have a stated answer · <span class="def some">in flight</span> on the roadmap · <span class="def">none</span> no answer today.</div>
+<table>
+<thead><tr><th style="width:29%">Threat</th><th>What is happening</th><th style="width:11%">Severity</th><th style="width:9%">Timing</th><th style="width:10%">Defence</th></tr></thead>
+<tbody>
+<tr><td><strong>The system of record claims the context layer</strong></td><td>Our stated moat is per-customer accumulated context. Linear is building it where the work already lives; Productboard shipped Company Knowledge as a curated context home on 28 May. An overlay that has to integrate for context loses to a record-holder that already has it.</td><td><span class="sev rm">Removes us</span></td><td>This year</td><td><span class="def">none</span></td></tr>
+<tr><td><strong>Bundling at zero marginal price</strong></td><td>Linear Agent and Skills are included on all plans, free during beta, inside a $10–$16 seat. We would be asking a team to add a line item for a capability their existing tool now includes.</td><td><span class="sev rm">Removes us</span></td><td>Now</td><td><span class="def">none</span></td></tr>
+<tr><td><strong>Our headline feature became table stakes</strong></td><td>Scheduled autonomous runs shipped at Productboard (13 May), Linear (Loops) and Anthropic within a quarter. The Monday brief no longer differentiates.</td><td><span class="sev rs">Reshapes us</span></td><td>Now</td><td><span class="def some">in flight</span></td></tr>
+<tr><td><strong>The loop closes from the measurement end</strong></td><td>Amplitude's agents monitor dashboards, run experiments and map feedback themes to behaviour. Our Measurement Agent is marked coming soon, and measurement is the step our moat argument depends on.</td><td><span class="sev rs">Reshapes us</span></td><td>Now</td><td><span class="def some">in flight</span></td></tr>
+<tr><td><strong>Free first-party substitution</strong></td><td>Anthropic's PM plugin covers spec writing, brainstorming and metric review at no additional cost to a Claude seat the buyer likely already has. The buyer's question becomes why not just use Claude.</td><td><span class="sev rs">Reshapes us</span></td><td>Now</td><td><span class="def">none</span></td></tr>
+<tr><td><strong>Price floor set below us, before we have set one</strong></td><td>Linear $10, ChatPRD $15, Productboard Essentials $19 are all published. We have published nothing, so every pricing conversation starts from their anchor.</td><td><span class="sev dn">Dents us</span></td><td>This year</td><td><span class="def">none</span></td></tr>
+<tr><td>Structural: model providers absorbing the application layer</td><td>Repricing of legacy software around the January 2026 Cowork launch showed the market treats first-party agent capability as an existential input, not a feature. This is a hypothesis about direction <span class="t i">I</span>, not a measured effect on our category.</td><td><span class="sev rs">Reshapes us</span></td><td>Watch</td><td><span class="def">none</span></td></tr>
+</tbody></table>
+<p><strong>Two threats are rated <em>removes us</em> with no defence.</strong> Both are the same underlying problem seen from two angles: we are an overlay in a market where the record-holders are absorbing the overlay's job. That is not a reason to stop; it is a reason for the wedge to be something a record-holder structurally cannot do, and for the raise narrative to answer it directly rather than route around it. Recommendations 1 and 5 exist because of these two rows. Read across the whole scan, every structural force runs against us at once — rivalry, substitutes, buyer power and ease of entry — which is why the defensible position has to be a job the record-holders structurally cannot do, rather than a better version of one they can.</p>
+
+<div class="eyebrow">Sentiment</div>
+<div class="eyeburb">Same axes for everyone, including us, from review platforms and public forums. Where a competitor has no accessible corpus, the row says so rather than being filled in.</div>
+<table>
+<thead><tr><th style="width:14%">Company</th><th style="width:16%">Rating &amp; volume</th><th style="width:31%">Praised for</th><th>Complained about</th></tr></thead>
+<tbody>
+<tr><td class="us"><strong>Us</strong></td><td class="us"><span class="src">no accessible corpus</span></td><td class="us">&mdash;</td><td class="us">Pre-launch. No G2, Capterra, Product Hunt or forum presence found. Nothing to report in either direction.</td></tr>
+<tr><td><strong>Productboard</strong></td><td>4.3/5, 253 reviews (G2); 4.4/5, 30 reviews (Gartner Peer Insights) <span class="t h">H</span></td><td>Consolidating feedback, prioritisation visibility, cross-functional alignment when set up well</td><td>Interface density, reporting limits, operational overhead as datasets grow, and cost — an enterprise quote circulated at $70–100k a year for 20 makers <span class="t s">S</span></td></tr>
+<tr><td><strong>Linear</strong></td><td>4.5/5, 91 verified reviews (G2) <span class="t h">H</span></td><td>Speed, keyboard-first interface, Slack and GitHub integration, agent reliability</td><td>Limited customisation and custom fields; price scaling for larger teams; some resistance to the agent push — one reviewer described the growing AI and agent emphasis as something their company has no current use for, noting it remains opt-in</td></tr>
+<tr><td><strong>ChatPRD</strong></td><td><span class="src">no independent corpus</span> — no Product Hunt reviews as of June 2026; no substantive Reddit or HN threads found <span class="t h">H</span></td><td>Editorial reviews score it 7.8/10 and 65/100; output needs less rewriting than generic models</td><td>Document-only scope with no feedback collection or analysis; enterprise controls gated behind custom pricing; dependence on third-party models</td></tr>
+<tr><td><strong>Amplitude</strong></td><td>Ranked first across multiple G2 categories <span class="t v">V</span> — the company's own claim; independent rating not pulled</td><td>Scale of self-serve analytics; reduced reliance on manual reporting, per named customers in the launch release <span class="t v">V</span></td><td>Not sourced for this window. Open pull.</td></tr>
+<tr><td><strong>Claude Code / Cowork</strong></td><td><span class="src">no structured review corpus</span> — practitioner writing rather than ratings</td><td>Reusability of skills; agentic execution rather than chat; broad enterprise adoption</td><td>A documented early incident where Cowork consumed 11GB of files during testing, with backup advised before granting directory access <span class="t h">H</span></td></tr>
+</tbody></table>
+<h3>For each objection we will face, who is already selling against it</h3>
+<p class="eyeburb" style="margin-top:-2px">We have no complaint corpus, so this maps the objections a buyer will raise about a pre-launch entrant against the competitor whose marketing already answers them. A theme that maps to a rival's line is a roadmap item; one that maps to nobody is avoidable loss.</p>
+<table>
+<thead><tr><th style="width:30%">The objection</th><th style="width:22%">Who sells against it</th><th>Their line</th></tr></thead>
+<tbody>
+<tr><td>"No track record — who else uses this?"</td><td><strong>ChatPRD</strong>, <strong>Productboard</strong></td><td>100,000 PMs and 750,000 documents; 6,000 organisations and a decade of practice. Roadmap item: named design partners on the site.</td></tr>
+<tr><td>"Another tool to adopt and maintain"</td><td><strong>Linear</strong>, <strong>Productboard</strong></td><td>Already in your workflow; the agent is in the seat you pay for. Roadmap item: five-minute setup is claimed but not demonstrable to a prospect.</td></tr>
+<tr><td>"Why not just use Claude?"</td><td><strong>Anthropic</strong></td><td>A free official PM plugin covering spec, brainstorm and metric review. Nothing on our site answers this directly today.</td></tr>
+<tr><td>"Can I trust an agent's findings?"</td><td><strong>Productboard</strong></td><td>Statistically accurate analysis with citations, per-quote attribution, and an agent that asks rather than guesses. We make the same claim; they can demonstrate it.</td></tr>
+<tr><td>"Will you exist in eighteen months?"</td><td><span class="src">nobody</span></td><td>Maps to no rival's marketing line. This is avoidable loss — it is answered by proof, not by positioning.</td></tr>
+</tbody></table>
+
+<div class="eyebrow">Where to invest, by agent</div>
+<div class="eyeburb">The nine-box adapted to a single product: each agent in the stack scored on how attractive that job is against how strong our relative position is, with a verb attached. Both scores are judgment <span class="t i">I</span>.</div>
+<table>
+<thead><tr><th style="width:17%">Agent</th><th style="width:11%">Status</th><th style="width:14%">Job attractiveness</th><th style="width:14%">Our relative strength</th><th style="width:11%">Verb</th><th>Why</th></tr></thead>
+<tbody>
+<tr><td><strong>On-Call</strong></td><td>Live <span class="t v">V</span></td><td>High</td><td>Medium-high</td><td><span class="cls new">Invest</span></td><td>Only Amplitude shares this row, and only inside its own data. Cross-tool root cause is the sharpest thing we have.</td></tr>
+<tr><td><strong>Signal Synthesis</strong></td><td>Live <span class="t v">V</span></td><td>High</td><td>Medium</td><td><span class="cls new">Invest</span></td><td>Breadth is real but copyable. Value is in the join across tools nobody else spans, not in the count of connectors.</td></tr>
+<tr><td><strong>Measurement</strong></td><td>Coming soon <span class="t v">V</span></td><td>High</td><td>Low</td><td><span class="cls new">Invest</span></td><td>The moat argument depends on it and two competitors already ship it. Absent, the closed loop is a claim.</td></tr>
+<tr><td><strong>Strategy</strong></td><td>Live <span class="t v">V</span></td><td>Medium</td><td>Medium</td><td><span class="cls par">Maintain</span></td><td>Precedent-matching is distinctive but unverifiable to a buyer. Hard to sell, hard to disprove — a demo asset, not a wedge.</td></tr>
+<tr><td><strong>Engineering handoff</strong></td><td>Partly live <span class="t v">V</span></td><td>High</td><td>Low</td><td><span class="cls par">Maintain</span></td><td>Table stakes. Keep it excellent; stop leading with it.</td></tr>
+<tr><td><strong>Prototype</strong></td><td>Coming soon <span class="t v">V</span></td><td>Medium</td><td>Low</td><td><span class="cls dep">Defer</span></td><td>Three credible substitutes exist and none of them is losing on it. The cheapest place to spend less.</td></tr>
+</tbody></table>
+
+<div class="eyebrow">Pricing and packaging</div>
+<div class="eyeburb">Tracked as dated history rather than a snapshot. The window checked is January to August 2026.</div>
+<table>
+<thead><tr><th style="width:14%">Company</th><th style="width:30%">Published entry</th><th>Movement in the window</th></tr></thead>
+<tbody>
+<tr><td class="us"><strong>Us</strong></td><td class="us"><span class="src">none published</span></td><td class="us">No pricing page. Every conversation is anchored by someone else's number.</td></tr>
+<tr><td><strong>Linear</strong></td><td>Free tier; Basic $10, Business $16 per seat <span class="t h">H</span></td><td><strong>Headline seat prices did not change.</strong> The movement is underneath: Coding Sessions became the first usage-metered feature on 11 June, billed from prepaid AI credits, and Loops carried the same credit footnote from 29 July. Two metered exceptions where there were none. $20 per seat in promotional credits ran to 20 August.</td></tr>
+<tr><td><strong>ChatPRD</strong></td><td>Free (3 docs), Pro $15, Teams $29/seat, Enterprise custom <span class="t h">H</span></td><td>No change observed. Pro annual quoted at $180. <strong>Sources disagree on a mid-tier:</strong> one lists Basic at $8, another states there is no tier between free and Pro <span class="t s">S</span>. Do not quote $8 internally until it is confirmed on their own pricing page.</td></tr>
+<tr><td><strong>Productboard</strong></td><td>Essentials $19 per maker; Pro listed at $75 per user <span class="t s">S</span></td><td>Seat prices unchanged, but <strong>the AI tier is currently unpurchasable</strong> — support docs state Productboard AI and Pulse are not available for purchase and their capabilities are folding into Spark. Spark's own price is unpublished.</td></tr>
+<tr><td><strong>Claude</strong></td><td>Around $20 per month for the consumer tier <span class="t s">S</span>; PM plugin free</td><td>No change observed in the window.</td></tr>
+<tr><td><strong>Amplitude</strong></td><td><span class="src">not sourced</span></td><td>Open pull.</td></tr>
+</tbody></table>
+<p>The read that matters is not that everyone is cheap. It is that <strong>Linear and Productboard have both chosen not to price the agent separately</strong> — Linear folded it into the seat and metered only the compute-heavy edges; Productboard pulled its AI products from sale while it consolidates. Both are protecting the seat and treating agentic capability as a reason to keep it, not a new line item. A standalone per-seat agent price walks into that.</p>
+
+<div class="eyebrow">Momentum and what management is saying</div>
+<div class="eyeburb">Ship cadence where a public changelog exists. Executive commentary with venue and date. Hiring data was not pulled for this run and is an open item rather than an inference.</div>
+<table>
+<thead><tr><th style="width:15%">Company</th><th style="width:26%">Observable cadence</th><th>What leadership is saying</th></tr></thead>
+<tbody>
+<tr><td class="us"><strong>Us</strong></td><td class="us"><span class="src">not publicly observable</span> — no changelog</td><td class="us">The site states two agents available now, one partly available, two coming soon <span class="t v">V</span>. A prospect comparing us to a public changelog has nothing to compare against.</td></tr>
+<tr><td><strong>Productboard</strong></td><td>~38 Spark releases, 15 Apr – 17 Aug; rising monthly <span class="t h">H</span></td><td>Co-founder and CEO Hubert Palan published a post titled on Productboard going AI-only <span class="t h">H</span>. Only the title was retrievable; the argument itself is an open pull.</td></tr>
+<tr><td><strong>Linear</strong></td><td>8 major agent releases, Mar – Aug; roughly monthly <span class="t h">H</span></td><td>Co-founder and CEO Karri Saarinen, 25 March 2026: <span class="q" style="display:inline;border:none;padding:0;margin:0">"Issue tracking is dead"</span> — the accompanying page reframes Linear as the system that turns context into execution <span class="t h">H</span>.</td></tr>
+<tr><td><strong>Amplitude</strong></td><td>One dense release, 17 Feb; nothing further in window <span class="t h">H</span></td><td>Co-founder and CEO Spenser Skates, 17 February 2026: <span class="q" style="display:inline;border:none;padding:0;margin:0">"Today, we're launching the first fully autonomous analytics agent."</span> <span class="t v">V</span></td></tr>
+<tr><td><strong>ChatPRD</strong></td><td><span class="src">no changelog published</span></td><td>Founded by Claire Vo, a three-time chief product officer, and still bootstrapped with no outside funding as of 2026 <span class="t h">H</span>. Positioning leans on that credential.</td></tr>
+</tbody></table>
+<p class="legend">Sprntly's absent changelog is a small thing with a real cost. Every competitor in this set except ChatPRD publishes dated shipping, and dated shipping is how a design partner, an enterprise buyer and an investor all check whether a pre-launch company is moving.</p>
+
+<div class="eyebrow">What to do</div>
+<div class="eyeburb">One ranked set, by leverage rather than effort. Each names the findings behind it, how we would know it worked, and what it costs us if we are wrong.</div>
+
+<div class="rec"><div class="hd"><span class="num">01</span><span class="ttl">Move the wedge from the loop to cross-tool root cause</span></div><div class="bd">
+<div class="row"><div class="rk">From</div><div>Feature benchmark — no row held alone, and the one shared row is live-metric anomaly detection with root cause. Radar — the only axis where we extend past both platform players is signal breadth. Threat scan — the loop itself is being assembled by two record-holders.</div></div>
+<div class="row"><div class="rk">Do</div><div>Lead every demo, deck page and outbound message with the On-Call Agent: a metric moves, and we explain why using evidence from analytics, support, CRM and calls together. Demote the five-agent loop from headline to architecture slide. Amplitude does root cause inside its own data; Productboard and Linear do not do it at all. Cross-source causal explanation is the one job a single-system record-holder structurally cannot do.</div></div>
+<div class="row"><div class="rk">Why now</div><div>The loop stopped being differentiating during Q2. Waiting until the raise to re-cut the story means pitching the commoditised version of it.</div></div>
+<div class="row"><div class="rk">Measure</div><div>Share of design-partner sessions initiated by an On-Call finding rather than a PRD request. If the wedge is right, that share rises without prompting.</div></div>
+<div class="row"><div class="rk">Watch</div><div>Amplitude can close this from a stronger position — it owns the behavioural data and shipped a dashboard monitoring agent in February. Narrowing to root cause also narrows the story, which is harder to raise a platform round on.</div></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">02</span><span class="ttl">Ship Measurement before Prototype</span></div><div class="bd">
+<div class="row"><div class="rk">From</div><div>Nine-box — Measurement scores high attractiveness and low strength; Prototype scores medium and low. Feature benchmark — closed-loop measurement is contested and we are marked coming soon. Threat scan — the loop is closing from the measurement end.</div></div>
+<div class="row"><div class="rk">Do</div><div>Reorder the roadmap so the Measurement Agent ships before the Prototype Agent. The closed-loop outcome graph is the stated moat; without measurement it is an assertion. Prototype has three working substitutes and losing it costs a demo moment, not a position.</div></div>
+<div class="row"><div class="rk">Why now</div><div>Productboard shipped post-launch evaluation on 4 June; Amplitude shipped an experimentation agent in February. An unshipped closing step will not survive diligence in October.</div></div>
+<div class="row"><div class="rk">Measure</div><div>Number of design partners with at least one complete hypothesis → ship → measured-outcome cycle recorded before the raise. One is a demo; three is a moat argument.</div></div>
+<div class="row"><div class="rk">Watch</div><div>Measurement needs analytics write access and clean instrumentation — the slowest integration path in the stack. It may not land by October, and a half-shipped measurement agent is worse in a diligence conversation than an honest roadmap.</div></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">03</span><span class="ttl">Close the positioning fork before the raise opens</span></div><div class="bd">
+<div class="row"><div class="rk">From</div><div>Stage 0 — the live site sells the agentic PM stack and an AI product intelligence platform for product managers, while the internal master line is an execution intelligence platform for AI-native software teams. Site metadata targets ChatPRD, Productboard, Dovetail and Kraftful comparisons.</div></div>
+<div class="row"><div class="rk">Do</div><div>Pick one and make site, deck and outbound agree. Note that "execution intelligence platform" is currently claimed by at least six unrelated vendors across process mining, PE transformation, CPG field sales and municipal strategy — as a search term it does not lead to us, and as a category it does not describe a PM tool. The PM-facing line is clearer to the buyer; the platform line is easier to raise on. That tension is the decision, and it should be made deliberately rather than left to whichever surface someone reads first.</div></div>
+<div class="row"><div class="rk">Why now</div><div>Two audiences will read both surfaces in the same week from October. Inconsistency between a website and a deck is a diligence flag, not a nuance.</div></div>
+<div class="row"><div class="rk">Measure</div><div>One line, used verbatim across site hero, deck slide one and cold outreach. Check by asking three people outside the company to describe what we sell after sixty seconds on the site.</div></div>
+<div class="row"><div class="rk">Watch</div><div>Narrowing to the PM tool framing puts us in ChatPRD's $15 comparison band and caps the story. Staying with the platform framing keeps the ceiling but competes for a term that already belongs to nobody in particular.</div></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">04</span><span class="ttl">Answer the Claude question on the page where it is asked</span></div><div class="bd">
+<div class="row"><div class="rk">From</div><div>Objection map — "why not just use Claude?" maps to Anthropic's free PM plugin and nothing on our site addresses it. Threat scan — free first-party substitution, rated reshapes us, defence none. Radar — Claude Code matches or beats us on four of eight dimensions.</div></div>
+<div class="row"><div class="rk">Do</div><div>Add it to the FAQ, which currently answers the analytics question but not this one. The honest answer is specific: a folder-scoped agent has no persistent multi-tool signal graph, no continuous monitoring against a live metric, and no shared team context. Say that plainly rather than avoiding the comparison — our own product sends work to Claude Code, so the relationship is complementary and should be described as such.</div></div>
+<div class="row"><div class="rk">Why now</div><div>The buyer is asking it now. Cowork has been generally available across platforms since April and the PM plugin is one install away.</div></div>
+<div class="row"><div class="rk">Measure</div><div>How often the question comes up unprompted in design-partner and investor calls before versus after. It should drop.</div></div>
+<div class="row"><div class="rk">Watch</div><div>Naming a substitute on your own site teaches some prospects it exists. The alternative is letting the comparison happen without our framing, which is worse.</div></div>
+</div></div>
+
+<div class="rec"><div class="hd"><span class="num">05</span><span class="ttl">Decide the Linear relationship deliberately</span></div><div class="bd">
+<div class="row"><div class="rk">From</div><div>Threat scan — bundling at zero marginal price and the system of record claiming the context layer, both rated removes us with no defence. Scale benchmark — 40,000 organisations, agent included on all plans. Launch log — agent, codebase, review, code, recurring work, assembled in eight months.</div></div>
+<div class="row"><div class="rk">Do</div><div>Treat Linear as a strategic decision with a date on it rather than a competitor to monitor. Three options, and the choice should be made before the raise: build deeply on Linear and sell the layer it will not build (cross-tool signal and causal explanation); avoid it entirely and target teams on Jira or Azure DevOps where the context layer is weaker; or compete head-on, which the evidence does not support. Establish first which of the current design partners already run Linear Agent.</div></div>
+<div class="row"><div class="rk">Why now</div><div>Linear is moving roughly monthly and the answer changes what we build. Deciding after the round means raising on a plan that may not survive the next two releases.</div></div>
+<div class="row"><div class="rk">Measure</div><div>A written one-page position, and the Linear Agent adoption rate across the design-partner base. Both should exist before the first partner meeting in October.</div></div>
+<div class="row"><div class="rk">Watch</div><div>Building on Linear means depending on the company most likely to absorb the category — the classic platform risk, and investors will name it. Avoiding it means giving up the segment where our ideal customer concentrates.</div></div>
+</div></div>
+
+<p class="legend">No prior run exists on file, so there are no earlier recommendations to carry forward. From the next run, each item above should return with a status — open, in progress, done or dropped — and what happened. That is what turns this from a report into a program.</p>
+
+<div class="eyebrow">Sources</div>
+<div class="eyeburb">Grouped by company, each with what it supports and its date.</div>
+<div class="srcgrid">
+<div class="srcbox"><b>Us</b>sprntly.ai homepage, retrieved 20 Aug 2026 — agent stack and availability labels, five-agent descriptions, Briefing and On-Call agents, FAQ, security claims, site metadata naming comparison targets. Everything about Sprntly in this document comes from that page and is vendor-reported <span class="t v">V</span>. No internal figures — retention, design-partner count, pipeline, ARR — were available to this run.</div>
+<div class="srcbox"><b>Productboard</b>Release notes, updated 17 Aug 2026 — every dated launch and both deprecations. Spark product page, June 2026 — agentic scope and MCP access for coding agents. Support articles on Pulse and Productboard AI, updated Apr–Jun 2026 — purchasability status. Spark announcement, Oct 2025 and Jan 2026 — context-native positioning. G2 and Gartner Peer Insights via a third-party review synthesis, Apr 2026 — ratings and complaint themes. Capterra and G2 listings — Essentials and Pro pricing. Enterprise quote range is from a competitor's blog and is soft and vendor-adjacent <span class="t s">S</span>.</div>
+<div class="srcbox"><b>Linear</b>Changelog entries dated 24 Mar, 14 May, 28 May, 11 Jun, 18 Jun, 2 Jul, 13 Aug 2026; linear.app/next and /now for the March essay and the coding-sessions piece. A third-party pricing blueprint, Jun 2026, for the $10/$16 tiers, the June and July AI-credit changes and the June 2025 Series C. G2 reviews page and seller page for the 4.5 rating, review count and complaint themes. Agent adoption statistics are Linear's own claims <span class="t v">V</span>.</div>
+<div class="srcbox"><b>ChatPRD</b>chatprd.ai pricing, features and homepage — tiers, integrations, user and document counts, testimonials, all vendor-reported <span class="t v">V</span>. Independent research note, Jun 2026 — the absence of Product Hunt, Reddit and HN discussion, the bootstrapped status, MCP client support and the document-only criticism. Two editorial reviews, May and Jun 2026 — the 7.8/10 and 65/100 scores and the tier detail. No dated changelog is published, so the launch log for ChatPRD is reconstructed and its dates are soft <span class="t s">S</span>.</div>
+<div class="srcbox"><b>Amplitude</b>Business Wire release and Amplitude investor-relations page, 17 Feb 2026 — Global Agent, the four specialised agents, MCP and Skills updates, the Skates quote and the customer count. Trade coverage of the same launch, 18 Feb 2026. The ARR and revenue figures referenced are from a market commentary piece covering a quarter that predates the launch and are marked stale <span class="t s">S</span>. Current pricing and an independent rating are open pulls.</div>
+<div class="srcbox"><b>Anthropic</b>claude.com/product/cowork, Jul 2026 — plugins, enterprise controls, platform availability. InfoQ, Jan 2026 — the 12 Jan launch, VM architecture, sub-agent coordination and the 11GB file incident. Third-party guide, Apr 2026 — the official product-management plugin, its six skills and six commands, and the repository star count. anthropic.com events page — the 24 Feb enterprise session. Practitioner writing, Apr–May 2026, for how PMs are actually using it.</div>
+<div class="srcbox"><b>Market context</b>AI agent seed fundraising analyses, Apr and Jul 2026 — median seed valuations, and the diligence question about whether a product survives when a foundation model ships the feature natively. Coverage of the software repricing around the Cowork launch, 2026. Six unrelated vendors using "execution intelligence platform" were found in a single search of that exact term, Aug 2026.</div>
+</div>
+
+<div class="metaline">
+Window checked: 15 April – 20 August 2026, with earlier dates included where a launch anchors a pattern. Competitor set derived, not supplied — Productboard Spark and ChatPRD direct, Linear adjacent, Claude Code and Cowork substitute, Amplitude entrant; Aha!, Jira, Dovetail, Kraftful and Notion considered and excluded.<br>
+Confidence: <span class="t h">H</span> hard, observed and sourced · <span class="t s">S</span> soft, grounded estimate · <span class="t i">I</span> inferred, analytical judgment · <span class="t v">V</span> vendor-reported, the company's own claim about itself.<br>
+On our own figures: this run had no access to internal Sprntly data. Every statement about Sprntly is taken from sprntly.ai and is therefore vendor-reported. Retention, design-partner counts, pipeline and revenue are absent, not zero, and any of them would change the reads above.<br>
+Open pulls named in prose: Amplitude current-quarter revenue, Amplitude pricing and independent rating, Amplitude changelog for the post-February window, the argument inside Productboard's AI-only post, ChatPRD's disputed mid-tier price, and hiring signals across the set.
+</div>
+
+</div></div></body></html>

@@ -45,6 +45,12 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "./ClarifyQuestionsCard"
+import {
+  GoalGateCard,
+  type GoalGate,
+  type GoalGateResolved,
+} from "./GoalGateCard"
+import type { PlanDecision } from "./GoalAnalysisPlan"
 import { OpenArtifactChips } from "./OpenArtifactChips"
 import { ArtifactListCards } from "./ArtifactListCards"
 import type { AskResponse, ChatArtifactItem, OpenArtifactCandidate } from "../../lib/api"
@@ -138,8 +144,8 @@ export interface ChatBubbleProps {
   humanAlign?: "start" | "end"
 
   agentName: string
-  /** Badge text next to the agent name ("Product Coworker", "AGENT"). Omit
-   *  to render no badge. */
+  /** Badge text next to the agent name ("DS COWORKER"). Omit to render no
+   *  badge — which is what every PM-agent surface now does. */
   agentBadge?: string | null
   agentTimestamp?: string | null
   agentHeadExtra?: ReactNode
@@ -165,8 +171,13 @@ export interface ChatBubbleProps {
   waitResumed?: boolean
   partial?: string | null
   streamDropped?: boolean
+  /** Curated, user-facing progress copy for the pipeline leg currently running,
+   *  from the real backend `phase` signal. Passed to the wait state, which only
+   *  consults it when the grounded-progress flag is on. */
+  livePhase?: string
 
   error?: string | null
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   onAskAgain?: () => void
   stopped?: boolean
   timedOut?: boolean
@@ -179,6 +190,15 @@ export interface ChatBubbleProps {
    *  still true. */
   prdCommandThinking?: boolean
 
+  /** A Goal Analysis gate riding this turn — the definition question or the
+   *  plan awaiting approval, answered IN THE THREAD. */
+  goalGate?: GoalGate | null
+  goalGateResolved?: GoalGateResolved
+  goalGateBusy?: boolean
+  /** A refusal the reader can act on, shown beside the live controls. */
+  goalGateError?: string
+  onConfirmGoalDefinition?: (definition: string) => void
+  onApproveGoalPlan?: (decision: PlanDecision) => void
   clarify?: ClarifyQuestion[] | null
   clarifyResolved?: ClarifyResolution
   /** True while the dock's stepper popup is open and targeting THIS turn —
@@ -417,7 +437,9 @@ export function ChatBubble(props: ChatBubbleProps) {
     waitResumed,
     partial,
     streamDropped,
+    livePhase,
     error,
+    providerNotice,
     onAskAgain,
     stopped,
     timedOut,
@@ -426,6 +448,12 @@ export function ChatBubble(props: ChatBubbleProps) {
     summaryPending,
     onStop,
     prdCommandThinking,
+    goalGate,
+    goalGateResolved,
+    goalGateBusy,
+    goalGateError,
+    onConfirmGoalDefinition,
+    onApproveGoalPlan,
     clarify,
     clarifyResolved,
     clarifyPopupNote,
@@ -674,9 +702,16 @@ export function ChatBubble(props: ChatBubbleProps) {
                 agentBodyNode
               ) : (
                 <>
-                  {error ? <WaitFailedState onAskAgain={onAskAgain} /> : null}
+                  {error ? (
+                    <WaitFailedState onAskAgain={onAskAgain} notice={providerNotice} />
+                  ) : null}
                   {stopped && !reply ? <WaitStoppedState onAskAgain={onAskAgain} /> : null}
-                  {!reply && !error && !stopped ? (
+                  {/* A turn carrying a GATE is not a turn awaiting a reply: the
+                      card IS the agent's message. Without this the whole
+                      no-reply ladder ran beside it and printed "No response was
+                      generated for this message." directly above a live
+                      question. */}
+                  {!reply && !error && !stopped && !goalGate && !goalGateResolved ? (
                     summaryPending ? (
                       <div data-testid="summary-pending">
                         <AssistantThinkingSkeleton compact phase="Summarizing what got built…" />
@@ -713,6 +748,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                           startedAt={waitStartedAt}
                           streamDropped={streamDropped}
                           resumed={waitResumed}
+                          livePhase={livePhase}
                           skillLabel={waitSkill?.label ?? null}
                           longSkill={isLongRunningSkill(waitSkill?.id)}
                           onStop={onStop}
@@ -729,6 +765,16 @@ export function ChatBubble(props: ChatBubbleProps) {
                     ) : (
                       <div className="bc-stopped">No response was generated for this message.</div>
                     )
+                  ) : null}
+                  {goalGate || goalGateResolved ? (
+                    <GoalGateCard
+                      gate={goalGate ?? undefined}
+                      resolved={goalGateResolved}
+                      busy={goalGateBusy}
+                      error={goalGateError}
+                      onConfirmDefinition={(d) => onConfirmGoalDefinition?.(d)}
+                      onApprovePlan={(d) => onApproveGoalPlan?.(d)}
+                    />
                   ) : null}
                   {clarify?.length && (clarifyResolved || clarifyGateOpen) ? (
                     clarifyPopupNote && !clarifyResolved ? (

@@ -3,17 +3,16 @@
 The engine's other promise (spec, alongside `delegate_task`): the agent
 doesn't only chase people, it does the tasks it actually can, then hands
 off the rest. This module wires the LOCKED v1 agent-doable set — PRD
-draft ONLY — so a member can ask Sprntly, in either project chat surface,
-to draft the PRD itself: the agent runs the EXISTING PRD generate pipeline
+draft ONLY — so a member can ask Sprntly, in the private project chat, to
+draft the PRD itself: the agent runs the EXISTING PRD generate pipeline
 (`app.prd_runner._generate_human_prd` + `extract_input_questions_task`)
 and posts the draft plus its finalize/input questions, instead of routing
 the ask to a human.
 
 Structured like `project_delegation.py`'s `delegate_task` sibling:
 `handle_execute_task` is the best-effort, never-raising `dispatch` target
-for BOTH the group agent's `run_tool_loop` (`routes/projects.py::
-_respond_as_group_agent`) and the private-chat loop (`project_individual_
-agent.py::respond_individual`).
+for the private-chat loop's `run_tool_loop`
+(`qa_agent._try_scoped_tool_answer`).
 
 Agent-execution here is INLINE and STATELESS: it produces the artifact and
 posts it — it creates NO `project_delegations` row and NO agent pseudo-
@@ -153,10 +152,9 @@ async def _run_prd_generation(
 ) -> None:
     """The reused-pipeline call, isolated in its own coroutine so the sync
     dispatch call site (`run_tool_loop`'s `dispatch`, which runs on a worker
-    thread with no event loop of its own — see `ask_job_runner._run_sync`
-    and `routes/projects.py::post_group_turn_route`) can drive it via
-    `asyncio.run`. Calls the EXISTING pipeline verbatim — no new generation
-    function is defined here."""
+    thread with no event loop of its own — see `ask_job_runner._run_sync`)
+    can drive it via `asyncio.run`. Calls the EXISTING pipeline verbatim —
+    no new generation function is defined here."""
     from app.prd_runner import _generate_human_prd, extract_input_questions_task
 
     await _generate_human_prd(
@@ -265,10 +263,9 @@ def handle_execute_task(
     (`project_id`, a requester identity, `dataset`/`company_id`,
     `tool_input`), plus `roster` (author-name resolution, reusing an
     already-fetched roster like `handle_delegate_task` does) and
-    `post_turn` (a one-arg callback each call site supplies for its own
-    conversation writer — `conversations_db.post_group_turn` for the group
-    agent, `post_individual_turn` for the private chat — so this module
-    stays decoupled from which chat surface called it).
+    `post_turn` (a one-arg callback the caller supplies for its own
+    conversation writer — `post_individual_turn` for the private chat — so
+    this module stays decoupled from which chat surface called it).
 
     `company_id` is accepted for signature parity with `handle_delegate_task`
     and future doable types; the v1 PRD path does not need it directly (PRD

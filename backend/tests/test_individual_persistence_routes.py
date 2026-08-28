@@ -92,88 +92,18 @@ def _turns(conversation_id: int, user_id: str):
     return conversations_db.list_individual_turns(conversation_id, user_id)
 
 
-# ── `/v1/ask` project branch — both sides (AC1) ──────────────────────────
-
-
-def test_ask_project_branch_persists_user_at_dispatch(tenant_client, isolated_settings, monkeypatch):
-    t = tenant_client.make(slug="acme")
-    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
-    project_id = _seed_project(t, isolated_settings)
-    _mock_project_ask_answer(monkeypatch, "the answer")
-
-    # Mirrors the real client flow (`useProjectPrivateThread.ensureConversationId`):
-    # the individual chat is get-or-created and its id threaded onto every ask.
-    conv_resp = t.client.post(f"/v1/projects/{project_id}/individual")
-    conversation_id = conv_resp.json()["id"]
-
-    resp = t.client.post(
-        "/v1/ask",
-        json={
-            "question": "what's the status?", "dataset": "acme", "project_id": project_id,
-            "conversation_id": conversation_id,
-        },
-    )
-    assert resp.status_code == 200, resp.text
-
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_individual_project_chat(project_id, t.user_id)
-    assert conv is not None
-    turns = _turns(conv["id"], t.user_id)
-    roles = [tn["role"] for tn in turns]
-    assert "user" in roles
-    user_turn = next(tn for tn in turns if tn["role"] == "user")
-    assert user_turn["content"] == "what's the status?"
-
-
-def test_run_sync_persists_answer_after_complete(tenant_client, isolated_settings, monkeypatch):
-    """The assistant turn lands too, linked via ask_job_id — a fresh read
-    (simulating reload) shows BOTH sides, in order."""
-    t = tenant_client.make(slug="acme")
-    _seed_corpus(isolated_settings["data_dir"], dataset="acme")
-    project_id = _seed_project(t, isolated_settings)
-    _mock_project_ask_answer(monkeypatch, "42 open items")
-
-    conv_resp = t.client.post(f"/v1/projects/{project_id}/individual")
-    conversation_id = conv_resp.json()["id"]
-
-    resp = t.client.post(
-        "/v1/ask",
-        json={
-            "question": "how many open items?", "dataset": "acme", "project_id": project_id,
-            "conversation_id": conversation_id,
-        },
-    )
-    assert resp.status_code == 200, resp.text
-    ask_id = resp.json()["ask_id"]
-
-    from app.db import conversations as conversations_db
-
-    conv = conversations_db.get_individual_project_chat(project_id, t.user_id)
-    turns = _turns(conv["id"], t.user_id)
-    assert [tn["role"] for tn in turns] == ["user", "assistant"]
-    assert turns[0]["content"] == "how many open items?"
-    assert turns[1]["content"] == "42 open items"
-
-    # Linked to the run.
-    row = (
-        require_client().table("conversation_turns").select("ask_job_id")
-        .eq("id", turns[1]["id"]).execute().data[0]
-    )
-    assert row["ask_job_id"] == ask_id
-
-
-# AC4 for the `/v1/ask` USER-side write specifically: a real client-level
-# retry re-POSTs `/v1/ask` with the same `client_message_id`, which
-# `start_ask_job`'s OWN partial-unique (`ask_jobs_client_message_id_uidx`)
-# already refuses at the `ask_jobs` layer before this ticket's
-# writer is ever reached — a raw double-POST is therefore not the right
-# shape to prove the `conversation_turns` writer's own idempotency at the
-# route level. That per-side dedup (same key, sequential double call →
-# one row) is proven directly against the writer in
-# `test_individual_turn_persistence.py::test_owned_writers_idempotent_per_side`,
-# which is what `/v1/ask`'s dispatch-time persist call (and the edit route
-# and the owned turns route below) all route through.
+# RETIRED (2026-08-20): test_ask_project_branch_persists_user_at_dispatch and
+# test_run_sync_persists_answer_after_complete asserted that `/v1/ask` itself
+# persists the individual project chat's user turn (at dispatch) and assistant
+# turn (after complete_ask_job), gated on a TOP-LEVEL `body.project_id`. Both are
+# deprecated: (1) the live individual chat persists both sides CLIENT-side via
+# `api.addTurn` -> `POST /v1/conversations/{id}/turns` (see
+# `web/.../projects/useProjectConversation.ts` + `lib/chatPersistence.ts`), NOT
+# through `/v1/ask`; and (2) it carries its project on `context_source.params`,
+# never the top-level `project_id` these tests POST (which has no live client
+# caller). The owned writers themselves (exercised by the /individual/turns and
+# /prd/chat-edit route tests below) remain live. Re-add if a future slice moves
+# individual persistence back onto the server ask path.
 
 
 # ── Main chat NOT double-written (AC7, security spine) ───────────────────

@@ -267,3 +267,116 @@ def test_clustering_a_realistic_corpus_finishes_quickly():
     # the worst case: almost every claim becomes its own leader.
     assert stats["clusters"] > n * 0.9
     assert elapsed < 20, f"clustering {n} claims took {elapsed:.1f}s"
+
+# ── The quoted example ───────────────────────────────────────────────────────
+
+def test_an_example_keeps_a_whole_short_claim():
+    """The label budget (90) cut real findings mid-clause on staging — "…a
+    native, clean bidirectional NetSuite sync that eliminates the need for" —
+    which reads as a source who trailed off rather than a sentence we clipped."""
+    from app.crucible.cluster import example_for
+    said = ("Rippling offers a native, clean bidirectional NetSuite sync that "
+            "eliminates the need for manual CSV uploads")
+    assert example_for(said) == said
+
+
+def test_an_example_that_must_be_cut_says_it_was_cut():
+    """Silently stopping mid-clause is the one option that misrepresents the
+    source: the reader cannot see that anything was removed."""
+    from app.crucible.cluster import example_for, _EXAMPLE_MAX
+    said = "word " * 200
+    out = example_for(said)
+    assert len(out) <= _EXAMPLE_MAX + 1
+    assert out.endswith("\u2026")
+
+
+def test_an_example_prefers_the_source_own_sentence_end():
+    """A quote that ends where the source ended a thought reads as a quote."""
+    from app.crucible.cluster import example_for, _EXAMPLE_MAX
+    first = "A" + "a" * (_EXAMPLE_MAX - 60) + " ends here."
+    out = example_for(first + " And then a second sentence runs on well past the budget.")
+    assert out.endswith("ends here.")
+    assert "\u2026" not in out
+
+
+def test_an_example_takes_the_same_causal_cut_as_a_label():
+    """Identical I5 guarantee: a quote that explains WHY would be an
+    unsupported causal claim wearing quotation marks."""
+    from app.crucible.cluster import example_for
+    out = example_for("Keystrokes drop in the mobile editor because the sync loop stalls")
+    assert out == "Keystrokes drop in the mobile editor"
+
+
+def test_an_example_of_nothing_is_empty_not_a_placeholder():
+    """`label_for` answers "unlabelled", which is a fine label and a terrible
+    quotation — it puts quotation marks around a word no source ever said."""
+    from app.crucible.cluster import example_for
+    assert example_for("") == ""
+    assert example_for(" ,;: ") == ""
+
+# ── I5 at position zero ──────────────────────────────────────────────────────
+
+def test_a_sentence_that_opens_with_a_cause_does_not_keep_it():
+    """EVERY `_CUTS` entry opens with a space and both cutters guarded on
+    `i > 0`, so a connective at position 0 was never cut — by either of them.
+    The lint did not catch it either (`BANNED_CAUSAL_VERBS` holds "because of",
+    not bare "because"), so it shipped as a finding's statement: a mechanism
+    asserted at `reported` strength, in the one sentence a PM quotes."""
+    from app.crucible.cluster import example_for, label_for
+    said = "Because the nightly export job times out, three renewals slipped"
+    assert label_for(said) == "three renewals slipped"
+    assert example_for(said) == "three renewals slipped"
+
+
+def test_a_leading_cause_still_ships_nothing_past_the_lint():
+    """The lint is not a backstop here, which is why the cut has to be. Proven
+    rather than assumed: the uncut sentence passes `lint_claim` at `reported`,
+    so nothing downstream would have stopped it."""
+    from app.crucible.lint import lint_claim
+    uncut = ('3 claims concern "Because the nightly export job times out, '
+             'three renewals slipped".')
+    assert lint_claim(uncut, "reported").ok, (
+        "if this ever goes False the lint has become a backstop and this "
+        "test should be re-read, not deleted"
+    )
+
+
+def test_a_sentence_that_is_causal_all_the_way_down_keeps_nothing():
+    """"Because everything is broken" has no observation inside it. There is
+    nothing honest to keep, so the example is empty and the label falls back."""
+    from app.crucible.cluster import example_for, label_for
+    assert example_for("Because everything is broken") == ""
+    assert label_for("Because everything is broken") == "unlabelled"
+
+
+def test_a_leading_due_to_is_cut_the_same_way():
+    from app.crucible.cluster import example_for
+    assert example_for("Due to the rendering change, exports return zero-byte files") == (
+        "exports return zero-byte files")
+
+
+def test_a_mid_sentence_cause_is_still_cut_where_it_always_was():
+    """The control: fixing position 0 must not disturb the case that worked."""
+    from app.crucible.cluster import example_for
+    assert example_for(
+        "The nightly export job times out because the batch is too large"
+    ) == "The nightly export job times out"
+
+
+def test_a_plain_observation_is_left_alone():
+    """And the case that matters most in volume: nothing causal, nothing cut."""
+    from app.crucible.cluster import example_for, label_for
+    said = "PDF export fails on decks over 200 slides"
+    assert example_for(said) == said
+    assert label_for(said) == said
+
+
+def test_since_is_deliberately_not_cut():
+    """"Since" is causal in "Since the migration, exports fail" and purely
+    temporal in "Since June, exports fail", and this function cannot tell them
+    apart. Cutting both would silently delete real observations — a worse trade
+    than the ambiguity. Pinned as a DECISION so the next reader finds the
+    reasoning instead of assuming an oversight."""
+    from app.crucible.cluster import example_for
+    said = "Since the March migration, exports fail for enterprise accounts"
+    assert example_for(said) == said

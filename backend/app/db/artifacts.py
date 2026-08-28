@@ -38,6 +38,7 @@ the same in-code-join posture db/prds.latest_prd_for_dataset already uses.
 from __future__ import annotations
 
 from app.db.client import require_client, retry_on_disconnect
+from app.db.prds import is_hidden_from_library
 
 # Hard cap on the unified list. Recency-sorted, so the cap keeps the newest
 # 200 artifacts; older ones are dropped (acceptable for a listing view — the
@@ -163,13 +164,55 @@ def list_document_artifacts(*, dataset: str, openable_only: bool = False) -> lis
         c.table("prds")
         .select(
             "id, brief_id, insight_index, theme_id, source, "
-            "title, status, generated_at"
+            "title, status, generated_at, first_read_at, auto_generated"
         )
         .in_("brief_id", brief_ids)
         .execute()
         .data
         or []
     )
+    # THE PIPELINE'S OWN OUTPUT IS NOT THIS PERSON'S WORK. A weekly brief
+    # writes a PRD per top insight and the backlog sweep writes one per ranked
+    # theme; nobody asked for either, and they outnumber the documents people
+    # deliberately made from chat, an upload or an idea. Left in, the library
+    # stops reading as "what I made".
+    #
+    # Hidden only while UNREAD (`db.prds.is_hidden_from_library`) — reading one
+    # is what claims it. They stay reachable the whole time from the brief that
+    # produced them (Top Insights opens a PRD by its (brief, insight) pair), so
+    # this is a library that shows what you have touched, not a document that
+    # can never be found. Nothing is deleted and no row was stamped: the rule
+    # IS the behaviour.
+    #
+    # The evidence written for the same finding follows it — see below.
+    #
+    # ONLY WHEN LISTING. `openable_only` already separates this function's two
+    # callers, and they want opposite things here: the Artifacts screen is
+    # LISTING a library, while `app.artifact_open` is RESOLVING "open the
+    # checkout PRD" by name. Hiding an auto PRD from that lookup would make it
+    # genuinely unreachable — and since OPENING one is what claims it back into
+    # the library, it could never stop being hidden either. Hidden from the
+    # shelf, still on it.
+    #
+    # Gated on the existing flag rather than a second one on purpose: two
+    # booleans that must agree is a trap for whoever adds the third caller.
+    hidden_insight_keys: set[tuple] = set()
+    kept_prd_rows: list[dict] = []
+    for r in prd_rows:
+        if not openable_only and is_hidden_from_library(r):
+            # Key on the pair `evidences` is stored under, so the sibling
+            # document goes with it. A `backlog` PRD has no real insight index
+            # and therefore no evidence to hide — the key simply matches
+            # nothing, which is the correct outcome rather than a special case.
+            hidden_insight_keys.add((r.get("brief_id"), r.get("insight_index")))
+            continue
+        kept_prd_rows.append(r)
+    # A finding whose PRD survives must keep its evidence, even if an OLDER
+    # generation of that PRD was hidden — the family, not the row, is what the
+    # reader sees.
+    for r in kept_prd_rows:
+        hidden_insight_keys.discard((r.get("brief_id"), r.get("insight_index")))
+    prd_rows = kept_prd_rows
     # A PRD is regenerated in place: each attempt is a new prds row in the
     # same family. The artifacts list shows only the LATEST generation per
     # logical PRD; older generations are reachable from the PRD's Version
@@ -222,6 +265,13 @@ def list_document_artifacts(*, dataset: str, openable_only: bool = False) -> lis
         # Evidence has no regeneration family, so order doesn't matter here —
         # but a failed document is no more openable than a failed PRD.
         if openable_only and (r.get("status") or "") in _UNOPENABLE_PRD_STATUSES:
+            continue
+        # The evidence written FOR a hidden auto PRD goes with it. `evidences`
+        # carries no prd_id — it is keyed on the same (brief_id,
+        # insight_index) the PRD hangs off, so the two are siblings under one
+        # finding rather than parent and child, and this pair is the only link
+        # between them.
+        if (r.get("brief_id"), r.get("insight_index")) in hidden_insight_keys:
             continue
         bid = r["brief_id"]
         items.append({

@@ -68,6 +68,15 @@ def test_a_plan_becomes_the_envelope_the_client_already_reads():
         "list_mode": None,
         "reason": "asked for a spec",
         "source": "planner",
+        # WHERE the answer gets written. Present on every verdict, False on the
+        # ones it does not belong to — a report pipeline is the only thing that
+        # turns it on, and the client reads it to open the panel that writes the
+        # document instead of letting a report scroll through the thread.
+        "report": False,
+        # WHICH document an `edit_artifact` targets — the report or team
+        # document the tab has open, re-read server-side. None on every other
+        # verdict, on the same present-on-every-verdict terms as the rest.
+        "open_artifact": None,
     }
 
 
@@ -456,3 +465,157 @@ def test_the_planner_verdict_wins_when_it_returns_one(monkeypatch):
     assert envelope["intent"] == "generate_tickets"
     assert envelope["task"] == "split the PRD"
     assert envelope["source"] == "planner"
+
+
+# ── the report flag (WHERE the answer is written) ───────────────────────────
+# A report pipeline answers with a DOCUMENT. The intent stays `answer` — the ask
+# path runs it exactly as before — but the client needs to know at send time so
+# it opens the panel's Reports tab in its generating state and streams the
+# document there, instead of scrolling a report through the chat thread it is
+# about to appear beside.
+
+
+def test_a_report_pipeline_is_flagged_on_the_envelope():
+    for pipeline in ("voice-of-customer-report", "competitive-intelligence-review"):
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id=pipeline, action_confidence=0.95,
+                  confidence=0.85, reason="wants a VoC report"),
+            prd_id=None,
+        )
+        assert envelope["intent"] == "answer", pipeline
+        assert envelope["report"] is True, pipeline
+
+
+def test_an_ordinary_answer_is_not_a_report():
+    envelope = ci._plan_to_envelope(
+        _plan("answer", action_confidence=0.95, reason="a question"), prd_id=None,
+    )
+    assert envelope["report"] is False
+
+
+def test_a_non_report_pipeline_is_not_a_report():
+    """`_REPORT_PIPELINE_IDS` is narrower than "a pipeline ran" — the lookup and
+    utility machinery ids are deliberately outside it."""
+    envelope = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="tracker-lookup", action_confidence=0.9,
+              confidence=0.9, reason="jira lookup"),
+        prd_id=None,
+    )
+    assert envelope["report"] is False
+
+
+def test_the_flag_reads_the_dispatch_set_itself():
+    """One set, not two: a name in `qa_agent._REPORT_PIPELINE_IDS` that this
+    endpoint didn't know about would print a report into the chat, and one it
+    knew about that the answer path didn't would open a panel over an answer."""
+    from app import qa_agent
+
+    for pipeline in sorted(qa_agent._REPORT_PIPELINE_IDS):
+        assert ci._is_report_pipeline(pipeline) is True, pipeline
+    assert ci._is_report_pipeline(None) is False
+    assert ci._is_report_pipeline("") is False
+
+
+# ── the count-engine carve-out — bug 2: the count answer masquerading as a
+#    report ─────────────────────────────────────────────────────────────────
+# `call-digest` is the ONE pipeline id both the full voice-of-customer report
+# AND the map-reduce count engine resolve to (the planner classifies by
+# question shape before the answer path decides which of the two it will
+# run). A count-shaped question must never open the Reports drawer or show
+# report-generation copy — it answers inline, in the SAME turn's chat reply.
+
+
+def test_a_mapreducible_count_question_is_not_flagged_as_a_report(monkeypatch):
+    # Imported fresh, matching exactly what `_is_report_pipeline` itself
+    # reads (a lazy `from app.config import settings`) — NOT
+    # `app.call_digest.settings`, whose own module-level binding predates
+    # this test's per-test config reload and would silently miss the patch.
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    envelope = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
+              confidence=0.85, reason="a count question"),
+        prd_id=None,
+        question="how many calls raised product issues this month",
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["report"] is False
+
+
+def test_a_report_shaped_call_digest_question_is_still_flagged_as_a_report(monkeypatch):
+    """The carve-out is narrow: an ordinary call-digest question — report-
+    shaped, or query-shaped but not count-eligible — keeps opening the
+    Reports drawer exactly as before. Only the count engine's own subset is
+    excluded."""
+    # Imported fresh, matching exactly what `_is_report_pipeline` itself
+    # reads (a lazy `from app.config import settings`) — NOT
+    # `app.call_digest.settings`, whose own module-level binding predates
+    # this test's per-test config reload and would silently miss the patch.
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    for question in (
+        "give me a voice of customer report for this month",
+        "did complaints about exports increase this week?",  # comparative,
+        # excluded from count eligibility by `is_mapreducible_count` itself
+    ):
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
+                  confidence=0.85, reason="a report question"),
+            prd_id=None, question=question,
+        )
+        assert envelope["report"] is True, question
+
+
+def test_the_carve_out_never_fires_when_the_engine_flag_is_off(monkeypatch):
+    """Dark-ship discipline: the frontend must not stop opening the drawer
+    for a count-shaped question while the engine itself is still off (the
+    answer path would run the untouched query/report pass, which IS a
+    report-eligible answer)."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", False)
+    envelope = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
+              confidence=0.85, reason="a count question"),
+        prd_id=None,
+        question="how many calls raised product issues this month",
+    )
+    assert envelope["report"] is True
+
+
+def test_the_carve_out_never_fires_with_no_question_supplied(monkeypatch):
+    """`question` defaults to "" for every caller that predates this fix —
+    the pre-existing (report=True) behaviour for `call-digest`, never a
+    silent behaviour change for a caller this fix does not know about."""
+    # Imported fresh, matching exactly what `_is_report_pipeline` itself
+    # reads (a lazy `from app.config import settings`) — NOT
+    # `app.call_digest.settings`, whose own module-level binding predates
+    # this test's per-test config reload and would silently miss the patch.
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    assert ci._is_report_pipeline("call-digest") is True
+    assert ci._is_report_pipeline("call-digest", "") is True
+
+
+def test_a_non_call_digest_report_pipeline_ignores_question_shape(monkeypatch):
+    """The carve-out is scoped to `call-digest` alone — a count-shaped
+    PHRASING pointed at a different report pipeline (e.g. competitive
+    intelligence, which has no count engine of its own) still opens the
+    drawer; the question text is never a generic report override."""
+    # Imported fresh, matching exactly what `_is_report_pipeline` itself
+    # reads (a lazy `from app.config import settings`) — NOT
+    # `app.call_digest.settings`, whose own module-level binding predates
+    # this test's per-test config reload and would silently miss the patch.
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    envelope = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="competitive-intelligence-review",
+              action_confidence=0.9, confidence=0.85, reason="wants a review"),
+        prd_id=None,
+        question="how many competitors raised pricing concerns this month",
+    )
+    assert envelope["report"] is True

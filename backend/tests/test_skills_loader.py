@@ -27,6 +27,11 @@ BOUND_SKILLS = [
     "hubspot-extraction",
     "clickup-extraction",
     "roadmap-extraction",
+    # Vendored 2026-08-20 for the scheduled report engines. Adding them also
+    # gave four RESEARCH call sites a real method for the first time — see
+    # the two binding tests below, which used to assert the opposite.
+    "competitive-intelligence-review",
+    "public-feedback-report",
 ]
 
 
@@ -247,6 +252,20 @@ def _tool_msg(payload=None):
                               cache_read_input_tokens=2),
         stop_reason="tool_use",
     )
+
+
+def _system_text(system) -> str:
+    """What the model actually reads, whether `system` is a str or a block list.
+
+    `call_with_web_search` sends TWO system blocks so the stable method text can
+    carry a cache breakpoint (app.llm — the module and the caller's layer move
+    per pass, the SKILL.md does not). Both shapes are legitimate, so tests that
+    care about prompt CONTENT flatten first; the tests that care about the split
+    itself assert on the blocks directly.
+    """
+    if isinstance(system, str):
+        return system
+    return "".join(b["text"] for b in system)
 
 
 def _capture_client(captured: dict):
@@ -556,7 +575,7 @@ def test_oncall_binding_degrades_method_less(isolated_settings, monkeypatch):
     assert captured.get("system")
 
 
-def test_market_research_web_search_degrades_method_less(isolated_settings, monkeypatch):
+def test_market_research_binds_the_public_feedback_method(isolated_settings, monkeypatch):
     from app import llm
     from app.research import market
 
@@ -572,16 +591,20 @@ def test_market_research_web_search_degrades_method_less(isolated_settings, monk
     monkeypatch.setattr(market, "log_agent_decision", lambda **k: None)
 
     market.run_market_research(_FakeFacade(), "ent-A")
-    # The web-search path folds a bound method into the system prompt — and
-    # `public-feedback-report` is not vendored any more, so there is none. What
-    # matters is that `call_with_web_search` DEGRADED instead of raising: the
-    # sweep still ran and the caller's own system prompt was sent. (Intolerance
-    # here would have taken the whole public-feedback capability down.)
-    assert "## METHOD (skill: public-feedback-report" not in captured["system"]
-    assert captured["system"]
+    # `run_market_research` binds `skill="public-feedback-report"`, and since
+    # that skill was vendored the web-search path folds its method into the
+    # system prompt. This test asserted the OPPOSITE while the skill was
+    # missing — the binding was then a decision-log label with nothing behind
+    # it. Pinned explicitly because the change is silent: vendoring a skill
+    # re-methods every call site that names it, including ones that are not
+    # the report engine it was written for.
+    assert "## METHOD (skill: public-feedback-report" in _system_text(captured["system"])
+    # The method is its own cache-controlled block; the caller's layer is not.
+    assert captured["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in captured["system"][1]
 
 
-def test_competitor_research_web_search_degrades_method_less(isolated_settings, monkeypatch):
+def test_competitor_research_binds_the_cir_method(isolated_settings, monkeypatch):
     from app import llm
     from app.research import competitor as comp
 
@@ -595,12 +618,19 @@ def test_competitor_research_web_search_degrades_method_less(isolated_settings, 
     monkeypatch.setattr(comp, "log_agent_decision", lambda **k: None)
 
     comp.run_competitor_research(_FakeFacade(), "ent-A", competitors=["Adobe"])
-    # Same as the market-research case: the CIR skill is gone, the staged
-    # deep-dive still runs. `research/competitor.py` also passes
-    # `skill_module=` per stage — a missing skill returns early, so the module
-    # lookup is never reached and cannot KeyError.
-    assert "## METHOD (skill: competitive-intelligence-review" not in captured["system"]
-    assert captured["system"]
+    # Same as the market-research case: vendoring the skill re-methoded a call
+    # site that is NOT the report engine the skill was written for.
+    #
+    # `research/competitor.py` also passes `skill_module=` per stage
+    # ("08-synthesis-decisions.md" and friends), and the vendored skill ships
+    # NO modules. That is safe only because this is the web-search path, which
+    # tolerates an unknown module; `graph.gateway._build_method_prefix` raises
+    # KeyError for one. Pinned here so a future move of these calls onto the
+    # gateway fails loudly in a test rather than at runtime.
+    assert "## METHOD (skill: competitive-intelligence-review" in _system_text(captured["system"])
+    # The method is its own cache-controlled block; the caller's layer is not.
+    assert captured["system"][0]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in captured["system"][1]
 
 
 # ---------- ported scoring ----------

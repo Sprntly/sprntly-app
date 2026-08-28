@@ -363,6 +363,11 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   // flips it back off. When no project is bound the icon is hidden and this state
   // is inert, so the panel renders byte-identical to before.
   const [projectSectionOpen, setProjectSectionOpen] = useState(false)
+  // The header slot the open report's share/PDF menu portals into, so it sits
+  // where the PRD's does — top right of the panel — instead of inside the
+  // document it acts on. State rather than a ref so the portal re-renders once
+  // the node exists.
+  const [reportShareSlot, setReportShareSlot] = useState<HTMLDivElement | null>(null)
   const hasActiveProject = content.activeProjectId != null
   useEffect(() => {
     // A thread with no bound project can never show the project section — reset
@@ -432,7 +437,13 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
     // thread list at all — the open document IS the reason the tab belongs. Keyed
     // on the explicit flag, not on "a focus id exists": a focus id that merely
     // outlived its thread used to keep a Reports tab on chats that have none.
-    !content.reportFocusStandalone
+    !content.reportFocusStandalone &&
+    // A report being WRITTEN is a Reports tab with no row behind it yet — the
+    // same window `ticketSetGenerating` covers below, except capture is a
+    // post-terminal server step, so this window is the WHOLE generation rather
+    // than a second of it. Keying purely on the list would leave a report
+    // generating inside a tab nobody can see.
+    !content.reportGenerating
 
   // A standalone ticket set is on screen — INCLUDING the window before the row
   // exists. `runTicketSetGeneration` publishes `ticketSetGenerating` on its very
@@ -687,6 +698,13 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                 // the wrong document's name over the right one's body.
                 : activeTab === "document"
                   ? "Document"
+                // And again, for the same reason the two lines above exist. A
+                // Goal Analysis run is not a PRD; falling through put "PRD"
+                // over the run's body on staging, with the tab beside it
+                // correctly reading "Goal Analysis". Three tabs have now made
+                // this mistake — the ladder is the thing to extend.
+                : activeTab === "goal"
+                  ? "Goal Analysis"
                 // A standalone set has no PRD to name, and naming one anyway
                 // ("PRD") would label the panel with a document that does not
                 // exist. The line is always rendered — a set still being
@@ -696,9 +714,15 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                   : actionablePrd?.title ? `PRD · ${actionablePrd.title}` : "PRD"}
             </span>
           <div className="cpanel-head-actions">
+            {/* The REPORT's share/PDF menu lands here, in the header beside
+                where the PRD's sits, rather than inside the document it acts
+                on. Filled by `ReportsTab` through a portal: the menu reads the
+                OPEN report, and that document belongs to the tab. Empty on
+                every other tab. */}
+            <div ref={setReportShareSlot} data-testid="cpanel-report-share-slot" />
             {/* The header Share menu exports the Evidence + PRD pair, so it has no
                 meaning on Reports — a report carries its OWN share/PDF actions,
-                on the open document (ReportsTab). Force-disabled in guest mode —
+                which render in the slot above. Force-disabled in guest mode —
                 a guest has no edit/export entitlement (AC15). */}
             {/* Document is excluded for the same reason as Reports: this menu
                 exports the Evidence + PRD pair, which has nothing to do with a
@@ -745,7 +769,12 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
           )}
           {activeTab === "tickets" && <TicketsTab />}
           {activeTab === "reports" && (
-            <ReportsTab reports={reports} loading={reportsLoading} error={reportsError} />
+            <ReportsTab
+              reports={reports}
+              loading={reportsLoading}
+              error={reportsError}
+              shareSlot={reportShareSlot}
+            />
           )}
           {activeTab === "goal" && content.goalRunId != null && (
             <Suspense fallback={<div style={{ fontSize: 13, opacity: 0.6 }}>Loading analysis…</div>}>

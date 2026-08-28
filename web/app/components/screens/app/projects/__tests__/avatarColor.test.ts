@@ -42,19 +42,21 @@ describe("personAvatarStyle — determinism + stability (AC-9)", () => {
     expect(nameOnly.background).toBeTruthy()
   })
 
-  it("the @Sprntly agent avatar is never routed through this helper (source scan) — RETARGETED to the engine post-fold", () => {
-    // Post-fold the pre-fold host's `styles.aiMark` scan went VACUOUS (the thin
-    // host has no aiMark → indexOf(-1) → empty slice → passes proving nothing).
-    // The agent avatar now renders bubble-less through ChatBubble; the group
-    // engine (`useProjectGroupThread`) is where a turn's `avatarStyle` is
-    // assigned, and it deliberately sets an AGENT turn's `avatarStyle` to
-    // `undefined` (never personAvatarStyle) — only human self/peer turns get a
-    // per-person tint. Assert that guard exists where the logic now lives.
-    const engineSrc = readFileSync(join(__dirname, "../useProjectGroupThread.ts"), "utf8")
-    expect(engineSrc).toContain("avatarStyle: isAgent ? undefined : personAvatarStyle(")
-    // Non-vacuous negative: the aiMark scan is gone (the host is thin) — the
-    // agent avatar is not colour-keyed anywhere in the host.
-    const hostSrc = readFileSync(join(__dirname, "../ProjectGroupChat.tsx"), "utf8")
-    expect(hostSrc).not.toContain("styles.aiMark")
+  it("the shared conversation engine no longer tints any turn (source scan) — the per-person tint was a GROUP-turn-only concern, removed with the group chat surface", () => {
+    // Superseded by the group-chat-removal ticket: the per-surface group
+    // engine (`useProjectGroupThread` / `ProjectGroupChat`) was DELETED and
+    // folded into the shared `useProjectConversation`, and its group-turn
+    // peer-attribution branch (the ONLY place this file ever called
+    // `personAvatarStyle` — a peer's `author.avatarStyle`) was removed
+    // wholesale when the group surface itself was removed: the private/
+    // individual chat is single-owner and never sets `author` on a turn, so
+    // there is no per-person tint left to assign here at all. `avatarStyle`
+    // still lives on `ThreadTurn["author"]` (the type/prop plumbing is
+    // untouched) for whichever surface next sets it; `personAvatarStyle`
+    // itself is unchanged and still used by ProjectDetailScreen.tsx and the
+    // other surviving consumers this file's own header documents.
+    const engineSrc = readFileSync(join(__dirname, "../useProjectConversation.ts"), "utf8")
+    const tintCalls = engineSrc.match(/personAvatarStyle\(/g) ?? []
+    expect(tintCalls).toHaveLength(0)
   })
 })

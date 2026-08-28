@@ -39,6 +39,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Response
 from pydantic import BaseModel, Field
 
+from app import report_markdown
 from app.db import find_report_by_share_token
 from app.db.prototypes import verify_share_passcode
 from app.design_agent.rate_limit import SlidingWindowLimiter
@@ -132,7 +133,10 @@ def _projection(row: dict) -> PublicReport:
         title=row.get("title") or "Report",
         kind=humanize_label(row.get("skill") or "") or "Report",
         skill=row.get("skill") or "",
-        html=row.get("html") or "",
+        # HTML whatever is stored — see routes/reports.py. A link handed out
+        # before reports became rich documents keeps working: its markdown row
+        # converts on the way out, exactly as the in-app viewer sees it.
+        html=report_markdown.to_html(row.get("html")),
         created_at=row.get("created_at"),
     )
 
@@ -201,7 +205,7 @@ async def download_public_report_pdf(token: str, body: PdfIn | None = None):
         if not verify_share_passcode(passcode, row.get("share_passcode_hash")):
             raise HTTPException(status_code=401, detail="Incorrect passcode")
 
-    pdf = await render_report_pdf(row.get("html") or "")
+    pdf = await render_report_pdf(report_markdown.to_html(row.get("html")))
     if not pdf:
         logger.warning("public report pdf unavailable token=%s", _token_hash(token))
         raise HTTPException(

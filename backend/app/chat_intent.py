@@ -625,6 +625,27 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # comment records: this set is the wire, and an action missing from it is
     # a silent half-feature, not an error.
     "assign_tickets",
+    # Change the report or document open beside the chat. Listed here for the
+    # reason `create_artifact`'s comment above records at length: THIS SET IS
+    # THE WIRE. An action the planner can decide and an endpoint can execute,
+    # but which is missing here, falls through `_fallback("unknown action")` to
+    # a plain answer — so the chat would reply in prose describing an edit it
+    # never made, which is precisely the failure being fixed.
+    "edit_artifact",
+    # A business GOAL to move — hands off to Goal Analysis, which asks what the
+    # metric means, states what it will read, and waits for approval.
+    #
+    # THE WIRE AGAIN, and this one was shipped cut. #1321 taught `ask_planner`
+    # the `analyse_goal` action and added the client's dispatch case, and
+    # omitted this line — so the planner decided correctly, `_plan_to_envelope`
+    # hit `_fallback("unknown action")`, and the client received `answer`. A
+    # user asking to increase revenue by 5% still got a list of opportunities:
+    # the exact bug the PR was written to fix, shipped as a no-op.
+    #
+    # The subset assertion in `test_ask_planner.py` (`_CLIENT_INTENTS <=
+    # _ACTIONS`) cannot catch this — it points the other way. The membership
+    # test that can lives beside this file's other intents.
+    "analyse_goal",
     # The tickets counterpart of change_prd_template — dispatches
     # POST /v1/stories/change-template with the envelope's
     # `artifact_template_id`. The TARGET is resolved client-side (the thread's
@@ -655,11 +676,71 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # it had shared the document. Nothing would reach Slack, and unlike an
     # empty library nobody can check a channel they were never told about.
     "share_to_slack",
+    # Create a PROJECT — the container, not a document. The client calls
+    # POST /v1/projects with the envelope's `task` as the name and opens the
+    # new project. Listed here for exactly the reason create_artifact's
+    # comment records: this set is the wire, and an action missing from it
+    # falls through to `answer` — where the chat, knowing the product has
+    # projects, replies that it made one and nothing exists.
+    "create_project",
 }
 
 
-def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
+def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
+    """Does this plan's pipeline WRITE A REPORT DOCUMENT?
+
+    `qa_agent._REPORT_PIPELINE_IDS` is the set the answer path itself dispatches
+    on, so it is the one read here — a second list would drift and the drift
+    would be invisible until a report printed itself into a chat thread.
+
+    ONE carve-out: `call-digest` is the machinery id BOTH the full
+    voice-of-customer pass AND the map-reduce count engine
+    (`app.corpus_mapreduce` via `call_digest.VOC_CALLS_SPEC`) resolve to — the
+    planner classifies by question SHAPE ("is this about the calls?"), before
+    the answer path has decided which of the two it will actually run, so one
+    pipeline id has to cover both. A count-shaped question
+    (`call_digest.is_mapreducible_count`, the SAME eligibility check the
+    answer path itself gates the engine on) answers INLINE, never a report —
+    see `app.corpus_mapreduce`'s module docstring — so it must not open the
+    Reports drawer or show report-generation copy just because it shares a
+    pipeline id with the report it is not writing. Every other
+    `_REPORT_PIPELINE_IDS` member names exactly one shape and needs no such
+    carve-out.
+
+    Imported lazily: `qa_agent` is a heavy module and this endpoint is on the
+    send path, which imports `ask_planner` the same way one function below.
+    """
+    if not pipeline_id:
+        return False
+    try:
+        from app.qa_agent import _REPORT_PIPELINE_IDS
+
+        if pipeline_id not in _REPORT_PIPELINE_IDS:
+            return False
+        if pipeline_id == "call-digest":
+            from app.call_digest import is_mapreducible_count
+            from app.config import settings
+
+            if settings.voc_count_engine_enabled and is_mapreducible_count(question):
+                return False
+        return True
+    except Exception:  # noqa: BLE001 — never break the verdict over a hint
+        logger.exception("report-pipeline check failed for %s", pipeline_id)
+        return False
+
+
+def _plan_to_envelope(
+    plan, *, prd_id: Optional[int], open_artifact: Optional[dict] = None,
+    question: str = "",
+) -> dict:
     """A gated `ask_planner.Plan` in this module's envelope vocabulary.
+
+    `question` is the original message, threaded through ONLY so the
+    `"report"` key can tell a count-shaped `call-digest` question apart from
+    a report-shaped one — see `_is_report_pipeline`. Defaulted so every
+    existing direct caller (tests included) that has no message in hand
+    keeps working unchanged; a missing question just means the `call-digest`
+    carve-out never fires, which is the pre-existing (report=True) behaviour.
 
     Three of this module's own downgrade rules are re-applied HERE rather than
     trusted to the planner, because each needs something the planner does not
@@ -695,6 +776,11 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
     # acts on, so every condition that must hold before a build starts is
     # enforced where the build is dispatched from.
     if intent == "create_artifact" and not (plan.task or "").strip():
+        intent = "answer"
+    # A project with no subject is an untitled container. Same re-application,
+    # same reason: this envelope is what the CLIENT acts on, so the condition
+    # is enforced where the create is dispatched from.
+    if intent == "create_project" and not (plan.task or "").strip():
         intent = "answer"
     if intent not in _CLIENT_INTENTS:
         return _fallback("unknown action")
@@ -754,6 +840,23 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         ),
         "reason": plan.reason or "",
         "source": "planner",
+        # The answer this turn produces is a REPORT DOCUMENT, not a chat reply:
+        # the planner resolved one of the report pipelines and the gate accepted
+        # it. The client opens the panel's Reports tab in its generating state
+        # and streams the document THERE — the posture a PRD build already takes
+        # — instead of printing a report into the thread it is about to appear
+        # beside. False is the ordinary case and reads as "an answer".
+        #
+        # Read from the SAME set `qa_agent` dispatches on, never a second list:
+        # a name that fell out of one and not the other would open a panel for
+        # an answer, or print a report into the chat.
+        "report": _is_report_pipeline(plan.pipeline_id, question),
+        # `edit_artifact` only: WHICH document the edit targets — the report or
+        # team document the tab has open, re-read server-side. The client
+        # already knows what its own panel is showing; this is echoed so the
+        # reducer acts on the SAME artifact the decision was grounded on, the
+        # way `prd_id`/`prd_title` are echoed for `edit_prd`.
+        "open_artifact": open_artifact,
     }
     # A FORMAT WE COULD NOT FIND STOPS THE BUILD (owner's decision, 2026-08-10).
     # `template_query` is only ever set when the user named a format and nothing
@@ -780,6 +883,18 @@ def _plan_to_envelope(plan, *, prd_id: Optional[int]) -> dict:
         envelope.update(intent="answer", source="no_target_prd")
     if envelope["intent"] == "edit_prd" and not envelope["instruction"]:
         envelope.update(intent="answer", source="no_instruction")
+    if envelope["intent"] == "edit_artifact" and (
+        not envelope["instruction"] or not open_artifact
+    ):
+        # The same two re-applications `edit_prd` gets, for the same reasons:
+        # an edit with nothing to apply has nothing to do, and a TARGET is a
+        # tenant-scoped fact the planner cannot check (it is told what is open,
+        # but the id it would act on is resolved here). `answer` is the
+        # recoverable landing — it can ask which document, or what to change.
+        envelope.update(
+            intent="answer",
+            source="no_instruction" if not envelope["instruction"] else "no_target_artifact",
+        )
     if envelope["intent"] == "assign_tickets" and not envelope["instruction"]:
         # Same rule as edit_prd: an assignment with nobody named and nothing
         # targeted is a dispatch with nothing to execute. The planner gates
@@ -813,6 +928,9 @@ def _resolve_via_planner(
     history: Optional[list[dict]],
     *,
     prd_id: Optional[int],
+    prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
+    thread_artifact: Optional[dict] = None,
 ) -> Optional[dict]:
     """The planner's verdict as an envelope, or None to use the call below.
 
@@ -823,11 +941,35 @@ def _resolve_via_planner(
     from app import ask_planner
 
     plan = ask_planner.plan_for_answer(
-        enterprise_id=enterprise_id, question=message, history=history
+        enterprise_id=enterprise_id,
+        question=message,
+        history=history,
+        # The thread's open PRD is an INPUT to the plan, not just an after-the-
+        # fact gate on its verdict: without it the planner answered "build a
+        # report from this prd" with "no PRD is open or identified in the thread".
+        prd_id=prd_id,
+        prd_title=prd_title,
+        # THE LINE THE EDIT PRECONDITION READS. `plan_for_answer` has always
+        # taken this and this call has never passed it, so the planner's prompt
+        # was rendered without any "Active tab: report #45 … is open beside
+        # this chat" line — and `edit_artifact`'s own rule says "Choose this
+        # only when that line names a report or a document". With the line
+        # never present the action was unreachable: every "add a risks section
+        # to that report" planned as `answer` and came back as the rewritten
+        # section printed into the chat, with the report untouched. Reported as
+        # "it cannot edit a report based on a prompt".
+        #
+        # `thread_artifact` is the same referent when the panel is showing
+        # nothing — a report this conversation produced is still what "that
+        # report" means to the person who asked for it here.
+        open_artifact=open_artifact or thread_artifact,
     )
     if plan is None:
         return None
-    envelope = _plan_to_envelope(plan, prd_id=prd_id)
+    envelope = _plan_to_envelope(
+        plan, prd_id=prd_id, open_artifact=open_artifact or thread_artifact,
+        question=message,
+    )
     # The full gated plan rides along under `plan`, for the browser console.
     # Everything on it was already decided server-side and is already visible in
     # the backend log; this only saves someone testing from having to watch
@@ -852,6 +994,12 @@ def resolve_chat_intent(
     prd_id: Optional[int] = None,
     prd_title: Optional[str] = None,
     has_attachments: bool = False,
+    open_artifact: Optional[dict] = None,
+    #: The report/document THIS THREAD produced, when the panel is showing
+    #: none. Resolved by the route (`_thread_edit_target`), and used for the
+    #: same two jobs `open_artifact` is: the referent in the planner's prompt,
+    #: and the target an `edit_artifact` verdict acts on.
+    thread_artifact: Optional[dict] = None,
 ) -> dict:
     """Decide the action envelope for one chat message, in context.
 
@@ -899,7 +1047,11 @@ def resolve_chat_intent(
     # send path, and a planner import or flag read must never break a send.
     try:
         planned = _resolve_via_planner(
-            enterprise_id, message, history, prd_id=prd_id
+            enterprise_id, message, history, prd_id=prd_id, prd_title=prd_title,
+            # Both referents an edit can act on: what the panel is showing, and
+            # failing that what this thread produced. Neither reached the
+            # planner before, which is why `edit_artifact` never fired.
+            open_artifact=open_artifact, thread_artifact=thread_artifact,
         )
         if planned is not None:
             return planned

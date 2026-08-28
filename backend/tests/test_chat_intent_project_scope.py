@@ -70,12 +70,38 @@ def _seed_project_with_prd(t, prd_id: int) -> int:
     return project["id"]
 
 
+def _insert_legacy_group_conversation(t, project_id: int) -> dict:
+    """A `kind='group'` conversation row inserted directly (the group-chat
+    WRITE path — `create_group_chat` — was removed with the group-chat
+    backend; pre-existing group rows are explicitly NOT deleted from the
+    database, so `get_conversation_project_id` must keep resolving them)."""
+    from app.db.client import require_client
+
+    ws_id = ensure_default_workspace(t.company_id)["id"]
+    return (
+        require_client()
+        .table("conversations")
+        .insert(
+            {
+                "company_id": t.company_id,
+                "workspace_id": ws_id,
+                "user_id": t.user_id,
+                "project_id": project_id,
+                "kind": "group",
+            }
+        )
+        .execute()
+        .data[0]
+    )
+
+
 def _open_envelope(monkeypatch, query: str):
     """Force an `open_artifact` verdict so the route's LOOKUP is what's tested."""
     import app.routes.chat as chat_route
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False):
+                 prd_title=None, has_attachments=False, open_artifact=None,
+                 thread_artifact=None):
         return {
             "intent": "open_artifact", "confidence": 0.95, "task": None,
             "instruction": None, "artifact_type": "prd",
@@ -93,7 +119,8 @@ def _edit_envelope(monkeypatch):
     seen: dict = {}
 
     def _resolve(enterprise_id, message, history=None, *, prd_id=None,
-                 prd_title=None, has_attachments=False):
+                 prd_title=None, has_attachments=False, open_artifact=None,
+                 thread_artifact=None):
         seen["prd_id"] = prd_id
         return {
             "intent": "edit_prd", "confidence": 0.92, "task": None,
@@ -143,7 +170,7 @@ def test_group_project_chat_open_resolves_to_project_prd(
     project_prd = _seed_prd(db, dataset="acme", title="Compliance Reporting", theme_id="chat:g")
     _seed_prd(db, dataset="acme", title="Compliance Reporting", theme_id="chat:gws")
     project_id = _seed_project_with_prd(t, project_prd)
-    group = conversations_db.create_group_chat(project_id, t.user_id)
+    group = _insert_legacy_group_conversation(t, project_id)
     _open_envelope(monkeypatch, "compliance reporting")
 
     body = t.client.post(
@@ -258,7 +285,7 @@ def test_get_conversation_project_id_reads_binding(
         created_by=t.user_id,
     )
     individual = conversations_db.create_individual_project_chat(project["id"], t.user_id)
-    group = conversations_db.create_group_chat(project["id"], t.user_id)
+    group = _insert_legacy_group_conversation(t, project["id"])
 
     assert conversations_db.get_conversation_project_id(
         individual["id"], t.company_id

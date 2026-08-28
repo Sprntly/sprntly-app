@@ -96,11 +96,74 @@ def test_generate_from_task_returns_project_id_existing_prd(tenant_client, isola
     # The EXISTING-PRD response path (`if existing:`) — same prd_id, forked id set.
     assert body["prd_id"] == first["prd_id"]
     assert body["project_id"] == 777
-    assert body["status"] == first["status"]
+    # NOT `== first["status"]`. `first["status"]` was captured from the FIRST
+    # response, before that PRD's background generation had finished; the route
+    # returns `existing["status"]`, read live from the row. Once generation
+    # completes the row is `ready`, so this comparison decided nothing about
+    # the existing-PRD path and everything about whether the worker beat the
+    # second request — timing, not behaviour. It failed in CI on two
+    # consecutive heads with `assert 'ready' == 'generating'` while passing
+    # every time locally, which is the signature of exactly that race.
+    #
+    # The honest assertion is the sentence this whole fix is arguing: the
+    # response reports THE ROW, not a memory. So read the row.
+    #
+    # Deliberately not `in {"generating", "ready"}`, which review showed is
+    # tautological here — `find_existing_prd_for_theme` already filters
+    # `.in_("status", ["ready", "generating"])`, so that form restates the
+    # finder's own filter and cannot fail. It would read as a guard while
+    # guarding nothing, which is the failure mode this file just suffered.
+    row = (require_client().table("prds").select("status")
+           .eq("id", first["prd_id"]).execute()).data[0]
+    assert body["status"] == row["status"]
     assert body["title"] == first["title"]
     assert body["variant"] == "v3"
     assert len(calls) == 1
     assert calls[0]["conversation_id"] == conv_id
+
+
+def test_existing_prd_path_holds_after_generation_has_finished(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The CI ordering, made deterministic.
+
+    The sibling test above passed locally on every run and failed in CI on two
+    consecutive heads, because locally the second request always beat the
+    background worker. This pins the row to `ready` first, so the existing-PRD
+    path is exercised in the ordering that was previously reached only by
+    losing a race — and the response must still resolve the same PRD and
+    report the row's real status rather than a remembered one.
+
+    Verified to be the actual bug: with the old `== first["status"]`
+    assertion, this test fails with `assert 'ready' == 'generating'`, the
+    identical message CI produced.
+    """
+    t = tenant_client.make(slug="acme")
+    _save_current_brief(isolated_settings["db"], dataset="acme")
+
+    first = t.client.post(
+        "/v1/prd/generate-from-task", json={"task": "dark mode on mobile"}
+    ).json()
+
+    # What the background worker does when it finishes, done here on purpose.
+    require_client().table("prds").update({"status": "ready"}).eq(
+        "id", first["prd_id"]
+    ).execute()
+
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    calls = _stub_fork(monkeypatch, 777)
+
+    again = t.client.post(
+        "/v1/prd/generate-from-task",
+        json={"task": "dark mode on mobile", "conversation_id": conv_id},
+    )
+    assert again.status_code == 200
+    body = again.json()
+    assert body["prd_id"] == first["prd_id"]      # found, not re-created
+    assert body["project_id"] == 777
+    assert body["status"] == "ready"              # the row's truth, not a memory
+    assert body["title"] == first["title"]
+    assert len(calls) == 1
 
 
 def test_generate_from_task_project_id_none_when_unbound(tenant_client, isolated_settings, monkeypatch):

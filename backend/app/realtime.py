@@ -14,9 +14,9 @@ already used by `welcome_email.py`/`team_email.py` (no new dependency).
 Best-effort throughout (AD-P7): unconfigured env, a network failure, a
 timeout, or a non-2xx response are all swallowed here — a broadcast is a
 liveness nicety, never a correctness requirement, because every poll surface
-this ticket feeds (`GET .../group/turns`, `GET .../individual/turns`) already
-reconciles on its own `since`-cursor read (AD-P22). A dropped broadcast is
-invisible to the caller and closes on the client's next poll / re-open.
+this ticket feeds (`GET .../individual/turns`) already reconciles on its own
+`since`-cursor read (AD-P22). A dropped broadcast is invisible to the caller
+and closes on the client's next poll / re-open.
 """
 from __future__ import annotations
 
@@ -38,9 +38,9 @@ def publish_broadcast(topic: str, event: str, payload: dict) -> None:
     closes the gap. No-op (returns) when Realtime env is unconfigured.
 
     `payload` MUST already be the client-facing read-DTO (e.g. the
-    `list_group_turns`/`list_individual_turns` shape) — never a raw DB row
-    (AD-P21 no-schema-coupling). Shaping is the caller's responsibility;
-    this helper does not know or care what a "turn" or a "brief" looks like."""
+    `list_individual_turns` shape) — never a raw DB row (AD-P21
+    no-schema-coupling). Shaping is the caller's responsibility; this
+    helper does not know or care what a "turn" or a "brief" looks like."""
     url = config_mod.settings.supabase_url
     key = config_mod.settings.supabase_service_role_key
     if not url or not key:

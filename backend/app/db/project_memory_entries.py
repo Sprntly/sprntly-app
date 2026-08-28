@@ -27,17 +27,17 @@ def list_entries(project_id: int) -> list[dict]:
     """Memory entries for this project, most-recently-updated first. Each
     row is annotated with `source_conversation_kind`
     (`"group" | "individual" | None`) — the KIND of the conversation
-    `source_conversation_id` points at (`conversations.kind`, additive
-    group-chat column), batch-resolved in one extra query (never N+1, same
-    posture as `list_members`'s profile join).
+    `source_conversation_id` points at (`conversations.kind`; `"group"` is a
+    legacy value, still readable off rows the retired group surface wrote,
+    but never newly assigned), batch-resolved in one extra query (never
+    N+1, same posture as `list_members`'s profile join).
 
-    An agent-promoted entry's `source_conversation_id` is set from BOTH the
-    project's group chat (an `@Sprntly` mention / smart-interjection reply)
-    AND a member's individual chat (a cross-chat promotion,
-    `app/project_memory.py`'s `maybe_promote_turn`) — the id alone can't
-    tell those apart, which is exactly the mislabeling this annotation
-    fixes: a caller must read `source_conversation_kind`, never assume
-    "group" just because the id is set."""
+    An agent-promoted entry's `source_conversation_id` is set from a
+    member's individual chat (a cross-chat promotion, `app/project_memory.py`'s
+    `maybe_promote_turn`) — or, for entries predating the group surface's
+    retirement, an old group-conversation id. A caller must read
+    `source_conversation_kind`, never assume "individual" just because the
+    id is set."""
     client = require_client()
     entries = (
         client.table("project_memory_entries")
@@ -250,9 +250,9 @@ def get_latest_insight(project_id: int) -> dict | None:
     `list_entries`'s existing updated_at-desc ordering AND its
     `source_conversation_kind` annotation, rather than adding a second
     ordering/lookup convention — `source_kind` is what lets the caller
-    render "from the group chat" vs "from a chat with Sprntly" instead of
-    assuming group whenever a source conversation is set (the bug this
-    field exists to fix). Attribution is fixed at "Sprntly" (v1) — the
+    distinguish a legacy group-conversation source from a live individual
+    chat instead of assuming individual whenever a source conversation is
+    set (the bug this field exists to fix). Attribution is fixed at "Sprntly" (v1) — the
     schema records `source_conversation_id`, not the seeding human, so
     per-teammate attribution is a flagged follow-on, not guessed here.
     Never calls an LLM."""

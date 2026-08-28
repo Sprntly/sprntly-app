@@ -271,6 +271,8 @@ def sequence_ideation(
     *,
     exclude_theme_ids,
     agent: str = "ideation",
+    batch: bool = False,
+    batch_deadline_s: float | None = None,
 ) -> list[dict]:
     """Sequence the non-brief convergence candidates into the ideation pool and
     pick the visible shortlist.
@@ -334,6 +336,11 @@ def sequence_ideation(
                    + _candidates_payload(pool)),
             json_schema=_PRIORITIZE_SCHEMA,
             skill=PRIORITIZE_SKILL,
+            # Same opt-in `run_synthesis` takes, threaded from it: this runs
+            # AFTER the brief is saved, inside the scheduled run, and its result
+            # lands in the ideation pool rather than on anyone's screen. The
+            # user-facing synthesis routes pass batch=False and are unaffected.
+            batch=batch, batch_deadline_s=batch_deadline_s,
         )
         output = result.output or {}
         model = result.model

@@ -1,0 +1,606 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Public Feedback Report — Facebook Boost Post (July 2026)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:opsz,ital,wght@6..72,0,400;6..72,0,500;6..72,0,600;6..72,0,700;6..72,1,400&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root{--ink:#1a1813;--ink2:#403c34;--soft:#8a857a;--line:#e8e6e0;--rule:#d8d5cd;--page:#fff;--bg:#fff;
+--accent:#1f6f52;--red:#bb463c;--red-s:#fbecea;--amber:#a9762a;--amber-s:#f7efdd;--teal:#1f7a5a;--teal-s:#e9f3ed;--blue:#3a5a9a;--blue-s:#eaeef8;--purple:#8a6fae;--neutral:#7a756a;
+--serif:'Newsreader',Georgia,serif;--sans:'Inter',system-ui,sans-serif;}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--ink);font-family:var(--serif);line-height:1.6;-webkit-font-smoothing:antialiased;padding:0 16px 80px}
+.page{max-width:790px;margin:0 auto;background:var(--page);padding:58px 62px 48px}
+.eyebrow{font-family:var(--sans);font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--accent);font-weight:700}
+h1{font-weight:600;font-size:31px;line-height:1.15;margin:9px 0 6px}
+.stamp{font-family:var(--sans);font-size:11.5px;color:var(--soft);margin-bottom:13px}
+.runline{font-family:var(--sans);font-size:12.5px;color:var(--ink2);line-height:1.7;border-top:1px solid var(--rule);border-bottom:1px solid var(--rule);padding:13px 0}
+.runline b{color:var(--ink)}
+.chip{font-family:var(--sans);display:inline-block;margin-top:9px;font-size:11px;font-weight:600;border-radius:6px;padding:4px 10px}
+.chip.s{background:var(--amber-s);border:1px solid #ecd9b0;color:#8a5a00}
+.chip.c{background:var(--blue-s);border:1px solid #cdd8ef;color:var(--blue);margin-left:6px}
+.chip.p{background:var(--teal-s);border:1px solid #c8e0d3;color:var(--teal);margin-left:6px}
+h2{font-weight:600;font-size:13px;font-family:var(--sans);letter-spacing:.12em;text-transform:uppercase;color:var(--accent);margin:38px 0 0;padding-bottom:7px;border-bottom:2px solid var(--accent);display:inline-block}
+.sec{margin-top:8px}
+.scopenote{font-family:var(--sans);font-size:11.5px;color:var(--soft);font-style:italic;margin-top:10px}
+.tldr .src{font-style:italic;color:var(--ink2);font-size:15px;margin-top:15px}
+.tldr .intro{font-size:16px;margin-top:12px}.tldr .intro b{font-weight:600}
+.enum .item{font-size:15.5px;line-height:1.55;margin:14px 0}
+.enum .hash{font-family:var(--sans);font-weight:700;color:var(--accent);font-size:14.5px;margin-right:6px}
+.enum .item b{font-weight:600}
+.enum .sub{font-family:var(--sans);display:block;font-size:12.5px;color:var(--ink2);margin-top:4px;line-height:1.6}
+.enum .vq{display:block;font-size:14px;font-style:italic;color:var(--ink2);margin-top:5px;padding-left:16px;border-left:2px solid var(--line);margin-left:4px}
+.tldr .close{font-size:16px;margin-top:16px;padding-top:14px;border-top:1px dashed var(--line)}.tldr .close b{font-weight:600;color:var(--accent)}
+.chartwrap{margin-top:16px;border:1px solid var(--line);border-radius:10px;padding:16px 18px 10px;background:#fdfdfc}
+.legend{font-family:var(--sans);display:flex;gap:18px;font-size:12px;color:var(--ink2);margin-bottom:6px;flex-wrap:wrap}
+.legend span{display:inline-flex;align-items:center;gap:6px}.dot{width:14px;height:3px;border-radius:2px;display:inline-block}
+.kpis{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:14px}
+.kpi{font-family:var(--sans);border:1px solid var(--line);border-radius:9px;padding:11px 13px;background:#fff}
+.kpi .l{font-size:10px;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.kpi .v{font-size:18px;font-weight:700;margin-top:3px}.kpi .v small{font-size:11.5px;font-weight:600;color:var(--soft)}
+.down{color:var(--red)}.up{color:var(--teal)}
+.tt,.plat,.cmp{font-family:var(--sans);width:100%;border-collapse:collapse;font-size:12.5px;margin-top:16px;border:1px solid var(--rule);border-radius:8px;overflow:hidden}
+.tt th,.plat th,.cmp th{background:#f6f5f1;text-align:left;padding:9px 11px;font-size:10px;letter-spacing:.04em;text-transform:uppercase;color:var(--ink2);font-weight:700}
+.tt td,.plat td,.cmp td{padding:12px 12px;border-top:1px solid var(--line);vertical-align:top;color:var(--ink2)}
+.tt td b,.plat td b,.cmp td b{color:var(--ink)}
+.pq{font-family:var(--serif);font-size:14.5px;color:var(--ink);line-height:1.4}
+.pgloss{display:block;font-family:var(--sans);font-size:11.5px;color:var(--soft);margin-top:3px}
+.sent{font-weight:700;font-size:11px;padding:2px 7px;border-radius:5px;white-space:nowrap}
+.neg{background:var(--red-s);color:var(--red)}.pos{background:var(--teal-s);color:var(--teal)}.mix{background:var(--amber-s);color:var(--amber)}.neu{background:#efeee9;color:var(--neutral)}
+.tr-up{color:var(--red);font-weight:700}.tr-flat{color:var(--soft);font-weight:700}.tr-down{color:var(--teal);font-weight:700}
+.tq{font-style:italic;color:var(--ink2);font-family:var(--serif);font-size:13px}.tq .pf{font-style:normal;font-family:var(--sans);font-size:10.5px;color:var(--soft);font-weight:600;display:block;margin-top:2px}
+.tier{font-family:var(--sans);font-size:10px;font-weight:700;color:var(--soft);border:1px solid var(--line);border-radius:4px;padding:1px 4px;margin-left:4px;white-space:nowrap}
+/* temporal + mix side by side */
+.split{display:grid;grid-template-columns:2fr 1fr;gap:16px;margin-top:18px;align-items:start}
+.temporal{display:grid;grid-template-columns:1fr;gap:12px}
+.tcol{border:1px solid var(--line);border-radius:10px;padding:13px 14px;border-top:3px solid var(--tc)}
+.tcol.long{--tc:var(--red)}.tcol.new{--tc:var(--amber)}.tcol.gone{--tc:var(--teal)}
+.tcol h4{font-family:var(--sans);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--tc);margin-bottom:8px}
+.tcol .it{font-size:14px;color:var(--ink);margin:8px 0;line-height:1.4}.tcol .it .d{font-family:var(--sans);display:block;font-size:10.5px;color:var(--soft);margin-top:2px}
+.mixbox{border:1px solid var(--rule);border-radius:10px;padding:15px 16px;background:#fbfbf9}
+.mixbox h4{font-family:var(--sans);font-size:11.5px;text-transform:uppercase;letter-spacing:.05em;font-weight:700;color:var(--ink2);margin-bottom:4px}
+.mixbox .den{font-family:var(--sans);font-size:10.5px;color:var(--soft);line-height:1.5}
+.mixgroup{margin-top:15px}
+.mixlab{font-family:var(--sans);font-size:11px;font-weight:700;color:var(--ink2);display:flex;justify-content:space-between;margin-bottom:5px}
+.mixlab span{color:var(--soft);font-weight:600}
+.bar{display:flex;height:11px;border-radius:6px;overflow:hidden;background:#efeee9}
+.bar i{display:block;height:100%}
+.b-pos{background:var(--teal)}.b-neg{background:var(--red)}.b-neu{background:#c9c6bd}
+.b-prod{background:var(--accent)}.b-non{background:#b8b3a6}
+.mixkey{font-family:var(--sans);font-size:10.5px;color:var(--soft);margin-top:6px;display:flex;gap:11px;flex-wrap:wrap}
+.mixkey b{color:var(--ink2);font-weight:700}
+.mixnote{font-family:var(--sans);font-size:11px;color:var(--soft);line-height:1.55;margin-top:14px;border-top:1px solid var(--line);padding-top:11px}
+.mixnote b{color:var(--ink2)}
+.compgrid{display:grid;grid-template-columns:1fr 1fr 1fr;gap:13px;margin-top:16px}
+.lovecard{border:1px solid var(--line);border-radius:10px;padding:14px 15px;border-top:3px solid var(--lc)}
+.lovecard.us{--lc:var(--teal)}.lovecard.a{--lc:var(--blue)}.lovecard.b{--lc:var(--purple)}
+.lovecard .nm{font-family:var(--sans);font-size:13px;font-weight:700;color:var(--lc);margin-bottom:7px}
+.lovecard .li{font-size:13.5px;color:var(--ink2);padding:5px 0;border-top:1px solid var(--line)}.lovecard .li:first-of-type{border-top:none}.lovecard .li b{color:var(--ink)}
+.aheadtag{font-weight:700;font-size:11px;padding:2px 7px;border-radius:5px}
+.a-us{background:var(--teal-s);color:var(--teal)}.a-a{background:var(--blue-s);color:var(--blue)}.a-b{background:#efeaf6;color:var(--purple)}.a-none{background:#efeee9;color:var(--neutral)}
+.switch{font-family:var(--sans);font-size:12px;color:var(--ink2);background:var(--red-s);border:1px solid #eccfc9;border-radius:8px;padding:11px 14px;margin-top:14px;line-height:1.65}.switch b{color:var(--red)}
+.callout{font-family:var(--sans);font-size:12.5px;color:var(--ink2);background:#eef3f0;border:1px solid #cfe0d7;border-radius:8px;padding:11px 14px;margin-top:14px;line-height:1.65}.callout b{color:var(--ink)}
+.recintro{font-family:var(--sans);font-size:12.5px;color:var(--ink2);background:#eef3f0;border:1px solid #cfe0d7;border-radius:8px;padding:10px 13px;margin-top:6px;line-height:1.6}
+.reccard{border:1px solid var(--line);border-radius:11px;padding:14px 17px;margin-top:12px;background:#fff;border-left:4px solid var(--accent)}
+.reccard .rh{display:flex;align-items:baseline;gap:11px;flex-wrap:wrap}
+.recnum2{font-family:var(--sans);width:25px;height:25px;border-radius:6px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:13px;flex-shrink:0}
+.reccard .rt{font-size:16px;font-weight:600}
+.prio{font-family:var(--sans);margin-left:auto;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:3px 9px;border-radius:5px}
+.prio.hi{background:var(--red-s);color:var(--red)}.prio.med{background:var(--amber-s);color:var(--amber)}
+.reccard .rm{font-family:var(--sans);font-size:12.5px;color:var(--ink2);margin-top:7px;line-height:1.6}.reccard .rm b{color:var(--ink)}
+.reccard .prob{font-family:var(--serif);font-size:14.5px;color:var(--ink);margin-top:6px;font-style:italic}
+.reccard .moves{font-family:var(--sans);font-size:11.5px;color:var(--accent);font-weight:600;margin-top:6px}
+.nonprod{margin-top:14px;border:1px solid var(--rule);border-radius:11px;padding:16px 19px;background:#fbfaf7}
+.nonprod .nph{font-family:var(--sans);font-size:12.5px;color:var(--ink2);line-height:1.6}.nonprod .nph b{color:var(--ink)}
+.npitem{display:flex;gap:13px;padding:12px 0;border-top:1px solid var(--line);margin-top:12px}
+.npitem:first-of-type{margin-top:14px}
+.nptag{font-family:var(--sans);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;padding:3px 8px;border-radius:5px;background:#ede9e0;color:#6f6a5f;height:fit-content;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.npbody .npt{font-size:15.5px;font-weight:600;line-height:1.3}
+.npbody .npm{font-family:var(--sans);font-size:12px;color:var(--ink2);margin-top:4px;line-height:1.6}
+.npbody .npo{font-family:var(--sans);font-size:11px;color:var(--soft);font-weight:600;margin-top:4px}
+.nextsteps{margin-top:20px;border:1px solid var(--rule);border-radius:11px;padding:16px 19px;background:#fbfbf9}
+.nextsteps h4{font-family:var(--sans);font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--soft);font-weight:700}
+.nextsteps p{font-family:var(--sans);font-size:13px;color:var(--ink2);margin-top:7px;line-height:1.6}.nextsteps p b{color:var(--ink)}
+.recactions{display:flex;gap:9px;margin-top:13px;flex-wrap:wrap}
+.btn{font-family:var(--sans);font-size:12px;font-weight:600;line-height:1.4;border-radius:7px;padding:9px 14px;cursor:pointer;border:1px solid var(--rule);background:#fff;color:var(--ink2)}
+.btn:hover{background:#f3f1ea}
+.btn.prd{background:var(--accent);color:#fff;border-color:var(--accent)}.btn.prd:hover{background:#185a43}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.statusmsg{font-family:var(--sans);font-size:11.5px;font-weight:600;margin-top:9px;color:var(--teal)}
+.integrity{font-family:var(--sans);font-size:11.5px;line-height:1.65;color:var(--soft);margin-top:14px;border-top:1px solid var(--line);padding-top:14px}.integrity b{color:var(--ink2)}.integrity p{margin-top:9px}
+.metabar{font-family:var(--sans);margin-top:34px;border-top:1px solid var(--rule);padding-top:14px}
+.metatoggle{font-family:var(--sans);font-size:11.5px;font-weight:600;color:var(--soft);background:none;border:none;padding:0;cursor:pointer;letter-spacing:.02em}
+.metatoggle:hover{color:var(--accent)}
+.metatoggle:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.metatoggle .chev{display:inline-block;margin-right:5px}
+
+.brandmark{position:absolute;top:0;right:0;font-family:var(--sans);font-size:10.5px;letter-spacing:.06em;text-transform:lowercase;color:var(--soft);font-weight:700}
+.brandmark b{color:var(--accent);letter-spacing:.06em}
+.pagehead{position:relative;padding-top:4px}
+.countstrip{display:flex;gap:0;margin-top:16px;border:1px solid var(--rule);border-radius:9px;overflow:hidden}
+.cs{flex:1;font-family:var(--sans);padding:10px 13px;border-left:1px solid var(--line)}
+.cs:first-child{border-left:none}
+.cs .l{font-size:9.5px;letter-spacing:.05em;text-transform:uppercase;color:var(--soft);font-weight:700}
+.cs .v{font-size:17px;font-weight:700;color:var(--ink);margin-top:2px}
+.cs .v small{font-size:11px;font-weight:600;color:var(--soft)}
+.printbtn{position:fixed;top:15px;right:15px;background:var(--ink);color:#fff;border:none;border-radius:8px;padding:9px 15px;font-family:var(--sans);font-size:12.5px;font-weight:600;cursor:pointer;opacity:.85}
+@media print{.printbtn{display:none}.page{padding:0}h2{break-after:avoid}h2.pb{break-before:page}.tt tr,.plat tr{break-inside:avoid}.brandmark{position:static;text-align:right;display:block;margin-bottom:6px}body{padding:0}.page{max-width:100%;padding:0}#metaPanel{display:block!important}.metatoggle .chev{display:none}.tcol,.tt,.plat,.cmp,.chartwrap,.lovecard,.reccard,.mixbox,.npitem{break-inside:avoid}}
+@media(max-width:680px){.split,.kpis,.compgrid{grid-template-columns:1fr}.page{padding:38px 24px}}
+
+</style></head><body>
+<div class="page">
+<div class="pagehead">
+<div class="brandmark">generated by <b>sprntly ai</b></div>
+<div class="eyebrow">Public feedback · July 2026</div>
+<h1>What people are saying about Boost Post</h1>
+<div class="stamp">Prepared 20 August 2026 · covering 1–31 July 2026 · first monthly edition</div>
+</div>
+<div class="runline"><b>What this covers:</b> everything people posted publicly about the Facebook Boost Post button during July 2026. Older posts are still held and used, but only to tell whether something raised this month is new or long-running.<br><b>Where we looked:</b> 29 channels swept — app stores, Trustpilot, G2, Capterra, TrustRadius, Gartner, Reddit, X, TikTok, YouTube, Hacker News, forums, Q&amp;A sites, agency and analyst blogs. <b>Four returned anything for July.</b><br><b>What we were trying to answer:</b> what should the product team fix next, and what changed this month?<br></div>
+<div class="countstrip">
+<div class="cs"><div class="l">Collected in July</div><div class="v">9 <small>posts</small></div></div>
+<div class="cs"><div class="l">Product team can fix</div><div class="v">6 <small>of the 9</small></div></div>
+<div class="cs"><div class="l">Someone else owns</div><div class="v">3 <small>all support</small></div></div>
+<div class="cs"><div class="l">Channels with posts</div><div class="v">4 <small>of 29 swept</small></div></div>
+<div class="cs"><div class="l">Said they're leaving</div><div class="v">0 <small>this month</small></div></div>
+</div>
+
+<h2>TL;DR</h2>
+<div class="sec tldr">
+<p class="src">Nine posts is a small month, so everything below is ranked rather than given as a percentage, and no trend claim rests on July's volume alone. Seven of the nine came from people who had actually boosted a post. <b>This report is short because the month was:</b> 25 of the 29 channels we swept returned nothing for July. It has not been padded to fill a page count.</p>
+<p class="intro"><b>July had one subject: money people could see leaving and could not stop.</b> Six of the nine posts are about a charge that could not be cancelled, explained or disputed. Not one is about targeting, reach or results.</p>
+<div class="enum">
+<div class="item"><span class="hash">1</span><b>"I can't stop a boost that's already running."</b>
+<span class="sub">Two posts, both Trustpilot, both mid-July, and <b>new this month</b>. A boosted event does not appear in Ads Manager, so it cannot be found or cancelled; the assistant cannot locate, pause or refund it; and Business Suite refuses to edit it. The person watched the spend continue while being unable to stop it. Fix: a cancel that works from where the boost was created. Owner: product.</span>
+<span class="vq">"Their AI can't cancel the event." — Trustpilot, 13 July</span></div>
+
+<div class="item"><span class="hash">2</span><b>"It said my payment failed, then charged me twice."</b>
+<span class="sub">One post this month, and a <b>second instance of something first seen in June</b> — which is why it is here rather than buried. Payments reported as failing across two cards and Paylode, after which the account showed multiple duplicate payments. Two months running is not yet a trend, but it is the pattern worth watching in August. Owner: engineering.</span>
+<span class="vq">"Now my account shows multiple, duplicate payments made!!!" — Google Play, 1 July</span></div>
+
+<div class="item"><span class="hash">3</span><b>"There's nobody to reach when it's my money."</b>
+<span class="sub">Three posts — the largest single group in July, and all three belong to Support rather than the product team, so they sit in their own section below. Live chat advertised at 5–10 minutes reported as taking 5–7 hours. An AI assistant that cannot escalate. A hacked-then-disabled account with nothing in the help pages explaining recovery. <b>Every billing failure above ends here</b>, which is why it is worth reading the two together.</span></div>
+
+<div class="item"><span class="hash">4</span><b>Nobody said they were leaving this month.</b>
+<span class="sub">Zero explicit departures in July. Across everything we hold, three people have ever said so outright — 2014, 2016 and February 2025 — and none named a rival; they stopped rather than switched. We did not count anyone who merely sounded finished, including the reviewer who warned others off boosting but did not say they had stopped.</span></div>
+
+<div class="item"><span class="hash">5</span><b>Brand new, and from analysts rather than users: the measures changed underneath everyone.</b>
+<span class="sub">From 15 June about 85 long-standing reach and impressions measures stopped updating and were replaced by Views, which counts differently — so any year-on-year comparison breaks at that date. Separately, delivery now reads the ad creative itself to decide who sees it, which puts a single-creative boost at a structural disadvantage. <b>No user has raised either</b>, which most likely means the people affected have not yet worked out what happened.</span></div>
+</div>
+<p class="close">If you do one thing: <b>make a running boost cancellable from where it was created.</b> It is the only genuinely new user problem this month, it is the most severe, and right now it is being resolved by banks and card disputes instead of by us.</p>
+</div>
+
+<h2>July in context — the last 24 months</h2>
+<div class="sec">
+<div class="chartwrap">
+<div class="legend"><span><i class="dot" style="background:#1f7a5a"></i> Positive</span><span><i class="dot" style="background:#c9c6bd"></i> Neutral</span><span><i class="dot" style="background:#bb463c"></i> Negative</span><span><i class="dot" style="background:#e8e6e0"></i> Nothing found</span></div>
+<svg viewBox="0 0 796.8000000000001 162" width="100%" xmlns="http://www.w3.org/2000/svg"><rect x="0.0" y="128" width="30" height="4" fill="#e8e6e0"/><text x="15.0" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="15.0" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">09</text><text x="15.0" y="157" text-anchor="middle" font-size="8" fill="#403c34" font-family="Inter,sans-serif" font-weight="700">2024</text><rect x="33.2" y="128" width="30" height="4" fill="#e8e6e0"/><text x="48.2" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="48.2" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">10</text><rect x="66.4" y="128" width="30" height="4" fill="#e8e6e0"/><text x="81.4" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="81.4" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">11</text><rect x="99.60000000000001" y="128" width="30" height="4" fill="#e8e6e0"/><text x="114.60000000000001" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="114.60000000000001" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">12</text><rect x="132.8" y="128" width="30" height="4" fill="#e8e6e0"/><text x="147.8" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="147.8" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">01</text><text x="147.8" y="157" text-anchor="middle" font-size="8" fill="#403c34" font-family="Inter,sans-serif" font-weight="700">2025</text><rect x="166.0" y="117.1" width="30" height="14.9" fill="#bb463c"/><text x="181.0" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="181.0" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">02</text><rect x="199.20000000000002" y="124.5" width="30" height="7.5" fill="#bb463c"/><rect x="199.20000000000002" y="117.1" width="30" height="7.5" fill="#c9c6bd"/><text x="214.20000000000002" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="214.20000000000002" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">03</text><rect x="232.40000000000003" y="128" width="30" height="4" fill="#e8e6e0"/><text x="247.40000000000003" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="247.40000000000003" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">04</text><rect x="265.6" y="128" width="30" height="4" fill="#e8e6e0"/><text x="280.6" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="280.6" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">05</text><rect x="298.8" y="128" width="30" height="4" fill="#e8e6e0"/><text x="313.8" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="313.8" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">06</text><rect x="332.0" y="117.1" width="30" height="14.9" fill="#bb463c"/><text x="347.0" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="347.0" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">07</text><rect x="365.20000000000005" y="128" width="30" height="4" fill="#e8e6e0"/><text x="380.20000000000005" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="380.20000000000005" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">08</text><rect x="398.40000000000003" y="117.1" width="30" height="14.9" fill="#bb463c"/><text x="413.40000000000003" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="413.40000000000003" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">09</text><text x="413.40000000000003" y="157" text-anchor="middle" font-size="8" fill="#403c34" font-family="Inter,sans-serif" font-weight="700">2025</text><rect x="431.6" y="128" width="30" height="4" fill="#e8e6e0"/><text x="446.6" y="124" text-anchor="middle" font-size="8" fill="#c3bfb6" font-family="Inter,sans-serif">—</text><text x="446.6" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">10</text><rect x="464.80000000000007" y="117.1" width="30" height="14.9" fill="#c9c6bd"/><text x="479.80000000000007" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="479.80000000000007" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">11</text><rect x="498.00000000000006" y="124.5" width="30" height="7.5" fill="#bb463c"/><text x="513.0" y="120.5" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">1</text><text x="513.0" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">12</text><rect x="531.2" y="124.5" width="30" height="7.5" fill="#c9c6bd"/><text x="546.2" y="120.5" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">1</text><text x="546.2" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">01</text><text x="546.2" y="157" text-anchor="middle" font-size="8" fill="#403c34" font-family="Inter,sans-serif" font-weight="700">2026</text><rect x="564.4000000000001" y="124.5" width="30" height="7.5" fill="#c9c6bd"/><text x="579.4000000000001" y="120.5" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">1</text><text x="579.4000000000001" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">02</text><rect x="597.6" y="124.5" width="30" height="7.5" fill="#bb463c"/><rect x="597.6" y="102.1" width="30" height="22.4" fill="#c9c6bd"/><rect x="597.6" y="94.7" width="30" height="7.5" fill="#1f7a5a"/><text x="612.6" y="90.7" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">5</text><text x="612.6" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">03</text><rect x="630.8000000000001" y="117.1" width="30" height="14.9" fill="#c9c6bd"/><text x="645.8000000000001" y="113.1" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">2</text><text x="645.8000000000001" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">04</text><rect x="664.0" y="72.3" width="30" height="59.7" fill="#c9c6bd"/><rect x="664.0" y="49.9" width="30" height="22.4" fill="#1f7a5a"/><text x="679.0" y="45.9" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">11</text><text x="679.0" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">05</text><rect x="697.2" y="49.9" width="30" height="82.1" fill="#bb463c"/><rect x="697.2" y="34.9" width="30" height="14.9" fill="#c9c6bd"/><rect x="697.2" y="20.0" width="30" height="14.9" fill="#1f7a5a"/><text x="712.2" y="16.0" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">15</text><text x="712.2" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">06</text><rect x="730.4000000000001" y="87.2" width="30" height="44.8" fill="#bb463c"/><rect x="730.4000000000001" y="64.8" width="30" height="22.4" fill="#c9c6bd"/><text x="745.4000000000001" y="60.8" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">9</text><text x="745.4000000000001" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">07</text><rect x="763.6" y="102.1" width="30" height="29.9" fill="#bb463c"/><rect x="763.6" y="87.2" width="30" height="14.9" fill="#c9c6bd"/><rect x="763.6" y="79.7" width="30" height="7.5" fill="#1f7a5a"/><text x="778.6" y="75.7" text-anchor="middle" font-size="9" fill="#8a857a" font-family="Inter,sans-serif" font-weight="600">7</text><text x="778.6" y="146" text-anchor="middle" font-size="8" fill="#8a857a" font-family="Inter,sans-serif">08</text></svg>
+</div>
+<p class="scopenote">July's nine posts sit against 15 in June and 7 so far in August. <b>Do not read June-to-July as a fall in complaints</b> — the rise from March 2026 is our collection reaching the app stores and review sites for the first time, and the month-to-month movement since is well inside the noise of a sample this size. The ten empty months are collection reach, not quiet months. From next month this chart becomes the real comparison, because the periods will finally be like for like.</p>
+</div>
+
+<h2 class="pb">The problems people ran into in July</h2>
+<div class="sec">
+<p class="scopenote">All six product posts from July, none omitted. "How often" is a rank over nine posts, never a share of users. The last column uses everything we hold from earlier periods to say whether this is new.</p>
+<table class="tt">
+<thead><tr><th style="width:34%">What they said</th><th style="width:15%">How often · who</th><th style="width:27%">A real post</th><th>New or long-running</th></tr></thead>
+<tbody>
+<tr><td><span class="pq">"I can't stop a boost that's already running"</span><span class="pgloss">A boosted event is absent from Ads Manager, cannot be cancelled or edited, and the assistant cannot pause or refund it · product</span></td>
+<td><b>Most, 2 posts</b><br><small>Users · Trustpilot</small><br><span class="sent neg">Angry</span></td>
+<td class="tq">"Their AI can't cancel the event."<span class="pf">Trustpilot · 13 Jul</span></td>
+<td><span class="tr-up">New</span><br><small>First seen 13 Jul</small></td></tr>
+
+<tr><td><span class="pq">"It said my payment failed, then charged me twice"</span><span class="pgloss">Payments rejected across two cards and Paylode, then appearing as duplicates on the account · engineering</span></td>
+<td><b>1 post</b><br><small>User · Google Play</small><br><span class="sent neg">Angry</span></td>
+<td class="tq">"Now my account shows multiple, duplicate payments made!!!"<span class="pf">Google Play · 1 Jul</span></td>
+<td><span class="tr-up">Second month</span><br><small>First seen 22 Jun</small></td></tr>
+
+<tr><td><span class="pq">"The numbers stopped meaning what they used to"</span><span class="pgloss">About 85 legacy reach and impressions measures stopped updating on 15 June; Views counts differently, so year-on-year breaks · product</span></td>
+<td><b>1 post</b><br><small><b>Analyst only</b></small><br><span class="sent neu">Measured</span></td>
+<td class="tq">Views count differently from Reach, so historical comparisons break at that seam.<span class="pf">Agency changelog · 11 Jul</span></td>
+<td><span class="tr-up">New</span><br><small>Effective 15 Jun</small></td></tr>
+
+<tr><td><span class="pq">"Delivery now reads the creative to pick the audience"</span><span class="pgloss">Creative briefing has become a targeting decision; boost ships one creative unchanged to every placement · product</span></td>
+<td><b>1 post</b><br><small><b>Analyst only</b></small><br><span class="sent neu">Measured</span></td>
+<td class="tq">One asset style per goal no longer works now that creative is read as targeting.<span class="pf">Agency blog · 15 Jul</span></td>
+<td><span class="tr-flat">Building</span><br><small>Raised since Nov 2025</small></td></tr>
+
+<tr><td><span class="pq">"It grew my business, and there's still nobody to call"</span><span class="pgloss">Credits Facebook advertising with nearly doubling their business, while warning there is no service when something breaks · product</span></td>
+<td><b>1 post</b><br><small>User · Google Play</small><br><span class="sent mix">Mixed</span></td>
+<td class="tq">Says advertising on Facebook almost doubled their business, then warns there is zero customer service.<span class="pf">Google Play · 1 Jul</span></td>
+<td><span class="tr-flat">Ongoing</span><br><small>Both halves are chronic</small></td></tr>
+</tbody></table>
+<div class="callout"><b>What is not in this table matters as much as what is.</b> Nobody in July complained about targeting, reach, cost per result, fake engagement, or being unable to boost at all — the problems that dominated every earlier period. On nine posts that is not evidence they are fixed; it is one quiet month. Two of them are still live and carried into the recommendations below.</div>
+</div>
+
+<h2>What's new, what's stuck, what's fixed</h2>
+<div class="sec">
+<div class="split">
+<div class="temporal">
+<div class="tcol new"><h4>New in July</h4>
+<div class="it">A running boost that cannot be found or cancelled<span class="d">13 Jul · users · the month's most severe problem</span></div>
+<div class="it">About 85 legacy reach measures retired, replaced by Views<span class="d">Effective 15 Jun, surfaced 11 Jul · analyst only</span></div>
+</div>
+<div class="tcol long"><h4>Still unresolved</h4>
+<div class="it">Payments failing, then appearing as duplicates<span class="d">Second month running — first seen 22 Jun</span></div>
+<div class="it">No human reachable when money is involved<span class="d">Raised since Aug 2023 · three posts this month</span></div>
+<div class="it">"I paid, and all I got was likes"<span class="d">Since Feb 2014 · quiet in July, last seen 11 Jun</span></div>
+<div class="it">"It won't let me boost and won't tell me why"<span class="d">Since Jun 2016 · quiet in July, last seen Jan 2026</span></div>
+</div>
+<div class="tcol gone"><h4>Looks fixed</h4>
+<div class="it">"The engagement I paid for looked fake"<span class="d">Six posts between Aug 2014 and Jan 2019, nothing since across a wide sweep. Meta has said it tripled detection of suspected fake likes.</span></div>
+<div class="it"><b>Still worth checking.</b><span class="d">Silence can also mean the angriest people left. Check invalid-activity rates before calling it solved.</span></div>
+</div>
+</div>
+<div class="mixbox">
+<h4>The July mix</h4>
+<div class="den">Out of the 9 posts collected in July — not out of anyone's user base.</div>
+<div class="mixgroup">
+<div class="mixlab"><span>Product team can act on</span><span>6 of 9</span></div>
+<div class="bar"><i class="b-prod" style="width:67%"></i><i class="b-non" style="width:33%"></i></div>
+<div class="mixkey"><span><b>6</b> product</span><span><b>3</b> support</span></div>
+</div>
+<div class="mixgroup">
+<div class="mixlab"><span>Mood of the product posts</span><span>6</span></div>
+<div class="bar"><i class="b-neg" style="width:50%"></i><i class="b-neu" style="width:50%"></i></div>
+<div class="mixkey"><span><b>3</b> angry</span><span><b>3</b> measured</span></div>
+</div>
+<div class="mixgroup">
+<div class="mixlab"><span>Mood of the other 3</span><span>3</span></div>
+<div class="bar"><i class="b-neg" style="width:100%"></i></div>
+<div class="mixkey"><span><b>3</b> angry — all support</span></div>
+</div>
+<div class="mixnote"><b>A third of July is support</b>, which is high, and all three are angry. The measured half of the product posts is both analyst articles — strip those out and every user post this month is angry.</div>
+</div>
+</div>
+</div>
+
+<h2>By platform</h2>
+<div class="sec">
+<table class="plat">
+<thead><tr><th style="width:19%">Where</th><th>Posts</th><th>What surfaced here that didn't elsewhere</th></tr></thead>
+<tbody>
+<tr><td><b>Google Play</b></td><td><b>4</b><br><span class="sent neg">3 angry</span></td><td>Dated and version-anchored, so the most checkable evidence we get. The duplicate-payment failure, the hacked-and-disabled account, and the one genuinely positive post of the month — which still ends in a warning about support.</td></tr>
+<tr><td><b>Trustpilot</b></td><td><b>3</b><br><span class="sent neg">3 angry</span></td><td>The cancellation failure, in the sharpest language of the month, plus the 5-to-7-hour wait against an advertised 5-to-10 minutes. Trustpilot is where people go once something has already gone wrong, so it reads harsher by design, not by accident.</td></tr>
+<tr><td><b>Agency blogs</b><br><small>2 publishers</small></td><td><b>2</b><br><span class="sent neu">Measured</span></td><td>The retired measures and the creative-as-targeting shift. Useful, and written by people who benefit when clients move spend off the button. Not user feedback, and not counted as such.</td></tr>
+</tbody></table>
+<div class="switch"><b>Twenty-five of the 29 channels we swept returned nothing for July</b> — including the Apple App Store, Shopify reviews, TrustRadius, Capterra, TikTok and the Meta forums, all of which gave us material in earlier periods. Reddit, X, YouTube comments, Discord and G2 remain unreachable entirely. On a one-month period this is the single biggest limit on the report: <b>an empty channel means we did not get there, never that its users were content.</b></div>
+</div>
+
+<h2>How we compare</h2>
+<div class="sec">
+<div class="callout"><b>No competitor feedback was collected in July, so there is no comparison this month.</b> We are not repeating last period's table as though it were current. Two things still stand and are worth restating in a line each: the destination people name when they stop boosting is <b>Meta Ads Manager</b>, which is ours — so almost nobody here leaves Meta over Boost, they move deeper into Meta. And the two closest outside substitutes, <b>TikTok Promote</b> and <b>LinkedIn Boost</b>, both offer something Boost does not: a business outcome you can buy directly, rather than engagement only. Nobody said they were leaving in July, and no rival was named.</div>
+</div>
+
+<h2 class="pb">Recommendations</h2>
+<div class="sec">
+<div class="recintro">Four items. Two come from July's evidence; two are <b>carried forward</b> because they are still live and were simply quiet this month — they are labelled with the date they were first raised, not presented as new. July did not produce a fifth worth your engineering time, and we have not invented one.</div>
+
+<div class="reccard"><div class="rh"><div class="recnum2">1</div><div class="rt">Make a running boost cancellable from where it was created</div><span class="prio hi">Do first</span></div>
+<div class="prob">"I can't stop a boost that's already running."</div>
+<div class="rm">The month's only new user problem and its most severe. A boosted event does not appear in Ads Manager, so there is no surface on which to stop it; the assistant cannot find, pause or refund it; Business Suite refuses to edit it. The person is left watching spend continue. <b>Evidence: two posts, one source, this month, both from users.</b> Thin by volume, but the failure is specific and reproducible enough to act on without waiting for more.</div>
+<div class="moves">→ Route to prd-author</div></div>
+
+<div class="reccard"><div class="rh"><div class="recnum2">2</div><div class="rt">Trace the failed-payment-then-duplicate-charge path</div><span class="prio hi">Do first</span></div>
+<div class="prob">"It said my payment failed, then charged me twice."</div>
+<div class="rm">One post in July and one in June — the same shape both times: repeated rejections across multiple payment methods, then duplicate charges appearing on the account. Meta's help pages explain that boosts accrue and bill later at a threshold, which may account for some of what people are seeing, but <b>a correct explanation in documentation does not stop the bank alert.</b> Worth a trace now, while it is two cases rather than a pattern. <b>Evidence: two posts across two months, both users, both app stores.</b></div>
+<div class="moves">→ Route to prd-author</div></div>
+
+<div class="reccard"><div class="rh"><div class="recnum2">3</div><div class="rt">Say what the boost is optimising for, on the screen that takes the money</div><span class="prio med">Carried forward</span></div>
+<div class="prob">"I paid, and all I got was likes."</div>
+<div class="rm"><b>Carried forward — first raised February 2014, last seen 11 June 2026, ten posts all time.</b> Quiet in July, not resolved. The flow assigns an engagement goal without saying so, and sales and lead goals are not offered at all. A disclosure change rather than a rebuild: it adds no controls and does not touch the one-decision simplicity that is the button's whole advantage.</div>
+<div class="moves">→ Route to prd-author</div></div>
+
+<div class="reccard"><div class="rh"><div class="recnum2">4</div><div class="rt">Show the reason a boost was blocked, where it was blocked</div><span class="prio med">Carried forward</span></div>
+<div class="prob">"It won't let me boost and won't tell me why."</div>
+<div class="rm"><b>Carried forward — first raised June 2016, last seen January 2026, seven posts all time.</b> Quiet in July. The reasons already exist in Meta's published policies; the failure is that someone stopped mid-purchase has to go and find them. One documented case has a roof-replacement advert blocked under housing policy, which no buyer could have predicted. Cheap, and it is real user pain.</div>
+<div class="moves">→ Route to prd-author</div></div>
+
+<div class="callout"><b>Watching, not recommending yet.</b> Two analyst-only items from July: the roughly 85 legacy reach measures retired on 15 June, and delivery now reading creative to choose the audience. Both are real and both affect boost, but <b>no user has raised either</b> — so they belong in next month's read, not this month's build list. If August brings user posts about numbers falling, check the June measurement change before diagnosing a performance problem.</div>
+</div>
+
+<h2>Also worth a look — not for the product team</h2>
+<div class="sec">
+<div class="nonprod">
+<div class="nph"><b>Three of July's nine posts are somebody else's job, and all three are support</b> — a third of the month, from one team's queue. Shown in full; there are only three.</div>
+<div class="npitem"><div class="nptag">Support</div><div class="npbody">
+<div class="npt">There is no human behind the money</div>
+<div class="npm">Live chat on a Business Suite support case advertises a 5–10 minute response and was reported as taking 5–7 hours. An AI assistant gave only vague answers about charges and could not escalate. A hacked-then-disabled account had nothing in the help pages explaining how to recover it, no phone number, and no reply to several emails. <b>Every product billing failure in this report ends in this queue</b>, which is why the two should be read together rather than separately.</div>
+<div class="npo">Owner: Support · 3 of 3 non-product posts</div></div></div>
+</div>
+</div>
+
+<div class="nextsteps">
+<h4>Next steps</h4>
+<p><b>To address these, turn them into a PRD.</b> The four product recommendations are ready to route. The support items above are not included.</p>
+<div class="recactions"><span class="btn prd">Draft PRD</span></div>
+</div>
+
+<div class="metabar">
+<button class="metatoggle" id="metaBtn" aria-expanded="false" aria-controls="metaPanel" onclick="toggleMeta()"><span class="chev">&rsaquo;</span>Report data</button>
+<div id="metaPanel" hidden>
+<script type="application/json" id="report-metadata">
+{
+ "generated_by": "sprntly ai",
+ "skill": "public-feedback-report",
+ "skill_version": "2.4",
+ "output_format": "pdf",
+ "generated_at": "2026-08-20",
+ "company": "Meta \u2014 Facebook Boost Post",
+ "reporting_period": {
+  "start": "2026-07-01",
+  "end": "2026-07-31",
+  "label": "July 2026",
+  "type": "complete calendar month"
+ },
+ "prior_period": {
+  "start": "2026-06-01",
+  "end": "2026-06-30",
+  "posts": 15
+ },
+ "context_window": {
+  "start": "2024-09-01",
+  "end": "2026-08-20",
+  "months": 24,
+  "note": "older records collected and used only to judge whether a July problem is new or long-running"
+ },
+ "totals": {
+  "this_month": 9,
+  "product": 6,
+  "non_product": 3,
+  "sources_with_posts_this_month": 4,
+  "channels_swept": 29,
+  "switching_this_month": 0,
+  "context_records_held": 91,
+  "context_about_us": 84
+ },
+ "sentiment": {
+  "this_month": {
+   "product": {
+    "angry": 3,
+    "neutral": 3
+   },
+   "non_product": {
+    "angry": 3
+   }
+  },
+  "method": "assigned by hand per post; no sentiment model used"
+ },
+ "by_source_this_month": {
+  "Google Play": {
+   "posts": 4,
+   "angry": 3,
+   "neutral": 1,
+   "product": 2,
+   "non_product": 2,
+   "earliest": "2026-07-01",
+   "latest": "2026-07-01",
+   "caution": "dated and version-anchored; most reliable recency signal we have"
+  },
+  "Trustpilot": {
+   "posts": 3,
+   "angry": 3,
+   "product": 2,
+   "non_product": 1,
+   "earliest": "2026-07-13",
+   "latest": "2026-07-13",
+   "caution": "where people go when something has already gone wrong; reads harsher by design"
+  },
+  "Agency blog (AdMake AI)": {
+   "posts": 1,
+   "neutral": 1,
+   "product": 1,
+   "non_product": 0,
+   "earliest": "2026-07-11",
+   "latest": "2026-07-11",
+   "caution": "agency content, not user feedback"
+  },
+  "Agency blog (Cordelia Labs)": {
+   "posts": 1,
+   "neutral": 1,
+   "product": 1,
+   "non_product": 0,
+   "earliest": "2026-07-15",
+   "latest": "2026-07-15",
+   "caution": "agency content, not user feedback"
+  }
+ },
+ "channels_with_nothing_this_month": [
+  "Apple App Store",
+  "Shopify app reviews",
+  "TrustRadius",
+  "Capterra",
+  "JustAnswer",
+  "TikTok",
+  "Meta Community Forums",
+  "Hacker News",
+  "Medium",
+  "Reddit",
+  "X",
+  "Facebook Groups",
+  "YouTube comments",
+  "Discord",
+  "G2",
+  "Gartner Peer Insights"
+ ],
+ "by_month": {
+  "2024-09": 0,
+  "2024-10": 0,
+  "2024-11": 0,
+  "2024-12": 0,
+  "2025-01": 0,
+  "2025-02": 2,
+  "2025-03": 2,
+  "2025-04": 0,
+  "2025-05": 0,
+  "2025-06": 0,
+  "2025-07": 2,
+  "2025-08": 0,
+  "2025-09": 2,
+  "2025-10": 0,
+  "2025-11": 2,
+  "2025-12": 1,
+  "2026-01": 1,
+  "2026-02": 1,
+  "2026-03": 5,
+  "2026-04": 2,
+  "2026-05": 11,
+  "2026-06": 15,
+  "2026-07": 9,
+  "2026-08": 7
+ },
+ "themes_this_month": {
+  "cannot_cancel": {
+   "label": "I can't stop a boost that's already running",
+   "posts": 2,
+   "sources": 1,
+   "record_ids": [
+    74,
+    75
+   ],
+   "first_seen": "2026-07-13",
+   "status": "new",
+   "category": "product",
+   "owner": "product"
+  },
+  "duplicate_payments": {
+   "label": "It said my payment failed, then charged me twice",
+   "posts": 1,
+   "sources": 1,
+   "record_ids": [
+    70
+   ],
+   "first_seen": "2026-06-22",
+   "status": "continuing",
+   "category": "product",
+   "owner": "engineering",
+   "note": "first seen in June; a second instance this month"
+  },
+  "support_dead_end": {
+   "label": "There's nobody to reach when it's my money",
+   "posts": 3,
+   "sources": 2,
+   "record_ids": [
+    71,
+    72,
+    76
+   ],
+   "first_seen": "2023-08-20",
+   "status": "long_standing",
+   "category": "non_product",
+   "owner": "support"
+  },
+  "measurement_break": {
+   "label": "The numbers stopped meaning what they used to",
+   "posts": 1,
+   "sources": 1,
+   "record_ids": [
+    36
+   ],
+   "first_seen": "2026-07-11",
+   "status": "new",
+   "category": "product",
+   "owner": "product",
+   "raised_by": "analyst only"
+  },
+  "creative_as_targeting": {
+   "label": "Delivery now reads the creative to pick the audience",
+   "posts": 1,
+   "sources": 1,
+   "record_ids": [
+    53
+   ],
+   "first_seen": "2026-07-15",
+   "status": "new",
+   "category": "product",
+   "owner": "product",
+   "raised_by": "analyst only"
+  },
+  "praise_with_a_caveat": {
+   "label": "It grew my business, and there's still nobody to call",
+   "posts": 1,
+   "sources": 1,
+   "record_ids": [
+    73
+   ],
+   "first_seen": "2026-07-01",
+   "status": "live",
+   "category": "product",
+   "owner": "product"
+  }
+ },
+ "carried_forward": [
+  {
+   "label": "I paid, and all I got was likes",
+   "first_raised": "2014-02-02",
+   "posts_all_time": 10,
+   "status": "still live",
+   "last_seen": "2026-06-11"
+  },
+  {
+   "label": "It won't let me boost and won't tell me why",
+   "first_raised": "2016-06-01",
+   "posts_all_time": 7,
+   "status": "still live",
+   "last_seen": "2026-01-01"
+  }
+ ],
+ "resolved": [
+  {
+   "label": "The engagement I paid for looked fake",
+   "stopped_around": "2019-01",
+   "evidence": "six posts between Aug 2014 and Jan 2019, nothing since across a wide channel sweep",
+   "confidence": "moderate \u2014 silence may also mean the affected population left"
+  }
+ ],
+ "switching": {
+  "count_this_month": 0,
+  "count_all_time": 3,
+  "rule": "counted only on explicit statements; frustration never read as intent to leave",
+  "note": "nobody said they were leaving in July; the three all-time cases are from 2014, 2016 and Feb 2025, and none named a rival"
+ },
+ "competitors": {
+  "selected": [
+   "TikTok Promote",
+   "LinkedIn Boost"
+  ],
+  "posts_this_month": 0,
+  "selection_basis": "closest one-button promote substitutes on rival platforms",
+  "excluded": {
+   "Meta Ads Manager": "owned by Meta \u2014 and it is the most-named destination people move to, which is itself a finding"
+  },
+  "note": "no competitor feedback was collected in July; the comparison table is omitted rather than repeated from stale data"
+ },
+ "external_ratings": {
+  "apple_app_store_meta_business_suite": {
+   "value": 4.6,
+   "ratings": 49000,
+   "as_of": "2026",
+   "conflict": "star rating contradicts the written reviews on the same listing"
+  },
+  "note": "Boost Post has no standalone listing anywhere; all ratings are for the parent or companion product"
+ },
+ "limits": {
+  "collection_method": "open-web retrieval, not platform API access",
+  "denominator_rule": "all counts are over the 9 posts collected in July, never over the user base",
+  "small_month_caution": "nine posts is a small month; rank language is used instead of percentages and no trend claim rests on July volume alone",
+  "coverage_gap": "25 of the 29 channels swept returned nothing for July; that is collection reach, not silence",
+  "author_mix": "7 of the 9 July posts were written by people who had boosted; 2 by agencies",
+  "sentiment_method": "assigned by hand per post; no sentiment model used",
+  "verbatim_rule": "one short quote per source document; other posts summarised",
+  "subject_caution": "some Google Play records concern Business Suite generally and are not confirmed to involve Boost Post"
+ },
+ "coverage_note": {
+  "how_to_read": "Every count is how many posts we found, never how many people have the problem. Public posting is self-selected toward people with a grievance.",
+  "period_change": "This run is the first on a monthly period. Earlier runs covered 24 months at once, so their totals are not comparable to this one.",
+  "still_unreached": "Reddit, X, Facebook Groups, YouTube comments, Discord, G2, individual Gartner reviews",
+  "quotes": "real, dated and attributed; one short quote per source document, everything else summarised in our words; nothing invented"
+ },
+ "cadence": "monthly",
+ "next_run": "2026-09-01 for August 2026"
+}
+</script>
+</div>
+</div>
+</div>
+<script>
+function toggleMeta(){var b=document.getElementById("metaBtn"),p=document.getElementById("metaPanel");var open=b.getAttribute("aria-expanded")==="true";b.setAttribute("aria-expanded",String(!open));p.hidden=open;}
+</script>
+</body></html>

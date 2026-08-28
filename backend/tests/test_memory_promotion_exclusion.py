@@ -91,7 +91,7 @@ def test_self_capability_excerpt_not_promoted_classifier_none(
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "none"
     fake_promote_llm["body"] = ""
@@ -116,7 +116,7 @@ def test_self_capability_body_blocked_despite_classifier_new(
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "new"
     fake_promote_llm["body"] = (
@@ -166,7 +166,7 @@ def test_genuine_fact_still_promotes(isolated_settings, monkeypatch, fake_promot
 
     from app.db import conversations as conversations_db
 
-    conv = conversations_db.create_group_chat(project["id"], ctx.user_id)
+    conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
 
     fake_promote_llm["action"] = "new"
     fake_promote_llm["body"] = "The team locked the API rate limit at 100 req/min per tenant."

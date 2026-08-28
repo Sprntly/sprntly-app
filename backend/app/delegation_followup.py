@@ -42,6 +42,7 @@ from app.delegation_cadence import (
     should_escalate,
 )
 from app.delegation_followup_email import send_followup_email
+from app.delegation_status_ingest import notify_requester_task_completed
 from app.llm import DEFAULT_MODEL, call_json
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
@@ -256,6 +257,10 @@ def _process_one(row: dict, *, now: datetime, tz_map: dict[str, str], summary: d
         delegation_events_db.record_event(
             delegation_id=delegation_id, event="completed", actor_user_id=assigner_user_id,
         )
+        notify_requester_task_completed(
+            project_id, delegation_id,
+            assignee_user_id=assignee_user_id, task_summary=task_summary,
+        )
         delegation_followups_db.upsert_followup(delegation_id, pending_done_since=None)
         summary["finalized"] += 1
         return
@@ -428,26 +433,15 @@ def run_task_followup_cycle() -> dict:
     """One pass of the autonomous task follow-up sweep. Per-task error
     isolation; safe to call repeatedly (idempotent send-ledger). Gated at
     the scheduler level by `settings.task_followup_enabled` +
-    `settings.scheduler_enabled`; this function additionally re-checks the
-    request-time Projects gate itself (`routes.projects._projects_enabled`)
-    so a dark-Projects environment makes zero LLM calls even if a stray
-    call reaches this function directly.
+    `settings.scheduler_enabled`. (Projects itself is GA — there is no
+    longer a request-time Projects master switch to re-check here.)
 
     Returns a small summary dict for logging + tests:
     `{due, finalized, pinged, rescheduled, escalated, emailed, skipped}`."""
-    # Imported here (not at module load) so the test config reload +
-    # request-time env read are in effect, mirroring every other cycle
-    # wrapper in this codebase.
-    from app.routes.projects import _projects_enabled
-
     summary = {
         "due": 0, "finalized": 0, "pinged": 0, "rescheduled": 0,
         "escalated": 0, "emailed": 0, "skipped": 0,
     }
-
-    if not _projects_enabled():
-        logger.info("task-followup: Projects disabled — skipping cycle")
-        return summary
 
     now = datetime.now(timezone.utc)
     try:

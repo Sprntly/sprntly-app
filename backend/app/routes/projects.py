@@ -11,21 +11,10 @@ and does not call `require_owned_dataset`.
 Scope boundary: memory synthesis + promotion are Phase 2. Artifact fan-out
 (GET/POST `.../artifacts`) reuses `db/artifacts.py`'s existing five-table
 fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
-
-Group-chat turn endpoints (build spec §5.3, AD-P2/AD-P4/AD-P10): a
-human-to-human group turn is a cheap DB write — no LLM call, UNLESS it
-clears the cheap pre-filter in `project_group_gate` and the should-respond
-classifier decides the turn is clearly for the agent. Either an explicit
-`@Sprntly` mention (deterministic, no classifier call) OR a smart-
-interjection `respond=true` decision triggers ONE best-effort LLM call
-(AD-P7) producing an assistant turn. There is no user-facing toggle for
-this — the agent decides (v3.4 retired the Auto/mention-only setting).
 """
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
 import sys
 import uuid
 from typing import Literal
@@ -39,7 +28,6 @@ from app.auth import WorkspaceContext, require_workspace
 from app.chat_intent import resolve_chat_intent
 from app.db import asks as asks_db
 from app.db.asks import start_ask_job, touch_ask_job
-from app.db import conversation_read_cursors as read_cursors_db
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import project_delegations as project_delegations_db
@@ -59,11 +47,11 @@ from app import project_task_execution
 from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.realtime import publish_broadcast
-from app.project_group_realtime import publish_group_turn_created
 from app.project_artifact_capture import save_chat_output_as_report
 from app.project_from_prd import find_existing_prd_auto_project
+from app.project_origin_seed import seed_project_origin_memory
 from app.project_title import generate_project_title
-from app.delegation_status_ingest import maybe_ingest_status
+from app.delegation_status_ingest import maybe_ingest_status, notify_requester_task_completed
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
@@ -72,44 +60,6 @@ from app.routes.chat import _dataset_for
 from app.surface_scope import PROJECT_TOOL_NUDGE, Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
-
-# Deterministic trigger — checked FIRST, unconditionally, no classifier
-# call (AD-P10). Word-boundary so "@Sprntly" and "@sprntly" both match but
-# a longer handle sharing the prefix would not. A turn that does NOT match
-# this falls through to the smart-interjection gate (`project_group_gate.
-# should_respond`) below.
-_MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
-
-# How many of the most recent group turns are folded into the agent's
-# context on a mention reply — bounded so a long-running group chat can't
-# grow the prompt unboundedly (mirrors the per-turn history clamp posture
-# `_load_history`/`app.prompt_history` already apply to individual chats).
-_GROUP_CONTEXT_TURNS = 30
-
-# The exact `list_group_turns` read-DTO key set — a hard whitelist applied
-# before every `turn.created` broadcast (AD-P21 no-schema-coupling), so an
-# internal `conversation_turns` column (e.g. `attachments`) can never ride
-# along on the wire even if a future column is added to the table.
-_GROUP_TURN_DTO_KEYS = (
-    "id", "role", "content", "author_user_id", "author_name",
-    "author_job_role", "created_at",
-    # The FULL structured reply on an assistant turn (answer/key_points/
-    # citations + the classify envelope's card data) — on the broadcast too,
-    # so a realtime-delivered agent turn renders the same cards a reload does.
-    "reply",
-    # Execution-run status, attached by `list_group_turns` onto the human turn
-    # whose id == the run's source_turn_id (mapped to the FE AgentRunStatus
-    # vocabulary at the DTO edge). On the broadcast too, so the realtime shape
-    # matches the poll read.
-    "run_status", "error_class",
-)
-
-# Strong refs to in-flight background group-reply tasks — mirrors
-# `routes.ask._inflight_tasks` (`ask.py:43`). asyncio holds only a WEAK
-# reference to a bare `create_task` result, so without this the task can be
-# garbage-collected mid-run. The done-callback discards each task on
-# completion.
-_group_reply_tasks: set[asyncio.Task] = set()
 
 
 def _is_unique_violation(exc: Exception) -> bool:
@@ -147,6 +97,15 @@ class CreateProjectRequest(BaseModel):
     # from PRD" tab) — the PRD being forked, used for the first-write-wins
     # dedup check below. Ignored for every other origin.
     prd_id: int | None = Field(default=None, ge=1)
+    # Optional grounding text for the origin "why" memory seed: the
+    # creator's first message/instructions for a manual project, or an
+    # excerpt of the seeding artifact for an artifact-origin project.
+    # Ignored for prd_auto (that origin seeds via the chat-time fork hook,
+    # `app/project_from_prd.py`, unchanged). Not yet sent by the create
+    # modal — falls back to a name-only deterministic brief
+    # (`project_origin_seed._fallback_brief_generic`) until a future ticket
+    # wires the field into the create-modal UI.
+    seed_text: str | None = Field(default=None, max_length=4000)
 
 
 class AddMemberRequest(BaseModel):
@@ -265,23 +224,44 @@ def create_project(
         origin=payload.origin,
     )
     logger.info("project_created project_id=%s", project["id"])
+    if payload.origin != "prd_auto" and payload.seed_text:
+        # Seed the new project's memory with a grounded "why" — the
+        # prd_auto origin already gets this from the chat-time fork hook
+        # (`app/project_from_prd.py`) when it runs; a project created here
+        # with prd_auto (the create-modal's own "Auto · from PRD" tab, a
+        # DIFFERENT path from that hook) has no conversation to seed from,
+        # so it is left as-is rather than seeding a thin, conversation-less
+        # brief under the same origin label.
+        #
+        # Gated on `payload.seed_text` being present: the create modal does
+        # not send it yet (a future ticket wires the field into the UI), so
+        # this call is inert today — no side effect on the many existing
+        # tests/flows that create a manual/artifact project with no
+        # instructions. Once a caller DOES send `seed_text`, the seed's own
+        # `_fallback_brief_generic` floor still applies inside
+        # `seed_project_origin_memory` for the (rarer) case where the text
+        # turns out to be pure whitespace. `seed_project_origin_memory` is
+        # best-effort and never raises (AD-P7) — no extra try/except needed
+        # at this call site.
+        seed_project_origin_memory(
+            project_id=project["id"],
+            origin=payload.origin,
+            project_name=name,
+            seed_text=payload.seed_text,
+        )
     return project
 
 
 @router.get("/{project_id}")
 def get_project(project_id: int, ctx: WorkspaceContext = Depends(require_workspace)):
-    """Project detail: the row, human members (+ prepended virtual agent
-    member, AD-P6), and the group-chat id (or null when no group chat
-    has been created for this project yet). Membership-gated (403 for a
-    same-tenant non-member) — the virtual agent member is irrelevant to
-    this human-caller gate."""
+    """Project detail: the row and human members (+ prepended virtual agent
+    member, AD-P6). Membership-gated (403 for a same-tenant non-member) —
+    the virtual agent member is irrelevant to this human-caller gate."""
     project = _require_project_member(project_id, ctx)
     members = projects_db.list_members(project_id)
-    group_chat_id = projects_db.get_group_chat_id(project_id)
     return {
         **project,
         "members": [dict(_AGENT_MEMBER), *members],
-        "group_chat_id": group_chat_id,
     }
 
 
@@ -725,7 +705,7 @@ def project_chat_edit(
     body: ProjectChatEditIn,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
-    """The private (and group) project chat's PRD-edit write path — applies
+    """The private project chat's PRD-edit write path — applies
     directly through the SAME `apply_chat_edit_scoped` the main chat's
     `POST /v1/prd/{id}/chat-edit` calls, no confirm step.
 
@@ -999,11 +979,11 @@ async def delete_memory(
     return {"deleted": True}
 
 
-# ── Group chat ────────────────────────────────────────────────────────
-# One `kind='group'` conversation per project, open to every project member
-# (AD-P2 — additive, never touches the per-user chat path). Every route here
-# is membership-gated via `_require_project_member` (AD-P11 WAVE INVARIANT):
-# a same-tenant non-member gets 403, a foreign-tenant project 404s.
+# ── Individual project chat ─────────────────────────────────────────────
+# One `kind='individual'` conversation per (project, user) — "My chat with
+# Sprntly". Every route here is membership-gated via
+# `_require_project_member` (AD-P11 WAVE INVARIANT): a same-tenant
+# non-member gets 403, a foreign-tenant project 404s.
 
 
 @router.post("/{project_id}/individual")
@@ -1012,8 +992,7 @@ def create_individual_chat_route(
 ):
     """Get-or-create THIS caller's durable individual project chat
     (`kind='individual'`, scoped project_id+user_id) and return it.
-    Idempotent per (project, caller) — mirrors `POST /{project_id}/group`
-    one level down (per-user rather than per-project).
+    Idempotent per (project, caller).
 
     This is what gives `ProjectIndividualChat.tsx` ("My chat with
     Sprntly") a real, reusable `conversation_id` to thread into `/v1/ask`:
@@ -1029,170 +1008,6 @@ def create_individual_chat_route(
         project_id, conversation["id"],
     )
     return conversation
-
-
-@router.post("/{project_id}/group")
-def create_group_chat_route(
-    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
-):
-    """Get-or-create the project's ONE shared group chat (`kind='group'`,
-    scoped project_id) and return it. Idempotent per project (mirrors
-    `POST /{project_id}/individual` one level up — per-project rather than
-    per-user), with the schema's partial-unique index as the concurrency
-    backstop inside `create_group_chat`.
-
-    This is what gives the rebuilt group chat surface a real, reusable
-    `conversation_id` to thread into `/v1/ask` — the group chat is main chat
-    on this shared, project-bound conversation row (no project context sent;
-    the deleted project-scoped ask branch is not used). The
-    `POST /{project_id}/individual` docstring's reference to this route is
-    restored here after the project-chat rebuild removed it."""
-    _require_project_member(project_id, ctx)
-    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
-    logger.info(
-        "group_project_chat_created project_id=%s conversation_id=%s",
-        project_id, conversation["id"],
-    )
-    return conversation
-
-
-class PostGroupTurnRequest(BaseModel):
-    """A human turn posted to the shared group chat. Author is resolved
-    SERVER-side from `ctx.user_id` (never trusted from the client) and stamped
-    onto the row so `list_group_turns` can attribute it; `attachments` are the
-    resolved attachment texts riding the send. `client_message_id` is accepted
-    for wire parity with the individual surface (a future double-submit
-    backstop); it is NOT yet a persisted idempotency key on this route — the
-    agent reply here comes from the shared `/v1/ask` mount, not a server
-    scheduler, so no `ask_jobs` run is minted at post time (mount-not-
-    scheduler)."""
-
-    content: str = Field(min_length=1)
-    client_message_id: str | None = None
-    attachments: list | None = None
-
-
-# A people-mention token in message content: `@` + a name/word run. Mirrors the
-# frontend `mentions.ts` parse (`parseMentionChips`), including EXCLUDING the
-# agent token `@sprntly` (case-insensitive) — that is the agent path, never a
-# people-notify. A message can carry several tokens (multiple mentions).
-_MENTION_TOKEN_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9._-]*)")
-_AGENT_MENTION_WORD = "sprntly"
-
-
-def _parse_mention_tokens(content: str) -> list[str]:
-    """The distinct people-mention tokens in `content`, agent token excluded,
-    lowercased. Empty when the message tags no one (the common case)."""
-    seen: list[str] = []
-    for m in _MENTION_TOKEN_RE.finditer(content or ""):
-        tok = m.group(1).lower()
-        if tok == _AGENT_MENTION_WORD or tok in seen:
-            continue
-        seen.append(tok)
-    return seen
-
-
-def _notify_content_mentions(
-    project_id: int, project_name: str | None, content: str, actor_user_id: str
-) -> None:
-    """Server-authoritative mention notify: for every `@member` token in the
-    sent `content`, publish a private `mention.received` signal to that
-    member's own per-user channel (reusing `_publish_mention_signal`). A token
-    resolves to a member when it casefold-matches ANY whitespace word of that
-    member's display name (so `@Ada` reaches "Ada Lovelace"; the chip renders
-    only the first word, but either word notifies). The actor never notifies
-    themselves. Best-effort throughout (AD-P22): the turn has already
-    persisted, so a resolve/publish hiccup can never fail the send — an
-    unresolved token is simply plain text with no signal."""
-    tokens = _parse_mention_tokens(content)
-    if not tokens:
-        return
-    try:
-        members = projects_db.list_members(project_id)
-    except Exception:  # noqa: BLE001 — best-effort; a directory hiccup drops the notify only
-        logger.warning("mention_notify_member_read_failed project_id=%s", project_id)
-        return
-    actor_name = _tag_actor_name(actor_user_id)
-    notified: set[str] = set()
-    token_set = set(tokens)
-    for member in members:
-        uid = member.get("user_id")
-        if not uid or uid == actor_user_id or uid in notified:
-            continue
-        name_words = {w.lower() for w in (member.get("name") or "").split() if w}
-        if token_set & name_words:
-            notified.add(uid)
-            project_delegation._publish_mention_signal(
-                project_id, uid, actor_name, project_name
-            )
-
-
-@router.get("/{project_id}/group/turns")
-def list_group_turns_route(
-    project_id: int,
-    since: int | None = None,
-    ctx: WorkspaceContext = Depends(require_workspace),
-):
-    """Load/poll read of the shared group chat: turns after `since` (a turn-id
-    cursor), ascending, each carrying `author_name`/`author_job_role` (the
-    agent's own turns carry `author_user_id: null` and render as Sprntly).
-    Empty (not 404) when the group chat hasn't been created yet — a legitimate
-    read state, not an error (mirrors `list_individual_turns_route`)."""
-    _require_project_member(project_id, ctx)
-    conversation = conversations_db.get_group_chat(project_id)
-    if not conversation:
-        return {"turns": []}
-    return {"turns": conversations_db.list_group_turns(conversation["id"], since=since)}
-
-
-@router.post("/{project_id}/group/turns")
-def post_group_turn_route(
-    project_id: int,
-    payload: PostGroupTurnRequest,
-    ctx: WorkspaceContext = Depends(require_workspace),
-):
-    """Persist ONE human turn into the shared group chat (create-if-absent) and
-    broadcast it so every member sees it live. Author is stamped server-side
-    from `ctx.user_id` — this is what gives a multi-author group thread its
-    attribution, and what lets a non-owner member post at all (the generic
-    owner-only `/v1/conversations/{id}/turns` write cannot).
-
-    Mount-not-scheduler: this route does NOT run the interjection gate or
-    schedule an agent reply. The @Sprntly reply comes from the shared `/v1/ask`
-    mount the surface already drives; its answer is persisted + broadcast at
-    ask completion (`ask_job_runner`), keyed on the same `context_source`."""
-    project = _require_project_member(project_id, ctx)
-    conversation = conversations_db.create_group_chat(project_id, ctx.user_id)
-    # `client_message_id` makes this idempotent (inside `post_group_turn`): a
-    # double-submit with the same key replays the original turn rather than
-    # posting a second one. The returned DTO carries the key back so the poster
-    # can dedup its own realtime echo.
-    turn = conversations_db.post_group_turn(
-        conversation["id"],
-        ctx.user_id,
-        payload.content,
-        attachments=payload.attachments,
-        client_message_id=payload.client_message_id,
-    )
-    logger.info(
-        "group_turn_posted project_id=%s conversation_id=%s turn_id=%s",
-        project_id, conversation["id"], turn.get("id") if turn else None,
-    )
-    publish_group_turn_created(project_id, conversation["id"], turn)
-    # Server-authoritative people-mention notify: any `@member` in the content
-    # privately signals that member. Best-effort, after the turn already
-    # persisted + broadcast — never blocks or fails the send. @Sprntly excluded.
-    _notify_content_mentions(project_id, project.get("name"), payload.content, ctx.user_id)
-    # Return the author-enriched DTO (not the raw row) so the poster can
-    # reconcile its optimistic turn to the durable server id/attribution.
-    if turn:
-        shaped = conversations_db.list_group_turns(
-            conversation["id"], since=turn["id"] - 1
-        )
-        dto = next((t for t in shaped if t["id"] == turn["id"]), None)
-        if dto is not None:
-            return dto
-    return turn
 
 
 class PostIndividualTurnsRequest(BaseModel):
@@ -1249,8 +1064,8 @@ def list_individual_turns_route(
     client never supplies a `conversation_id` (defense in depth — the reader
     itself re-checks ownership too, `list_individual_turns`'s own-conversation
     gate). Empty (not 404) when the caller hasn't opened this chat yet —
-    nothing has been posted, which is a legitimate read state, not an error,
-    mirroring `list_group_turns_route`'s own not-created posture."""
+    nothing has been posted, which is a legitimate read state, not an
+    error."""
     _require_project_member(project_id, ctx)
     conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
     if not conversation:
@@ -1260,50 +1075,6 @@ def list_individual_turns_route(
             conversation["id"], ctx.user_id, since=since
         )
     }
-
-
-@router.get("/{project_id}/individual/unread")
-def get_individual_unread_route(
-    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
-):
-    """Derived unread signal for the CALLER'S OWN individual project chat
-    (AD-P3/AD-P20 — inputs-only + derive-at-read; no stored `unread`
-    boolean anywhere). Resolves `ctx.user_id`'s own conversation
-    server-side; the client never supplies a `conversation_id`/`user_id` —
-    same own-conversation posture as `list_individual_turns_route` one
-    handler up. No conversation yet (caller hasn't opened this chat) is a
-    legitimate, unread-false read state, not an error."""
-    _require_project_member(project_id, ctx)
-    conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
-    if not conversation:
-        return {"unread": False, "latest_turn_id": None, "last_read_turn_id": 0}
-    conv_id = conversation["id"]
-    return {
-        "unread": read_cursors_db.unread_for(conv_id, ctx.user_id),
-        "latest_turn_id": read_cursors_db.latest_individual_turn_id(conv_id),
-        "last_read_turn_id": read_cursors_db.get_cursor(conv_id, ctx.user_id),
-    }
-
-
-@router.post("/{project_id}/individual/read")
-def mark_individual_read_route(
-    project_id: int, ctx: WorkspaceContext = Depends(require_workspace)
-):
-    """Advance the CALLER'S OWN read cursor to the latest turn in their own
-    individual project chat — clears the rail badge. Advance-only
-    (`set_cursor`'s own `max(existing, new)` clamp, AC5): calling this
-    twice, or calling it when nothing new has arrived, is a no-op past the
-    first advance. No conversation yet → nothing to advance; returns the
-    same zero-state shape as the unread route above rather than 404ing (not
-    having opened the chat yet is not an error)."""
-    _require_project_member(project_id, ctx)
-    conversation = conversations_db.get_individual_project_chat(project_id, ctx.user_id)
-    if not conversation:
-        return {"last_read_turn_id": 0}
-    conv_id = conversation["id"]
-    latest = read_cursors_db.latest_individual_turn_id(conv_id) or 0
-    updated = read_cursors_db.set_cursor(conv_id, ctx.user_id, latest)
-    return {"last_read_turn_id": updated["last_read_turn_id"]}
 
 
 def _ledger_row_dto(row: dict, members: dict[str, str | None], view: str) -> dict:
@@ -1374,6 +1145,22 @@ def emit_delegation_event_route(
         "delegation_event_emitted delegation_id=%s event=%s actor=%s",
         delegation_id, payload.event, ctx.user_id,
     )  # ids only, never note text
+    if payload.event == "completed":
+        # Best-effort, non-fatal (mirrors the publish block's own posture
+        # immediately below): a `status_dto` read failure here must not turn
+        # an already-durably-recorded completion into a client-visible 500.
+        try:
+            dto = delegation_events_db.status_dto(delegation_id)
+            notify_requester_task_completed(
+                project_id, delegation_id,
+                assignee_user_id=deleg["assignee_user_id"],
+                task_summary=(dto or {}).get("task_summary"),
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort, see comment above
+            logger.warning(
+                "delegation_completion_notice_prep_failed delegation_id=%s error_class=%s",
+                delegation_id, type(exc).__name__,
+            )
     # Live dual per-user publish (AD-P30/AD-P22) — best-effort: the event is
     # already recorded, so a publish failure never fails the emit and the
     # response body is identical whether the publish succeeds or not. The DTO
@@ -1424,8 +1211,8 @@ def delegation_counts_route(
     project_id: int,
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
-    """Open-only ledger counts for the project rail card — the same derive-
-    and-count shape as `individual/unread`. `reopened` counts as open;
+    """Open-only ledger counts for the project rail card — a derived,
+    never-stored count. `reopened` counts as open;
     `completed`/`declined`/`cancelled` do not."""
     _require_project_member(project_id, ctx)
     assigned_to_me = delegation_events_db.list_status_for_assignee(project_id, ctx.user_id)

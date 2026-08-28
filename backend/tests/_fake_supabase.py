@@ -200,6 +200,7 @@ class _Query:
         self._values: list[dict] = []
         self._patch: dict = {}
         self._on_conflict: str | None = None
+        self._ignore_duplicates: bool = False
         self._count_mode: str | None = None
 
     # ── verbs ──────────────────────────────────────────────────────
@@ -215,10 +216,21 @@ class _Query:
         self._values = [row_or_rows] if isinstance(row_or_rows, dict) else list(row_or_rows)
         return self
 
-    def upsert(self, row_or_rows, on_conflict: str | None = None) -> "_Query":
+    def upsert(
+        self,
+        row_or_rows,
+        on_conflict: str | None = None,
+        ignore_duplicates: bool = False,
+    ) -> "_Query":
         self._kind = "upsert"
         self._values = [row_or_rows] if isinstance(row_or_rows, dict) else list(row_or_rows)
         self._on_conflict = on_conflict
+        # supabase-py's `ignore_duplicates=True` is ON CONFLICT DO NOTHING —
+        # the existing row wins and keeps every column it already had. Without
+        # it the branch below builds a DO UPDATE and a repeat write silently
+        # overwrites columns the caller meant to preserve (whitelist signups
+        # keep their ORIGINAL created_at this way).
+        self._ignore_duplicates = ignore_duplicates
         return self
 
     def update(self, patch: dict) -> "_Query":
@@ -438,7 +450,7 @@ class _Query:
                     )
                     conflict_sql = (
                         f" ON CONFLICT({self._on_conflict}) DO UPDATE SET {update_assignments}"
-                        if update_assignments else
+                        if update_assignments and not self._ignore_duplicates else
                         f" ON CONFLICT({self._on_conflict}) DO NOTHING"
                     )
                 else:

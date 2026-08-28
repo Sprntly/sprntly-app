@@ -26,7 +26,7 @@
  * AttachmentViewer + report-by-title opens have no project-surface sink yet.
  */
 
-import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
+import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react"
 // Single source of truth for the busy-send hint copy — main defines it beside
 // its own composer. Reused (not duplicated) so the two surfaces stay verbatim.
 import { BUSY_ENTER_HINT_LEAD, BUSY_ENTER_HINT_TAIL } from "../ChatScreen"
@@ -38,7 +38,7 @@ import { createChatPersistence, replyToText } from "../../../../lib/chatPersiste
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
   type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
-  type ChatArtifactItem, type SlackShareTargetRef, type GroupTurn,
+  type ChatArtifactItem, type SlackShareTargetRef,
 } from "../../../../lib/api"
 import { type PopupAnswer } from "../../../shared/QuestionPopup"
 import { DRAFT_MIN_CHARS } from "../../../shared/ChatComposer"
@@ -51,6 +51,7 @@ import { useAssignCompletion } from "../../../shared/chat-shell/conversation/use
 import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
 import { runClarifiedGeneration } from "../../../shared/chat-shell/conversation/clarifiedGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
+import { GROUNDED_PROGRESS_ENABLED } from "../../../../lib/friendlyPhase"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
@@ -62,13 +63,7 @@ import { useNextPrompts, type NextPromptsAdapter } from "../../../shared/chat-sh
 import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
-import { personAvatarStyle } from "./avatarColor"
-import { MentionBubble } from "./MentionBubble"
 import { GreetingTurnBody } from "./GreetingTurnBody"
-import { mentionsAgent, stripAgentMention } from "./mentions"
-import { AGENT_NAME } from "../../../../lib/agent"
-import { useMentionPicker, type ComposerDraftApi } from "./useMentionPicker"
-import { useRealtimeChannel } from "./useRealtimeChannel"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
 import { useConversationGeneration } from "../useConversationGeneration"
@@ -77,8 +72,6 @@ import type { ThreadTurn, ChatTab } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
 import type { MapMainTurnsDeps } from "../../../shared/chat-shell/types"
 import { MORE_MARKER } from "../../../shared/chat-shell/types"
-
-export type ProjectChatSurface = "individual" | "group"
 
 /** The attachment overlay's state shape — main keeps this on ChatScreen; the
  *  project surface owns its own copy and hands it to the host to render the
@@ -92,11 +85,6 @@ export type ViewerAttachment = { name: string; content: string; key?: string | n
 export type ProjectConversationProps = ConversationViewProps & {
   viewerAttachment: ViewerAttachment | null
   setViewerAttachment: (a: ViewerAttachment | null) => void
-  /** The group @-mention picker dropdown (null when no `@…` token is active or
-   *  on the individual surface). The host renders it in a project-local overlay
-   *  anchored to the composer — no shared-composer touch. */
-  mentionPickerNode: ReactNode
-  mentionPickerOpen: boolean
 }
 
 type PendingClarify = { task: string; sourceDocs?: { name: string; content: string }[]; turnId: string }
@@ -118,8 +106,8 @@ const CLARIFY_SKIP_RE = /^\s*(generate( now)?|go|proceed|do it|just do it|skip|t
 // const here because main's is module-private).
 const COPIED_HINT_MS = 1600
 
-function surfaceKey(projectId: number | string, surface: ProjectChatSurface): string {
-  return `project-${projectId}-${surface}`
+function surfaceKey(projectId: number | string): string {
+  return `project-${projectId}-individual`
 }
 
 // The project chat's empty-state landing chips: main's shared default set minus
@@ -133,29 +121,15 @@ const newId = () =>
 
 export function useProjectConversation(
   projectId: number | string,
-  surface: ProjectChatSurface,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
-  projectName?: string,
-  humanMemberCount?: number,
-  memberNames?: readonly string[],
 ): ProjectConversationProps {
-  const convKey = useMemo(() => surfaceKey(projectId, surface), [projectId, surface])
+  const convKey = useMemo(() => surfaceKey(projectId), [projectId])
   const { activeCompany } = useCompany()
   const { profile } = useWorkspace()
   const { content, setContent } = useContent()
   const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   const name = profileDisplayName(profile) || "You"
   const userInitials = name.slice(0, 2).toUpperCase()
-  const isGroup = surface === "group"
-  // The current viewer's user id — the self/peer discriminator for group
-  // attribution. A turn authored by THIS id renders through the default path
-  // (the viewer's own head); any OTHER author is a peer and carries `author`.
-  const selfUserId = (profile as { id?: string | null } | null)?.id ?? null
-  // 2-mode response gate input: a SOLO project (≤1 human member) has Sprntly
-  // reply to every message; a MULTI-human project replies ONLY to a turn that
-  // @Sprntly-mentions it. Unknown count → default to solo/reply (today's
-  // behavior; the server backstop still enforces the multi-human rule).
-  const isSolo = (humanMemberCount ?? 1) <= 1
 
   // ── The single-conversation store ─────────────────────────────────────────
   const [thread, setThread] = useState<ThreadTurn[]>([])
@@ -212,126 +186,15 @@ export function useProjectConversation(
     return () => { mountedRef.current = false }
   }, [])
 
-  // ── Group multi-party plumbing (inert on the individual surface) ───────────
-  // The durable server turn ids already rendered (hydrate + realtime + the
-  // reconcile), so an at-most-once broadcast, a since-cursor replay, and the
-  // poster's own optimistic turn never double-render the same turn.
-  const seenGroupTurnIdsRef = useRef<Set<number>>(new Set())
-  // The high-water server turn id, the `since` cursor for the reconcile read.
-  const lastGroupTurnIdRef = useRef<number>(0)
-  // The viewer's OWN send-identity keys. A broadcast/reconcile turn carrying
-  // one of these is this poster's own user turn OR its agent reply (both
-  // already on screen from the optimistic send + the ask poll), so it is never
-  // re-rendered — id-precise correlation, never a timing guess. A per-send key
-  // is minted in `submitAsk`, keyed by the optimistic turn id so the group
-  // persistence seam AND the ask both stamp the SAME key (the reply inherits it
-  // server-side), and added here so the echo is recognised whenever it arrives.
-  const mySentCmidsRef = useRef<Set<string>>(new Set())
-  const cmidByTurnIdRef = useRef<Map<string, string>>(new Map())
-
-  // One group turn DTO → a ThreadTurn. Row-per-turn (never paired): each
-  // author's message is its own bubble. `author` is attached ONLY for a PEER's
-  // user turn — the viewer's own turns and the agent's turns leave it unset and
-  // render through the identical default path (data-driven attribution).
-  const mapGroupTurn = useCallback((gt: GroupTurn): ThreadTurn => {
-    const id = `g-${gt.id}`
-    if (gt.role === "assistant") {
-      const reply = (gt.reply ?? {
-        answer: gt.content, sources: [], follow_ups: [], key_points: [],
-        citations: [], confidence: 1, unanswered: "",
-      }) as AskResponse
-      return { id, query: "", reply }
-    }
-    // Attribute a PEER only when the viewer's identity is KNOWN and the author
-    // positively differs. If selfUserId is not yet resolved, NEVER render the
-    // viewer's own message as a peer — fall through to the default self render.
-    const isPeer = !!selfUserId && !!gt.author_user_id && gt.author_user_id !== selfUserId
-    // The viewer's OWN group user turn. In the row-per-turn group model the
-    // agent's reply (if any) is a SEPARATE assistant row, so a user row never
-    // carries an agent block — `postedOnly` drops it, matching the live gate's
-    // post-only branch and preventing a reload from resurrecting the
-    // "No response was generated" placeholder under a past untagged post.
-    if (!isPeer) return { id, query: gt.content, postedOnly: true }
-    const authorName = gt.author_name || "Someone"
-    return {
-      id,
-      query: gt.content,
-      author: {
-        name: authorName,
-        role: gt.author_job_role,
-        userId: gt.author_user_id,
-        initials: authorName.slice(0, 2).toUpperCase(),
-        avatarStyle: personAvatarStyle(gt.author_user_id, gt.author_name),
-      },
-    }
-  }, [selfUserId])
-
-  // Append any group turns not already on screen (deduped by durable id),
-  // advancing the high-water cursor. The single merge point for hydrate,
-  // realtime, and the reconcile read.
-  const mergeGroupTurns = useCallback((incoming: GroupTurn[]) => {
-    const fresh = incoming.filter((gt) => !seenGroupTurnIdsRef.current.has(gt.id))
-    if (fresh.length === 0) return
-    // Defensive reply echo-dedup (poster only): an ASSISTANT turn whose text
-    // this poster is ALREADY showing inline on a turn IT originated is its own
-    // reply's realtime echo — the sender rendered the answer on its user turn
-    // from the ask poll, so the broadcast of the same reply must not render a
-    // SECOND, standalone copy. The primary guard is the `client_message_id`
-    // echo-dedup (`isOwnEcho`, applied before this in `groupOnEvent`/reconcile);
-    // this is the content-level backstop for the sender, so a cmid-correlation
-    // miss can never double-render the poster's own reply. A peer (which never
-    // originated the send, so has no matching inline answer) is unaffected and
-    // still sees the reply exactly once.
-    const originatedTurnIds = new Set(cmidByTurnIdRef.current.keys())
-    const myInlineAnswers = new Set(
-      threadRef.current
-        .filter((t) => originatedTurnIds.has(t.id) && t.reply?.answer)
-        .map((t) => (t.reply!.answer || "").trim())
-        .filter((a) => a.length > 0),
-    )
-    const toAdd: GroupTurn[] = []
-    fresh.forEach((gt) => {
-      seenGroupTurnIdsRef.current.add(gt.id)
-      if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
-      if (gt.role === "assistant") {
-        const ans = ((gt.reply?.answer ?? gt.content) || "").trim()
-        if (ans.length > 0 && myInlineAnswers.has(ans)) return
-      }
-      toAdd.push(gt)
-    })
-    if (toAdd.length === 0) return
-    const mapped = toAdd.map(mapGroupTurn)
-    setThread((prev) => [...prev, ...mapped])
-  }, [mapGroupTurn])
-
   // ── Resolve the project conversation row + hydrate its history ─────────────
   useEffect(() => {
     let cancelled = false
     setHydrating(true)
     ;(async () => {
       try {
-        const conv = surface === "group"
-          ? await import("../../../../lib/api").then((m) => m.projectsApi.groupChat(projectId))
-          : await import("../../../../lib/api").then((m) => m.projectsApi.individualChat(projectId))
+        const conv = await import("../../../../lib/api").then((m) => m.projectsApi.individualChat(projectId))
         if (cancelled) return
         setDbConvId(conv.id)
-        if (isGroup) {
-          // The group thread is a multi-author feed — hydrate row-per-turn (no
-          // user+assistant pairing) so every author's message is its own bubble
-          // and carries its own attribution. `groupTurns` returns the
-          // author-enriched DTOs; `mapGroupTurn` tags peers, and the seen-id +
-          // high-water cursor seed the realtime/reconcile dedup.
-          const gts = (await projectsApi.groupTurns(projectId)) ?? []
-          if (cancelled) return
-          gts.forEach((gt) => {
-            seenGroupTurnIdsRef.current.add(gt.id)
-            if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
-          })
-          const restored = gts.map(mapGroupTurn)
-          restored.forEach((r) => resumedTurnsRef.current.add(r.id))
-          if (restored.length) setThread((prev) => (prev.length === 0 ? restored : prev))
-          return
-        }
         const { turns } = await conversationsApi.listTurns(conv.id)
         if (cancelled) return
         const restored: ThreadTurn[] = []
@@ -368,7 +231,7 @@ export function useProjectConversation(
     })()
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [projectId, surface])
+  }, [projectId])
 
   // ── Mirror this conversation into the shared content store (main parity) ────
   // Main's ChatScreen stamps `content.conversationId` with the active tab's
@@ -486,16 +349,14 @@ export function useProjectConversation(
   const ensureProjectConv = useCallback(async (): Promise<number | null> => {
     if (dbConvIdRef.current != null) return dbConvIdRef.current
     try {
-      const conv = surface === "group"
-        ? await projectsApi.groupChat(projectId)
-        : await projectsApi.individualChat(projectId)
+      const conv = await projectsApi.individualChat(projectId)
       dbConvIdRef.current = conv.id
       setDbConvId(conv.id)
       return conv.id
     } catch {
       return null
     }
-  }, [projectId, surface])
+  }, [projectId])
   // Publish for the persistence create-path override (declared above the memo).
   ensureProjectConvRef.current = ensureProjectConv
 
@@ -506,79 +367,35 @@ export function useProjectConversation(
     const convId = dbConvIdRef.current ?? await ensureProjectConv()
     // Pin this project's context source on every send: the backend routes it to
     // `ProjectContextAssembler` (membership-gated server-side), which folds the
-    // project's roster/ledger/artifacts/memory into the answer. `surface`
-    // carries the mount identity this adapter already knows — "private" for the
-    // individual "My chat with Sprntly" mount, "group" for the @Sprntly group
-    // mount. conversation_id still rides for history replay + the conv↔project
-    // bind; `project_id` moves onto `context_source.params` (the seam's shape).
+    // project's roster/ledger/artifacts/memory into the answer. `surface` is
+    // always "individual" now (the group mount was removed) — the backend's
+    // `context_source.params` shape is unchanged so this ticket touches no
+    // backend contract. conversation_id still rides for history replay + the
+    // conv↔project bind.
     const context_source = {
       kind: "project",
-      params: { project_id: projectId, surface },
+      params: { project_id: projectId, surface: "individual" as const },
     }
-    // Group only: forward this send's identity key so the backend stamps the
-    // agent reply with the SAME key (Choice A), which is how the poster
-    // recognises the reply's realtime echo as its own.
-    const cmid = isGroup ? cmidByTurnIdRef.current.get(_m.turnId) : undefined
     const grounding: AskGrounding = convId != null
       ? { conversation_id: convId, context_source }
       : { context_source }
-    if (cmid) grounding.client_message_id = cmid
     return { convId: convId ?? null, grounding }
-  }, [ensureProjectConv, projectId, surface, isGroup])
+  }, [ensureProjectConv, projectId])
 
   const pushPendingConversation = useCallback((
     turnId: string, query: string, key: string,
     attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[],
   ) => {
-    if (isGroup) {
-      // Group user turns go through the group turn store, NOT the owner-only
-      // generic write — so the author is stamped server-side (attribution),
-      // a non-owner member can post at all, and the turn broadcasts to every
-      // member. Mark the durable server id seen once it resolves so this
-      // poster's own realtime echo of the turn is never double-rendered.
-      if (!query.trim() && !(attachments && attachments.length)) return
-      // Stamp this send's identity key so the post is idempotent (a retry
-      // replays the original turn) and so the turn — and the reply that
-      // inherits the same key server-side — are recognised as this poster's
-      // own realtime echo. The plain-ask send pre-binds this key in `submitAsk`;
-      // a COMMAND/GENERATION send (prd/tickets/document flows) reaches here with
-      // no bound key, so mint+register one HERE — otherwise the generation user
-      // turn posts with NO cmid and its own realtime echo isn't recognised
-      // (re-rendered) and it isn't broadcast-correlated like the plain path.
-      let cmid = cmidByTurnIdRef.current.get(turnId)
-      if (!cmid) {
-        cmid = newId()
-        cmidByTurnIdRef.current.set(turnId, cmid)
-        mySentCmidsRef.current.add(cmid)
-      }
-      void projectsApi.postGroupTurn(projectId, query, {
-        ...(attachments && attachments.length ? { attachments } : {}),
-        ...(cmid ? { client_message_id: cmid } : {}),
-      })
-        .then((dto) => {
-          if (dto && typeof dto.id === "number") {
-            seenGroupTurnIdsRef.current.add(dto.id)
-            if (dto.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = dto.id
-          }
-        })
-        .catch(() => { /* best-effort; the composer already showed the turn */ })
-      return
-    }
     const title = query.length > 52 ? `${query.slice(0, 49)}…` : query
     void persistence.pushUserTurn(key, { turnId, title, query, attachments })
-  }, [persistence, isGroup, projectId])
+  }, [persistence])
 
   const finalizeConversationTurn = useCallback((
     turnId: string, updates: { reply?: AskResponse; error?: string }, key: string,
   ): Promise<void> => {
-    // Group: the assistant turn is persisted + broadcast SERVER-SIDE at ask
-    // completion (ask_job_runner, Choice A), so the client must NOT also write
-    // it — that would double-persist and, worse, hit the owner-only generic
-    // route. No-op here; the reply still renders locally on the poster's turn.
-    if (isGroup) return Promise.resolve()
     if (updates.reply) return persistence.pushAssistantTurn(key, replyToText(updates.reply))
     return Promise.resolve()
-  }, [persistence, isGroup])
+  }, [persistence])
 
   // Same adapter as main (MAIN_NEXT_PROMPTS_ADAPTER): the shared next-prompts
   // hook drives the fetch off the conversation's db id; the project surface just
@@ -591,33 +408,6 @@ export function useProjectConversation(
 
   // ── The shared unit ────────────────────────────────────────────────────────
   const composer = useComposer({ showToast })
-
-  // ── Group @-mention picker (project-local; touches NO shared composer) ──────
-  // A ComposerDraftApi built over the shared composer's textarea ref + setDraft:
-  // reads the LIVE DOM value/caret (most current, pre-React-sync) and re-seats
-  // the caret after the controlled update. The picker itself is inert on the
-  // individual surface (no input is fed to it there).
-  const mentionDraftApi = useMemo<ComposerDraftApi>(() => ({
-    getValue: () => composer.composerRef.current?.value ?? "",
-    getCaret: () => composer.composerRef.current?.selectionStart ?? (composer.composerRef.current?.value.length ?? 0),
-    setValue: (text, caret) => {
-      composer.setDraft(text)
-      requestAnimationFrame(() => {
-        const ta = composer.composerRef.current
-        if (!ta) return
-        ta.focus()
-        if (caret != null) ta.setSelectionRange(caret, caret)
-      })
-    },
-    // composerRef/setDraft are stable across renders; the methods read .current
-    // lazily at call time, so this object never needs to be rebuilt.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }), [])
-  const mentionPicker = useMentionPicker({
-    projectId,
-    draftApi: mentionDraftApi,
-    onAffordance: (a) => showToast(a.text, ""),
-  })
 
   const scroll = useThreadScroll({ thread, activeTabId: convKey, pendingSend: composer.pendingSend })
   const engine = useMainConversation({
@@ -658,32 +448,11 @@ export function useProjectConversation(
     return joined.length <= 12_000 ? joined : `…\n\n${joined.slice(-12_000)}`
   }, [])
 
-  const openArtifactInPanel = useCallback((candidate: OpenArtifactCandidate, seedQuery?: string): boolean => {
+  const openArtifactInPanel = useCallback((candidate: OpenArtifactCandidate): boolean => {
     if (!onOpenArtifact) return false
-    // GROUP surface: opening an artifact must NOT swallow the human's message.
-    // On main/private, resolving `open_artifact` opens the panel WITHOUT a
-    // thread turn (acceptable — a solo surface), but in a GROUP the message
-    // ("@Sprntly open the <title> PRD") has to be posted as a real group turn
-    // so it's persisted (a `conversation_turns` row), attributed to the sender,
-    // and broadcast to peers — otherwise the send is silently dropped and the
-    // composer's optimistic "Working on your question" never resolves. Post it
-    // as a post-only group turn (same seam as the plain-ask group path: an
-    // optimistic bubble + `postGroupTurn` via `pushPendingConversation`), THEN
-    // open the artifact for the sender. The two are not mutually exclusive.
-    if (isGroup && seedQuery && seedQuery.trim()) {
-      const id = newId()
-      // Mint + register this send's identity key so the poster's own realtime
-      // echo of the turn is recognised (not double-rendered), mirroring the
-      // plain-ask and command group send paths.
-      const cmid = newId()
-      cmidByTurnIdRef.current.set(id, cmid)
-      mySentCmidsRef.current.add(cmid)
-      setThread((prev) => [...prev, { id, query: seedQuery, postedOnly: true }])
-      pushPendingConversation(id, seedQuery, convKey)
-    }
     onOpenArtifact(candidate)
     return true
-  }, [onOpenArtifact, isGroup, convKey, pushPendingConversation])
+  }, [onOpenArtifact])
 
   const postOpenArtifactReply = useCallback((seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => {
     emitTurn({
@@ -699,6 +468,7 @@ export function useProjectConversation(
     setContent, openContentPanel, content, showToast,
     openArtifactInPanel, postOpenArtifactReply,
     markTicketSetAutoOpened: () => {}, postSummary: () => {},
+    activeCompany,
   })
 
   // ── Skills palette: the company's own uploaded skills (main parity) ─────────
@@ -748,12 +518,17 @@ export function useProjectConversation(
           // preview up with everything already written, then live deltas.
           (text) => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, partial: text, streamDropped: false } : t)),
           () => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, streamDropped: true } : t)),
+          // Grounded progress on a re-attached private-project generation — same
+          // curated, flag-gated `livePhase` seam the shared POST engine uses.
+          GROUNDED_PROGRESS_ENABLED
+            ? (label) => patchTurn((t) => (!t.reply && !t.stopped ? { ...t, livePhase: label } : t))
+            : undefined,
         )
         // If it streamed, mark animated BEFORE the reply lands so the typewriter
         // doesn't re-reveal text already read (main's `hasFreshReply` reasoning).
         const streamed = threadRef.current.find((t) => t.id === turnId)
         if (streamed?.partial) animatedTurnIds.current.add(turnId)
-        patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }))
+        patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }))
         void finalizeConversationTurn(turnId, { reply: res }, convKey)
       } catch (e) {
         // Unmounted again mid-resume: leave the persisted ask so the NEXT mount
@@ -762,11 +537,11 @@ export function useProjectConversation(
         // User stopped the resumed ask: rendered by handleStopAsk, not a failure.
         if (e instanceof AskStoppedError) return
         if (e instanceof AskTimeoutError) {
-          patchTurn((t) => ({ ...t, timedOut: true, partial: undefined, streamDropped: undefined }))
+          patchTurn((t) => ({ ...t, timedOut: true, partial: undefined, streamDropped: undefined, livePhase: undefined }))
           return
         }
         const msg = e instanceof Error ? e.message : "Something went wrong"
-        patchTurn((t) => ({ ...t, error: msg, streamDropped: undefined }))
+        patchTurn((t) => ({ ...t, error: msg, streamDropped: undefined, livePhase: undefined }))
         void finalizeConversationTurn(turnId, { error: msg }, convKey)
       } finally {
         askStartRef.current.delete(turnId)
@@ -896,39 +671,6 @@ export function useProjectConversation(
       return
     }
 
-    // ── 2-mode response gate (project GROUP only) ─────────────────────────────
-    // Multi-human project + the turn does NOT @Sprntly-mention it → the human
-    // turn just posts to the group thread (author-stamped + broadcast to peers)
-    // with NO agent reply: no intent dispatch, no ask fired. Decided
-    // synchronously HERE, before any trigger — at most one reply per post, no
-    // scheduler, no classifier. Solo (≤1 human) never takes this branch, so the
-    // solo path is byte-identical to before. The server (Choice A) re-checks the
-    // same rule as the authoritative backstop.
-    if (isGroup && !isSolo && !mentionsAgent(trimmed)) {
-      const id = newId()
-      const cmid = newId()
-      cmidByTurnIdRef.current.set(id, cmid)
-      mySentCmidsRef.current.add(cmid)
-      const hasAttachments = composer.attachments.length > 0
-      let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
-      if (hasAttachments) {
-        try {
-          const extracted = await resolveAttachmentRefs(composer.attachments)
-          persistedAttachments = extracted.map((e) => ({ name: e.name, content: e.content, key: e.key, mime: e.mime, size: e.size }))
-        } catch { persistedAttachments = undefined }
-      }
-      setThread((prev) => [...prev, {
-        id, query: trimmed, postedOnly: true,
-        ...(persistedAttachments ? { attachments: persistedAttachments }
-          : hasAttachments ? { attachments: composer.attachments.map((a) => ({ name: a.name })) } : {}),
-      }])
-      // Persist the user turn (postGroupTurn → author + broadcast + cmid); NO ask.
-      pushPendingConversation(id, trimmed, convKey, persistedAttachments)
-      composer.setAttachments([])
-      settlePendingSend()
-      return
-    }
-
     // Attachment early-extraction (so the planner + the ask see the same text).
     let earlyExtracted: (string | null)[] | null = null
     if (composer.attachments.length > 0) {
@@ -942,16 +684,7 @@ export function useProjectConversation(
       : undefined
 
     if (!trimmed.startsWith("/")) {
-      // COMMAND INTERPRETATION COPY (group @Sprntly only): strip the agent
-      // addressing token before the message is read as a COMMAND. `@Sprntly` is
-      // "this turn is for the agent", NOT part of the instruction — but left in
-      // place it sits in front of the verb the intent classifier keys off
-      // ("@Sprntly generate a PRD…"), which is exactly the intersection that
-      // silently failed to dispatch (mention + a generation intent). The
-      // displayed/persisted user turn keeps `trimmed` verbatim so the `@Sprntly`
-      // chip still renders; only the planner-facing copy and the generation task
-      // use the stripped text. Non-group / no-mention sends are unchanged.
-      const commandText = isGroup && mentionsAgent(trimmed) ? stripAgentMention(trimmed) : trimmed
+      const commandText = trimmed
       const attachedForIntent = earlyExtracted?.some((t) => t)
         ? composer.attachments.map((a, i) => `--- ${a.name} ---\n${earlyExtracted![i] ?? ""}`).join("\n\n").slice(0, 100000)
         : null
@@ -983,7 +716,7 @@ export function useProjectConversation(
           // (`prd?.prd_id ?? prdId`) and the Slack `resolveShareRef` precedence.
           prdId: openPanelPrdId ?? metaRef.current.prdId ?? null,
           hasAttachments: composer.attachments.length > 0,
-          contextSource: { kind: "project", params: { project_id: projectId, surface } },
+          contextSource: { kind: "project", params: { project_id: projectId, surface: "individual" as const } },
         })
         .catch(() => null)
       if (envelope) {
@@ -1120,17 +853,6 @@ export function useProjectConversation(
     // ── Plain grounded ask (fallthrough) ──────────────────────────────────────
     if (askingRef.current.has(convKey)) { settlePendingSend(); return }
     const id = newId()
-    // Group: mint this send's identity key and bind it to the optimistic turn
-    // id BEFORE persisting or asking, so the group persistence seam
-    // (postGroupTurn) and the ask (resolveAskParams grounding) both stamp the
-    // SAME key. The agent reply inherits it server-side (Choice A), so this
-    // poster recognises both its own turn and its own reply's realtime echo by
-    // this key — no timing window.
-    if (isGroup) {
-      const cmid = newId()
-      cmidByTurnIdRef.current.set(id, cmid)
-      mySentCmidsRef.current.add(cmid)
-    }
     const hasAttachments = composer.attachments.length > 0
     const displayQuery = trimmed
     setThread((prev) => [...prev, { id, query: displayQuery, ...(hasAttachments ? { attachments: composer.attachments.map((a) => ({ name: a.name })) } : {}) }])
@@ -1153,7 +875,7 @@ export function useProjectConversation(
       }
     }
     await engine.runConversationAsk({ targetTabId: convKey, id, displayQuery, sendQuery, persistedAttachments })
-  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany, isGroup, isSolo])
+  }, [convKey, composer, engine, nextPrompts, gen, pendingClarify, emitTurn, onOpenArtifact, openContentPanel, setContent, runProjectGeneratePrd, runProjectClarifiedGeneration, ensureProjectConv, activeCompany])
 
   const handleComposerSubmit = useCallback(() => {
     const q = composer.draft.trim()
@@ -1171,9 +893,6 @@ export function useProjectConversation(
     void submitAsk(q)
   }, [composer, submitAsk, convKey])
   const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-    // Group: the @-mention picker gets first refusal of arrow/Enter/Escape while
-    // a token is active, so nav/select/close don't submit or stop the chat.
-    if (isGroup && mentionPicker.handleKeys(e)) return
     if (composer.slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); composer.setSlashActive((i) => (i + 1) % composer.filteredSkills.length); return }
       if (e.key === "ArrowUp") { e.preventDefault(); composer.setSlashActive((i) => (i - 1 + composer.filteredSkills.length) % composer.filteredSkills.length); return }
@@ -1181,16 +900,11 @@ export function useProjectConversation(
       if (e.key === "Escape") { e.preventDefault(); composer.setShowSlash(false); composer.setSlashFromMenu(false); return }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleComposerSubmit() }
-  }, [composer, handleComposerSubmit, isGroup, mentionPicker])
+  }, [composer, handleComposerSubmit])
 
-  // Caret-aware input interception (group): feed the picker the REAL
-  // selectionStart before the composer's own draft update, so a mid-string `@`
-  // opens/updates the picker on the token the caret is actually in. On the
-  // individual surface this is a pass-through.
   const handleComposerInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    if (isGroup) mentionPicker.handleComposerInput(e.target.value, e.target.selectionStart ?? e.target.value.length)
     composer.handleComposerInput(e)
-  }, [isGroup, mentionPicker, composer])
+  }, [composer])
 
   // ── Retry a failed/errored ask ─────────────────────────────────────────────
   // The per-turn "Ask again" affordance (mapMainTurns' `onAskAgain`). Same
@@ -1237,10 +951,6 @@ export function useProjectConversation(
   const reAskFromTurn = useCallback((turn: ThreadTurn, nextQuery: string) => {
     const q = nextQuery.trim()
     if (!q) return
-    if (isGroup) {
-      void submitAsk(q)
-      return
-    }
     setThread((prev) => {
       const idx = prev.findIndex((x) => x.id === turn.id)
       // Not found means the thread moved under us (a background answer landed, a
@@ -1249,7 +959,7 @@ export function useProjectConversation(
     })
     void persistence.rewindToUserTurn(convKey, turn.id, turn.dbTurnId)
     void submitAsk(q)
-  }, [isGroup, submitAsk, persistence, convKey])
+  }, [submitAsk, persistence, convKey])
 
   const handleRetryTurn = useCallback((turn: ThreadTurn) => {
     // Verbatim — including the quoted passage, which is part of the question.
@@ -1396,50 +1106,6 @@ export function useProjectConversation(
     finalizeTurn: assignFinalizeTurn,
   })
 
-  // ── Group realtime: other members' turns appear live (inert on individual) ─
-  // Subscribe to the project's shared broadcast channel; every `turn.created`
-  // the backend publishes (a peer's message, or an agent reply to a peer)
-  // renders in place. The poster's own user turn (already optimistic) and its
-  // own agent reply (rendered from the poll) are filtered so nothing double-
-  // renders; a since-cursor reconcile on every (re)subscribe closes any
-  // at-most-once broadcast gap (AD-P22).
-  // The poster's OWN turn or reply carries a send-identity key this client
-  // minted — recognise it and never re-render (it is already on screen). Both
-  // the user turn AND the agent reply (which inherits the key server-side) are
-  // covered, at ANY broadcast delay, so no timing window is needed.
-  const isOwnEcho = useCallback(
-    (gt: GroupTurn): boolean => !!gt.client_message_id && mySentCmidsRef.current.has(gt.client_message_id),
-    [],
-  )
-
-  const groupOnEvent = useCallback((event: string, payload: unknown) => {
-    if (event !== "turn.created" || !payload || typeof payload !== "object") return
-    const gt = payload as GroupTurn
-    if (typeof gt.id !== "number") return
-    if (isOwnEcho(gt)) {
-      // Capture the durable id so a later reconcile skips it too, then stop.
-      seenGroupTurnIdsRef.current.add(gt.id)
-      if (gt.id > lastGroupTurnIdRef.current) lastGroupTurnIdRef.current = gt.id
-      return
-    }
-    mergeGroupTurns([gt])
-  }, [isOwnEcho, mergeGroupTurns])
-
-  const groupOnReconcile = useCallback(() => {
-    if (!isGroup) return
-    void projectsApi.groupTurns(projectId, lastGroupTurnIdRef.current || undefined)
-      .then((turns) => {
-        const gts = (turns ?? []).filter((gt) => !isOwnEcho(gt))
-        if (gts.length) mergeGroupTurns(gts)
-      })
-      .catch(() => { /* best-effort; the next poll/re-open reconciles */ })
-  }, [isGroup, projectId, isOwnEcho, mergeGroupTurns])
-
-  useRealtimeChannel(isGroup ? `project:${projectId}` : null, {
-    onEvent: groupOnEvent,
-    onReconcile: groupOnReconcile,
-  })
-
   // ── Host-bag assembly ──────────────────────────────────────────────────────
   const activeTab = useMemo(() => ({
     id: convKey, hydrating: hydrating && thread.length === 0,
@@ -1483,18 +1149,15 @@ export function useProjectConversation(
     return () => window.removeEventListener("keydown", onKey)
   }, [busy, viewerAttachment, composer.slashOpen, composer.plusMenuOpen, pendingAssign, pendingShare, clarifyPopupOpen, engine.handleStopAsk])
 
-  // The display names a group `@mention` chip can wrap as ONE unit — the
-  // project's human members plus the agent. Longest-match in `parseMentionChips`
-  // uses this so "@Bob Baker" chips whole instead of only "@Bob" (defect: a
-  // multi-word display name chipped only its first word).
-  const mentionKnownNames = useMemo<string[]>(
-    () => [AGENT_NAME, ...(memberNames ?? [])].filter((n) => !!n && n.trim().length > 0),
-    [memberNames],
-  )
-
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
+    // The project GROUP surface has no Goal Analysis. Named explicitly rather
+    // than omitted: `MapMainTurnsDeps` requires these so a surface cannot drop
+    // them with a clean `tsc`, which is how the in-thread gates shipped inert.
+    goalGateBusyTurnId: undefined,
+    confirmGoalDefinition: undefined,
+    approveGoalPlan: undefined,
     activeTab: { id: convKey, prdId: meta.prdId ?? null, prd: meta.prd ?? null, prdGenerating: !!meta.prdGenerating, pendingClarify: meta.pendingClarify },
     name, userInitials, skillForQuery: composer.skillForQuery,
     ticketSetActionState: (meta.ticketSetStatus === "generating" ? "running" : meta.ticketSetStatus === "ready" ? "ready" : meta.ticketSetStatus === "failed" ? "failed" : null),
@@ -1514,18 +1177,14 @@ export function useProjectConversation(
     handleTicketSetAction: gen.handleTicketSetAction, handleOpenEvidence: () => {}, handleOpenPrd,
     handleViewPrototype: () => {}, handlePrototypeSettled: () => {},
     onSendSlackShare: sendSlackShare, onCancelSlackShare: cancelSlackShareCard, onPickSlackShareTarget: repreviewSlackShare,
-    // Group: route the user body through the mention-chip renderer (@user chips
-    // + @Sprntly agent chip). Individual/main leave it undefined → plain query.
-    renderUserBody: isGroup ? (turn: { query: string }) => createElement(MentionBubble, { content: turn.query, knownNames: mentionKnownNames }) : undefined,
     // The on-join greeting's lead/Show-more split. Only a greeting turn carries
     // the `MORE_MARKER`; every other turn returns null and stays on the default
-    // reply ladder. Both project surfaces get it (either can host a greeting);
-    // main never passes it, so main rendering is unchanged.
+    // reply ladder. main never passes it, so main rendering is unchanged.
     renderAgentBody: (turn: { reply?: { answer: string } | null }) =>
       turn.reply?.answer?.includes(MORE_MARKER)
         ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
         : null,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, isGroup, mentionKnownNames, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
@@ -1533,9 +1192,6 @@ export function useProjectConversation(
     thread, mapDeps,
     // The attachment overlay's state, for the host to render the shared viewer.
     viewerAttachment, setViewerAttachment,
-    // The group @-mention picker, for the host's project-local overlay.
-    mentionPickerNode: isGroup ? mentionPicker.pickerNode : null,
-    mentionPickerOpen: isGroup && mentionPicker.open,
     draft: composer.draft, pinnedSkill: composer.pinnedSkill, attachments: composer.attachments,
     composerHintNode,
     plusMenuOpen: composer.plusMenuOpen, plusMenuActive: composer.plusMenuActive,
@@ -1547,15 +1203,8 @@ export function useProjectConversation(
     handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,
     handleToggleVoice: composer.handleToggleVoice,
-    // Per-surface empty-state greeting. GROUP: a project-themed, collaborative
-    // copy that names the project and cues the @Sprntly tag. INDIVIDUAL: unset,
-    // so ConversationView renders its default (main/private) copy unchanged.
-    landingTitle: isGroup
-      ? (projectName ? `Welcome to the ${projectName} team chat` : "Welcome to the team chat")
-      : undefined,
-    landingSubtitle: isGroup
-      ? "Collaborate with your team here — tag @Sprntly anytime to bring the agent in."
-      : undefined,
+    // Empty-state greeting: unset → `ConversationView` renders its default
+    // (main/private) copy unchanged.
     showChipRow: !showThreadView, displayChips: PROJECT_LANDING_CHIPS, handleHomeCard: () => {},
     handleStarterChip: (text) => { void submitAsk(text) }, showEmptyStarters: false,
     activeTab,

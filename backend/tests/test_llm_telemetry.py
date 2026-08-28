@@ -13,10 +13,13 @@ import types
 import pytest
 
 from app.llm_telemetry import (
+    CACHE_TTL_1H,
+    CACHE_TTL_5M,
     MODEL_PRICING,
     RunUsage,
     UnknownModelError,
     log_llm_run,
+    project_next_iter_cost,
 )
 
 TELEMETRY_LOGGER = "app.llm_telemetry"
@@ -43,18 +46,61 @@ def test_module_exports_canonical_primitive():
 
 def test_haiku_row_matches_published_rates():
     """Anthropic's pricing page (2026-08): $1/MTok in, $5/MTok out, $0.10/MTok
-    cache hits. Cache WRITE is the 5-minute tier (1.25x base input) because
-    `app/llm.py::_build_base_kwargs` only ever sends `{"type": "ephemeral"}`
-    with no `ttl` — the 1h tier this dict's key name implies is never requested.
-    See the naming-mismatch note above MODEL_PRICING."""
+    cache hits, and two cache-WRITE tiers — 1.25x base input for the 5-minute
+    tier, 2x for the explicit 1-hour tier."""
     p = MODEL_PRICING["claude-haiku-4-5"]
     assert p["input"] == pytest.approx(1.0 / 1_000_000)
     assert p["output"] == pytest.approx(5.0 / 1_000_000)
     assert p["cache_read"] == pytest.approx(0.1 / 1_000_000)
-    assert p["cache_write_1h"] == pytest.approx(1.25 / 1_000_000)
-    # 0.1x and 1.25x of base input — the published multipliers.
+    assert p["cache_write_5m"] == pytest.approx(1.25 / 1_000_000)
+    assert p["cache_write_1h"] == pytest.approx(2.0 / 1_000_000)
+    # 0.1x / 1.25x / 2x of base input — the published multipliers.
     assert p["cache_read"] == pytest.approx(p["input"] * 0.1)
-    assert p["cache_write_1h"] == pytest.approx(p["input"] * 1.25)
+    assert p["cache_write_5m"] == pytest.approx(p["input"] * 1.25)
+    assert p["cache_write_1h"] == pytest.approx(p["input"] * 2.0)
+
+
+def test_every_row_carries_both_write_tiers_at_published_multipliers():
+    """The whole table, not just the newest row.
+
+    The bug this replaces was a SINGLE write key holding the 1-hour rate while
+    the code only ever asked for the 5-minute tier, so sonnet and opus
+    over-reported every cache write by 1.6x. A per-row spot check would not have
+    caught it; asserting the multipliers across every Claude row does. OpenAI
+    rows are excluded: OpenAI's caching has no TTL to choose, so its
+    `cache_write_5m`/`cache_write_1h` pair is one rate written twice.
+    """
+    for model, p in MODEL_PRICING.items():
+        if not model.startswith("claude-"):
+            continue
+        assert p["cache_write_5m"] == pytest.approx(p["input"] * 1.25), model
+        assert p["cache_write_1h"] == pytest.approx(p["input"] * 2.0), model
+        assert p["cache_read"] == pytest.approx(p["input"] * 0.1), model
+
+
+def test_est_cost_defaults_to_the_tier_the_code_actually_requests():
+    """The 5-minute tier is the default because a bare ephemeral block earns it.
+
+    Getting this backwards is the original bug, so it is pinned: an unqualified
+    `est_cost_usd` must price cache writes at 1.25x, and only an explicit
+    CACHE_TTL_1H moves it to 2x.
+    """
+    usage = RunUsage(cache_creation_input_tokens=1_000_000)
+    assert usage.est_cost_usd("claude-opus-4-7") == pytest.approx(6.25)
+    assert usage.est_cost_usd("claude-opus-4-7", CACHE_TTL_5M) == pytest.approx(6.25)
+    assert usage.est_cost_usd("claude-opus-4-7", CACHE_TTL_1H) == pytest.approx(10.0)
+
+
+def test_budget_caps_price_by_the_tier_they_are_told():
+    """The design agent writes at 1h and passes CACHE_TTL_1H, so its projection
+    must be the 2x one — the caps it drives were calibrated against that rate."""
+    usage = RunUsage(cache_creation_input_tokens=1_000_000)
+    assert project_next_iter_cost(
+        usage, "claude-opus-4-7", 1, CACHE_TTL_1H
+    ) == pytest.approx(20.0)
+    assert project_next_iter_cost(
+        usage, "claude-opus-4-7", 1
+    ) == pytest.approx(12.5)
 
 
 def test_haiku_usage_costs_more_than_zero():
@@ -155,10 +201,15 @@ def test_run_usage_est_cost_sonnet_4_6():
         input_tokens=500,
         output_tokens=300,
     )
-    # Hand-computed from MODEL_PRICING["claude-sonnet-4-6"]:
-    # 1000*6e-6 + 2000*0.3e-6 + 500*3e-6 + 300*15e-6
-    expected = 0.006 + 0.0006 + 0.0015 + 0.0045
+    # Hand-computed from MODEL_PRICING["claude-sonnet-4-6"], at the 5-minute
+    # write tier (3.75/MTok) because that is what an unqualified call prices at:
+    # 1000*3.75e-6 + 2000*0.3e-6 + 500*3e-6 + 300*15e-6
+    expected = 0.00375 + 0.0006 + 0.0015 + 0.0045
     assert usage.est_cost_usd("claude-sonnet-4-6") == pytest.approx(expected)
+    # ...and the 1-hour tier costs strictly more, on the write component only.
+    assert usage.est_cost_usd("claude-sonnet-4-6", CACHE_TTL_1H) == pytest.approx(
+        expected + 1000 * (6.0 - 3.75) / 1_000_000
+    )
 
 
 def test_run_usage_est_cost_opus_4_7_is_larger():
@@ -171,7 +222,8 @@ def test_run_usage_est_cost_opus_4_7_is_larger():
     sonnet = usage.est_cost_usd("claude-sonnet-4-6")
     opus = usage.est_cost_usd("claude-opus-4-7")
     # Same usage; Opus pricing is strictly higher — proves model lookup works.
-    expected_opus = 0.01 + 0.001 + 0.0025 + 0.0075
+    # 1000*6.25e-6 (5m write) + 2000*0.5e-6 + 500*5e-6 + 300*25e-6
+    expected_opus = 0.00625 + 0.001 + 0.0025 + 0.0075
     assert opus == pytest.approx(expected_opus)
     assert opus > sonnet
 

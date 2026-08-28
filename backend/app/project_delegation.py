@@ -1,17 +1,16 @@
 """`delegate_task` tool + brief + gated cross-user delivery.
 
-The defining Projects behavior: a member, in the group chat, asks Sprntly
-to hand a task to a teammate ("send this to Fortune"), and Sprntly resolves
-the assignee, writes a bounded best-effort brief, and delivers it into the
-assignee's own private individual project chat — then confirms in the
-group. This is the FIRST cross-user write in the product (a miss here is a
-cross-user IDOR); the double-membership gate below is the load-bearing
-invariant.
+The defining Projects behavior: a member, in their own project chat, asks
+Sprntly to hand a task to a teammate ("send this to Fortune"), and Sprntly
+resolves the assignee, writes a bounded best-effort brief, and delivers it
+into the assignee's own private individual project chat. This is the FIRST
+cross-user write in the product (a miss here is a cross-user IDOR); the
+double-membership gate below is the load-bearing invariant.
 
 Structured like `project_memory.py::maybe_promote_turn`: `handle_delegate_task`
 is the best-effort, never-raising entry point, called as the `dispatch`
-target for the group agent's `run_tool_loop` (`routes/projects.py::
-_respond_as_group_agent`). Zero new LLM calls for the resolve/gate/deliver
+target for `qa_agent`'s scoped tool loop (`qa_agent.py::
+_try_scoped_tool_answer`). Zero new LLM calls for the resolve/gate/deliver
 path — the ONE extra call is `_build_brief`'s bounded `call_md`, made only
 once resolution + both membership gates have already passed.
 

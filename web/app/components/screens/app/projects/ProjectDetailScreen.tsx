@@ -70,11 +70,12 @@ import { personAvatarStyle } from "./avatarColor"
 import { IconPlus } from "../../../shared/app-icons"
 import styles from "./ProjectDetailScreen.module.css"
 
-// Focus-gated FALLBACK poll interval for the unread badge (AD-P22) — same
-// cadence `ProjectGroupChat.tsx`'s own `POLL_MS` uses (AD-P4), duplicated
-// locally per this file's existing precedent (`initials`, etc.). Demoted
-// below: the live per-user channel + its reconnect reconcile carry the
-// badge while connected; this interval only arms when degraded.
+// Focus-gated FALLBACK poll interval for the ledger-counts rail card and the
+// artifacts count (AD-P22) — same cadence `ProjectGroupChat.tsx`'s own
+// `POLL_MS` used (AD-P4), duplicated locally per this file's existing
+// precedent (`initials`, etc.). Demoted below: the live per-user/artifact
+// channels + their reconnect reconciles carry each count while connected;
+// these intervals only arm when degraded.
 const UNREAD_POLL_MS = 4000
 
 type HumanMember = Extract<ProjectMember, { kind: "human" }>
@@ -143,17 +144,6 @@ function ArtifactsIcon() {
   )
 }
 
-function GroupChatIcon() {
-  return (
-    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-      <line x1="4" y1="9" x2="20" y2="9" />
-      <line x1="4" y1="15" x2="20" y2="15" />
-      <line x1="10" y1="3" x2="8" y2="21" />
-      <line x1="16" y1="3" x2="14" y2="21" />
-    </svg>
-  )
-}
-
 function LockIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -165,24 +155,14 @@ function LockIcon() {
 
 // ── Presentational pieces ──
 
-type ActiveChat = "group" | "individual"
-
 export type ProjectDetailViewProps = {
   project: ProjectDetail
   artifacts: ArtifactItem[]
   memory: ProjectMemorySummary
-  activeChat: ActiveChat
-  onSelectChat: (chat: ActiveChat) => void
-  /** Derived (AD-P3/AD-P20 — never a stored boolean upstream, this is the
-   *  server's `unread` field passed straight through): true when the
-   *  caller's individual chat has a turn beyond their read cursor. Renders
-   *  a dot on the top-bar Private tab; clears when the tab is selected
-   *  (the container POSTs `/individual/read` on that transition). */
-  individualUnread: boolean
   /** Open-only delegation counts for the Task-ledger rail card, mirrored
-   *  from `GET /v1/projects/{id}/delegations/counts` on fetch/poll the same
-   *  way `individualUnread` is — `null` before the first fetch resolves or
-   *  when it failed (a best-effort convenience; the modal is the authority). */
+   *  from `GET /v1/projects/{id}/delegations/counts` on fetch/poll — `null`
+   *  before the first fetch resolves or when it failed (a best-effort
+   *  convenience; the modal is the authority). */
   ledgerCounts: DelegationCounts | null
   /** A small preview of OPEN ledger rows for the rail card's checklist — the
    *  real party-filtered reads (`assigned_to_me` + `waiting_on`), capped for
@@ -251,9 +231,6 @@ export function ProjectDetailView({
   project,
   artifacts,
   memory: _memory,
-  activeChat,
-  onSelectChat,
-  individualUnread,
   ledgerCounts: _ledgerCounts,
   ledgerRows: _ledgerRows,
   onOpenArtifacts,
@@ -271,12 +248,6 @@ export function ProjectDetailView({
   onCloseArtifactsDrawer,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
-  // The human member display names — threaded to the group chat so a multi-word
-  // `@mention` chip ("@Bob Baker") wraps the FULL name, not only its first word.
-  const memberNames = useMemo(
-    () => humans.map((m) => m.name).filter((n): n is string => !!n && n.trim().length > 0),
-    [humans],
-  )
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
   // branch, resume-conversation-first, reuse-by-prd-id and null-id guards all
   // live in `openArtifactDestination`; this project surface supplies the
@@ -350,43 +321,6 @@ export function ProjectDetailView({
 
         <span className={styles.topSpacer} />
 
-        {/* Group ⇆ Private chat switch — sits in the RIGHT cluster (after the
-            spacer), immediately left of the Artifacts button. Same
-            testids/behaviour; placement-only move from the left cluster. */}
-        <div className={styles.topChatToggle} role="tablist" aria-label="Chat" data-testid="topbar-chat-toggle">
-          <button
-            type="button"
-            role="tab"
-            className={`${styles.chatToggleBtn} ${activeChat === "group" ? styles.chatToggleBtnActive : ""}`}
-            onClick={() => onSelectChat("group")}
-            aria-selected={activeChat === "group"}
-            data-testid="chat-row-group"
-          >
-            <GroupChatIcon />
-            Group
-            <span className={styles.chatToggleDot} title="active now" aria-label="active now" />
-          </button>
-          <button
-            type="button"
-            role="tab"
-            className={`${styles.chatToggleBtn} ${activeChat === "individual" ? styles.chatToggleBtnActive : ""}`}
-            onClick={() => onSelectChat("individual")}
-            aria-selected={activeChat === "individual"}
-            data-testid="chat-row-individual"
-          >
-            <LockIcon />
-            Private
-            {individualUnread ? (
-              <span
-                className={styles.chatRowUnreadDot}
-                title="unread"
-                aria-label="unread"
-                data-testid="individual-chat-unread-dot"
-              />
-            ) : null}
-          </button>
-        </div>
-
         {/* Top-bar "See all tasks" affordance removed — the task ledger is
             reached conversationally (backend `get_task_ledger`, rendered
             inline in chat). The `onOpenTasks` → TaskModal open-state chain
@@ -416,29 +350,14 @@ export function ProjectDetailView({
       <div className={`${styles.body} ${artifactsDrawerOpen ? styles.bodyDrawerOpen : ""}`}>
         <main className={styles.main} aria-label="Project chat">
           <div className={styles.chatNote} data-testid="chat-note">
-            {activeChat === "group" ? (
-              humans.length > 1 ? (
-                <>
-                  Open to all members. Tag <b>@Sprntly</b> to bring the agent in.
-                </>
-              ) : (
-                <>
-                  Open to all members. Sprntly <b>replies to every message</b> here.
-                </>
-              )
-            ) : (
-              <>
-                Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
-                transcripts; your chats outside this project stay walled off.
-              </>
-            )}
+            Just you + Sprntly. This thread <b>feeds project memory</b> as summaries — never
+            transcripts; your chats outside this project stay walled off.
           </div>
 
-          {/* Chat thread HOST (AD-P13): ProjectMainThread swaps group ⇆
-              individual per `activeChat`; BOTH sides are thin containers
-              over the SAME extracted composer — no second composer lives
-              at this shell level, and no chat-monolith container is
-              imported anywhere in this swap. */}
+          {/* Chat thread HOST (AD-P13): the private chat is a thin container
+              over the SAME extracted composer — no second composer lives at
+              this shell level, and no chat-monolith container is imported
+              here. */}
           <div className={styles.threadHost} data-testid="project-main-thread-host">
             <ProjectMainThread
               // Project-switch isolation (an adversarial review): a flat-route
@@ -449,10 +368,6 @@ export function ProjectDetailView({
               // asserted flat-route premise hold rather than patching a live bug.
               key={project.id}
               projectId={project.id}
-              projectName={project.name}
-              humanMemberCount={humans.length}
-              memberNames={memberNames}
-              activeChat={activeChat}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}
@@ -511,13 +426,14 @@ type OpenModal =
 
 export function ProjectDetailScreen({
   projectId,
-  initialChat,
+  initialChat: _initialChat,
 }: {
   projectId: string
-  /** Which chat tab to land on when the shell first mounts — set by the
-   *  main-chat PRD fork nav via `?chat=individual` (`ProjectsRoute.tsx`).
-   *  Defaults to the shell's own `"group"` default when absent. */
-  initialChat?: ActiveChat
+  /** Accepted for caller compatibility (`ProjectsRoute.tsx` still reads
+   *  `?chat=individual` off the main-chat PRD fork nav and passes it
+   *  through) — unused: there is only the one (private) chat surface now,
+   *  so nothing branches on it. */
+  initialChat?: "individual"
 }) {
   const auth = useAuth()
   const router = useRouter()
@@ -535,7 +451,6 @@ export function ProjectDetailScreen({
   }
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
   const [state, setState] = useState<LoadState>({ status: "loading" })
-  const [activeChat, setActiveChat] = useState<ActiveChat>(initialChat ?? "group")
   const [railModal, setRailModal] = useState<OpenModal>(null)
   // The top-bar gear's "Project settings" modal — `null` = closed, a tab
   // value = open on that tab. Replaces the standalone `MemoryModal`/
@@ -546,14 +461,10 @@ export function ProjectDetailScreen({
   const [removeTarget, setRemoveTarget] = useState<HumanMember | null>(null)
   const [removeBusy, setRemoveBusy] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
-  // Derived unread signal for the caller's OWN individual chat
-  // (AD-P3/AD-P20 — never stored client-side either, just mirrored from the
-  // server's derived `unread` field on each fetch/poll tick).
-  const [individualUnread, setIndividualUnread] = useState(false)
   // Open-only delegation counts for the Task-ledger rail card — mirrored from
-  // the server's derived counts on each fetch/poll tick, exactly like
-  // `individualUnread` above (a convenience readout; the modal is the
-  // authority). `null` until the first fetch resolves, or when it failed.
+  // the server's derived counts on each fetch/poll tick (a convenience
+  // readout; the modal is the authority). `null` until the first fetch
+  // resolves, or when it failed.
   const [ledgerCounts, setLedgerCounts] = useState<DelegationCounts | null>(null)
   // A small preview of OPEN ledger rows for the rail card's checklist. Real,
   // party-filtered reads (`assigned_to_me` + `waiting_on`), deduped and capped
@@ -617,16 +528,15 @@ export function ProjectDetailScreen({
     setRailModal(null)
   }, [projectId])
 
-  // Live individual-unread signal (AD-P25 S2): the caller's OWN, member+
-  // owner-gated per-user channel (`project:{id}:user:{uid}`) flips the badge
-  // the instant a `brief.delivered` broadcast lands — no poll wait. `onReconcile`
-  // fires exactly once per (re)subscribe (the hook's own guarantee) and
-  // re-derives the same `individualUnread` signal the poll below uses,
-  // closing any at-most-once Broadcast gap (AD-P22). `currentUserId` is the
-  // same session-derived id already resolved above (`useAuth()`) — no new
-  // fetch; a `null` id (unresolved auth) yields a `null` topic, the hook
-  // reports `degraded: true`, and the poll below carries the badge exactly
-  // as it always has.
+  // The caller's OWN, member+owner-gated per-user channel
+  // (`project:{id}:user:{uid}`). Carries `delegation.event` (the ledger
+  // status change, live) and `member.added` (the "you were added to a
+  // project" landing signal, cross-project routing below) — NOT the private-
+  // chat unread badge any more (removed with the Group⇆Private toggle; there
+  // is no affordance left to render it against). `currentUserId` is the same
+  // session-derived id already resolved above (`useAuth()`); a `null` id
+  // (unresolved auth) yields a `null` topic and the hook reports `degraded:
+  // true`, same as before.
   // Refetch the open-only rail counts (best-effort) — shared by the live
   // `delegation.event` path and the reconnect reconcile below, the same
   // convenience readout the fallback poll tick also drives.
@@ -668,16 +578,12 @@ export function ProjectDetailScreen({
   // `member.added` (both add paths — POST /members and POST /tag — publish it).
   // Bring the just-added user straight into the project's private chat (the
   // invite-modal promise: "they land straight in its chats"), unless they're
-  // mid-task or already sitting in it. Held on a ref so the stable
-  // `handleUnreadEvent` subscription reads the freshest activeChat/nav closures
-  // without re-subscribing (channel identity keys on topic only).
+  // mid-task. Held on a ref so the stable `handleUnreadEvent` subscription
+  // reads the freshest nav closures without re-subscribing (channel identity
+  // keys on topic only).
   const landOnMemberAddedRef = useRef<(payload: unknown) => void>(() => {})
   const handleUnreadEvent = useCallback(
     (event: string, payload: unknown) => {
-      if (event === "brief.delivered") {
-        setIndividualUnread(true)
-        return
-      }
       if (event === "member.added") {
         landOnMemberAddedRef.current(payload)
         return
@@ -691,45 +597,29 @@ export function ProjectDetailScreen({
     [refetchLedgerCounts, refetchLedgerRows],
   )
   const handleUnreadReconcile = useCallback(() => {
-    projectsApi
-      .individualUnread(projectId)
-      .then((status) => setIndividualUnread(Boolean(status.unread)))
-      .catch(() => {
-        /* best-effort — the next reconnect or fallback poll tick retries */
-      })
-    // Ledger surfaces reconcile on reconnect too (AD-P22 reconcile authority):
+    // Ledger surfaces reconcile on reconnect (AD-P22 reconcile authority):
     // refetch the counts and bump the modal so an open ledger re-reads once.
     refetchLedgerCounts()
     refetchLedgerRows()
     setLedgerVersion((v) => v + 1)
-  }, [projectId, refetchLedgerCounts, refetchLedgerRows])
+  }, [refetchLedgerCounts, refetchLedgerRows])
   const unreadTopic = currentUserId ? `project:${projectId}:user:${currentUserId}` : null
   const { degraded: unreadDegraded } = useRealtimeChannel(unreadTopic, {
     onEvent: handleUnreadEvent,
     onReconcile: handleUnreadReconcile,
   })
 
-  // Unread badge: fetch on mount, then a focus-gated poll while the tab has
-  // focus — same cadence + focus-gate posture `ProjectGroupChat.tsx`'s own
-  // poll uses (AD-P4). Demoted to a fallback by AD-P22: while the realtime
-  // channel above is live, the broadcast + reconnect reconcile cover the
-  // badge and this interval does not arm; when the channel errors/drops,
-  // this re-arms exactly as it always has. Best-effort: a failed fetch/poll
-  // tick just leaves the badge in its last-known state, never an error
-  // surface.
+  // Ledger-counts rail card: fetch on mount, then a focus-gated poll while
+  // the tab has focus — same cadence + focus-gate posture `ProjectGroupChat.
+  // tsx`'s own poll used (AD-P4). Demoted to a fallback by AD-P22: while the
+  // per-user realtime channel above is live, `delegation.event` + the
+  // reconnect reconcile cover the counts and this interval does not arm;
+  // when the channel errors/drops, this re-arms exactly as it always has.
+  // Best-effort: a failed fetch/poll tick just leaves the card in its
+  // last-known state, never an error surface.
   useEffect(() => {
     let cancelled = false
-    const fetchUnread = () => {
-      projectsApi
-        .individualUnread(projectId)
-        .then((status) => {
-          if (!cancelled) setIndividualUnread(Boolean(status.unread))
-        })
-        .catch(() => {
-          /* best-effort — a dropped tick leaves the badge as-is */
-        })
-      // Ledger counts ride the same fetch/poll tick, mirrored the same way —
-      // best-effort: a dropped tick leaves the last-known counts on the card.
+    const fetchLedgerFallback = () => {
       projectsApi
         .ledgerCounts(projectId)
         .then((counts) => {
@@ -741,13 +631,13 @@ export function ProjectDetailScreen({
       if (!cancelled) refetchLedgerRows()
     }
 
-    fetchUnread()
+    fetchLedgerFallback()
 
     let intervalId: ReturnType<typeof setInterval> | null = null
     const start = () => {
       if (!unreadDegraded) return
       if (intervalId != null) return
-      intervalId = setInterval(fetchUnread, UNREAD_POLL_MS)
+      intervalId = setInterval(fetchLedgerFallback, UNREAD_POLL_MS)
     }
     const stop = () => {
       if (intervalId == null) return
@@ -769,54 +659,24 @@ export function ProjectDetailScreen({
     }
   }, [projectId, unreadDegraded, refetchLedgerRows])
 
-  // Selecting the individual row clears the badge: POST /individual/read
-  // advances the caller's own cursor server-side, then the local dot state
-  // is cleared to match (best-effort — a failed POST just leaves the badge
-  // showing until the next successful poll tick re-derives it).
-  const onSelectChat = useCallback(
-    (chat: ActiveChat) => {
-      setActiveChat(chat)
-      // Persist the active surface to the URL (`?chat=group|individual`) so a
-      // refresh restores it — `ProjectsRoute` reads this back as `initialChat`
-      // on mount. Preserve every other param (`id`, `company`) rather than
-      // rebuilding the path, and skip the scroll reset (same idiom as
-      // `SettingsScreen`'s section sync). Without this, a reload defaults to
-      // the shell's own `"group"` and snaps a private chat back to group.
-      const params = new URLSearchParams(searchParams?.toString() ?? "")
-      params.set("chat", chat)
-      router.replace(`${PROJECTS_PATH}?${params.toString()}`, { scroll: false })
-      if (chat !== "individual") return
-      projectsApi
-        .markIndividualRead(projectId)
-        .then(() => setIndividualUnread(false))
-        .catch(() => {
-          /* best-effort — badge stays until the next poll tick */
-        })
-    },
-    [projectId, router, searchParams],
-  )
-
   // The freshest `member.added` landing closure (see `handleUnreadEvent`).
-  // Reassigned every render so it reads the current `activeChat` and the
-  // current nav callbacks; the stable subscription reaches it via the ref.
+  // Reassigned every render so the stable subscription reaches it via the ref.
   landOnMemberAddedRef.current = (payload: unknown) => {
     // A focused composer/search field means the user is mid-task — never yank.
     const el = typeof document !== "undefined" ? document.activeElement : null
     const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
     const target = memberAddedLandingTarget(payload, {
       currentProjectId: projectId,
-      alreadyInPrivateChat: activeChat === "individual",
+      // There is only the private chat now — the caller is always "already
+      // in" it, so a same-project signal always resolves to null here
+      // (nothing to do — memberAddedLandingTarget only returns non-null for
+      // a genuinely DIFFERENT project). The routing below is the cross-
+      // project case only.
+      alreadyInPrivateChat: true,
       busy,
     })
     if (target == null) return
-    // Same project → switch its tab to the private chat in place (also persists
-    // the tab + clears the unread badge). A different project → route to it,
-    // opening on its private chat.
-    if (String(target) === String(projectId)) {
-      onSelectChat("individual")
-    } else {
-      router.push(projectPath(target, { chat: "individual" }))
-    }
+    router.push(projectPath(target, { chat: "individual" }))
   }
 
   // Re-fetches ONLY the project row (members + count) after a roster
@@ -1107,9 +967,6 @@ export function ProjectDetailScreen({
         artifacts={state.artifacts}
         memory={state.memory}
         insightNote={state.insight}
-        activeChat={activeChat}
-        onSelectChat={onSelectChat}
-        individualUnread={individualUnread}
         ledgerCounts={ledgerCounts}
         ledgerRows={ledgerRows}
         onOpenArtifacts={onOpenArtifacts}

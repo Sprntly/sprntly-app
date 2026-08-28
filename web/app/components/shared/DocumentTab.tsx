@@ -9,7 +9,13 @@ import {
   type SaveState,
   type Scheduler,
 } from "../../lib/documentSave"
+import type { Editor } from "@tiptap/react"
 import { DocumentEditor } from "../../(app)/artifacts/doc/DocumentEditor"
+import { PrdToolbar } from "./PrdMarkdownEditor"
+import {
+  UNSUPPORTED_DOCUMENT_COMMANDS,
+  execDocumentCommand,
+} from "../../lib/documentToolbarExec"
 import { documentFailureCopy } from "../../lib/documentFailure"
 
 // ── The chat panel's Document tab ────────────────────────────────────────────
@@ -245,16 +251,63 @@ export function DocumentTab({
     }
   }, [load])
 
+  // The live editor, handed over by `DocumentEditor` on mount. The pinned
+  // toolbar drives THIS — the bar is outside the editor now, so it needs a way
+  // back in. Held in state rather than a ref so the bar re-renders (and stops
+  // reading "No draft") the moment there is a document to format.
+  const [editor, setEditor] = useState<Editor | null>(null)
+
   if (loading) return <div style={S.muted}>Loading document…</div>
   if (failed || !doc) return <div style={S.muted}>This document could not be loaded.</div>
 
   return (
     <div data-document-tab style={{ padding: "4px 2px 24px" }}>
-      <div style={S.head}>
-        <div style={S.title}>{doc.title.trim() || "Untitled document"}</div>
-        <SaveIndicator state={saveState} />
-      </div>
-      {doc.kind.trim() && <div style={S.kind}>{doc.kind.trim()}</div>}
+      {/* FIRST in the panel, straight after the artifact tabs and ahead of the
+          title: the formatting controls are what you reach for while editing,
+          so they sit at the top edge and stay there — the posture the PRD panel
+          takes. Inside the editor (where this bar used to live) it scrolled
+          away with the first paragraph and was gone by the time there was
+          anything to format.
+
+          The SAME `PrdToolbar` the PRD uses — one formatting control for every
+          document in this panel, rather than bars that drift apart. Its commands
+          are execCommand names (it was built for a contenteditable);
+          `execDocumentCommand` translates them for this schema-backed editor,
+          and the ones with no extension behind them are omitted rather than
+          rendered inert. */}
+      {doc.status === "ready" && (
+        <div style={S.toolbar}>
+          <PrdToolbar
+            hasDoc={!!editor}
+            // The bar carries the same save word this tab already shows beside
+            // the title. "error" and "conflict" read as UNSAVED here on purpose:
+            // the detail is spelled out below, and a bar that said "Saved" over
+            // an unsaved document would be the one lie a save indicator cannot
+            // tell.
+            saveStatus={
+              saveState.kind === "saving"
+                ? "saving"
+                : saveState.kind === "error" || saveState.kind === "conflict"
+                  ? "unsaved"
+                  : "saved"
+            }
+            omit={UNSUPPORTED_DOCUMENT_COMMANDS}
+            // Not "Saved · Draft": that is the PRD's word for its own state, and
+            // a team document is not a draft of anything.
+            savedLabel="Saved"
+            exec={(cmd, value) => { if (editor) execDocumentCommand(editor, cmd, value) }}
+          />
+        </div>
+      )}
+      {/* NO TITLE ROW. The document opens with its own <h1> -- the generator
+          writes one, and every document in the library has one -- so printing
+          the row's title above it showed the same sentence twice, with the KIND
+          label wedged between them as a third near-copy. The document is the
+          title. Renaming still happens where a document is renamed: the
+          artifacts screen and the full-page editor.
+
+          The save state moved into the toolbar's own status pill, which is the
+          one place in this panel that already reports it. */}
 
       {doc.status === "generating" && (
         <div data-document-writing style={S.notice}>Writing this document…</div>
@@ -323,6 +376,9 @@ export function DocumentTab({
             editable={doc.status === "ready"}
             onChange={onChange}
             onBlur={() => void schedulerRef.current?.flush()}
+            onReady={setEditor}
+            // The bar is pinned above the scroll area instead — see the header.
+            hideToolbar
           />
         </>
       )}
@@ -340,30 +396,7 @@ function asConflict(err: unknown): ConflictDoc | null | undefined {
   return detail.current ?? null
 }
 
-function SaveIndicator({ state }: { state: SaveState }) {
-  const text =
-    state.kind === "saving" ? "Saving…"
-      : state.kind === "saved" ? "Saved"
-      : state.kind === "error" ? "Not saved — keep typing to retry"
-      : state.kind === "conflict" ? "Someone else edited this"
-      : ""
-  if (!text) return null
-  return (
-    <span data-document-save-state={state.kind} style={{
-      fontSize: 11.5,
-      color: state.kind === "error" || state.kind === "conflict"
-        ? "var(--danger, #DC2626)" : "var(--ink-3, #8C8A84)",
-    }}>{text}</span>
-  )
-}
-
 const S: Record<string, React.CSSProperties> = {
-  head: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 12 },
-  title: { fontSize: 17, fontWeight: 700, color: "var(--ink, #1A1A17)" },
-  kind: {
-    fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em",
-    color: "var(--ink-3, #8C8A84)", marginBottom: 12,
-  },
   notice: {
     fontSize: 12.5, color: "var(--ink-2, #5A5853)",
     background: "var(--surface-2, #F4F1EA)", border: "1px solid var(--line, #E8E6E0)",
@@ -381,6 +414,14 @@ const S: Record<string, React.CSSProperties> = {
   btnPrimary: {
     fontSize: 12, fontWeight: 600, padding: "5px 10px", borderRadius: 6,
     border: "none", background: "var(--accent, #179463)", color: "#fff", cursor: "pointer",
+  },
+  // The bar sits above the document and STAYS there: `position: sticky` against
+  // the panel's own scroll container, so scrolling the text does not scroll the
+  // controls away — which is the whole point of moving it out of the editor.
+  toolbar: {
+    position: "sticky", top: 0, zIndex: 5,
+    background: "var(--surface, #fff)",
+    margin: "0 0 10px",
   },
   body: { fontSize: 14, lineHeight: 1.7, color: "var(--ink, #1A1A17)" },
   muted: { fontSize: 13, color: "var(--ink-3, #8C8A84)" },

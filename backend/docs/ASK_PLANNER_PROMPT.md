@@ -288,9 +288,15 @@ Connected sources for this company — these and only these may appear in
 Sources this company has NOT connected: jira, clickup, fireflies, hubspot,
 google_drive. Do not name them.
 
+Goal Analysis is not available in this workspace. Never choose `analyse_goal`;
+treat a goal the user wants moved as a question to `answer`, and pick the
+pipeline and sources for it as you would for any other question.
+
 Keyword match: a keyword rule matched the "{pipeline_id}" pipeline for this
 question. Treat that as the default outcome unless one of the Company skills
 above genuinely fits the question better.
+
+Active tab: PRD #{id} — "{title}" is open beside this chat.
 
 Conversation so far:
 User: {turn}
@@ -308,6 +314,7 @@ Question: {the user's question}
 | Connected sources | Always | `registry.connected_providers(enterprise_id)`, intersected with `LOOKUP_PROVIDERS` |
 | Not connected | Always | `LOOKUP_PROVIDERS` minus the above. Stating the negative measurably reduces hallucinated sources |
 | Keyword match | Only when the regex tier hit AND the company has uploads | `_keyword_prior` |
+| Active tab | Only when a PRD is open on the tab that sent the message | `_open_prd_block`. The same fact the pre-planner resolver already rendered (`chat_intent._render_context`) and the planner was never given: without it "build a report from this prd" planned as `answer` — *"no PRD is open or identified in the thread"* — on a thread that had one open. Absent when none is open; the prompt already reasons from that as its default |
 | Conversation | Only when history exists | `_render_history`, per-turn clamped |
 | Question | Always | **`_routing_text_with_filenames(...)`, never the raw `question`** — see below. Last |
 
@@ -384,6 +391,7 @@ treats the classifier's output: **model proposes, Python disposes.**
 | Scope | Honour `in_scope` only on strict `is False`, so a missing or malformed field fails open to the normal path |
 | Constraints | Parse and validate dates; a `top_n` that is not a positive int is dropped, not clamped |
 | Pipeline exclusivity | If a pipeline is accepted, ignore `sources` / `web_search` — the pipeline gathers its own |
+| Goal Analysis | `analyse_goal` is refused unless the company's `crucible` flag is on. Fails CLOSED — an unreadable flags row refuses too |
 | Total failure | Any exception → fall back to today's `route()`. The planner must never be able to break an answer |
 
 ---

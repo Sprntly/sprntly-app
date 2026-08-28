@@ -13,11 +13,22 @@ import { pollUntil } from "./poll"
 import { clearPendingJob, getPendingJob, setPendingJob, type PendingJob } from "./jobResume"
 import { throttlePartial } from "./runPrdGeneration"
 import { subscribeToGenerationStream } from "./streamGeneration"
+import { friendlyPhase } from "./friendlyPhase"
 import { providerNoticeFromAsk, type ProviderNotice } from "./providerLimitNotice"
 
 /** Live-preview callback: the accumulating answer markdown as it streams.
  *  Progressive display only — the poll's final payload stays authoritative. */
 export type OnAskPartial = (markdown: string) => void
+
+/**
+ * Fired with USER-FACING, curated progress copy each time the backend reports a
+ * new pipeline leg (retrieval, writing, report legs) over the SSE `phase`
+ * channel — before and during the answer. The raw backend label is curated
+ * through `friendlyPhase` HERE, at the ingestion boundary, so no downstream
+ * caller ever handles the raw activity string (the egress contract). Display
+ * only; the poll stays authoritative. Absent on runs that publish no phases.
+ */
+export type OnAskPhase = (friendlyLabel: string) => void
 
 /**
  * Fired when the SSE preview channel drops AFTER it had already delivered at
@@ -104,7 +115,7 @@ class AskFailedError extends Error {
  * ask_id is deliberately left in place so a reload re-attaches. Split out from
  * the generic failure so the chat can render the honest "still running on our
  * side — reload and it will pick up where it left off" state instead of the
- * red "that answer didn't come through" bubble.
+ * red "there was an interruption" bubble.
  */
 export class AskTimeoutError extends AskFailedError {}
 
@@ -157,6 +168,7 @@ async function pollAskToResult(
   isStopped?: () => boolean,
   onPartial?: OnAskPartial,
   onStreamDrop?: OnAskStreamDrop,
+  onPhase?: OnAskPhase,
 ): Promise<AskResponse> {
   const scope = askScope(tabId)
   // `onPartial` opens an SSE token stream ALONGSIDE the poll and forwards the
@@ -182,12 +194,18 @@ async function pollAskToResult(
   // says nothing about whether the job finished, and the ordinary interval
   // already covers that case.
   let wakePoll: (() => void) | null = null
-  const stopStream = throttled
+  // Open the stream when EITHER a live text preview (onPartial) OR a progress
+  // signal (onPhase) is wanted. A phase-only caller still gets the leg markers
+  // even if it renders no live token preview.
+  const stopStream = throttled || onPhase
     ? subscribeToGenerationStream((t) => askApi.streamUrl(askId, t), {
         onDelta: (full) => {
           sawDelta = true
-          throttled.push(full)
+          throttled?.push(full)
         },
+        // Curate the raw backend label to user-facing copy right here, at the
+        // boundary — no downstream code ever sees the raw activity string.
+        onPhase: onPhase ? (label) => onPhase(friendlyPhase(label)) : undefined,
         onDone: () => {
           wakePoll?.()
         },
@@ -334,6 +352,10 @@ export async function runAskGeneration(
      *  mutually exclusive with prd_id (the tab has one primary artifact). */
     evidence_id?: number
     ticket_set_id?: number
+    /** The report/document the side panel is SHOWING. Not grounding by id like
+     *  the three above — the backend grounds on everything this THREAD made
+     *  and uses this only to put the one on screen first. */
+    open_artifact?: { kind: "report" | "document"; id: number } | null
     /** Individual-project-chat send identity — the idempotency key the
      *  server persists this turn's user side under. Passed straight through
      *  to `askApi.start`. */
@@ -352,6 +374,8 @@ export async function runAskGeneration(
     isStopped?: () => boolean
     onPartial?: OnAskPartial
     onStreamDrop?: OnAskStreamDrop
+    /** Curated, user-facing progress copy per pipeline leg (see OnAskPhase). */
+    onPhase?: OnAskPhase
   },
 ): Promise<AskResponse> {
   // A POST failure (4xx/5xx) propagates as-is so the route's error detail
@@ -363,8 +387,10 @@ export async function runAskGeneration(
   // A cache hit comes back immediately-`ready` — there is no generation to
   // stream, so don't open an EventSource that would only ever see silence.
   const onPartial = start.status === "generating" ? opts?.onPartial : undefined
+  // A cache hit is already ready — no generation to report progress on.
+  const onPhase = start.status === "generating" ? opts?.onPhase : undefined
   return pollAskToResult(
-    start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped, onPartial, opts?.onStreamDrop,
+    start.ask_id, company, tabId, opts?.isCancelled, opts?.isStopped, onPartial, opts?.onStreamDrop, onPhase,
   )
 }
 
@@ -381,8 +407,11 @@ export async function resumeAskGeneration(
   isStopped?: () => boolean,
   onPartial?: OnAskPartial,
   onStreamDrop?: OnAskStreamDrop,
+  onPhase?: OnAskPhase,
 ): Promise<AskResponse> {
   // A resume re-attaches mid-generation: the stream's replay frame catches the
   // preview up with everything emitted before this mount, then live deltas.
-  return pollAskToResult(askId, company, tabId, isCancelled, isStopped, onPartial, onStreamDrop)
+  // (Phase frames are NOT replayed on a mid-generation join — see token_stream —
+  // so a resumed turn may show only whatever leg starts next.)
+  return pollAskToResult(askId, company, tabId, isCancelled, isStopped, onPartial, onStreamDrop, onPhase)
 }

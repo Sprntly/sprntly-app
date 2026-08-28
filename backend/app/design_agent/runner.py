@@ -86,6 +86,7 @@ from app.llm_telemetry import (
     MODEL_PRICING,
     RunUsage,
     log_llm_run,
+    CACHE_TTL_1H,
     should_abort,
     should_wrap_up,
 )
@@ -1028,13 +1029,15 @@ async def agent_loop(
             # nudge above — count vs spend are separate convergence signals. The
             # trailing message here is still the user turn (the assistant turn is
             # appended below), so the nudge lands alternation-safe.
-            if not cost_guard_nudged and should_wrap_up(usage, MODEL, SOFT_CAP_USD, iters):
+            if not cost_guard_nudged and should_wrap_up(
+                usage, MODEL, SOFT_CAP_USD, iters, CACHE_TTL_1H
+            ):
                 _append_text_block(messages[-1], _wrap_up_nudge(0))  # hard-stop wording
                 cost_guard_nudged = True
                 logger.info(
                     "cost_guard.degraded prototype_id=%s mode=%s reason=soft_cap_projection "
                     "est_cost_usd=%.4f cap=%.2f",
-                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL), SOFT_CAP_USD,
+                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL, CACHE_TTL_1H), SOFT_CAP_USD,
                 )
 
             stop = resp.stop_reason
@@ -1056,11 +1059,11 @@ async def agent_loop(
             # last_assistant_content above), exactly as the max_iters exit does.
             # Placed AFTER the assignment so the salvaged content is this turn's,
             # not the prior iteration's (or the initial [] on iteration 1).
-            if should_abort(usage, MODEL, HARD_CAP_USD, iters):
+            if should_abort(usage, MODEL, HARD_CAP_USD, iters, CACHE_TTL_1H):
                 logger.warning(
                     "cost_guard.aborted prototype_id=%s mode=%s reason=hard_cap_projection "
                     "est_cost_usd=%.4f hard_cap=%.2f soft_cap=%.2f iters=%d",
-                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL),
+                    ctx.prototype_id, mode, usage.est_cost_usd(MODEL, CACHE_TTL_1H),
                     HARD_CAP_USD, SOFT_CAP_USD, iters,
                 )
                 # MUST fire BEFORE _finish (below) — _finish's own _sse_close pops

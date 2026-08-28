@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from app.llm import (
+    CACHE_TTL_1H,
     DEFAULT_MODEL,
     LONG_REQUEST_TIMEOUT_S,
     call_json,
@@ -48,6 +49,51 @@ _LONG_OUTPUT_SKILLS = frozenset(
 
 def _is_long_output(skill: Optional[str]) -> bool:
     return skill is not None and skill in _LONG_OUTPUT_SKILLS
+
+
+# Skills whose METHOD block is worth caching at the 1-hour tier rather than the
+# 5-minute default. The tiers are priced differently on the WRITE (1.25x input
+# for 5m, 2x for 1h) and identically on the read (0.1x), so 1h wins only when
+# entries survive long enough to be read. Break-even is a read/write ratio of
+# 0.28 at the 5m tier and 1.11 at 1h. It is not a strictly-better setting.
+#
+# EMPTY, deliberately. `top-insights` lived here and was removed on 2026-08-25
+# because the tier was billing 2x and delivering 5-minute behaviour.
+#
+# The measurement that put it here was sound and still reproduces: over 617
+# platform-key calls in the 30 days to 2026-08-24, 13.5% landed within 5 minutes
+# of the previous call and 83.0% within an hour (the original study said 14.8%
+# and 86.3%). What that study could not see is whether the 1-hour entries
+# actually survive. They do not. Hit rate against the gap since the previous
+# call FINISHED:
+#
+#     <5 min      67%
+#     5-15 min    11%     <- the cliff sits on the 5-minute boundary
+#     15-60 min    7%
+#
+# 69.5% of calls arrive in the 5-60 minute band — precisely the window the
+# 1-hour tier was bought for, and precisely where it does not pay out. The
+# result was a 0.20 read/write ratio against a 1.11 break-even: $242/month of
+# cache writes returning $2 of reads, 62% of the single most expensive
+# operation in the product.
+#
+# Ruled out first, so nobody re-derives them: the prefix is stable
+# (`_BRIEF_SCHEMA` and `_SYSTEM` are module constants, and the method block is
+# byte-identical across tenants); concurrency is not the cause (only 5% of calls
+# start while another is still running, and the median burst is a single call);
+# and `ttl: "1h"` needs no beta header. The 2x write IS being billed — metered
+# spend matches the 1h rate to 0.6%, and does not match the 5m rate at all.
+#
+# So this is not "1h is the wrong tier for top-insights"; it is "1h did not
+# behave as documented for this prefix". Worth re-testing with a controlled
+# experiment before anything is added back. Until then, if you are considering
+# putting a skill here: measure its OWN hit rate against gap-since-previous-call
+# — not just its gap distribution, which is what led us here.
+_LONG_CACHE_SKILLS: frozenset[str] = frozenset()
+
+
+def _cache_ttl_for(skill: Optional[str]) -> Optional[str]:
+    return CACHE_TTL_1H if skill is not None and skill in _LONG_CACHE_SKILLS else None
 
 
 def _build_method_prefix(
@@ -135,15 +181,27 @@ class LLMResult:
     stop_reason: Optional[str]
 
 
-def _est_cost(meta: dict) -> float:
+def _est_cost(meta: dict, cache_ttl: Optional[str] = None) -> float:
+    """Estimated USD for one call, from the response's own usage numbers.
+
+    `cache_ttl` is the tier the REQUEST asked for — the response does not say.
+    Defaults to the 5-minute tier, which is what a bare ephemeral block earns
+    and what every caller but a long-cache skill sends. This used to hardcode
+    the 1-hour rate, over-reporting every cache write by 1.6x.
+
+    Fails OPEN on an unpriced model (returns 0.0) rather than raising, unlike
+    `RunUsage.est_cost_usd` — a decision-log row must never take down the call
+    it is describing. That asymmetry is deliberate and predates this change.
+    """
     p = MODEL_PRICING.get(meta.get("model", ""))
     if not p:
         return 0.0
+    write_rate = p["cache_write_1h" if cache_ttl == CACHE_TTL_1H else "cache_write_5m"]
     return (
         meta.get("input_tokens", 0) * p["input"]
         + meta.get("output_tokens", 0) * p["output"]
         + meta.get("cache_read_input_tokens", 0) * p["cache_read"]
-        + meta.get("cache_creation_input_tokens", 0) * p["cache_write_1h"]
+        + meta.get("cache_creation_input_tokens", 0) * write_rate
     )
 
 
@@ -167,6 +225,11 @@ def llm_call(
     background: bool = False,
     temperature: Optional[float] = None,
     on_delta=None,
+    batch: bool = False,
+    # How long to wait for a batch before cancelling it and running the call
+    # live. None takes app.llm_batch.DEFAULT_DEADLINE_S. A caller with a real
+    # delivery slot (the brief's 3h GENERATION_LEAD) passes its own.
+    batch_deadline_s: Optional[float] = None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -215,6 +278,10 @@ def llm_call(
     # default 120s non-streamed path. Other callers keep the non-streamed path.
     # A caller asking for per-delta streaming implies the streaming transport.
     use_long_output = long_output or _is_long_output(skill) or (on_delta is not None)
+    # Cache-TTL tier for this call's method block / system prompt. Resolved
+    # from the bound skill (see _LONG_CACHE_SKILLS); None means the 5-minute
+    # default, which is what every skill but top-insights still wants.
+    cache_ttl = _cache_ttl_for(skill)
     stream = use_long_output
     timeout = LONG_REQUEST_TIMEOUT_S if use_long_output else None
     meta: dict = {}
@@ -257,8 +324,17 @@ def llm_call(
             # actually emits) — the caller wraps it in an extractor (e.g.
             # app.ask_stream.AnswerFieldExtractor) to turn them into text.
             output: Any = call_json(
+                # `batch` is the caller's statement that nothing is waiting on
+                # this result, so it may take the half-price Batches path (see
+                # app.llm._create_maybe_batched). Everything else about the call
+                # — attribution, telemetry, the decision-log row written below —
+                # is identical, which is why the switch lives here rather than
+                # in a parallel code path.
+                batch=batch, batch_label=f"{agent}.{purpose}",
+                batch_deadline_s=batch_deadline_s,
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 schema=json_schema, user_cacheable_prefix=user_cacheable_prefix,
+                cache_ttl=cache_ttl,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_json_delta=on_delta,
             )
@@ -269,8 +345,16 @@ def llm_call(
             # `system` prompt is cached too when substantial (see
             # _build_base_kwargs).
             output = call_md(
+                # Same opt-in as the json branch above. Most markdown callers
+                # are long-output and therefore stream; the batch seam now
+                # batches those anyway (streaming exists to bound a synchronous
+                # read a batch never performs) and keeps the streaming transport
+                # only for the fallback. See app.llm._create_maybe_batched.
+                batch=batch, batch_label=f"{agent}.{purpose}",
+                batch_deadline_s=batch_deadline_s,
                 system=system, user=input, model=chosen_model, max_tokens=max_tokens,
                 user_cacheable_prefix=user_cacheable_prefix,
+                cache_ttl=cache_ttl,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_delta=on_delta,
             )
@@ -290,7 +374,7 @@ def llm_call(
         output_tokens=meta.get("output_tokens", 0),
         cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
         cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
-        cost_usd=round(_est_cost(meta), 6),
+        cost_usd=round(_est_cost(meta, cache_ttl), 6),
         latency_ms=latency_ms,
         stop_reason=meta.get("stop_reason"),
     )

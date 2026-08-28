@@ -8,7 +8,8 @@ Run these as code where possible; they're cheap and catch most defects.
 
 ### Grounding and totals
 - **Grounding:** every number in a title, body, greeting, or what-to-build item maps to a field on a source finding (`pain.value`, `value.amount`/`range`, `reach.count`, or evidence). Any orphan number fails.
-- **Totals integrity:** the greeting's "within reach" total equals the sum of the card value figures, within rounding. Backlog items do not count toward it. Mismatch fails.
+- **Totals integrity:** the greeting's roll-up total equals the sum of the card value figures, within rounding. Backlog items do not count toward it. Mismatch fails.
+- **Greeting posture:** the greeting describes what the findings carry or what is at stake. "upside on the table", "money to go capture", "within reach", or any phrasing of the total as a return on acting fails — the reader has not agreed to act yet.
 - **No cross-channel averaging:** a figure equal to the mean of two channel figures, with neither present upstream, fails.
 - **Provenance recorded:** every card's `audit.figure_provenance` names a source for each figure it renders. Missing fails.
 
@@ -97,8 +98,8 @@ Before shipping any change to this skill, simulate seven consecutive daily brief
 ## What to check against the goldens
 
 After linting, compare voice and shape to `references/examples.md`:
-- Do the titles read like the golden titles (pain stat, then value-of-acting)?
+- Do the titles read like the golden titles (the finding's stat, then what's at stake)?
 - Do the bodies follow the arc and stand alone?
-- Does the greeting frame upside, and match the cadence?
+- Does the greeting report what surfaced (never a payoff for acting), and match the cadence?
 - Does a cross-channel card use each channel for what it's authoritative for?
 - Did you avoid every numbered anti-pattern in the counter-examples section?

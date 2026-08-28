@@ -75,94 +75,11 @@ _PRIVATE_SCOPE_SYSTEM = (
 )
 
 
-# The @Sprntly GROUP agent's system-prompt base — the SAME project-surface
-# behavioral contract `_PRIVATE_SCOPE_SYSTEM` carries (read-tool + retrieval +
-# synthesis + tenancy framing, the delegate_task WHEN/HOW guidance, and the
-# edit_prd direct-apply framing), re-cast for the multi-party register (one
-# voice in a shared thread). Ported in shape from `b09801dd^:routes/projects.py`'s
-# `_GROUP_SCOPE_SYSTEM`, with ONE deliberate change from the reference: the
-# opening does NOT assert "you were tagged with @Sprntly", because in a SOLO
-# project Sprntly replies to every message with no mention — the 2-mode gate has
-# already decided a reply is warranted before this prompt is used. The
-# `_ADDRESSING_NOTES` per-turn block is intentionally NOT ported (it was coupled
-# to the deleted `trigger_kind` scheduler; mount-not-scheduler has no trigger
-# kinds). Fed to the group scope's `system_addendum` alongside the roster block,
-# so the group model gets WHEN/HOW guidance for delegate_task / edit_prd + the
-# roster (free-text assignee → member) — not just the project facts.
-_GROUP_SCOPE_SYSTEM = (
-    "You are Sprntly, a project teammate embedded in this team's group chat. "
-    "Read the recent conversation below (each line is \"Name (job role): "
-    "message\", or \"Sprntly: message\" for your own prior turns) and reply "
-    "helpfully to the latest message, as one more voice in the thread — not a "
-    "formal report. Match the room's register: be conversational, but give the "
-    "ask the depth it needs — retrieve and synthesize from the project's real "
-    "data rather than deflecting or narrating a non-answer. If the ask is "
-    "unclear or out of scope, say so plainly rather than guessing.\n\n"
-    "You KNOW this project. The PROJECT CONTEXT block below gives you the "
-    "project's shared memory, its members (the roster), its open tasks (the "
-    "delegation ledger), and its artifacts (PRDs, prototypes, evidence, "
-    "reports). Answer questions about any of these directly — never say you "
-    "\"can't see\" the team's files, tasks, or members. You have tools to read "
-    "the project's shared memory, its artifact list, a specific artifact's "
-    "content, and its task ledger — call them when the answer depends on "
-    "project data rather than guessing. When someone asks what a document says, "
-    "read that artifact's content and answer from the real content. When the "
-    "ask is for the whole picture — \"catch us up\", \"what's the why and goal "
-    "here\" — first read the project's shared memory (and its artifacts/ledger "
-    "as needed), then synthesize the why, the goal, the current state, who's "
-    "assigned to what, and prior work — grounded in what you read, never "
-    "generic.\n\n"
-    "You have a delegate_task tool: when someone asks you to hand a specific "
-    "task to a teammate (by name, @handle, or role — resolve them against the "
-    "roster below), call it. Do not call it for a plain question, an FYI, or "
-    "human-to-human chatter. You must ACTUALLY CALL delegate_task to hand a "
-    "task off — NEVER reply that you are delegating, assigning, handing off, "
-    "or \"on it\" without calling the tool on THIS turn. A message like \"On "
-    "it — delegating that now\" or \"I'll assign this to <name>\" with no "
-    "delegate_task call is a failure: the handoff never happened, no brief was "
-    "sent, nothing was recorded. Either call delegate_task, or — if you are "
-    "not delegating — do not claim you are. Once you call delegate_task, the "
-    "handoff has happened — you are DONE. Do NOT then do the task yourself, "
-    "write the deliverable you just handed off, or answer the underlying "
-    "question in the teammate's place. Do NOT say the teammate has replied, "
-    "finished, agreed, or done anything at all — they have not. Confirm the "
-    "handoff plainly in your own voice (\"I've asked <name> to <task> — I'll "
-    "bring their answer back here once it's in.\") and stop there; never end a "
-    "delegation reply on a fabricated result.\n\n"
-    "You have a complete_task tool: when the person speaking says a task that "
-    "was delegated to THEM is finished or done (\"I'm done with the pricing "
-    "one-pager\", \"finished that\", \"sent it over\", \"the review's done\"), "
-    "call complete_task to record it on the ledger. You must ACTUALLY CALL the "
-    "tool for the completion to be recorded — never just say \"noted\" or "
-    "\"marked it done\" without calling complete_task on THIS turn; a bare "
-    "acknowledgment updates nothing. Only for the speaker's OWN task, and only "
-    "for a real completion — not a question about status, not a request to "
-    "start work. Relay whatever complete_task tells you (recorded, "
-    "already-done, or nothing-to-mark) — do not claim a completion the tool "
-    "did not confirm. When someone reports a task DONE, ONLY record the "
-    "completion — do NOT also call delegate_task to re-assign or hand off the "
-    "task they just finished.\n\n"
-    "You can edit this project's PRD. When the latest turn asks for a PRD "
-    "change, call the edit_prd tool with a plain-language instruction — you do "
-    "NOT choose or pass a PRD id; the right PRD is resolved for you, and if the "
-    "project has more than one PRD you will be asked which one to change. The "
-    "edit is applied to the document in place and a new version is saved "
-    "automatically so the change is undoable — it is NOT queued for approval "
-    "and does not need a teammate to manually accept it. Never describe your "
-    "role as merely advisory, or claim you cannot edit the PRD. You must "
-    "ACTUALLY call the edit_prd tool to make a PRD change happen — never say "
-    "\"Done\" or that you have updated the PRD unless you called edit_prd on "
-    "THIS turn and are relaying what it told you.\n\n"
-    "Everything you can read or edit is scoped to THIS project only; never "
-    "assume data from another project or company.\n\n" + PROJECT_TOOL_NUDGE
-)
-
-
 def _private_roster_block(roster: list[dict]) -> str:
     """"PROJECT ROSTER:\n- {first} — {job_role}" — RELOCATED verbatim from
     the deleted `project_individual_agent._roster_prompt_block`, so the
-    private surface resolves a free-text assignee ("the designer") to the
-    same names/roles the group agent's roster block uses."""
+    private surface resolves a free-text assignee ("the designer") against
+    the real names/roles on the project."""
     lines = []
     for m in roster:
         name = m.get("name") or "(unnamed)"
@@ -175,7 +92,7 @@ def _private_roster_block(roster: list[dict]) -> str:
 @dataclass
 class ExecutionOutcome:
     """Contract A — the one result shape every execution surface (main,
-    private, group) hands back from its `body` closure to
+    private) hands back from its `body` closure to
     `run_execution_job`. `response` is the citation-stripped answer payload
     that becomes the job row's stored `response`; `error`/`error_class` are
     populated ONLY on the failure path (by the primitive, from the raised
@@ -281,8 +198,8 @@ async def run_execution_job(
     body: Callable[[], "ExecutionOutcome"],
     on_committed: "Callable[[ExecutionOutcome], None] | None" = None,
 ) -> "ExecutionOutcome":
-    """The shared execution-lifecycle primitive (Contract A) that main,
-    private, AND group all run through — so group *inherits* the lifecycle by
+    """The shared execution-lifecycle primitive (Contract A) that both main
+    and private run through — so every surface *inherits* the lifecycle by
     using the SAME code, not a status-column wrapper. Owns exactly:
 
     * the async heartbeat loop (so a long-but-live run is never reaped);
@@ -304,8 +221,7 @@ async def run_execution_job(
 
     `is_cancelled` is part of Contract A and is wired by the caller into the
     answer call inside `body` (so the body raises `AskCancelled` at a
-    checkpoint); the primitive accepts it for surface symmetry and the group
-    opt-out ledger (group passes `lambda: False`). `run_id` is the durable
+    checkpoint); the primitive accepts it for surface symmetry. `run_id` is the durable
     execution identity carried for logging/retry correlation. Returns the
     resolved `ExecutionOutcome` so the caller can emit its own surface-specific
     terminal signal (e.g. main/private's `token_stream.close` frame) keyed to
@@ -351,7 +267,7 @@ async def _heartbeat(ask_id: int) -> None:
     stopped job stops being touched immediately.
 
     The loop body now lives in the shared `_run_heartbeat` primitive
-    (main/private and group both beat through it); this thin wrapper keeps the
+    (both main and private beat through it); this thin wrapper keeps the
     ask-id-shaped `touch_ask_job` binding and the direct unit coverage in
     `test_ask_job_heartbeat.py`.
     """
@@ -392,6 +308,11 @@ def _run_sync(
     project_id: int | None = None,
     evidence_id: int | None = None,
     ticket_set_id: int | None = None,
+    #: What the side panel is showing — `{"kind": "report"|"document", "id":
+    #: int}`. Unlike the three ids above it addresses nothing on its own: it
+    #: only says which of THIS THREAD's artifacts to put first
+    #: (`app.thread_context`), so an id from elsewhere reorders nothing.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> "ExecutionOutcome":
     # Token-stream the answer text as it generates: the structured answer call
@@ -469,10 +390,22 @@ def _run_sync(
         from app import ask_planner
 
         ask_plan = ask_planner.plan_for_answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id,
+            question=question,
+            history=history,
+            # Same context the intent endpoint planned with, so the memo hit is a
+            # real reuse of THIS turn's plan rather than a differently-keyed
+            # second opinion.
+            prd_id=prd_id,
         )
 
     context_token = ask_runner.set_active_conversation(conversation_id, user_id)
+    # The workspace, by the same route: a project list scopes to `(company,
+    # workspace, my memberships)`, and this function is the only place on the
+    # answer path that holds all three. Cleared in the same `finally` — a
+    # pooled thread holding the last ask's workspace would scope the next
+    # caller's list to someone else's.
+    workspace_token = ask_runner.set_active_workspace_id(workspace_id)
     embedding_token = ask_runner.set_active_question_embedding_pending()
     # The prior turns, by the same route and for the same reason: document
     # RESOLUTION ("what does it say about pricing?") cannot work out what "it"
@@ -546,6 +479,12 @@ def _run_sync(
             prd_id=prd_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            # The thread, and what the panel is showing in it — the two inputs
+            # `app.thread_context` needs to ground a question on the report or
+            # document THIS chat produced. Both optional: a Slack ask or a warm
+            # has no thread, and the block simply isn't built.
+            conversation_id=conversation_id,
+            open_artifact=open_artifact,
             # Cooperative cancellation: the user's Stop flips the job row to
             # `cancelled` (POST /v1/ask/{id}/cancel); qa_agent polls this between LLM
             # steps and raises AskCancelled to abort before the expensive answer call.
@@ -567,6 +506,7 @@ def _run_sync(
         payload = _single_shot()
     finally:
         ask_runner.reset_active_conversation(context_token)
+        ask_runner.reset_active_workspace_id(workspace_token)
         ask_runner.reset_active_question_embedding(embedding_token)
         ask_runner.reset_active_history(history_token)
         ask_runner.reset_active_planned_documents(planned_docs_token)
@@ -638,6 +578,10 @@ async def run_ask_job(
     user_id: str | None = None,
     workspace_id: str | None = None,
     project_id: int | None = None,
+    #: The report/document the panel is showing — passed straight down to
+    #: `_run_sync` for `app.thread_context`'s ordering. Defaulted so every
+    #: existing caller and test double is unaffected.
+    open_artifact: dict | None = None,
     context_source: dict | None = None,
 ) -> None:
     """Run the Ask pipeline in a worker thread; update the job row with the
@@ -672,6 +616,7 @@ async def run_ask_job(
             project_id=project_id,
             evidence_id=evidence_id,
             ticket_set_id=ticket_set_id,
+            open_artifact=open_artifact,
             context_source=context_source,
         )
 
@@ -682,9 +627,12 @@ async def run_ask_job(
         # self-swallowing, so it can only ever ADD a durable artifact/memory
         # entry, never delay or break the already-stored answer.
         payload = outcome.response
-        # A report skill answers with a self-contained HTML document; capture
-        # it as a durable `reports` artifact (no-op for a markdown answer).
-        capture_report(
+        # A report answer is a durable artifact, not just a chat reply: capture
+        # it into `reports` with the originating ask's `conversation_id`, which
+        # is what lets /artifacts open a report over the thread that produced it
+        # and what the thread's own Reports panel lists on. A no-op for an
+        # ordinary answer.
+        report_id = capture_report(
             payload,
             company_id=enterprise_id,
             question=question,
@@ -694,7 +642,45 @@ async def run_ask_job(
             prd_id=prd_id,
             is_cancelled=lambda: is_ask_cancelled(ask_id),
         )
-        # Individual/group project chat: promote a durable insight into project
+        # A report GENERATED within a project chat also auto-attaches to that
+        # project's own artifact list — the same standing rule the other five
+        # artifact types already follow (prd/evidence/ticket_set/prototype/
+        # custom_artifact: "any artifact made in a project lands in the
+        # project"). It attaches the row `capture_report` just wrote rather
+        # than minting a second one: this block used to call
+        # `save_chat_output_as_report` itself, because capture was a no-op for
+        # every markdown report (see report_capture.py's docstring on the
+        # regression that made it one) — that workaround filed project reports
+        # under the `saved-chat` skill and, being project-only, left main chat
+        # with no report row at all.
+        #
+        # Gated STRICTLY on `context_source["kind"] == "project"` — never a
+        # top-level `project_id` fallback, which project chat never sends
+        # (the same source `maybe_promote_turn` below reads its project id
+        # from). `add_artifact` upserts on the `(project_id, artifact_type,
+        # artifact_id)` PK, so a rare double-run of this best-effort block
+        # is a no-op, never a duplicate ref. Best-effort by construction:
+        # a failure here can only fail to ADD an artifact ref — it can never
+        # delay or break the answer, already durably stored above.
+        if (
+            report_id is not None
+            and context_source
+            and context_source.get("kind") == "project"
+        ):
+            _report_project_id = (context_source.get("params") or {}).get("project_id")
+            if _report_project_id is not None:
+                try:
+                    from app.db import projects as projects_db
+
+                    projects_db.add_artifact(
+                        int(_report_project_id), "report", report_id
+                    )
+                except Exception:  # noqa: BLE001 — best-effort, never fail the answer
+                    logger.warning(
+                        "project report auto-attach failed ask_id=%s project_id=%s",
+                        ask_id, _report_project_id, exc_info=True,
+                    )
+        # Private project chat: promote a durable insight into project
         # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
         # (the assembler resolved a project `SurfaceScope` for this turn, which
         # is exactly the `context_source["kind"] == "project"` condition; a scope
@@ -739,49 +725,6 @@ async def run_ask_job(
                         "maybe_ingest_status failed ask_id=%s project_id=%s",
                         ask_id, _promo_project_id, exc_info=True,
                     )
-                # Group surface (Choice A, mount-not-scheduler): persist the
-                # agent's reply as a GROUP turn (author NULL = Sprntly) and
-                # broadcast it, so every member sees the reply live via
-                # realtime — the server-authoritative replacement for the old
-                # server-scheduled group reply. Keyed on the SAME
-                # `context_source` the promotion block reads, additionally gated
-                # on `surface == "group"`; the individual surface already
-                # persists its own assistant turn via `_build_private_scope`'s
-                # emit hook, so only the group surface writes here. Best-effort:
-                # a persist/broadcast failure can only fail to ADD the group
-                # turn — the answer is already durably stored above.
-                if (context_source.get("params") or {}).get("surface") == "group":
-                    # 2-mode response gate (server BACKSTOP): in a MULTI-human
-                    # project (≥2 human members), Sprntly replies ONLY to a turn
-                    # that @Sprntly-mentions it. The PRIMARY gate now runs at the
-                    # /v1/ask route BEFORE generation (routes/ask.py), so a
-                    # suppressed ask never reaches this post-terminal hook at all;
-                    # this stays as defense-in-depth for any future path that
-                    # spawns a group ask without the route gate. FAIL CLOSED — a
-                    # count-read hiccup treats the project as multi-human and
-                    # suppresses the persist+broadcast, matching the route gate's
-                    # posture (never let the agent interject into a shared thread
-                    # on a read failure). Solo projects and @Sprntly-mentioning
-                    # turns still reply.
-                    import re as _re
-
-                    try:
-                        from app.db import projects as _projects_db
-                        _multi_human = _projects_db.count_project_members(int(_promo_project_id)) >= 2
-                    except Exception:  # noqa: BLE001 — fail CLOSED toward suppression
-                        _multi_human = True
-                    _mentions_agent = bool(_re.search(r"@sprntly\b", question or "", _re.IGNORECASE))
-                    if _multi_human and not _mentions_agent:
-                        logger.info(
-                            "group_reply_gated project_id=%s conversation_id=%s "
-                            "reason=multi_human_no_mention",
-                            _promo_project_id, conversation_id,
-                        )
-                    else:
-                        _persist_group_reply(
-                            ask_id, int(_promo_project_id), conversation_id, payload
-                        )
-
 
     outcome = await run_execution_job(
         job_id=ask_id,
@@ -805,37 +748,3 @@ async def run_ask_job(
         # client woken by `done` reads a `ready` row on its next poll.
         token_stream.close(channel, kind="done")
 
-
-def _persist_group_reply(
-    ask_id: int, project_id: int, conversation_id: int, payload: dict
-) -> None:
-    """Persist + broadcast the group agent reply (Choice A). Extracted so the
-    2-mode gate above reads as a single decision. Best-effort throughout."""
-    try:
-        from app.db import conversations as _conversations_db
-        from app.db.asks import get_ask_job
-        from app.project_group_realtime import (
-            publish_group_turn_created,
-        )
-
-        # Stamp the reply with the SAME send-identity key its originating ask
-        # carried (persisted on `ask_jobs` by `/v1/ask`). The member who posted
-        # the message renders this reply from its own ask poll, so it uses this
-        # key to recognise the reply's realtime echo as its own and NOT
-        # double-render it — id-precise, never a timing guess. A peer (a
-        # different key) still gets it live.
-        _grp_cmid = (get_ask_job(ask_id) or {}).get("client_message_id")
-        _grp_turn = _conversations_db.post_group_turn(
-            conversation_id,
-            None,
-            payload.get("answer", ""),
-            role="assistant",
-            reply=payload,
-            client_message_id=_grp_cmid,
-        )
-        publish_group_turn_created(project_id, conversation_id, _grp_turn)
-    except Exception:  # noqa: BLE001 — best-effort, never fail the answer
-        logger.warning(
-            "group assistant-turn persist/broadcast failed ask_id=%s project_id=%s",
-            ask_id, project_id, exc_info=True,
-        )

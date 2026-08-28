@@ -96,6 +96,8 @@ jobs:
           # and production. The backend PROJECTS_ENABLED gate is the real boundary; this only
           # shows/hides the nav + route in the static bundle.
           NEXT_PUBLIC_PROJECTS_ENABLED: "1"
+          # Grounded progress phases: ON for staging (main), OFF for prod (production).
+          NEXT_PUBLIC_GROUNDED_PROGRESS_ENABLED: ${{ github.ref == 'refs/heads/production' && '0' || '1' }}
           NEXT_PUBLIC_SUPABASE_URL: ${{ env.SUPA_URL }}
           NEXT_PUBLIC_SUPABASE_ANON_KEY: ${{ env.SUPA_ANON }}
           NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST: ${{ secrets.NEXT_PUBLIC_AUTH_EMAIL_ALLOWLIST }}

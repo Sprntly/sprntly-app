@@ -401,6 +401,326 @@ def test_missing_context_is_stated_rather_than_left_blank(gen_env, monkeypatch):
     assert "CONTEXT: none was supplied" in captured["input"]
 
 
+# ─── Thin-context grounding fallback ─────────────────────────────────────────
+#
+# THE BUG. "Generate a report for the biggest issues we have, explain it" as a
+# thread's first message reaches `generate_into` with only the seeded ack turn
+# as context (~100 chars — the user's own question plus "Writing your issues
+# report..."), so the document's own honesty rule correctly wrote "no factual
+# grounding was available" for every section. The IDENTICAL question without
+# the word "report" reached `qa_agent.answer` instead and answered correctly,
+# because THAT path retrieves (call digest / voice-of-customer / the KG). These
+# tests pin `_ground_thin_context`'s three behaviors and `generate_into`'s use
+# of it: fires only when context is thin AND a dataset is present, folds a real
+# answer in when one comes back, and changes nothing when it doesn't.
+
+def test_grounding_is_skipped_with_no_dataset(gen_env, monkeypatch):
+    """Backward compatibility: an older frontend build (or any caller) that
+    omits `dataset` gets exactly today's behavior — no retrieval attempted,
+    the original honest-empty-context path runs unchanged."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "should never be reached"})
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues",
+    )
+
+    assert calls == []
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_grounding_fires_on_thin_context_and_folds_the_real_answer_in(
+    gen_env, monkeypatch
+):
+    """The fix, corrected once already — see
+    `test_grounding_must_plan_before_answering_not_answer_unplanned` for the
+    regression this pins. A cold-thread create with a dataset gets a real
+    PLAN built first, then ONE retrieval pass through `qa_agent.answer`, and
+    the result becomes the document's grounding — instead of the document
+    honestly reporting a gap a plain question wouldn't have had."""
+    from app import ask_planner, qa_agent
+
+    plan_calls = []
+    answer_calls = []
+    _SENTINEL_PLAN = object()
+
+    def _fake_plan(**kw):
+        plan_calls.append(kw)
+        return _SENTINEL_PLAN
+
+    def _fake_answer(**kw):
+        answer_calls.append(kw)
+        return {"answer": "Export failures are 28.7% of the support queue this month."}
+
+    monkeypatch.setattr(ask_planner, "plan_for_answer", _fake_plan)
+    monkeypatch.setattr(qa_agent, "answer", _fake_answer)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues, explain it",
+        context="Q: our biggest issues, explain it\n\nA: Writing your issues report — it will open in the panel on the right.",
+        dataset="acme",
+    )
+
+    assert len(plan_calls) == 1
+    assert plan_calls[0]["enterprise_id"] == gen_env
+    assert plan_calls[0]["question"] == "our biggest issues, explain it"
+
+    assert len(answer_calls) == 1
+    assert answer_calls[0]["dataset"] == "acme"
+    assert answer_calls[0]["enterprise_id"] == gen_env
+    assert answer_calls[0]["question"] == "our biggest issues, explain it"
+    # THE ACTUAL BUG: `plan_for_answer`'s result must reach `qa_agent.answer`,
+    # not get built and thrown away. `plan is object()` (identity, not
+    # equality) so this fails if the plan is dropped OR silently swapped
+    # for something ELSE that happens to compare equal.
+    assert answer_calls[0]["plan"] is _SENTINEL_PLAN
+    assert "Export failures are 28.7%" in captured["input"]
+    # Never silently overwritten: the caller's own (thin) context survives
+    # alongside the grounded answer, not replaced by it.
+    assert "Writing your issues report" in captured["input"]
+
+
+def test_grounding_is_skipped_when_context_is_already_substantive(
+    gen_env, monkeypatch
+):
+    """A document drafted from a real conversation is unaffected — retrieval
+    would answer a different question from the one already discussed, exactly
+    as the module's grounding-source rule says. No extra LLM call, no extra
+    latency, for the case that was never broken."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "unused"})
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result("<h1>T</h1><p>x</p>"))
+
+    rich_context = "Prior turn established the export bug in detail. " * 10
+    assert len(rich_context) >= gen._THIN_CONTEXT_CHARS
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="leadership update", task="write it up",
+        context=rich_context, dataset="acme",
+    )
+
+    assert calls == []
+
+
+def test_grounding_failure_falls_back_to_the_original_honest_path(
+    gen_env, monkeypatch
+):
+    """Best-effort by contract: a raising retrieval must not fail the
+    generation or leak an exception past `generate_into`'s total-by-contract
+    boundary — it can only ADD grounding, never remove the fallback that
+    already existed."""
+    from app import qa_agent
+
+    def _boom(**kw):
+        raise RuntimeError("KG unreachable")
+
+    monkeypatch.setattr(qa_agent, "answer", _boom)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    doc_id = _pending(gen_env)
+    gen.generate_into(
+        company_id=gen_env, artifact_id=doc_id,
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_grounding_with_no_task_is_skipped(gen_env, monkeypatch):
+    """`_ground_thin_context` needs a real question to ask — an empty task has
+    nothing for `qa_agent.answer` to route, and calling it with "" would ask a
+    different, meaningless question."""
+    from app import qa_agent
+
+    calls = []
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: calls.append(kw) or {"answer": "x"})
+
+    assert gen._ground_thin_context(company_id=gen_env, dataset="acme", task="   ") == ""
+    assert calls == []
+
+
+def test_grounding_with_an_empty_qa_answer_changes_nothing(gen_env, monkeypatch):
+    """A retrieval that ran but genuinely had nothing to say ("" or whitespace)
+    is not different from one that never ran — the document falls back to its
+    own honest-empty-context copy either way."""
+    from app import qa_agent
+
+    monkeypatch.setattr(qa_agent, "answer", lambda **kw: {"answer": "   "})
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_a_hung_grounding_call_times_out_instead_of_blocking_forever(
+    gen_env, monkeypatch
+):
+    """THE SECOND BUG, caught the same day live-verifying the plan fix: fixing
+    the plan surfaced that a PLANNED call can resolve to a live-fetch pipeline
+    (call digest) that hangs far past any normal answer's latency —
+    18+ minutes with zero progress, observed live, on a workspace with no real
+    call connector for it to read. `qa_agent.answer` takes no timeout of its
+    own, so a hang there used to mean `generate_into` hung too — turning the
+    ORIGINAL failure mode (an honest, ~15-20s empty document) into something
+    strictly worse: a document that never finishes.
+
+    A grounding call that legitimately takes longer than `_GROUNDING_TIMEOUT_S`
+    must give up and fall back to the honest-empty-context path — the same
+    outcome as any other grounding failure — rather than block the whole
+    generation. `time.sleep`, not a mock that returns instantly, because a
+    threading-timeout bug is exactly the kind of bug a same-thread mock cannot
+    exercise: the fake has to actually occupy a thread for the wait to mean
+    anything."""
+    import time as time_mod
+    from app import ask_planner, qa_agent
+
+    def _slow_plan(**kw):
+        time_mod.sleep(2)
+        return object()
+
+    def _hangs_forever(**kw):
+        time_mod.sleep(3600)  # never returns within the test's lifetime
+        return {"answer": "should never be reached"}
+
+    monkeypatch.setattr(gen, "_GROUNDING_TIMEOUT_S", 1.0)
+    monkeypatch.setattr(ask_planner, "plan_for_answer", _slow_plan)
+    monkeypatch.setattr(qa_agent, "answer", _hangs_forever)
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    started = time_mod.monotonic()
+    doc_id = _pending(gen_env)
+    gen.generate_into(
+        company_id=gen_env, artifact_id=doc_id,
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+    elapsed = time_mod.monotonic() - started
+
+    # Returned near the 1s timeout, not after the plan's 2s sleep and
+    # DEFINITELY not after the answer's 3600s hang.
+    assert elapsed < 5, f"generate_into blocked for {elapsed:.1f}s — the timeout did not bound it"
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
+def test_grounding_must_plan_before_answering_not_answer_unplanned(
+    gen_env, monkeypatch
+):
+    """THE ACTUAL BUG, caught live on staging AFTER this whole feature had
+    already merged. `_ground_thin_context`'s first cut called
+    `qa_agent.answer(plan=None, ...)` on the theory that `plan=None` is "the
+    same router every unplanned chat question already goes through" — a
+    misreading of `qa_agent.answer`'s own docstring. There IS no live
+    unplanned caller: `ask_job_runner._single_shot` — the ONLY path a real
+    chat question ever takes — calls `ask_planner.plan_for_answer` FIRST and
+    passes its result. `plan=None` is what a PLANNER OUTAGE degrades to, not
+    a path a healthy question takes.
+
+    Live proof, reproduced via staging Chrome tools: the identical imperative
+    task text, asked plainly through chat (which plans it), returned a
+    10,044-character grounded answer citing the workspace's real support and
+    revenue data. The SAME text, sent through the un-fixed
+    `_ground_thin_context` (`plan=None`), returned nothing — the document
+    still wrote "no factual grounding was available". Not a data problem;
+    the missing plan was the entire gap.
+
+    This test pins the fix by asserting the CALL ORDER a mock can prove:
+    `ask_planner.plan_for_answer` must be called, and BEFORE `qa_agent.answer`
+    — proving the plan could not have been built from something the answer
+    call itself produced, and could not have been skipped."""
+    from app import ask_planner, qa_agent
+
+    order = []
+    monkeypatch.setattr(
+        ask_planner, "plan_for_answer",
+        lambda **kw: order.append("plan") or object(),
+    )
+    monkeypatch.setattr(
+        qa_agent, "answer",
+        lambda **kw: order.append("answer") or {"answer": "grounded"},
+    )
+    monkeypatch.setattr(gen, "llm_call", lambda **kw: _llm_result("<h1>T</h1><p>x</p>"))
+
+    gen.generate_into(
+        company_id=gen_env, artifact_id=_pending(gen_env),
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+
+    assert order == ["plan", "answer"]
+
+
+def test_a_raising_planner_still_falls_back_safely(gen_env, monkeypatch):
+    """`plan_for_answer` documents itself as never raising (a planner outage
+    returns None, its own fail-open contract) — this asserts the belt as well
+    as the braces: even if that contract were ever violated, grounding is
+    still best-effort and the generation still succeeds honestly, exactly
+    like a raising `qa_agent.answer` already must (see
+    test_grounding_failure_falls_back_to_the_original_honest_path)."""
+    from app import ask_planner, qa_agent
+
+    def _boom(**kw):
+        raise RuntimeError("planner outage")
+
+    monkeypatch.setattr(ask_planner, "plan_for_answer", _boom)
+    called_answer = []
+    monkeypatch.setattr(
+        qa_agent, "answer", lambda **kw: called_answer.append(kw) or {"answer": "x"},
+    )
+    captured = {}
+    monkeypatch.setattr(
+        gen, "llm_call",
+        lambda **kw: (captured.update(kw), _llm_result("<h1>T</h1><p>x</p>"))[1],
+    )
+
+    doc_id = _pending(gen_env)
+    gen.generate_into(
+        company_id=gen_env, artifact_id=doc_id,
+        kind="issues report", task="our biggest issues", dataset="acme",
+    )
+
+    row = get_artifact(gen_env, doc_id)
+    assert row["status"] == "ready"
+    # The whole plan+answer pair is one try/except: a raising planner never
+    # reaches the answer call, and the document falls back to its original
+    # honest-empty-context copy.
+    assert called_answer == []
+    assert "CONTEXT: none was supplied" in captured["input"]
+
+
 # ─── The orphan sweep ────────────────────────────────────────────────────────
 
 def _age(company_id: str, doc_id: int, minutes: int) -> None:

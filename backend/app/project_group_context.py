@@ -1,21 +1,23 @@
-"""Project-awareness for the @Sprntly group agent — breadth (an injected,
-bounded context block folded into every group reply) AND depth (on-demand
-read tools the model can call to pull the full memory, artifact list, a
-specific artifact's content, or the whole delegation ledger).
+"""Project-awareness for the private ("My chat with Sprntly") project surface
+— breadth (an injected, bounded context block folded into every private
+reply) AND depth (on-demand read tools the model can call to pull the full
+memory, artifact list, a specific artifact's content, or the whole
+delegation ledger).
 
 Load-bearing tenancy invariant: EVERY read here is scoped to the ONE
 project (`project_id`) and its company (`company_id`)/dataset the caller
-already resolved. The group agent must never reach another company's data.
-`get_artifact_content` in particular gates on the project's OWN artifact
-manifest (`list_artifacts_for_project`, itself tenant-scoped) before it
-returns any bytes — a `(type, id)` that is not on this project's manifest
-is refused, so a hallucinated or probed id can never resolve globally.
+already resolved. The private agent must never reach another company's
+data. `get_artifact_content` in particular gates on the project's OWN
+artifact manifest (`list_artifacts_for_project`, itself tenant-scoped)
+before it returns any bytes — a `(type, id)` that is not on this project's
+manifest is refused, so a hallucinated or probed id can never resolve
+globally.
 
 Everything is best-effort at the assembly layer the same way
 `assemble_project_context` is: the injected-context builder degrades a
 failed section to "(unavailable)" rather than raising, so a read hiccup
-never blocks the group reply (AD-P7). The tool handlers return a short
-string either way (content or a plain refusal/So-such message) — never
+never blocks the private reply (AD-P7). The tool handlers return a short
+string either way (content or a plain refusal/no-such message) — never
 raise into `run_tool_loop`, which would otherwise surface as a tool error.
 """
 from __future__ import annotations
@@ -31,10 +33,8 @@ logger = logging.getLogger(__name__)
 
 # Section caps for the INJECTED context block (breadth). Each is a soft
 # guardrail mirroring `project_context.assemble_project_context`'s posture —
-# a heavily-used project can't grow the group prompt unboundedly.
+# a heavily-used project can't grow the prompt unboundedly.
 _LEDGER_DIGEST_ROWS = 15
-_SUMMARY_CHARS = 1200
-_INSIGHT_CHARS = 400
 _MANIFEST_TITLE_CHARS = 60
 _MANIFEST_TITLES_PER_TYPE = 6
 
@@ -43,18 +43,10 @@ _MANIFEST_TITLES_PER_TYPE = 6
 # report body can't blow the tool-result back into the model unboundedly.
 _ARTIFACT_CONTENT_CHARS = 8000
 
-# Cap on the folded PROJECT INSTRUCTIONS block appended to BOTH project
-# surfaces' system prompts (private: `ask_job_runner._build_private_scope`;
-# group: `routes.projects._respond_as_group_agent`) — single-sourced here so
-# the format/cap can never drift between the two callers.
+# Cap on the folded PROJECT INSTRUCTIONS block appended to the private
+# surface's system prompt (`ask_job_runner._PRIVATE_SCOPE_SYSTEM` composition
+# in `context_assembler_project.py`) — single-sourced here.
 _INSTRUCTIONS_CHARS = 2000
-
-# How many of the most-recent GROUP-chat turns to fold into the PRIVATE
-# surface's context block (breadth) so a private ask can see/summarize the
-# shared group conversation. Mirrors `routes.ask._GROUP_HISTORY_TURNS` (the
-# cap the group surface itself uses on its own history) so a private user's
-# view of the group thread matches what the group agent works from.
-_GROUP_WINDOW_TURNS = 30
 
 _TYPE_LABELS = {
     "prd": "PRDs",
@@ -164,19 +156,16 @@ def _instructions_block(instructions: str | None) -> str:
 def assemble_project_fact_core(
     project_id: int, dataset: str, company_id: str, *, members: dict | None = None
 ) -> tuple[str, str, str]:
-    """The SHARED core project-fact block BOTH project surfaces assemble from:
-    `(roster, ledger, manifest)` — the roster of members, the task-ledger
-    digest, and the artifact manifest. These are the facts that must be
-    IDENTICAL across the private and group surfaces; single-sourcing them here
-    is what stops the two surfaces from ever drifting on WHICH members/tasks/
-    artifacts they report.
+    """The core project-fact block: `(roster, ledger, manifest)` — the roster
+    of members, the task-ledger digest, and the artifact manifest.
+    Single-sourced here so the private surface's facts are assembled the
+    same way regardless of caller.
 
-    Each surface still owns its own SURROUNDING format (private folds these
-    after the caller's own memory base; group prefixes them with the memory
-    summary + latest shared insight) — this function returns only the three
-    fact strings, so a surface's exact wrapper bytes are unchanged. `members`
-    may be passed to avoid a second `_members_by_id` read. Never raises — each
-    section degrades to a placeholder on a read failure (AD-P7)."""
+    The caller still owns its own SURROUNDING format (`assemble_private_
+    project_context` folds these after the caller's own memory base) — this
+    function returns only the three fact strings. `members` may be passed to
+    avoid a second `_members_by_id` read. Never raises — each section
+    degrades to a placeholder on a read failure (AD-P7)."""
     if members is None:
         members = _members_by_id(project_id)
     roster = _roster_block(project_id)
@@ -185,91 +174,20 @@ def assemble_project_fact_core(
     return roster, ledger, manifest
 
 
-def _recent_group_chat_window(project_id: int, user_id: str) -> str:
-    """A bounded, author-attributed transcript of the project's most-recent
-    GROUP-chat turns, for folding into the PRIVATE surface's context block so a
-    private ask ("summarize the group chat so far") can actually see the group
-    conversation — which the private thread's own owner-gated history never
-    carries.
-
-    ONE-DIRECTIONAL by construction: this reads the SHARED `kind='group'`
-    conversation (visible to every project member) and returns it to a member's
-    private chat. It NEVER reads any per-user private/individual chat, so no
-    private content can leak the other way (group→private only).
-
-    MEMBERSHIP-GATED (IDOR boundary): re-checks `is_project_member` — the SAME
-    gate the private assembler already ran upstream (`context_assembler_project`
-    403s a non-member before this is reached), mirrored here defensively and to
-    match `routes.ask._load_group_history`'s posture, so a non-member reads
-    nothing even if a future caller skips the outer gate.
-
-    Author-attributed using the SAME shape `_load_group_history` builds
-    ("Name (role): message" for human turns; the agent's own turns are labelled
-    as Sprntly), reusing the group turn store (`list_group_turns`) rather than
-    reinventing it. Bounded to the most-recent `_GROUP_WINDOW_TURNS`, each turn
-    per-turn clamped (`clamp_turn_text`) so one megabyte-scale turn can't blow
-    the private prompt. Best-effort (AD-P7): no group chat yet, no turns, or any
-    read error → "" (never blocks / breaks the private reply)."""
-    try:
-        from app.db.conversations import list_group_turns
-        from app.db.projects import get_group_chat_id, is_project_member
-        from app.prompt_history import clamp_turn_text
-
-        # IDOR boundary — a non-member reads nothing.
-        if not is_project_member(project_id, user_id):
-            return ""
-
-        conversation_id = get_group_chat_id(project_id)
-        if conversation_id is None:
-            return ""
-
-        turns = list_group_turns(conversation_id)  # author-enriched DTOs
-        if not turns:
-            return ""
-
-        lines: list[str] = []
-        for t in turns[-_GROUP_WINDOW_TURNS:]:
-            content = (t.get("content") or "").strip()
-            if not content:
-                continue
-            content = clamp_turn_text(content)
-            role = t.get("role") or "user"
-            if role == "user":
-                # Fold the author into the line so the model reads a multi-party
-                # transcript ("Name (role): message"), matching the shape
-                # `routes.ask._load_group_history` builds for the group surface.
-                author = t.get("author_name") or "Someone"
-                job_role = t.get("author_job_role")
-                prefix = f"{author} ({job_role})" if job_role else author
-                lines.append(f"{prefix}: {content}")
-            else:
-                # Agent turns are Sprntly's own voice in the shared room.
-                lines.append(f"Sprntly: {content}")
-
-        return "\n".join(lines)
-    except Exception:  # noqa: BLE001 — best-effort, must never break the reply
-        logger.warning(
-            "private group-chat window load failed project_id=%s", project_id,
-            exc_info=True,
-        )
-        return ""
-
-
 def assemble_private_project_context(
     project_id: int, user_id: str, dataset: str, company_id: str
 ) -> str:
     """Enriched PROJECT CONTEXT block for the PRIVATE ("My chat with Sprntly")
-    individual chat — the SAME breadth the @Sprntly group agent gets (memory
-    summary + roster of members/roles + task-ledger digest + artifact
-    manifest), on top of the caller's own memory entries + job_role that
-    `project_context.assemble_project_context` already folds in.
+    individual chat — memory summary + roster of members/roles + task-ledger
+    digest + artifact manifest, on top of the caller's own memory entries +
+    job_role that `project_context.assemble_project_context` already folds
+    in.
 
     BREADTH only: one bounded injected block, single-shot — NO read tools, NO
     tool loop, NO write path (that is a separate build). Every section is
-    bounded by the same soft caps the group-agent block uses so it can't blow
-    the ask prompt. Never raises — each section degrades to a placeholder / is
-    omitted on a read failure (AD-P7), and the whole block only ever reflects
-    THIS project/company."""
+    bounded by soft caps so it can't blow the ask prompt. Never raises — each
+    section degrades to a placeholder / is omitted on a read failure
+    (AD-P7), and the whole block only ever reflects THIS project/company."""
     parts: list[str] = []
 
     # Summary + the caller's own memory entries + their job_role (recency-
@@ -284,8 +202,6 @@ def assemble_private_project_context(
         parts.append(base)
 
     members = _members_by_id(project_id)
-    # Core facts via the SHARED assembler — single-sourced with the group
-    # surface so the two can never drift on members/tasks/artifacts.
     roster, ledger, manifest = assemble_project_fact_core(
         project_id, dataset, company_id, members=members
     )
@@ -297,60 +213,7 @@ def assemble_private_project_context(
         f"Artifacts: {manifest}"
     )
 
-    # Recent GROUP-chat window (breadth) — so this private chat can see and
-    # summarize the shared project group conversation. One-directional: private
-    # SEES group (the shared project space, visible to every member); the group
-    # surface never gains visibility into any per-user private chat. Bounded,
-    # author-attributed, membership-gated, best-effort (omitted on failure).
-    group_window = _recent_group_chat_window(project_id, user_id)
-    if group_window:
-        parts.append(
-            "RECENT GROUP CHAT (shared project group conversation — visible to "
-            "every member; summarize/answer from it when asked about the group "
-            "chat):\n" + group_window
-        )
-
     return "\n\n".join(p for p in parts if p)
-
-
-def assemble_group_agent_context(project_id: int, dataset: str, company_id: str) -> str:
-    """The bounded PROJECT CONTEXT block appended to the group agent's system
-    prompt on every reply (breadth). Never raises — each section degrades to a
-    placeholder on a read failure, so a folding hiccup can never block the
-    reply (AD-P7). Scoped entirely to this one project/company."""
-    members = _members_by_id(project_id)
-
-    try:
-        summary = memory_db.get_summary(project_id) or {}
-        summary_md = (summary.get("summary_md") or "").strip()
-    except Exception:  # noqa: BLE001
-        summary_md = ""
-    if summary_md and len(summary_md) > _SUMMARY_CHARS:
-        summary_md = summary_md[:_SUMMARY_CHARS].rstrip() + "…"
-
-    try:
-        insight = memory_db.get_latest_insight(project_id)
-    except Exception:  # noqa: BLE001
-        insight = None
-    insight_text = ((insight or {}).get("text") or "").strip()
-    if insight_text and len(insight_text) > _INSIGHT_CHARS:
-        insight_text = insight_text[:_INSIGHT_CHARS].rstrip() + "…"
-
-    # Core facts via the SHARED assembler — single-sourced with the private
-    # surface so the two can never drift on members/tasks/artifacts.
-    roster, ledger, manifest = assemble_project_fact_core(
-        project_id, dataset, company_id, members=members
-    )
-
-    block = [
-        "PROJECT CONTEXT (this project only — never another company's data):",
-        f"Project memory summary: {summary_md or '(none yet)'}",
-        f"Latest shared insight: {insight_text or '(none yet)'}",
-        f"Project roster (who is on this project):\n{roster}",
-        f"Task ledger:\n{ledger}",
-        f"Artifacts: {manifest}",
-    ]
-    return "\n".join(block)
 
 
 # ── Read tools (depth) — each scoped to THIS project/company ────────────────
@@ -421,46 +284,6 @@ def read_tools() -> list[dict]:
         GET_ARTIFACT_CONTENT_TOOL,
         GET_TASK_LEDGER_TOOL,
     ]
-
-
-# ── In-band PRD edit (GROUP surface only) ───────────────────────────────────
-# The @Sprntly group agent's `edit_prd` tool. GROUP-only: it is added to the
-# GROUP scope's `extra_tools`, NEVER to the shared `read_tools()`, so the
-# private surface's tool set (and its `answer()` result shape) is unchanged.
-#
-# ★ SECURITY: the schema exposes an `instruction` param ONLY — NO
-# `prd_id`. The edit target is the PRD open in the artifact drawer beside
-# this chat, closed over by the handler (never a model-supplied id, never a
-# server-side inference across the project's PRDs). With no PRD open, the
-# handler declines with a simple "open a PRD" narration rather than
-# enumerating or guessing a target. The handler applies DIRECTLY through the
-# shared editor — no propose/confirm step; the edit is live by the time the
-# narration is produced.
-EDIT_PRD_TOOL = {
-    "name": "edit_prd",
-    "description": (
-        "Edit the PRD currently open in the project's artifact drawer. Call "
-        "this when the latest turn asks to change, add to, update, remove "
-        "from, tighten, or rewrite part of the PRD. Pass a plain-language "
-        "`instruction` describing the change in the team's own words. You do "
-        "NOT choose or pass a PRD id — the target is whichever PRD the team "
-        "has open beside this chat; if none is open, tell them to open one "
-        "first. The edit applies IMMEDIATELY when you call this — there is "
-        "no confirmation step. After calling this, tell the team what you "
-        "changed in past tense (the change is already applied)."
-    ),
-    "input_schema": {
-        "type": "object",
-        "properties": {
-            "instruction": {
-                "type": "string",
-                "description": "the change to make to the PRD, in plain language",
-            },
-        },
-        "required": ["instruction"],
-        "additionalProperties": False,
-    },
-}
 
 
 _READ_TOOL_NAMES = frozenset(t["name"] for t in read_tools())
@@ -607,7 +430,7 @@ def dispatch_read_tool(
             return _handle_get_task_ledger(project_id)
     except Exception as exc:  # noqa: BLE001 — never raise into the tool loop
         logger.warning(
-            "group_agent_read_tool_failed tool=%s project_id=%s error_class=%s",
+            "project_read_tool_failed tool=%s project_id=%s error_class=%s",
             name, project_id, type(exc).__name__,
         )
         return "I hit a problem reading that just now."

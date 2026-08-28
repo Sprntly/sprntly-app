@@ -47,7 +47,14 @@ import {
   CreateProjectModal,
   type CreateProjectModalViewProps,
 } from "../CreateProjectModal"
-import type { ArtifactItem } from "../../../../../lib/api"
+import type { ArtifactItem, projectsApi as RealProjectsApi } from "../../../../../lib/api"
+
+// Type-only reference to the REAL `projectsApi.create` payload type — an
+// `import type` is unaffected by the `vi.mock` above (that mock only
+// reroutes the runtime module; TS still resolves types from the real
+// `lib/api.ts`), so this is a genuine tsc-gated check that the payload type
+// actually declares `seed_text` (AC6).
+type ProjectsApiCreatePayload = Parameters<typeof RealProjectsApi.create>[0]
 
 const hoursAgo = (h: number) => new Date(Date.now() - h * 3600 * 1000).toISOString()
 
@@ -84,6 +91,8 @@ function viewProps(overrides: Partial<CreateProjectModalViewProps> = {}): Create
     onTabChange: noop,
     name: "",
     onNameChange: noop,
+    whyText: "",
+    onWhyChange: noop,
     rows: [{ email: "", role: "member" }],
     onRowEmailChange: noop,
     onRowRoleChange: noop,
@@ -557,5 +566,191 @@ describe("CreateProjectModal — Cancel creates nothing (AC7)", () => {
     render(React.createElement(CreateProjectModal, { open: false, onClose: noop }))
     expect(artifactsListMock).not.toHaveBeenCalled()
     expect(createMock).not.toHaveBeenCalled()
+  })
+})
+
+// ── GCR-04 — create-time project "why" (an optional free-text goal threaded
+// into the create payload as `seed_text`, gated on the manual + artifact
+// origins only — never prd_auto, whose "why" comes from the PRD fork hook) ──
+describe("CreateProjectModalView — why field renders and is optional (AC1)", () => {
+  it("test_why_field_renders_on_manual_and_artifact_tabs", () => {
+    const { rerender } = render(React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })))
+    expect(screen.getByTestId("create-project-why-input")).toBeTruthy()
+
+    rerender(React.createElement(CreateProjectModalView, viewProps({ tab: "artifact" })))
+    expect(screen.getByTestId("create-project-why-input")).toBeTruthy()
+
+    rerender(React.createElement(CreateProjectModalView, viewProps({ tab: "auto" })))
+    expect(screen.queryByTestId("create-project-why-input")).toBeNull()
+  })
+})
+
+describe("CreateProjectModal — why field threads seed_text through create (AC1-AC4)", () => {
+  it("test_create_with_name_only_still_succeeds", async () => {
+    artifactsListMock.mockResolvedValue([])
+    createMock.mockResolvedValue({ id: 555, name: "Instant-quote flow", origin: "manual" })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), {
+      target: { value: "Instant-quote flow" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(createMock).toHaveBeenCalledWith({ name: "Instant-quote flow", origin: "manual" }))
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=555"))
+  })
+
+  it("test_manual_why_threads_seed_text", async () => {
+    artifactsListMock.mockResolvedValue([])
+    createMock.mockResolvedValue({ id: 556, name: "Instant-quote flow", origin: "manual" })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), {
+      target: { value: "Instant-quote flow" },
+    })
+    fireEvent.change(screen.getByTestId("create-project-why-input"), {
+      target: { value: "Faster quote turnaround for the sales team" },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith({
+        name: "Instant-quote flow",
+        origin: "manual",
+        seed_text: "Faster quote turnaround for the sales team",
+      }),
+    )
+  })
+
+  it("test_artifact_why_threads_seed_text", async () => {
+    artifactsListMock.mockResolvedValue(ARTIFACTS)
+    createMock.mockResolvedValue({ id: 89, name: PRD_ARTIFACT.title, origin: "artifact" })
+    addArtifactMock.mockResolvedValue({ project_id: 89, artifact_type: "prd", artifact_id: 1 })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.click(screen.getByTestId("create-project-tab-artifact"))
+    await waitFor(() => expect(screen.getByTestId("create-project-artifact-list")).toBeTruthy())
+    fireEvent.click(screen.getByTestId("create-project-artifact-row-prd-1"))
+    fireEvent.change(screen.getByTestId("create-project-why-input"), {
+      target: { value: "Kick off the redesign with prior research attached" },
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith({
+        name: PRD_ARTIFACT.title,
+        origin: "artifact",
+        seed_text: "Kick off the redesign with prior research attached",
+      }),
+    )
+    await waitFor(() => expect(addArtifactMock).toHaveBeenCalledWith(89, "prd", 1))
+  })
+
+  it("test_empty_why_omits_seed_text", async () => {
+    artifactsListMock.mockResolvedValue([])
+    createMock.mockResolvedValue({ id: 557, name: "Blank why", origin: "manual" })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "Blank why" } })
+    fireEvent.change(screen.getByTestId("create-project-why-input"), { target: { value: "   " } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(createMock).toHaveBeenCalled())
+    const payload = createMock.mock.calls[0][0] as { seed_text?: string }
+    expect(payload.seed_text).toBeFalsy()
+  })
+
+  it("test_why_value_is_trimmed", async () => {
+    artifactsListMock.mockResolvedValue([])
+    createMock.mockResolvedValue({ id: 558, name: "Trim me", origin: "manual" })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "Trim me" } })
+    fireEvent.change(screen.getByTestId("create-project-why-input"), {
+      target: { value: "  padded on both sides  " },
+    })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith({
+        name: "Trim me",
+        origin: "manual",
+        seed_text: "padded on both sides",
+      }),
+    )
+  })
+})
+
+describe("CreateProjectModal — prd_auto never carries seed_text (AC5)", () => {
+  it("test_prd_auto_create_never_carries_seed_text", async () => {
+    artifactsListMock.mockResolvedValue(ARTIFACTS)
+    createMock.mockResolvedValue({ id: 100, name: PRD_ARTIFACT.title, origin: "prd_auto" })
+    addArtifactMock.mockResolvedValue({ project_id: 100, artifact_type: "prd", artifact_id: 1 })
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+
+    // Type a "why" on the manual tab, then switch to auto — the field
+    // isn't shown there (asserted below), and its value never reaches this
+    // call regardless of what was typed earlier.
+    fireEvent.change(screen.getByTestId("create-project-why-input"), {
+      target: { value: "This text must never reach the auto-fork call" },
+    })
+    fireEvent.click(screen.getByTestId("create-project-tab-auto"))
+    await waitFor(() => expect(screen.getByTestId("create-project-auto-prd-list")).toBeTruthy())
+    expect(screen.queryByTestId("create-project-why-input")).toBeNull()
+    fireEvent.click(screen.getByTestId("create-project-auto-prd-row-1"))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() =>
+      expect(createMock).toHaveBeenCalledWith({
+        name: PRD_ARTIFACT.title,
+        origin: "prd_auto",
+        prd_id: PRD_ARTIFACT.id,
+      }),
+    )
+    const payload = createMock.mock.calls[0][0] as { seed_text?: string }
+    expect(payload.seed_text).toBeUndefined()
+  })
+})
+
+describe("projectsApi.create — payload type accepts seed_text (AC6)", () => {
+  it("test_create_payload_accepts_seed_text", () => {
+    // Type-level assertion (see `ProjectsApiCreatePayload` above) — this
+    // object literal only needs to COMPILE under `tsc --noEmit` against the
+    // REAL `lib/api.ts` `create` payload type; the runtime call below just
+    // exercises the mocked `create` the same as every other test here.
+    const payload: ProjectsApiCreatePayload = { name: "Type check", origin: "manual", seed_text: "x" }
+    expect(payload.seed_text).toBe("x")
   })
 })

@@ -1040,6 +1040,48 @@ def has_index(company_id: str) -> bool:
     return bool(rows)
 
 
+def resolve_call_id(
+    company_id: str, provider: str, external_id: str
+) -> Optional[int]:
+    """The `call_index.id` (bigint) for one catalogued call, keyed by its
+    natural identity, or None when the call is not (yet) in the index.
+
+    This is the FK a per-call KG extraction stamps onto
+    `kg_signal.source_call_id` (a bigint column — NOT the uuid `source_id`,
+    which points at kg_source) so a distilled signal can be traced back to the
+    exact call it came from.
+
+    Returns None — never raises, never invents an id — in the two cases a
+    caller must treat identically to "no link":
+      * the call is not catalogued yet. The KG puller and this index sync on
+        independent schedules, so a freshly-synced transcript can reach
+        extraction before the index has a row for it. A NULL source_id is the
+        honest "not linkable yet" state; a wrong one would mis-attribute
+        evidence.
+      * the lookup failed. Provenance/linkage is best-effort — a Supabase blip
+        must degrade a signal to unlinked, never fail the ingestion writing it.
+    """
+    if not (company_id and provider and external_id):
+        return None
+    from app.db.client import require_client
+
+    try:
+        rows = (
+            require_client().table("call_index").select("id")
+            .eq("company_id", company_id)
+            .eq("provider", provider)
+            .eq("external_id", str(external_id))
+            .limit(1).execute().data
+        )
+    except Exception:  # noqa: BLE001 — linkage is best-effort; never fail ingest
+        logger.warning(
+            "call-index: source_id resolve failed for %s (%s/%s)",
+            company_id, provider, external_id, exc_info=True,
+        )
+        return None
+    return rows[0]["id"] if rows else None
+
+
 # ── listing intent ───────────────────────────────────────────────────────────
 #
 # Questions the index answers OUTRIGHT — "what calls were there", "the 5 latest
@@ -1071,6 +1113,37 @@ _LISTING_RULE = re.compile(
     re.I,
 )
 
+# THE PEOPLE ON A CALL ARE NOT A LIST OF CALLS.
+#
+# `_LISTING_RULE` matches on PROXIMITY — a listing verb within forty characters
+# of a call-noun — and forty characters is enough room for a whole different
+# question to sit between them. Reported: "use a table and give me all the
+# names of folks on the call." The verb is `give me`, the noun is `call`, and
+# the thirty-one characters between them are the actual request. It was
+# answered with "548 calls. Showing the 50 most recent:" and a bulleted list of
+# call titles — no names, no table, and about every call in the workspace
+# rather than the one the thread was discussing.
+#
+# The grammar is the tell: the call is the PLACE ("on the call"), not the
+# thing being asked for. So a definite single call reached through a
+# preposition, with people as the object, stands the listing down. This path
+# renders `CallRow.render()` — a date, an account, a duration and a title — so
+# it cannot answer a roster question at all; standing down costs nothing it
+# could have delivered.
+#
+# Deliberately NOT matched: "who did we talk to this week", which the rule
+# above claims on purpose. It names no call and reaches for no preposition —
+# it asks across a window, which is a listing.
+_ROSTER_OF_ONE_CALL = re.compile(
+    r"\b(?:who|whom|names?|attendees?|participants?|speakers?|folks|people|"
+    r"everyone|everybody)\b"
+    # The people and the call must be in the same clause — the sentence-final
+    # punctuation bound stops this reaching across two questions.
+    r"[^.?!]{0,60}?"
+    rf"\b(?:on|in|at|from)\s+(?:the|this|that|our)\s+(?:\w+[\s-]+){{0,3}}?{_CALL_NOUN}\b",
+    re.I,
+)
+
 # An explicit count, in either order: "the 5 latest" and "the latest 5" are the
 # same request. Matching only one order silently returned the whole window.
 _COUNT_RULE = re.compile(
@@ -1087,9 +1160,16 @@ def is_listing_request(question: str) -> bool:
     conversations", which matched no existing rule and so fell through to the
     KG — where it correctly but unhelpfully reported that raw transcripts were
     not available, while the index holds exactly what was asked for.
+
+    Two stand-downs, and both are about what the caller actually asked for
+    rather than which words they used: a summary verb means they want the
+    analysis (`_SYNTHESIS_VERB`), and a question about the PEOPLE on a call
+    means the call is the place, not the subject (`_ROSTER_OF_ONE_CALL`).
     """
     text = question or ""
     if _SYNTHESIS_VERB.search(text):
+        return False
+    if _ROSTER_OF_ONE_CALL.search(text):
         return False
     return bool(_LISTING_RULE.search(text))
 

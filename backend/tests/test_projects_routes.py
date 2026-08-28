@@ -377,7 +377,7 @@ def test_list_projects_recency_order(isolated_settings, monkeypatch):
     newer_row = next(row for row in rows if row["id"] == newer["id"])
     assert newer_row["artifact_counts"] == {"prd": 1}
     assert newer_row["member_count"] == 1
-    assert newer_row["has_group_chat"] is False
+    assert "has_group_chat" not in newer_row
     assert newer_row["memory_count"] == 0
 
 
@@ -428,34 +428,6 @@ def test_get_project_no_members_still_returns_agent(isolated_settings, monkeypat
     members = r.json()["members"]
     assert len(members) == 1
     assert members[0]["kind"] == "agent"
-
-
-def test_get_project_returns_group_chat_id_or_null(isolated_settings, monkeypatch):
-    ctx = company_client(monkeypatch)
-    project = ctx.client.post("/v1/projects", json={"name": "No chat yet"}).json()
-
-    r = ctx.client.get(f"/v1/projects/{project['id']}")
-    assert r.json()["group_chat_id"] is None
-
-    from app.db.client import require_client
-
-    convo = (
-        require_client()
-        .table("conversations")
-        .insert(
-            {
-                "company_id": ctx.company_id,
-                "user_id": ctx.user_id,
-                "project_id": project["id"],
-                "kind": "group",
-            }
-        )
-        .execute()
-        .data[0]
-    )
-
-    r2 = ctx.client.get(f"/v1/projects/{project['id']}")
-    assert r2.json()["group_chat_id"] == convo["id"]
 
 
 def test_empty_project_list(isolated_settings, monkeypatch):

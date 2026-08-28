@@ -72,7 +72,11 @@ def test_generate_synthesis_path_runs_run_synthesis(app_client, isolated_setting
 
     assert r.status_code == 200, r.text
     # User-triggered: delivery suppressed in synthesis, short ping sent instead.
-    gen.assert_called_once_with("acme", deliver=False)
+    # force=True: both of these are user-triggered regenerate paths. The
+    # recompose floor added in perf/llm-cost-reduction bounds incidental
+    # churn (scheduler ticks, connector syncs) and must never make a click
+    # return a stale brief.
+    gen.assert_called_once_with("acme", deliver=False, force=True)
     ping.assert_called_once()
     body = r.json()
     assert body["summary_headline"] == "synthesis headline"
@@ -132,7 +136,11 @@ def test_synthesis_bg_runner_invokes_generate_brief_for(isolated_settings, monke
     with patch.object(brief_routes, "generate_brief_for") as gen, \
          patch.object(brief_routes, "_notify_brief_ready"):
         asyncio.run(brief_routes._synthesis_generate_bg("acme"))
-    gen.assert_called_once_with("acme", deliver=False)
+    # force=True: both of these are user-triggered regenerate paths. The
+    # recompose floor added in perf/llm-cost-reduction bounds incidental
+    # churn (scheduler ticks, connector syncs) and must never make a click
+    # return a stale brief.
+    gen.assert_called_once_with("acme", deliver=False, force=True)
 
 
 def test_synthesis_bg_runner_swallows_errors(isolated_settings, monkeypatch):
@@ -639,7 +647,7 @@ def test_scheduler_cycle_iterates_companies(isolated_settings, monkeypatch):
 
     seen: list[str] = []
     with patch("app.synthesis_brief.generate_brief_for",
-               side_effect=lambda slug: seen.append(slug)):
+               side_effect=lambda slug, **kw: seen.append(slug)):
         asyncio.run(scheduler_mod._run_scheduled_cycle())
     assert sorted(seen) == ["acme", "globex"]
 
@@ -652,7 +660,7 @@ def test_scheduler_synthesis_isolates_per_company_failure(isolated_settings, mon
 
     seen: list[str] = []
 
-    def _gen(slug):
+    def _gen(slug, **kw):
         if slug == "globex":
             raise RuntimeError("synthesis blew up for globex")
         seen.append(slug)
@@ -710,7 +718,7 @@ def test_generate_all_synthesis_briefs_iterates_and_warms(isolated_settings, mon
     seen: list[str] = []
     warmed: list[str] = []
     with patch.object(sb, "generate_brief_for",
-                      side_effect=lambda slug: seen.append(slug)), \
+                      side_effect=lambda slug, **kw: seen.append(slug)), \
          patch("app.brief_runner.warm_synthesis_drilldowns",
                side_effect=lambda slug: warmed.append(slug)):
         sb.generate_all_synthesis_briefs()
@@ -725,7 +733,7 @@ def test_generate_all_synthesis_briefs_isolates_failure(isolated_settings, monke
 
     seen: list[str] = []
 
-    def _gen(slug):
+    def _gen(slug, **kw):
         if slug == "acme":
             raise RuntimeError("boom")
         seen.append(slug)

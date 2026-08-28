@@ -16,13 +16,13 @@ export function ProjectsRoute() {
   // Projects is unconditionally on — no feature gate. (The former cosmetic
   // build-time gate was removed alongside the backend request-time one.)
   const id = searchParams.get("id")
-  // Optional initial chat-tab selection (`&chat=group|individual`), set by
-  // the main-chat PRD fork nav (`ChatScreen.goToProjectPrivateChat` via
+  // Optional initial chat-tab selection (`&chat=individual`), set by the
+  // main-chat PRD fork nav (`ChatScreen.goToProjectPrivateChat` via
   // `projectPath(id, { chat: "individual" })`) so the user lands directly on
   // the forked project's private chat. Anything else is ignored — the shell
-  // keeps its own `"group"` default.
+  // has only the one (private) surface to land on regardless.
   const chat = searchParams.get("chat")
-  const initialChat = chat === "individual" || chat === "group" ? chat : undefined
+  const initialChat = chat === "individual" ? chat : undefined
 
   if (id) {
     return <ProjectDetailScreen projectId={id} initialChat={initialChat} />

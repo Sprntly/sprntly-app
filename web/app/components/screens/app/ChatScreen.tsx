@@ -8,6 +8,7 @@ import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
 import { useAuth } from "../../../lib/auth"
+import { RESUME_EVENT } from "../../../lib/recentChats"
 // `crucibleOn` gates Goal Analysis. `dispatchChatIntent` / `useChatIntentExecutors`
 // that main re-adds here are already owned by the shared engine (useConversation),
 // so they are NOT reintroduced into this wrapper.
@@ -27,6 +28,10 @@ import {
   type ClarifyQuestion,
   type ClarifyResolution,
 } from "../../shared/ClarifyQuestionsCard"
+import type {
+  GoalGate, GoalGateResolved, SettledPlan,
+} from "../../shared/GoalGateCard"
+import type { PlanDecision } from "../../shared/GoalAnalysisPlan"
 import { type PopupAnswer } from "../../shared/QuestionPopup"
 import {
   useSlackShareCardHandlers,
@@ -51,7 +56,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  ApiError, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type OpenArtifactCandidate, type OpenArtifactResult, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type PersistedTurnReply, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -60,6 +65,7 @@ import { runPrdGeneration, resumePrdGeneration, runPrdGenerationFromIdeation, lo
 import type { PrdTabRequest } from "../../../context/NavigationContext"
 import { runEvidenceGeneration, resumeEvidenceGeneration, loadEvidenceByInsight } from "../../../lib/runEvidenceGeneration"
 import { resumeAskGeneration, getPendingAsk, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../lib/runAskGeneration"
+import { GROUNDED_PROGRESS_ENABLED } from "../../../lib/friendlyPhase"
 // The ONE owner of a standalone ticket-set run and of `content.ticketSet`.
 // Nothing in this file may call `storiesApi.generateFromInsight` directly —
 // see the module header for why a second caller is a second LLM bill.
@@ -91,6 +97,12 @@ import { AGENT_NAME } from "../../../lib/agent"
 const NO_REPORTS: ReportSummary[] = []
 
 export type ThreadTurn = {
+  /** WHY THE WAIT ENDED, in words fit to render. `error` next to it holds the
+   *  raw exception and is never shown. `mapMainTurns` forwards this to the
+   *  bubble, which is where the shape was declared and where it stopped —
+   *  `ShellTurn` carried the field, this type did not, and `next build` failed
+   *  on the read while vitest (which never type-checks) stayed green. */
+  providerNotice?: { message: string; needsAdmin: boolean } | null
   id: string
   /** DISPLAY text — the user's typed ask only. Attached-document content is NOT
    *  folded in here (that goes to the backend separately); the thread renders
@@ -165,6 +177,20 @@ export type ThreadTurn = {
    *  The card renders while the tab's `pendingClarify` is live and, once
    *  settled, as the read-only record below; only a full history rehydration
    *  (which rebuilds turns from text alone) falls back to `reply.answer`. */
+  /** A Goal Analysis gate riding this turn — the definition question, or the
+   *  plan awaiting approval. Rendered IN THE THREAD as an answerable card, the
+   *  same contract `clarify` uses: live while unresolved, replaced by a settled
+   *  summary once `goalGateResolved` lands. Both gates are the conversation
+   *  that lets a PM defend the result, so they belong in the conversation. */
+  goalGate?: GoalGate
+  /** What the user actually agreed to. Its presence flips the card to its
+   *  settled form and is what keeps the record in the thread. */
+  goalGateResolved?: GoalGateResolved
+  /** A refusal the reader can act on, shown BESIDE the live gate. Not `error`:
+   *  that renders the thread's generic "There was an interruption, try again."
+   *  and discards the message, and it replaces the card — turning a run still
+   *  sitting at its gate server-side into a dead end with no retry. */
+  goalGateError?: string
   clarify?: ClarifyQuestion[]
   /** How the batch above was settled — answers given, or the assumptions each
    *  unanswered question fell back to. Its presence is what flips the card from
@@ -184,6 +210,12 @@ export type ThreadTurn = {
    *  explanation. Never an error: the poll still delivers the real answer.
    *  Transient, like `partial`. */
   streamDropped?: boolean
+  /** Curated, user-facing progress copy for the pipeline leg currently running
+   *  (e.g. "Looking through your connected sources…"), from the real backend
+   *  `phase` SSE signal. Only set when the grounded-progress flag is on; drives
+   *  the wait line ahead of the answer. Transient, cleared on every terminal
+   *  transition, like `partial`. */
+  livePhase?: string
   /** "Open the PRD for X" matched SEVERAL documents — the candidates, rendered
    *  as chips under this turn's reply. Each chip carries its artifact's ids and
    *  opens the panel on click; it does NOT re-send its label as a message,
@@ -599,7 +631,7 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
   const importing = (source.kind === "resume" && source.origin !== "task") || source.kind === "importDoc"
   const fromTask = (source.kind === "resume" && source.origin === "task") || source.kind === "generateTask"
   const withTickets = (source.kind === "resume" || source.kind === "importDoc") && !!source.openTickets
-  // An Ideation idea is NOT this week's top insight — it's one of the items the
+  // A Backlog idea is NOT this week's top insight — it's one of the items the
   // brief did not prioritize — so it needs its own wording.
   const fromIdeation = source.kind === "generateIdeation"
   // WHERE the View PRD button actually lands, which differs by open kind and
@@ -624,7 +656,7 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
     : withTickets
     ? "Importing your document as a PRD — it'll open in the panel on the right, and I'll break it into tickets as soon as it's ready."
     : fromIdeation
-    ? "Framing this Ideation idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
+    ? "Framing this Backlog idea as a PRD — it'll open in the panel on the right when ready. From there you can break it into tickets and generate a prototype."
     : fromTask
       ? "Generating a PRD for that — it'll open in the panel on the right when ready."
       : importing
@@ -639,9 +671,9 @@ function commandAckReply(req: LocalPrdTabRequest): AskResponse {
  *
  *  This settles the deferred ack as ORDINARY PROSE rather than routing through
  *  failDeferredAck's error state, because it is neither a failure nor a
- *  generation: the shared error card says "That answer didn't come through.
- *  Nothing was saved." — three claims that are all false about an open that
- *  simply found the document busy. */
+ *  generation: the shared error card says "There was an interruption, try
+ *  again." — which is not what happened to an open that simply found the
+ *  document busy. */
 function openFailureReply(detail: string): AskResponse {
   const reason = detail.trim().replace(/[.\s]+$/, "")
   return {
@@ -669,6 +701,20 @@ const MAIN_NEXT_PROMPTS_ADAPTER: NextPromptsAdapter = {
     chatSuggestionsApi.next(conversationId, opts).then((r) => r.suggestions),
 }
 
+/** Drop a `pending` goal gate coming back from storage.
+ *
+ *  Stripped on SAVE too, but a thread written by an older build still carries
+ *  one — and a restored `pending` gate is a spinner nothing can fill: the poll
+ *  that would replace it with the run's question died with the page that
+ *  started it. Worse, it would satisfy the restore's has-this-run guard against
+ *  itself and block the rebuild that replaces it. Answered gates survive: a
+ *  settled definition or plan is a record, not an indicator.
+ */
+function _thawThread(thread: ThreadTurn[] | undefined): ThreadTurn[] {
+  return (thread ?? []).map((tn) =>
+    (tn.goalGate?.kind === "pending" ? { ...tn, goalGate: undefined } : tn))
+}
+
 export function ChatScreen() {
   const {
     currentScreen,
@@ -689,6 +735,8 @@ export function ChatScreen() {
     pendingReportFocus,
     setPendingReportFocus,
     pendingTicketSetFocus,
+    pendingDocumentFocus,
+    setPendingDocumentFocus,
     setPendingTicketSetFocus,
     showToast,
     openContentPanel,
@@ -756,7 +804,7 @@ export function ChatScreen() {
       return (JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
         id: t.id ?? "",
         title: t.title ?? "",
-        thread: t.thread ?? [],
+        thread: _thawThread(t.thread),
         dbConvId: t.dbConvId ?? null,
         briefMeta: t.briefMeta ?? null,
         insightBody: t.insightBody ?? null,
@@ -853,7 +901,7 @@ export function ChatScreen() {
       const saved = sessionStorage.getItem(tabsKey)
       if (saved) {
         setTabs((JSON.parse(saved) as Partial<ChatTab>[]).map((t) => ({
-          id: t.id ?? "", title: t.title ?? "", thread: t.thread ?? [],
+          id: t.id ?? "", title: t.title ?? "", thread: _thawThread(t.thread),
           dbConvId: t.dbConvId ?? null, briefMeta: t.briefMeta ?? null,
           insightBody: t.insightBody ?? null, prdId: t.prdId ?? null,
           prd: null, evidence: null, prdGenerating: false, evidenceGenerating: false,
@@ -892,6 +940,25 @@ export function ChatScreen() {
   // the chat landing/thread + composer.
   const isBriefTab = activeTabId === BRIEF_TAB_ID
   const activeTab = tabs.find((t) => t.id === activeTabId) ?? null
+  /** Whether the active tab's thread is still being fetched. A dependency of
+   *  the Goal Analysis restore, which must wait for hydration and then RUN —
+   *  not bail once and never look again. */
+  const activeTabHydrating = !!activeTab?.hydrating
+
+  /** Patch one turn in one tab. Declared up here because the Goal Analysis
+   *  restore effect runs above the gate handlers that share it. */
+  const setTabsGoalGate = useCallback(
+    (tabId: string, turnId: string, patch: Partial<ThreadTurn>) => {
+      setTabs((prev) => prev.map((t) => (t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) =>
+              (tn.id === turnId ? { ...tn, ...patch } : tn)),
+          }
+        : t)))
+    },
+    [],
+  )
   const thread = activeTab?.thread ?? []
   // The last turn a REPLY could still land on. A pending artifact-summary
   // placeholder is transparent here: it is appended the moment the artifact
@@ -1003,9 +1070,19 @@ export function ChatScreen() {
               // the `resolved` record both persist (a settled share must still
               // say what was posted after a reload); only the in-flight flag
               // is dropped, exactly like `ticketSetRunning` above.
-              turn.slackShare?.busy
-                ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
-                : turn),
+              // A `pending` goal gate is the same kind of in-flight indicator
+              // as the two above, and dies the same way: the poll that would
+              // replace it with the run's question lives in the page that just
+              // went. Restored, it is a permanent "working out what this goal
+              // means…" that nothing can fill — and worse, it satisfies the
+              // restore's own has-a-gate guard and blocks the rebuild that
+              // would have replaced it. The ANSWERED gates persist: a settled
+              // definition or plan is a record, not a spinner.
+              turn.goalGate?.kind === "pending"
+                ? { ...turn, goalGate: undefined }
+                : turn.slackShare?.busy
+                  ? { ...turn, slackShare: { ...turn.slackShare, busy: false } }
+                  : turn),
         }
         // A PRD command awaiting its deferred reply (the clarify gate is still
         // deciding — see deferredAckRef) has a reply-less seed turn, and the
@@ -1096,6 +1173,13 @@ export function ChatScreen() {
   // while its request was in flight, and depending on `content` would re-fire
   // the restore on every unrelated content change.
   const goalRunRef = useRef<number | null>(null)
+  // Tabs whose analysis has already been PUT on screen once by the restore.
+  //
+  // Mirrors `reportsAutoOpenedRef`: opening once per tab is what separates
+  // "you can get back to your analysis" from "a panel you closed keeps coming
+  // back every time you return to this thread". Keyed by tab, not by run,
+  // because two tabs can share one conversation.
+  const goalAutoOpenedRef = useRef<Set<string>>(new Set())
   // Wall-clock start of each in-flight ask, keyed by turn id. A ref, not state:
   // the wait component owns its own tick, so this only has to be READ during
   // render — and it must survive the pending-send → real-turn handoff so the
@@ -1214,6 +1298,11 @@ export function ChatScreen() {
             // Carry the file chip (with its storage key) so a reopened import-PRD
             // chat can still render/download the original document.
             ...(t.attachments?.length ? { attachments: t.attachments } : {}),
+            // …and the listing's clickable rows, for the same reason and from
+            // the same column `buildRestored` reads (the PRD tab is as good a
+            // place to ask "show me my PRDs" as the main chat).
+            ...(next?.reply?.artifact_list?.length
+              ? { artifactList: next.reply.artifact_list } : {}),
           })
           if (reply) i++
         } else if (t.role === "assistant" && t.content.trim()) {
@@ -1224,6 +1313,7 @@ export function ChatScreen() {
             id: `prdhist-${conversation.id}-${i}`,
             query: "",
             reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            ...(t.reply?.artifact_list?.length ? { artifactList: t.reply.artifact_list } : {}),
           })
         }
       }
@@ -1772,8 +1862,8 @@ export function ChatScreen() {
           if (deferAck && source.kind === "load" && seedTurn) {
             // An OPEN that found the document busy is a refusal we can explain,
             // not a failed generation — so it settles as prose. The error card
-            // the other kinds get would claim the answer didn't come through
-            // and that nothing was saved, neither of which happened here.
+            // the other kinds get would claim an interruption, which is not
+            // what happened here.
             settleCommandAck(tabId, seedTurn.id, openFailureReply(result.message))
           } else {
             failDeferredAck(tabId, seedTurn?.id, result.message)
@@ -2475,7 +2565,7 @@ export function ChatScreen() {
         setResumePanelTabId(tabId)
       }
       const buildRestored = (
-        turns: { id?: number; role: string; content: string; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
+        turns: { id?: number; role: string; content: string; reply?: PersistedTurnReply | null; attachments?: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | null }[],
         keyPrefix: string,
       ): ThreadTurn[] => {
         const restored: ThreadTurn[] = []
@@ -2484,8 +2574,14 @@ export function ChatScreen() {
           if (t.role === "user") {
             const next = turns[i + 1]
             const reply = next?.role === "assistant" ? { answer: next.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse : undefined
+            // What the answer showed BEYOND its prose, when the row carries it
+            // (`conversation_turns.reply`). Null on every row written before
+            // that column was wired, which is why `content` above stays the
+            // source of the answer text rather than being read from here.
+            const cards = next?.role === "assistant" ? next.reply?.artifact_list : null
             restored.push({
               id: `${keyPrefix}-${i}`,
+              ...(cards?.length ? { artifactList: cards } : {}),
               // Carried through so a rehydrated thread can still be rewound to
               // this turn (edit/retry on a past prompt) — the persistence
               // layer's own id map only covers turns THIS session sent.
@@ -2509,6 +2605,9 @@ export function ChatScreen() {
               id: `${keyPrefix}-${i}`,
               query: "",
               reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+              // An agent-only turn keeps its cards too — a listing emitted
+              // with no user line behind it is still a listing.
+              ...(t.reply?.artifact_list?.length ? { artifactList: t.reply.artifact_list } : {}),
             })
           }
         }
@@ -2576,6 +2675,15 @@ export function ChatScreen() {
   }, [openTab, showToast, hydratePrdThread])
   // Check on mount + whenever we navigate to this screen
   useEffect(() => { checkResume() }, [checkResume])
+  // Re-check when a thread is opened from somewhere that is NOT a route change
+  // — the sidebar's chat list, which can be clicked while this surface is
+  // already mounted and active. Without this the baton was written and never
+  // read, and the click did nothing.
+  useEffect(() => {
+    const onResume = () => checkResume()
+    window.addEventListener(RESUME_EVENT, onResume)
+    return () => window.removeEventListener(RESUME_EVENT, onResume)
+  }, [checkResume])
   // Re-check when the route lands on chat (covers goTo("chat") from ChatsScreen)
   useEffect(() => {
     if (currentScreen === "chat") {
@@ -2662,7 +2770,20 @@ export function ChatScreen() {
   // the write and see the conversation one turn short). Every other caller
   // ignores the return, exactly as before.
   const finalizeConversationTurn = useCallback(
-    (turnId: string, updates: { reply?: AskResponse; error?: string }, targetTabId: string): Promise<void> => {
+    (
+      turnId: string,
+      updates: {
+        reply?: AskResponse
+        error?: string
+        /** The turn's clickable listing rows, when it has them. Saved onto the
+         *  turn's structured `reply` so a reopened thread still renders the
+         *  cards — `content` is prose only, so before this the rows were gone
+         *  the moment the turn was written and "click one to open it" pointed
+         *  at empty space. */
+        artifactList?: ChatArtifactItem[] | null
+      },
+      targetTabId: string,
+    ): Promise<void> => {
       const prev = conversationsRef.current
       setContent({
         conversations: prev.map((c) => {
@@ -2685,7 +2806,15 @@ export function ChatScreen() {
       // The helper awaits any in-flight create so the assistant turn lands in the
       // SAME conversation as its user turn.
       if (updates.reply) {
-        return persistence.pushAssistantTurn(targetTabId, replyToText(updates.reply))
+        return persistence.pushAssistantTurn(
+          targetTabId,
+          replyToText(updates.reply),
+          // Only when there is something prose cannot carry. A plain answer
+          // writes the same content-only row it always has.
+          updates.artifactList?.length
+            ? { ...updates.reply, artifact_list: updates.artifactList }
+            : undefined,
+        )
       }
       return Promise.resolve()
     },
@@ -3659,13 +3788,23 @@ export function ChatScreen() {
   // turn into the active tab (append / rename) or a fresh tab, then persist it
   // client+server. A project surface supplies its own `emitTurn` (engine turns +
   // server-only persist); the action bodies never learn which.
-  const emitCommandTurn = useCallback((turn: ThreadTurn) => {
+  const emitCommandTurn = useCallback((turn: ThreadTurn, intoTabId?: string) => {
     const seedQuery = turn.query
     const handle = seedQuery.length > 40 ? `${seedQuery.slice(0, 37)}…` : seedQuery
-    const activeId = activeTabIdRef.current
+    // `intoTabId` PINS THE DESTINATION. Without it this lands on whatever tab is
+    // active when it runs — and a Goal Analysis plan turn is emitted minutes
+    // after its gate was answered, so a reader who switched tabs meanwhile got
+    // another conversation's plan grafted into their thread.
+    const activeId = intoTabId ?? activeTabIdRef.current
     const inTab = activeId && activeId !== BRIEF_TAB_ID
       ? tabsRef.current.find((t) => t.id === activeId)
       : undefined
+    // A NAMED tab that no longer exists is a DROPPED turn, never a new one.
+    // Pinning the destination made the id load-bearing without making a stale
+    // one detectable: falling through to `openTab(handle, …)` with an empty
+    // `handle` — every gate turn carries `query: ""` — spawned a blank-titled
+    // tab in the rail holding a plan for a conversation the reader had closed.
+    if (intoTabId && !inTab) return
     let tabId: string
     if (inTab) {
       tabId = inTab.id
@@ -3680,8 +3819,18 @@ export function ChatScreen() {
     } else {
       tabId = openTab(handle, [turn])
     }
-    pushPendingConversation(turn.id, seedQuery, tabId)
-    if (turn.reply) void finalizeConversationTurn(turn.id, { reply: turn.reply }, tabId)
+    // ONLY A TURN WITH TEXT IS A CONVERSATION TURN. The gate turns carry
+    // `query: ""` — they are a card, not something the user said — and pushing
+    // them persisted an empty user row per gate into the thread's history,
+    // which then replays as a blank message on every later restore.
+    if (seedQuery) pushPendingConversation(turn.id, seedQuery, tabId)
+    // The listing rows ride along — this is the turn `runListArtifactsAction`
+    // emits, and its cards are the whole answer to "show me the PRDs I made".
+    if (turn.reply) {
+      void finalizeConversationTurn(
+        turn.id, { reply: turn.reply, artifactList: turn.artifactList }, tabId,
+      )
+    }
   }, [openTab, pushPendingConversation, finalizeConversationTurn])
 
   // ── Resolve the tab a send lands on (main's tab multiplexer) ──────────────
@@ -3769,6 +3918,15 @@ export function ChatScreen() {
     },
     [setDraft, showToast, markClarifyResolved, runClarifiedGeneration],
   )
+  // Holds `startGoalAnalysis` for `useConversation`, which is called several
+  // hundred lines ABOVE that function's declaration. Kept in a ref rather than
+  // reordering the hook setup, and republished on every render (below) so the
+  // dispatcher always calls the current closure rather than the first one.
+  const startGoalAnalysisRef =
+    useRef<
+      ((goalText: string, saidText?: string) => void | Promise<void>) | null
+    >(null)
+
 
   // ── The per-conversation store seam ───────────────────────────────────────
   // The single-conversation engine, extracted into the shared `useConversation`.
@@ -3785,6 +3943,23 @@ export function ChatScreen() {
     listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
     openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
   } = useConversation({
+      // A REF, because `startGoalAnalysis` is declared several hundred lines
+      // below this call and a direct reference is a use-before-declaration.
+      //
+      // The slot must exist unconditionally and must ACT, because the
+      // dispatcher decides `handled` from presence alone (its peek pass stubs
+      // every body to a no-op, so a return value cannot be read). The ref is
+      // written during the same render that declares the callback, above any
+      // interaction, so it is never null when this runs.
+      // BOTH ARGUMENTS. This shim dropped `saidText` on the floor, which made
+      // the whole "show what the reader typed" fix inert — the thread went on
+      // rendering the planner's extraction and every test still passed,
+      // because the only path a test drives (the `+` menu) sends one argument
+      // anyway. A forwarder that silently narrows its own signature is the
+      // same shape of bug as an intent missing from `_CLIENT_INTENTS`.
+      startGoalAnalysis: (goalText: string, saidText?: string) => {
+        startGoalAnalysisRef.current?.(goalText, saidText)
+      },
       tabsRef,
       activeTabId,
       activeTabIdRef,
@@ -3849,10 +4024,23 @@ export function ChatScreen() {
   // trailing blockquote (appended in the engine's handleComposerSubmit via the
   // `quote` seam) — quoting is a way to point at a sentence, not a second send
   // button, so nothing is dispatched here.
+  //
+  // The focus is DEFERRED A FRAME, and that is the whole of it: this runs
+  // inside the toolbar button's click handler, which is not a safe moment to
+  // put a caret anywhere. React has not committed `setQuote` yet, so the
+  // composer on screen is not the one being focused; and the caller's very
+  // next statement is `window.getSelection().removeAllRanges()` — clearing the
+  // document selection immediately after a focus, which on the engines that
+  // model an input's caret as part of that selection takes the caret straight
+  // back out. Either way the field looked focused and swallowed the first
+  // thing typed into it. `focusComposerNextFrame` runs after the click handler
+  // has finished and after the commit, which is the same moment the document
+  // quote's own focus already happens from (it focuses from an effect, which
+  // is why THAT path never had this bug).
   const handleQuoteSelection = useCallback((text: string) => {
     setQuote(text)
-    composerRef.current?.focus()
-  }, [composerRef])
+    focusComposerNextFrame()
+  }, [focusComposerNextFrame])
 
   // ── Copy a past prompt ────────────────────────────────────────────────────
   // The WORDS, not the wire form: a message that quoted a passage stores it as
@@ -4058,6 +4246,13 @@ export function ChatScreen() {
       // `generating` document would lose its live view for the rest of the
       // session.
       documentAutoOpenedRef.current.delete(prevTabForPanelRef.current)
+      // Same claim, same retirement, for a thread whose artifact is a GOAL
+      // ANALYSIS — and for the identical reason the document comment gives.
+      // The reconcile below closes the panel on the way out, so a claim that
+      // outlives the visit means the restore declines on return: slot set,
+      // panel shut, and `ContentPanel` only un-hides the `goal` tab once the
+      // panel is open. That is #1283 again, one tab switch later.
+      goalAutoOpenedRef.current.delete(prevTabForPanelRef.current)
     }
     // Reconcile the SHARED ticket-set slot to the tab being switched TO, before
     // any of the early returns below — a set left on screen is wrong on every
@@ -4190,6 +4385,32 @@ export function ChatScreen() {
   }, [
     activeTabId, isBriefTab, pendingReportFocus, contentPanelTab,
     threadReports, content.threadReportsStatus, content.threadReportsConversationId,
+    setContent, openContentPanel,
+  ])
+
+  // ── Document → its own thread hand-off ────────────────────────────────────
+  // Clicking a team document in Artifacts writes the ordinary
+  // `sprntly_resume_conv` hand-off and fills `pendingDocumentFocus`.
+  // Structurally the report hand-off above, one artifact over: gated on the
+  // conversation id matching, so a failed resume opens nothing rather than the
+  // wrong thread's document.
+  //
+  // A document used to open its own PAGE from Artifacts instead — the reasoning
+  // being that writing wants the full measure of a page. It still does, and the
+  // page is still there; what was wrong is that this row behaved differently
+  // from every other row in the same list. A document born in a chat opens over
+  // that chat, like the PRD, the report and the ticket set beside it. One with
+  // no chat behind it (uploaded, or its thread deleted) still opens the page.
+  useEffect(() => {
+    if (!pendingDocumentFocus) return
+    const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    if (!tab || tab.dbConvId !== pendingDocumentFocus.conversationId) return
+    const documentId = pendingDocumentFocus.documentId
+    setPendingDocumentFocus(null)
+    setContent({ documentId, documentGenerating: false })
+    openContentPanel("document")
+  }, [
+    pendingDocumentFocus, setPendingDocumentFocus, activeTabId,
     setContent, openContentPanel,
   ])
 
@@ -4459,6 +4680,22 @@ export function ChatScreen() {
                 }
               ))
             },
+            // Grounded progress on a re-attached generation — same curated,
+            // flag-gated `livePhase` seam as the POST path. (Phase frames are not
+            // replayed on a mid-generation join, so a resumed turn shows only the
+            // leg that starts next; that is honest, not a gap.)
+            GROUNDED_PROGRESS_ENABLED
+              ? (label) => {
+                  setTabs((prev) => prev.map((t) =>
+                    t.id !== targetTabId ? t : {
+                      ...t, thread: t.thread.map((turn) =>
+                        turn.id === turnId && !turn.reply && !turn.stopped
+                          ? { ...turn, livePhase: label }
+                          : turn),
+                    }
+                  ))
+                }
+              : undefined,
           )
           // Same reason as the onResult path above, on the route a user reaches
           // by reloading mid-answer: if this turn streamed, mark it animated
@@ -4477,7 +4714,7 @@ export function ChatScreen() {
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId
-                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined }
+                ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }
                 : turn),
             }
           ))
@@ -4495,7 +4732,7 @@ export function ChatScreen() {
             setTabs((prev) => prev.map((t) =>
               t.id !== targetTabId ? t : {
                 ...t, thread: t.thread.map((turn) => turn.id === turnId
-                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined }
+                  ? { ...turn, timedOut: true, partial: undefined, streamDropped: undefined, livePhase: undefined }
                   : turn),
               }
             ))
@@ -4505,7 +4742,7 @@ export function ChatScreen() {
           setTabs((prev) => prev.map((t) =>
             t.id !== targetTabId ? t : {
               ...t, thread: t.thread.map((turn) => turn.id === turnId
-                ? { ...turn, error: msg, streamDropped: undefined }
+                ? { ...turn, error: msg, streamDropped: undefined, livePhase: undefined }
                 : turn),
             }
           ))
@@ -4563,6 +4800,78 @@ export function ChatScreen() {
         if (goalRunRef.current != null) return
         goalRunRef.current = mine.id
         setContent({ goalRunId: mine.id })
+
+        // RE-ARM AN UNANSWERED GATE. `goalGate` lives on the thread, which
+        // lives in sessionStorage — so a new browser session (or any tab whose
+        // thread was not persisted) came back with the run sitting at its gate
+        // and NOTHING anywhere to answer it: the panel had handed the gates to
+        // the chat, and the chat had no card. The run was stuck for good.
+        //
+        // Rebuilt from the run itself, which is the durable copy.
+        if (mine.status !== "awaiting_confirmation"
+            && mine.status !== "awaiting_approval") return
+        const tabId = activeTabIdRef.current
+        if (!tabId) return
+        const tab = tabsRef.current.find((t) => t.id === tabId)
+        if (!tab) return
+        // A tab whose thread is still being fetched is NOT an empty tab. Seeding
+        // it here races `resumeChat`'s fill, which only writes when the thread
+        // is still empty — so the loser is whichever arrives second, and the
+        // gate can be silently swallowed. `reusableActiveTab` skips a hydrating
+        // tab for exactly this reason; the next run of this effect catches it.
+        if (tab.hydrating) return
+
+        // KEYED ON THE RUN, NOT ON "HAS THIS THREAD EVER HELD A GATE". The first
+        // version asked the latter, so the settled record of a PREVIOUS run —
+        // the artefact this whole change exists to keep in the thread — blocked
+        // the rebuild for the next one, and a second analysis in one chat was
+        // unanswerable after a reload.
+        //
+        // ACROSS EVERY TAB, because two tabs can share a conversation id (this
+        // effect's own dependency comment says so) and each is restored
+        // independently — one gate per tab means two live Confirm buttons for
+        // one question, which is the duplicate the panel was stripped to avoid.
+        const alreadyOnScreen = tabsRef.current.some((t) => t.thread.some((tn) =>
+          (tn.goalGate?.kind === "definition" || tn.goalGate?.kind === "plan")
+            && tn.goalGate.runId === mine.id))
+        if (alreadyOnScreen) return
+        const detail = await goalAnalysisApi.get(mine.id)
+        if (!live) return
+        // APPENDS a fresh gate turn. An earlier version tried to hang the
+        // rebuilt gate back on the turn that had been carrying one, to keep the
+        // card next to the reader's own words. That cosmetic nicety needed a
+        // marker on the turn, and the marker produced five separate Criticals
+        // in one review round: unkeyed it captured another run's gate, keyed it
+        // was empty at the moment it mattered, and every exit that failed to
+        // clear it orphaned a permanently blank turn into sessionStorage.
+        //
+        // Appending is what the code already did before any of that, it has no
+        // state of its own to get wrong, and nobody has ever complained that a
+        // restored card came back a message lower.
+        if (detail.status === "awaiting_confirmation") {
+          emitCommandTurn({
+            id: `goal-restored-${mine.id}`,
+            query: "",
+            goalGate: {
+              kind: "definition",
+              runId: mine.id,
+              goalText: detail.goal_text ?? "",
+              ask: detail.prioritisation?.ask
+                || "Before this runs, confirm what this goal means.",
+              proposedDefinition: detail.prioritisation?.proposed_definition,
+              proposedSource: detail.prioritisation?.proposed_source,
+              methodNote: detail.prioritisation?.method_note,
+            },
+          }, tabId)
+        } else if (detail.prioritisation?.plan) {
+          emitCommandTurn({
+            id: `goal-plan-${mine.id}`,
+            query: "",
+            goalGate: {
+              kind: "plan", runId: mine.id, plan: detail.prioritisation.plan,
+            },
+          }, tabId)
+        }
       } catch {
         // A failed restore is a missing panel, not a broken chat. The run row
         // survives and the listing will be tried again on the next switch.
@@ -4573,20 +4882,491 @@ export function ChatScreen() {
     // id, so without it this effect does not re-run on the switch — the reset
     // clears the panel, the restore never fires again, and switching back does
     // not recover it.
-  }, [goalAnalysisOn, activeConvId, activeTabId, setContent])
+    // `activeTabHydrating` IS A DEPENDENCY, and it is the whole of finding 2:
+    // bailing on a hydrating tab without it meant bailing forever, because
+    // nothing else in this list changes when the thread fetch lands. Opening a
+    // conversation with a live gate from the history rail therefore never
+    // restored it. Listed here, the effect re-runs the moment hydration ends.
+  }, [goalAnalysisOn, activeConvId, activeTabId, activeTabHydrating, setContent,
+      emitCommandTurn, setTabsGoalGate])
 
-  // Start a Goal Analysis run and put its panel on screen.
+  // ...AND PUT IT ON SCREEN.
   //
-  // The panel opens on the run id RATHER THAN on a result, because the first
-  // thing a run does is stop and ask what the goal means.
-  const startGoalAnalysis = useCallback(async (goalText: string) => {
+  // The restore above fills the slot; `ContentPanel` un-hides the `goal` tab
+  // only once the panel is OPEN, and on a fresh load it is closed. Filling the
+  // slot alone therefore restored the run invisibly, with no control anywhere
+  // to reveal it (#1283).
+  //
+  // STATE-DRIVEN, not done inside the fetch, and that distinction is the whole
+  // reason this is a separate effect:
+  //
+  //   - reading `contentPanelTabRef` mid-fetch sees the value from the render
+  //     in which the reconcile called `closeContentPanel()`, so it concludes
+  //     "something is open", declines, and — the fetch being over — nothing
+  //     re-runs. The panel then never opens at all.
+  //   - the closure's `activeTabId` can be a thread the reader has already
+  //     left: `live` only flips when React flushes the cleanup, and a listing
+  //     resolving inside that window would open the panel on thread A's
+  //     analysis, live Confirm button and all, over thread B.
+  //
+  // Keyed on the state instead, both windows close: it re-evaluates whenever
+  // the panel or the active tab actually changes, and `goalRunId` is already
+  // reset per thread, so it can only ever open the run the slot currently
+  // holds. Same shape as the reports auto-open a few hundred lines up.
+  useEffect(() => {
+    if (!goalAnalysisOn || isBriefTab || !activeTabId) return
+    if (content.goalRunId == null) return
+    // TWO SOURCES OF TRUTH, AND ONLY ONE OF THEM IS CURRENT HERE.
+    //
+    // On the commit where the reader switches tabs, `activeTabId` is already
+    // the NEW tab while `content.goalRunId` is still the OLD thread's: the
+    // per-thread reset at `:2188` is itself an effect, and passive effects in
+    // one flush all close over the same render, so this runs BEFORE that
+    // setContent has re-rendered. `contentPanelTab` is stale for the same
+    // reason, so the hijack guard below cannot save it either.
+    //
+    // Left unchecked that opened `goal` on a thread with no analysis — a blank
+    // 60vw panel once the reset landed — and, being the last write in the
+    // commit, it overwrote a PRD the reconcile had just opened for the thread
+    // the reader actually navigated to.
+    //
+    // `goalRunRef` is the value that IS current: the restore effect declared
+    // above clears it synchronously at the top, so a mismatch means the slot
+    // still holds the previous thread's run and this flush has no business
+    // acting on it.
+    if (goalRunRef.current !== content.goalRunId) return
+    if (goalAutoOpenedRef.current.has(activeTabId)) return
+    if (contentPanelTab) return // something is already open — don't hijack it
+    goalAutoOpenedRef.current.add(activeTabId)
+    openContentPanel("goal")
+  }, [goalAnalysisOn, isBriefTab, activeTabId, content.goalRunId,
+      contentPanelTab, openContentPanel])
+
+  // ── Goal Analysis, conducted IN THE THREAD ────────────────────────────────
+  //
+  // Both gates are a CONVERSATION, so they happen in the conversation. The run
+  // asks what the goal means; the user answers. It states what it will read;
+  // the user approves, or drops a source, or says what they already expect.
+  // Only then does it read anything, and only the finished report — which is a
+  // document, not a question — goes to the panel.
+  //
+  // WHY NOT THE PANEL FOR THE GATES. It was, and the thread went quiet the
+  // moment a goal was typed: the question that decides what the whole run means
+  // was answered somewhere other than the conversation it belonged to, and
+  // scrolling back later showed a goal with no record of what was agreed. A PM
+  // has to defend the result, and the defence is exactly this exchange.
+  //
+  // NOTHING ADVANCES ON ITS OWN. Each gate waits for a click. The poll below
+  // only watches for the run REACHING a gate; it never answers one.
+  const goalGateBusyTurnRef = useRef<string | null>(null)
+  const [goalGateBusyTurnId, setGoalGateBusyTurnId] = useState<string | null>(null)
+
+  // SCOPED TO ONE TAB. `goal-plan-${runId}` is a deterministic, persisted turn
+  // id, so the same conversation open in two tabs holds the same id twice —
+  // patching every tab's thread would answer both. It also rebuilt every tab
+  // object on every patch for no reason.
+  const patchTurn = setTabsGoalGate
+
+  /** Poll one run until it reaches one of `until`, or dies. Returns null when
+   *  it failed, was cancelled, the component unmounted, or the ceiling was hit.
+   *
+   *  WAITS FOR A DESTINATION, NOT FOR A DEPARTURE. The first version polled
+   *  "until the status leaves `queued`" — and Goal Analysis has no `queued`
+   *  status at all (`crucible_runs.STATES`; a run is born `resolving_goal`).
+   *  The very first tick therefore satisfied "left queued", matched no branch,
+   *  and the gate was never attached: the whole feature inert, with every test
+   *  still green. Naming the destination makes that class of mistake fail
+   *  loudly instead of silently.
+   */
+  const awaitGoalRun = useCallback(
+    async (
+      runId: number,
+      until: readonly string[],
+    ): Promise<GoalRunDetail | null> => {
+      const deadline = Date.now() + 10 * 60 * 1000
+      while (Date.now() < deadline) {
+        // Stop the moment the screen is gone: this loop outlives a closed tab
+        // otherwise, and its resolve path writes a turn into a conversation
+        // nobody is looking at.
+        if (!mountedRef.current) return null
+        try {
+          const detail = await goalAnalysisApi.get(runId)
+          if (until.includes(detail.status)) return detail
+          if (detail.status === "failed" || detail.status === "cancelled") {
+            return detail
+          }
+        } catch (e) {
+          // A 403/404 is a verdict — the run is gone or not ours — and polling
+          // it for ten minutes helps nobody. Only a transient keeps the loop.
+          const st = e instanceof ApiError ? e.status : 0
+          if (st === 403 || st === 404) return null
+        }
+        await new Promise((r) => setTimeout(r, 1500))
+      }
+      return null
+    },
+    [],
+  )
+
+  /** A REJECTED request is not a LOST one, and they need opposite handling.
+   *
+   *  422/413 mean the server refused the body BEFORE claiming anything: the run
+   *  is still sitting at its gate, nothing is running, and the reader has to be
+   *  able to fix what they wrote and try again. Say what the server said.
+   *
+   *  Anything else may have been lost AFTER the claim — the server claims the
+   *  row before it does any work — so the run may well be going with nothing
+   *  watching it. Telling the reader to click again would 409 forever against
+   *  their own successful claim; the caller polls instead and lets the run say
+   *  what happened. Carried over from the panel, which owned these gates
+   *  before they moved into the thread.
+   */
+  const goalRefusalMessage = useCallback((e: unknown): string | null => {
+    // STRUCTURAL, not `instanceof`. The error crosses a module boundary (and,
+    // under a mocked `lib/api`, a second copy of the class), so an identity
+    // check silently answers "not a refusal" and sends a plain 422 down the
+    // lost-response path — the reader is told we are checking, forever, about
+    // a request the server already rejected outright.
+    const raw = (e as { status?: unknown })?.status
+    const status = typeof raw === "number" ? raw : 0
+    if (status !== 422 && status !== 413) return null
+    const body = (e as { body?: unknown })?.body
+    const msg = body == null || typeof apiErrorMessage !== "function"
+      ? "" : apiErrorMessage(status, body)
+    return (msg && msg !== `Request failed (${status})` ? msg.trim() : "")
+      || "That was not accepted. Shorten what you wrote and try again."
+  }, [])
+
+  /** The run itself is over — there is nothing to retry, so the gate goes and
+   *  the reason stays in the thread. Distinct from `failGoalTurn`, which is for
+   *  a refused ACTION against a run still sitting at its gate. */
+  const endGoalTurn = useCallback(
+    (tabId: string, turnId: string, reason: string) => {
+      goalGateBusyTurnRef.current = null
+      setGoalGateBusyTurnId(null)
+      // The settled record SURVIVES. A definition the reader confirmed is the
+      // thing they would have to defend later; overwriting it with the failure
+      // threw away the answer and kept only the complaint. The failure rides
+      // `goalGateError` beside it instead.
+      setTabs((prev) => prev.map((t) => (t.id === tabId
+        ? {
+            ...t,
+            thread: t.thread.map((tn) => (tn.id === turnId
+              ? {
+                  ...tn,
+                  goalGate: undefined,
+                  // EITHER the record OR the note, never both with the same
+                  // text — writing both printed the sentence twice on three of
+                  // the four paths that end a run.
+                  //
+                  // And the note is CLEARED when the failure becomes the
+                  // record, because `failGoalTurn` may have left a "Checking…"
+                  // there moments earlier: without this, a run that turned out
+                  // to be dead rendered its verdict directly above the promise
+                  // to keep checking that the verdict just answered.
+                  ...(tn.goalGateResolved
+                    ? { goalGateError: reason }
+                    : {
+                        goalGateError: undefined,
+                        goalGateResolved: { kind: "failed" as const, reason },
+                      }),
+                }
+              : tn)),
+          }
+        : t)))
+    },
+    [setTabs],
+  )
+
+  const failGoalTurn = useCallback(
+    (tabId: string, turnId: string, message: string) => {
+      goalGateBusyTurnRef.current = null
+      setGoalGateBusyTurnId(null)
+      // KEEPS THE GATE. A refused confirm or approve usually leaves the run
+      // exactly where it was server-side, so the card has to stay answerable —
+      // clearing it locked the reader out of a run that was still waiting for
+      // them. `error` is wrong for the same reason and worse: it renders the
+      // generic "There was an interruption, try again." and throws the reason
+      // away entirely.
+      patchTurn(tabId, turnId, { goalGateError: message })
+    },
+    [patchTurn],
+  )
+
+  // Gate 1 → Gate 2. The definition the user confirmed is THEIR words, which may
+  // be an edit of what was proposed; it is sent verbatim.
+  //
+  // `runId` COMES OFF THE GATE, not a side map. A `Map` on a ref does not
+  // survive a reload, but the thread does (sessionStorage) — so the card came
+  // back enabled after F5 with no way to resolve its run, and Confirm was a
+  // live-looking button that issued no request and showed no error. The gate
+  // object already carries the id it needs.
+  const confirmGoalDefinition = useCallback(
+    async (tabId: string, turnId: string, runId: number, definition: string) => {
+      if (goalGateBusyTurnRef.current) return
+      goalGateBusyTurnRef.current = turnId
+      setGoalGateBusyTurnId(turnId)
+      try {
+        await goalAnalysisApi.confirm(runId, definition)
+        // The record of what was agreed stays in the thread.
+        // CLEARS THE GATE, not just settles it. `GoalGateCard` renders the
+        // settled card before it looks at `gate`, so a leftover `goalGate` is
+        // invisible — but the restore's guard reads exactly that field, so an
+        // answered definition went on claiming "this run is already on screen"
+        // and blocked the rebuild of the PLAN gate. The dead end simply moved
+        // from gate 1 to gate 2, and only needed an unmount to reach.
+        patchTurn(tabId, turnId, {
+          goalGate: undefined,
+          goalGateResolved: { kind: "definition", definition },
+        })
+        const detail = await awaitGoalRun(runId, ["awaiting_approval"])
+        if (!detail || detail.status !== "awaiting_approval") {
+          endGoalTurn(tabId, turnId,
+            "The analysis could not build a plan for this goal.")
+          return
+        }
+        if (detail.prioritisation?.plan) {
+          // A NEW turn: the plan is the run's next thing to say, and a reply
+          // belongs beside the question it answers rather than replacing it.
+          // PINNED to the tab that asked — minutes may have passed and the
+          // reader may be somewhere else entirely.
+          emitCommandTurn({
+            id: `goal-plan-${runId}`,
+            query: "",
+            goalGate: { kind: "plan", runId, plan: detail.prioritisation.plan },
+          }, tabId)
+        }
+      } catch (e) {
+        const refused = goalRefusalMessage(e)
+        if (refused) {
+          // Retryable: the run never moved, so the card stays answerable.
+          failGoalTurn(tabId, turnId, refused)
+          return
+        }
+        failGoalTurn(tabId, turnId,
+          "We could not tell whether that started. Checking…")
+        const after = await awaitGoalRun(runId, ["awaiting_approval"])
+        if (!after || after.status === "failed" || after.status === "cancelled") {
+          // The twin of the guard `approveGoalPlan` got: without it a dead run
+          // left a live Confirm button sitting over a permanent "Checking…".
+          endGoalTurn(tabId, turnId,
+            "That analysis stopped before it could build a plan.")
+          return
+        }
+        if (after.status === "awaiting_approval" && after.prioritisation?.plan) {
+          patchTurn(tabId, turnId, {
+            goalGate: undefined,
+            goalGateError: undefined,
+            goalGateResolved: { kind: "definition", definition },
+          })
+          emitCommandTurn({
+            id: `goal-plan-${runId}`,
+            query: "",
+            goalGate: { kind: "plan", runId, plan: after.prioritisation.plan },
+          }, tabId)
+        }
+      } finally {
+        goalGateBusyTurnRef.current = null
+        setGoalGateBusyTurnId(null)
+      }
+    },
+    [awaitGoalRun, emitCommandTurn, endGoalTurn, failGoalTurn,
+     goalRefusalMessage, patchTurn],
+  )
+
+  // Gate 2 → the run. Only here does anything get read, and only here does the
+  // panel earn its place: what follows is a document.
+  const approveGoalPlan = useCallback(
+    async (tabId: string, turnId: string, runId: number, decision: PlanDecision,
+           plan?: SettledPlan) => {
+      if (goalGateBusyTurnRef.current) return
+      goalGateBusyTurnRef.current = turnId
+      setGoalGateBusyTurnId(turnId)
+      try {
+        await goalAnalysisApi.approve(runId, {
+          excluded_sources: decision.excluded_sources,
+          hypotheses: decision.hypotheses,
+          // Only present when the reader edited the proposed definition. The
+          // approve click is what adopts it either way — this carries the
+          // change, not the agreement.
+          definition_text: decision.definition_text,
+        })
+        patchTurn(tabId, turnId, {
+          goalGate: undefined,
+          goalGateResolved: {
+            kind: "plan",
+            excludedSources: decision.excluded_sources,
+            hypotheses: decision.hypotheses,
+            plan,
+          },
+        })
+        goalRunRef.current = runId
+        setContent({ goalRunId: runId })
+        goalAutoOpenedRef.current.add(tabId)
+        openContentPanel("goal")
+      } catch (e) {
+        const refused = goalRefusalMessage(e)
+        if (refused) {
+          // The server refused the body before claiming anything: the run is
+          // still at its gate and the card stays answerable.
+          failGoalTurn(tabId, turnId, refused)
+          return
+        }
+        // AND THEN ACTUALLY CHECK. The server claims the row before it does any
+        // work, so a response lost after that claim means the run IS going with
+        // nothing watching it. Saying "Checking…" and then not checking is
+        // worse than saying nothing: it promises a resolution that never comes.
+        failGoalTurn(tabId, turnId,
+          "We could not tell whether that started. Checking…")
+        const after = await awaitGoalRun(runId, ["running", "ready"])
+        // `awaitGoalRun` also returns on `failed`/`cancelled` — that is a
+        // verdict, not a destination. Treating any non-null answer as "it
+        // started" reported a dead run as a running one and opened the panel
+        // onto it.
+        if (!after || (after.status !== "running" && after.status !== "ready")) {
+          endGoalTurn(tabId, turnId,
+            "That analysis stopped before it could read anything.")
+          return
+        }
+        patchTurn(tabId, turnId, {
+          goalGateError: undefined,
+          goalGateResolved: {
+            kind: "plan",
+            excludedSources: decision.excluded_sources,
+            hypotheses: decision.hypotheses,
+            plan,
+          },
+        })
+        goalRunRef.current = runId
+        setContent({ goalRunId: runId })
+        goalAutoOpenedRef.current.add(tabId)
+        openContentPanel("goal")
+      } finally {
+        goalGateBusyTurnRef.current = null
+        setGoalGateBusyTurnId(null)
+      }
+    },
+    [awaitGoalRun, endGoalTurn, failGoalTurn, goalRefusalMessage, patchTurn,
+     setContent, openContentPanel],
+  )
+
+  // The entry point: start the run, then put its FIRST question in the thread.
+  // The panel is not opened here — there is nothing document-shaped to show yet.
+  const startGoalAnalysis = useCallback(async (
+    goalText: string,
+    /** WHAT THE USER ACTUALLY TYPED. The planner hands back an EXTRACTED goal
+     *  ("increase revenue by 5%") which is what the run should work from — but
+     *  it is not what the reader said. Emitting the extraction as their message
+     *  rewrote "How can I increase revenue by 5%?" into "increase revenue by
+     *  5%" in their own thread, so scrolling back showed them saying something
+     *  they never said. The run gets the extraction; the transcript gets the
+     *  sentence. Falls back to the extraction for callers that have no raw text
+     *  (the `+` menu, where the two are the same thing). */
+    saidText?: string,
+  ) => {
+    const turnId = `goal-${Date.now()}`
+    // THE TURN GOES UP FIRST, before the network call. The dispatcher reports
+    // `handled` from this executor's PRESENCE, so by the time we run, the caller
+    // has already rolled the optimistic turn away — if the start then 403s or
+    // times out and we had emitted nothing, the user's message would simply
+    // vanish from the thread. That is not hypothetical: it is what the deployed
+    // build does today, observed on staging (goal typed, panel opens, thread
+    // shows an empty "New chat"). Emitting first means the worst case is a turn
+    // carrying an error, which is still a conversation.
+    emitCommandTurn({
+      id: turnId,
+      query: (saidText || "").trim() || goalText,
+      // A GATE FROM THE FIRST FRAME. The run spends a beat in `resolving_goal`
+      // before it has a question, and a turn with no gate and no reply runs the
+      // ordinary no-reply ladder — which printed "No response was generated for
+      // this message." over a run that was working perfectly.
+      goalGate: { kind: "pending", goalText },
+    })
+    // AFTER the emit: on a fresh or brief surface `emitCommandTurn` spawns the
+    // tab, so reading this first returned the tab the reader was leaving (or
+    // null, silently abandoning a turn already on screen).
+    const tabId = activeTabIdRef.current
+    if (!tabId) return
     try {
+      // WAIT FOR THE CONVERSATION ROW, briefly. On the first message of a brand
+      // new chat there is no `dbConvId` yet — `emitCommandTurn` has only just
+      // queued its creation — so the run was started with no `conversation_id`
+      // and stayed orphaned from its own chat forever: the restore matches runs
+      // by conversation, so that run could never come back to the thread it was
+      // started in. Reading it from the tab after the emit costs a moment on a
+      // path that is already a second from its first question, and only on a
+      // first message.
+      let convId = activeConvId
+      // TEN SECONDS, NOT TWO. Two was chosen as "a moment" and is really a bet
+      // on how fast the conversation insert lands; a cold backend or a slow
+      // link loses that bet and the reader is refused for a save that was
+      // seconds from arriving. Waiting longer costs nothing on the ordinary
+      // path — the loop exits the instant the row appears — and the turn is
+      // already on screen in its pending state while it runs.
+      for (let i = 0; convId == null && i < 100; i++) {
+        await new Promise((r) => setTimeout(r, 100))
+        if (!mountedRef.current) return
+        convId = tabsRef.current.find((t) => t.id === tabId)?.dbConvId ?? null
+      }
+      if (convId == null) {
+        // THE WAIT CAN FAIL, and failing quietly is how the original bug
+        // looked. If the conversation row never arrives — create failed, or we
+        // are offline — starting anyway produces a run bound to no chat, which
+        // the restore (which matches BY conversation) can never bring back.
+        // The reader has just waited two seconds for that outcome, so they are
+        // told it rather than left with a run that silently cannot return.
+        // AND IT SAYS THE TRUE THING. "Send a message first" was advice the
+        // reader had already taken — the goal they just sent IS the message —
+        // and "has not been saved yet" reads as a permanent state rather than
+        // a save that did not finish in time. What they can actually do is
+        // ask again.
+        endGoalTurn(tabId, turnId,
+          "This chat had not finished saving, so the analysis could not be "
+          + "attached to it — starting it anyway would have left it unable to "
+          + "find its way back here. Ask again in a moment.")
+        return
+      }
       const run = await goalAnalysisApi.start(goalText, {
-        ...(activeConvId != null ? { conversation_id: activeConvId } : {}),
+        ...(convId != null ? { conversation_id: convId } : {}),
       })
       goalRunRef.current = run.id
-      setContent({ goalRunId: run.id })
-      openContentPanel("goal")
+      // A run is born `resolving_goal` and reaches A GATE a moment later —
+      // WHICH ONE depends on whether Stage 0 had anything honest to propose.
+      //
+      // This used to wait for `awaiting_confirmation` alone, and that was
+      // correct while it was the only gate a new run could reach. Now that a
+      // goal naming a recognisable metric resolves its definition and folds
+      // straight into the plan, waiting for the old state alone would time out
+      // on the COMMON path and tell the reader their analysis "could not
+      // start" while a perfectly good plan sat waiting on the row.
+      const detail = await awaitGoalRun(
+        run.id, ["awaiting_confirmation", "awaiting_approval"],
+      )
+      if (detail?.status === "awaiting_approval" && detail.prioritisation?.plan) {
+        patchTurn(tabId, turnId, {
+          goalGate: {
+            kind: "plan", runId: run.id, plan: detail.prioritisation.plan,
+          },
+        })
+        return
+      }
+      if (!detail || detail.status !== "awaiting_confirmation") {
+        endGoalTurn(tabId, turnId,
+          "The analysis could not start for this goal.")
+        return
+      }
+      patchTurn(tabId, turnId, {
+        goalGate: {
+          kind: "definition",
+          runId: run.id,
+          goalText,
+          ask: detail.prioritisation?.ask
+            || "Before this runs, confirm what this goal means.",
+          proposedDefinition: detail.prioritisation?.proposed_definition,
+          proposedSource: detail.prioritisation?.proposed_source,
+          methodNote: detail.prioritisation?.method_note,
+        },
+      })
     } catch (e) {
       // A 403 here is the entitlement gate, and it is the one failure worth
       // naming precisely: the control was visible, so "something went wrong"
@@ -4598,8 +5378,23 @@ export function ChatScreen() {
           ? "This is an experimental feature and your company is not enrolled yet."
           : (e instanceof Error ? e.message : String(e)).slice(0, 200),
       )
+      // The toast is transient and the thread is not. There is no run to go
+      // back to here, so this ends the turn rather than offering a retry.
+      endGoalTurn(tabId, turnId, denied
+        ? "Goal Analysis is not enabled for this workspace yet."
+        : "That analysis could not be started.")
     }
-  }, [activeConvId, setContent, openContentPanel, showToast])
+  }, [activeConvId, awaitGoalRun, emitCommandTurn, endGoalTurn, patchTurn,
+      showToast])
+
+  // Republished on every render so the dispatcher always calls the current
+  // closure. An effect would work equally well here — `dispatchChatIntent`
+  // runs in `submitAsk`'s continuation after an await, so it is always past
+  // commit — and the only reason this is a bare assignment is that there is
+  // nothing to clean up and no dependency list to keep honest. The write is
+  // idempotent, so a discarded or doubled render (StrictMode, concurrent)
+  // stores the same value twice and nothing observes the difference.
+  startGoalAnalysisRef.current = startGoalAnalysis
 
   // Goal mode intercepts the composer submit BEFORE the ask path: a run takes
   // the goal in the user's own words, so a slash trigger spliced into the front
@@ -4968,7 +5763,6 @@ export function ChatScreen() {
       wrapperClassName="bc-turn bc-turn--insight"
       dataTestId="chat-insight-msg"
       agentName={AGENT_NAME}
-      agentBadge="Product Coworker"
       agentBodyNode={
         <>
           <div className="bc-insight-msg">
@@ -5575,6 +6369,14 @@ export function ChatScreen() {
               chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
               inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
               clarifyPopupOpen, pendingClarifyTurn,
+              // WITHOUT THESE THE CARD IS DECORATION. They are optional on
+              // `MapMainTurnsDeps` (the group surface has no Goal Analysis), so
+              // omitting them here type-checked cleanly and every button
+              // short-circuited through `confirmGoalDefinition?.(…)` — the
+              // second independent way this feature shipped inert.
+              goalGateBusyTurnId,
+              confirmGoalDefinition,
+              approveGoalPlan,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
               editingTurnId,
               copiedTurnId,

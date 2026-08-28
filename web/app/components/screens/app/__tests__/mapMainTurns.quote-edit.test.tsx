@@ -52,6 +52,12 @@ function makeDeps(over: Partial<MapMainTurnsDeps> = {}): MapMainTurnsDeps {
     handleAskAgain: vi.fn(),
     handleStopAsk: vi.fn(),
     submitClarifyAnswers: vi.fn(),
+  // Named explicitly, not omitted: `MapMainTurnsDeps` requires the goal
+  // fields so a surface cannot drop them with a clean `tsc` — which is how
+  // the in-thread gates shipped inert.
+  goalGateBusyTurnId: undefined,
+  confirmGoalDefinition: undefined,
+  approveGoalPlan: undefined,
     setViewerAttachment: vi.fn(),
     openReportByTitle: vi.fn(),
     openArtifactInPanel: vi.fn(),

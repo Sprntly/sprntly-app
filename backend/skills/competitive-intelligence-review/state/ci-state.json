@@ -1,0 +1,490 @@
+{
+ "run_id": "2026-08-20-review-001",
+ "previous_run": null,
+ "mode": "review",
+ "window": {
+  "from": "2026-04-15",
+  "to": "2026-08-20"
+ },
+ "competitors": {
+  "Productboard": {
+   "bucket": "direct",
+   "features": [
+    {
+     "value": "Spark spec job",
+     "observed_on": "2026-04-15",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "Spark skills",
+     "observed_on": "2026-04-28",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "Scheduled tasks",
+     "observed_on": "2026-05-13",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "Company Knowledge",
+     "observed_on": "2026-05-28",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "MCP server for coding agents",
+     "observed_on": "2026-06-04",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "Post-launch evaluation skill",
+     "observed_on": "2026-06-04",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "MCP entity create/edit",
+     "observed_on": "2026-08-12",
+     "source": "productboard.com release notes + support docs"
+    }
+   ],
+   "deprecations": [
+    {
+     "value": "Legacy sentiment analysis",
+     "observed_on": "2026-06-04",
+     "source": "productboard.com release notes + support docs"
+    },
+    {
+     "value": "Daily/weekly digests",
+     "observed_on": "2026-07-17",
+     "source": "productboard.com release notes + support docs"
+    }
+   ],
+   "pricing": [
+    {
+     "value": "Essentials $19/maker; Pro $75/user",
+     "observed_on": "2026-08-20",
+     "source": "Capterra/G2"
+    },
+    {
+     "value": "Productboard AI and Pulse not available for purchase; Spark price unpublished",
+     "observed_on": "2026-06-25",
+     "source": "productboard.com release notes + support docs"
+    }
+   ],
+   "sentiment": {
+    "g2": {
+     "value": "4.3/5 over 253 reviews",
+     "observed_on": "2026-04-19",
+     "source": "G2 via review synthesis"
+    },
+    "gartner": {
+     "value": "4.4/5 over 30 reviews",
+     "observed_on": "2026-04-19",
+     "source": "Gartner Peer Insights"
+    },
+    "themes": {
+     "value": "praised: consolidation, prioritisation. complaints: interface density, reporting limits, overhead, cost",
+     "observed_on": "2026-04-19",
+     "source": "review synthesis"
+    }
+   },
+   "momentum": {
+    "value": "~39 dated Spark releases 15 Apr - 17 Aug; rising monthly",
+    "observed_on": "2026-08-17",
+    "source": "productboard.com release notes + support docs"
+   },
+   "financials": {
+    "customers": {
+     "value": "6,000+ organisations (vendor-reported)",
+     "observed_on": "2026-08-20",
+     "source": "productboard.com release notes + support docs"
+    },
+    "revenue": {
+     "value": "not disclosed",
+     "observed_on": "2026-08-20",
+     "source": "productboard.com release notes + support docs"
+    }
+   },
+   "hiring": {
+    "status": "not pulled this run"
+   }
+  },
+  "Linear": {
+   "bucket": "adjacent",
+   "features": [
+    {
+     "value": "Linear Agent, Skills, Automations (all plans)",
+     "observed_on": "2026-03-24",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Code Intelligence",
+     "observed_on": "2026-05-14",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Diffs",
+     "observed_on": "2026-05-28",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Coding sessions via Claude Code and Codex",
+     "observed_on": "2026-06-11",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Agent-drafted project updates",
+     "observed_on": "2026-06-18",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Okta-managed MCP access",
+     "observed_on": "2026-07-02",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Loops (recurring agent work)",
+     "observed_on": "2026-07-29",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Team-led initiatives",
+     "observed_on": "2026-08-13",
+     "source": "linear.app changelog"
+    }
+   ],
+   "pricing": [
+    {
+     "value": "Basic $10, Business $16; headline flat",
+     "observed_on": "2026-08-20",
+     "source": "usagepricing blueprint"
+    },
+    {
+     "value": "Coding Sessions first usage-metered feature on AI credits",
+     "observed_on": "2026-06-11",
+     "source": "linear.app changelog"
+    },
+    {
+     "value": "Loops carries AI-credit footnote",
+     "observed_on": "2026-07-29",
+     "source": "linear.app changelog"
+    }
+   ],
+   "sentiment": {
+    "g2": {
+     "value": "4.5/5 over 91 verified reviews",
+     "observed_on": "2026-08-13",
+     "source": "G2"
+    },
+    "themes": {
+     "value": "praised: speed, keyboard UI, integrations. complaints: limited customisation, price scaling, some resistance to agent push",
+     "observed_on": "2026-08-13",
+     "source": "G2"
+    }
+   },
+   "momentum": {
+    "value": "8 major agent releases Mar-Aug, roughly monthly",
+    "observed_on": "2026-08-13",
+    "source": "linear.app changelog"
+   },
+   "financials": {
+    "customers": {
+     "value": "40,000+ organisations (vendor-reported)",
+     "observed_on": "2026-08-20",
+     "source": "linear.app changelog"
+    },
+    "funding": {
+     "value": "$82M Series C at $1.25B",
+     "observed_on": "2025-06-01",
+     "source": "TechCrunch via usagepricing"
+    }
+   },
+   "exec_commentary": [
+    {
+     "value": "Saarinen: 'Issue tracking is dead'; Linear as the context layer",
+     "observed_on": "2026-03-25",
+     "source": "linear.app/next"
+    }
+   ],
+   "hiring": {
+    "status": "not pulled this run"
+   }
+  },
+  "ChatPRD": {
+   "bucket": "direct",
+   "features": [
+    {
+     "value": "7 AI-first team templates",
+     "observed_on": "2026-02-01",
+     "source": "chatprd.ai + third-party reviews"
+    },
+    {
+     "value": "MCP server for Cursor, Claude Desktop, Claude Code, Windsurf, VS Code",
+     "observed_on": "2026-06-01",
+     "source": "chatprd.ai + third-party reviews"
+    },
+    {
+     "value": "Projects, Multi Doc Mode, SOC 2 Type II + SSO",
+     "observed_on": "2026-06-01",
+     "source": "chatprd.ai + third-party reviews"
+    }
+   ],
+   "pricing": [
+    {
+     "value": "Free (3 docs), Pro $15, Teams $29/seat, Enterprise custom",
+     "observed_on": "2026-06-01",
+     "source": "chatprd.ai + third-party reviews"
+    },
+    {
+     "value": "CONFLICT: one source lists Basic $8, another says no tier between free and Pro - unresolved",
+     "observed_on": "2026-06-23",
+     "source": "IdeaPlan vs MakerStack"
+    }
+   ],
+   "sentiment": {
+    "independent": {
+     "value": "no Product Hunt reviews; no substantive Reddit/HN threads found",
+     "observed_on": "2026-06-11",
+     "source": "rywalker research"
+    },
+    "editorial": {
+     "value": "7.8/10 and 65/100 across two editorial reviews",
+     "observed_on": "2026-06-06",
+     "source": "MakerStack, aipmtools"
+    }
+   },
+   "momentum": {
+    "value": "no dated changelog published - cadence not observable",
+    "observed_on": "2026-08-20",
+    "source": "chatprd.ai + third-party reviews"
+   },
+   "financials": {
+    "users": {
+     "value": "100,000+ PMs, 750,000+ docs (vendor-reported)",
+     "observed_on": "2026-06-11",
+     "source": "chatprd.ai + third-party reviews"
+    },
+    "funding": {
+     "value": "bootstrapped, no outside funding",
+     "observed_on": "2026-06-11",
+     "source": "chatprd.ai + third-party reviews"
+    }
+   },
+   "hiring": {
+    "status": "not pulled this run"
+   }
+  },
+  "Amplitude": {
+   "bucket": "entrant",
+   "features": [
+    {
+     "value": "Global Agent",
+     "observed_on": "2026-02-17",
+     "source": "Amplitude/Business Wire 17 Feb 2026"
+    },
+    {
+     "value": "4 specialised agents: dashboard, session replay, experimentation, feedback",
+     "observed_on": "2026-02-17",
+     "source": "Amplitude/Business Wire 17 Feb 2026"
+    },
+    {
+     "value": "MCP and Skills into Claude, Cursor, Figma, Lovable, Notion, GitHub",
+     "observed_on": "2026-02-17",
+     "source": "Amplitude/Business Wire 17 Feb 2026"
+    }
+   ],
+   "pricing": [
+    {
+     "value": "not sourced - OPEN PULL",
+     "observed_on": "2026-08-20",
+     "source": null
+    }
+   ],
+   "sentiment": {
+    "status": {
+     "value": "not sourced - OPEN PULL; vendor claims #1 across multiple G2 categories",
+     "observed_on": "2026-08-20",
+     "source": "Amplitude/Business Wire 17 Feb 2026"
+    }
+   },
+   "momentum": {
+    "value": "one dense release; changelog not checked directly - quiet is UNVERIFIED",
+    "observed_on": "2026-08-20",
+    "source": "Amplitude/Business Wire 17 Feb 2026"
+   },
+   "financials": {
+    "customers": {
+     "value": "4,500+ (vendor-reported)",
+     "observed_on": "2026-02-17",
+     "source": "Amplitude/Business Wire 17 Feb 2026"
+    },
+    "revenue": {
+     "value": "STALE: ARR $312M +11%, quarter predates Feb 2026 agent launch - do not quote as current",
+     "observed_on": "2025-03-01",
+     "source": "market commentary"
+    }
+   },
+   "hiring": {
+    "status": "not pulled this run"
+   }
+  },
+  "Anthropic (Claude Code / Cowork)": {
+   "bucket": "substitute",
+   "features": [
+    {
+     "value": "Cowork research preview",
+     "observed_on": "2026-01-12",
+     "source": "claude.com + InfoQ + plugin docs"
+    },
+    {
+     "value": "Official product-management plugin: 6 skills, 6 slash commands",
+     "observed_on": "2026-02-01",
+     "source": "claude.com + InfoQ + plugin docs"
+    },
+    {
+     "value": "Enterprise Cowork deployment session",
+     "observed_on": "2026-02-24",
+     "source": "claude.com + InfoQ + plugin docs"
+    },
+    {
+     "value": "Windows then full cross-platform rollout",
+     "observed_on": "2026-04-03",
+     "source": "claude.com + InfoQ + plugin docs"
+    }
+   ],
+   "pricing": [
+    {
+     "value": "~$20/mo consumer tier; PM plugin free",
+     "observed_on": "2026-08-20",
+     "source": "third-party, soft"
+    }
+   ],
+   "sentiment": {
+    "themes": {
+     "value": "praised: skill reuse, agentic execution. incident: Cowork consumed 11GB during testing",
+     "observed_on": "2026-01-12",
+     "source": "InfoQ"
+    }
+   },
+   "momentum": {
+    "value": "2 net-new, 2 market moves in window",
+    "observed_on": "2026-08-20",
+    "source": "claude.com + InfoQ + plugin docs"
+   },
+   "hiring": {
+    "status": "not pulled this run"
+   }
+  }
+ },
+ "our_state": {
+  "note": "NO INTERNAL DATA THIS RUN - all Sprntly fields are vendor-reported from our own site",
+  "positioning": {
+   "site": {
+    "value": "'agentic PM stack' / 'AI product intelligence platform for product managers'",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   },
+   "internal_master_line": {
+    "value": "'Execution Intelligence Platform for AI-native software teams'",
+    "observed_on": "2026-08-20",
+    "source": "internal, unsourced"
+   },
+   "conflict": "unresolved - recommendation 03"
+  },
+  "agents": {
+   "Signal Synthesis": {
+    "value": "available now",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   },
+   "Strategy": {
+    "value": "available now",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   },
+   "Engineering": {
+    "value": "partly available",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   },
+   "Prototype": {
+    "value": "coming soon",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   },
+   "Measurement": {
+    "value": "coming soon",
+    "observed_on": "2026-08-20",
+    "source": "sprntly.ai homepage"
+   }
+  },
+  "pricing": {
+   "value": "none published",
+   "observed_on": "2026-08-20",
+   "source": "sprntly.ai homepage"
+  },
+  "distribution": {
+   "value": "pre-launch; waitlist and small design-partner group",
+   "observed_on": "2026-08-20",
+   "source": "sprntly.ai homepage"
+  },
+  "missing": [
+   "retention",
+   "design-partner count",
+   "pipeline",
+   "ARR",
+   "churn",
+   "changelog"
+  ]
+ },
+ "decisions": [
+  {
+   "id": "R1",
+   "raised_in_run": "2026-08-20-review-001",
+   "recommendation": "Move the wedge from the loop to cross-tool root cause",
+   "owner": null,
+   "status": "open",
+   "outcome_note": null
+  },
+  {
+   "id": "R2",
+   "raised_in_run": "2026-08-20-review-001",
+   "recommendation": "Ship Measurement before Prototype",
+   "owner": null,
+   "status": "open",
+   "outcome_note": null
+  },
+  {
+   "id": "R3",
+   "raised_in_run": "2026-08-20-review-001",
+   "recommendation": "Close the positioning fork before the raise opens",
+   "owner": null,
+   "status": "open",
+   "outcome_note": null
+  },
+  {
+   "id": "R4",
+   "raised_in_run": "2026-08-20-review-001",
+   "recommendation": "Answer the Claude question on the page where it is asked",
+   "owner": null,
+   "status": "open",
+   "outcome_note": null
+  },
+  {
+   "id": "R5",
+   "raised_in_run": "2026-08-20-review-001",
+   "recommendation": "Decide the Linear relationship deliberately",
+   "owner": null,
+   "status": "open",
+   "outcome_note": null
+  }
+ ],
+ "open_pulls": [
+  "Amplitude current-quarter revenue",
+  "Amplitude pricing and independent rating",
+  "Amplitude changelog for post-February window",
+  "Argument inside Productboard's AI-only post",
+  "ChatPRD disputed mid-tier price",
+  "Hiring signals across the whole set",
+  "All internal Sprntly metrics"
+ ]
+}

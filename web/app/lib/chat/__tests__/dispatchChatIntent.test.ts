@@ -47,6 +47,7 @@ function executors(): ChatIntentExecutors & Record<string, ReturnType<typeof vi.
     onCreateArtifact: vi.fn(),
     onAssignTickets: vi.fn(),
     onListArtifacts: vi.fn(),
+    onEditArtifact: vi.fn(),
     onAnswer: vi.fn(),
     // Deliberately omitted from the default fixture — `onClarify` is
     // OPTIONAL (main-chat callers never supply it) — see the two `clarify`
@@ -332,6 +333,38 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
   })
 })
 
+describe("dispatchChatIntent — create_project", () => {
+  it("routes to onCreateProject with the envelope when a name came through", () => {
+    const ex = executors()
+    const onCreateProject = vi.fn()
+    const env = envelope({ intent: "create_project", task: "Billing revamp" })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onCreateProject })
+    expect(onCreateProject).toHaveBeenCalledWith(env)
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+    expect(result).toEqual({ handled: true })
+  })
+
+  it("falls through to the grounded ask on a surface with no project affordance", () => {
+    // The honest outcome: a surface that cannot make a project must answer,
+    // never reply as though it made one.
+    const ex = executors()
+    const env = envelope({ intent: "create_project", task: "Billing revamp" })
+    const result = dispatchChatIntent(env, ctx(), ex)
+    expect(ex.onAnswer).toHaveBeenCalled()
+    expect(result).toEqual({ handled: false })
+  })
+
+  it("falls through when no name came through, rather than minting an untitled one", () => {
+    const ex = executors()
+    const onCreateProject = vi.fn()
+    const env = envelope({ intent: "create_project", task: null })
+    const result = dispatchChatIntent(env, ctx(), { ...ex, onCreateProject })
+    expect(onCreateProject).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalled()
+    expect(result).toEqual({ handled: false })
+  })
+})
+
 describe("dispatchChatIntent — share_to_slack", () => {
   it("routes to onShareToSlack with the envelope, unguarded", () => {
     // No target/channel guard on purpose: the executor's preview call resolves
@@ -372,5 +405,102 @@ describe("dispatchChatIntent — share_to_slack", () => {
     const result = dispatchChatIntent(env, ctx(), ex)
     expect(ex.onAnswer).toHaveBeenCalledTimes(1)
     expect(result).toEqual({ handled: false })
+  })
+})
+
+// ── edit_artifact: the report or document open beside the chat ──────────────
+// The target rides the ENVELOPE (re-read server-side under the caller's
+// company), not the caller's own state — it is the same read the planner was
+// told about when it chose this action, so resolving it again on the client
+// could edit a document the decision was never about.
+describe("dispatchChatIntent — edit_artifact", () => {
+  const target = { kind: "report", id: 12, title: "Voice of customer" }
+
+  it("hits onEditArtifact with the instruction and the envelope's target", () => {
+    const ex = executors()
+    const env = envelope({
+      intent: "edit_artifact",
+      instruction: "convert the RICE section into a table",
+      open_artifact: target,
+    })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(true)
+    expect(ex.onEditArtifact).toHaveBeenCalledWith(
+      "convert the RICE section into a table", target,
+    )
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+  })
+
+  it("falls through to the ask when nothing is open", () => {
+    const ex = executors()
+    const env = envelope({ intent: "edit_artifact", instruction: "shorten it" })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+    expect(ex.onEditArtifact).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("falls through to the ask with nothing to apply", () => {
+    const ex = executors()
+    const env = envelope({ intent: "edit_artifact", open_artifact: target })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("falls through on a surface with no panel to edit in", () => {
+    // The project group chat omits the executor entirely; an intent it cannot
+    // act on must answer rather than report an edit that never happened.
+    const ex = { ...executors(), onEditArtifact: undefined }
+    const env = envelope({
+      intent: "edit_artifact", instruction: "cut the appendix", open_artifact: target,
+    })
+    expect(dispatchChatIntent(env, ctx(), ex).handled).toBe(false)
+  })
+})
+
+describe("a goal typed into chat reaches Goal Analysis", () => {
+  // THE FAILURE THIS EXISTS TO STOP, observed live: a user asked to "increase
+  // revenue by 5%" and got a list of opportunities — no definition confirmed,
+  // no plan shown, nothing approved. The planner had no goal action, so it fell
+  // to `answer`; once it had one, the CLIENT still dropped it here.
+  const goal = () => envelope({ intent: "analyse_goal", task: "increase revenue by 5%" })
+
+  it("hands the goal to the panel", () => {
+    const seen: string[] = []
+    const ex = { ...executors(), onAnalyseGoal: (g: string) => { seen.push(g) } }
+    const out = dispatchChatIntent(goal(), ctx(), ex)
+    expect(out).toEqual({ handled: true })
+    expect(seen).toEqual(["increase revenue by 5%"])
+    expect(ex.onAnswer).not.toHaveBeenCalled()
+  })
+
+  it("answers instead on a surface with no panel", () => {
+    // The brief chat and the AI bar have nowhere to open a run. Falling through
+    // is right; swallowing the goal silently is not.
+    const ex = executors()
+    const out = dispatchChatIntent(goal(), ctx(), ex)
+    expect(out).toEqual({ handled: false })
+    expect(ex.onAnswer).toHaveBeenCalled()
+  })
+
+  it("survives the caller's side-effect-free PEEK pass", () => {
+    // THE BUG THIS PINS. `useConversation` calls the dispatcher twice: once
+    // with every executor body replaced by `() => {}` to ask "would this be
+    // handled?", and only then for real. A case that decides `handled` from
+    // the executor's return value reads `undefined` from the stub, answers
+    // false, and is never dispatched — the feature goes silently inert with
+    // every other test still green.
+    const stubbed = Object.fromEntries(
+      Object.entries({ ...executors(), onAnalyseGoal: () => {} })
+        .map(([k, v]) => [k, typeof v === "function" ? () => {} : v]),
+    ) as unknown as Parameters<typeof dispatchChatIntent>[2]
+    expect(dispatchChatIntent(goal(), ctx(), stubbed)).toEqual({ handled: true })
+  })
+
+  it("answers rather than starting a run with no goal text", () => {
+    const ex = { ...executors(), onAnalyseGoal: vi.fn() }
+    const out = dispatchChatIntent(
+      envelope({ intent: "analyse_goal", task: "" }), ctx(), ex)
+    expect(out).toEqual({ handled: false })
+    expect(ex.onAnalyseGoal).not.toHaveBeenCalled()
+    expect(ex.onAnswer).toHaveBeenCalled()
   })
 })

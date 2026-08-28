@@ -381,12 +381,19 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     renderChat()
     await typeAndSend("what are the prds i have?")
 
-    // The reply names the count HONESTLY ("your N newest", never "the N
-    // you've created" — the rows are capped); the rows render as CARDS, not
+    // The reply names NO count. This used to read "your 2 newest" — chosen so
+    // a capped page could not be read as a total, which was the right instinct
+    // aimed at the wrong word. The rows ARE capped
+    // (`chat_envelope._MAX_CHAT_ARTIFACTS`) and nothing on this side can tell a
+    // full page from a library of exactly that size, so a number here is
+    // unknowable either way; a reader who asked to be SHOWN their PRDs read
+    // "your 12 newest PRDs" as the count of PRDs they have. "Your most recent"
+    // claims neither a total nor completeness. The rows render as CARDS, not
     // prose — and nothing goes to the ask agent or any generator.
     await waitFor(() =>
-      expect(document.body.textContent).toContain("your 2 newest"),
+      expect(document.body.textContent).toContain("your most recent PRDs"),
     )
+    expect(document.body.textContent).not.toContain("2 newest")
     const cards = document.querySelectorAll('[data-testid="artifact-list-card"]')
     expect(cards.length).toBe(2)
     expect(cards[0].textContent).toContain("Checkout abandonment")

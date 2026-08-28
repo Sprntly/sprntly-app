@@ -161,6 +161,21 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     the best available outcome was prose describing how to share it by hand.
 #     Widening on v4's rule: a v9 row answers a question no v8 row was asked
 #     (where does this document GO), so the two must not be pooled.
+# v10: the menu gained `include_team` — the company's own member list (names,
+#     emails, jobs, access levels). "do you know my team members and their
+#     roles" used to reach a model holding the knowledge graph and the
+#     connected sources and NOTHING that records who works here, so the honest
+#     answer was "I don't have that" and the likely one was a roster built out
+#     of Slack authors and Jira assignees. Exclusive on v7's rule, for the same
+#     reason: the block is the whole grounding. Widening on v4's rule — a v10
+#     row answers a question no v9 row was asked — so the two must not be
+#     pooled.
+# v11: the menu gained `create_project` plus `include_projects` — the product's
+#     PROJECTS, which no earlier version could name or make. "create a project
+#     for the billing revamp" used to land on `answer` or on create_artifact
+#     (a document instead of a container), and "what is a project" was answered
+#     with the English word or with the connected tracker's version. Widening
+#     on v4's rule both ways, so v10 and v11 rows must not be pooled.
 # COSMETIC EDITS DO NOT BUMP THIS, and that is a deliberate reading of the rule
 # above rather than an oversight. The 2026-08-18 privacy scrub changed example
 # company names inside the prompt text: the examples illustrate SHAPE ("a named
@@ -168,7 +183,28 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 # pooling them is still correct. A bump would fragment the decision log for a
 # change that cannot move a routing decision. Anything that alters what the
 # prompt ASKS still bumps.
-_PROMPT_VERSION = "ask-planner-v9"
+#   v12: the action menu gained `analyse_goal` (a business goal to move, handed
+#     to Goal Analysis) and `edit_artifact` before it. A v11 row could choose
+#     neither, so pooling v11 with v12 mixes two different action menus and any
+#     routing-accuracy query over the pair measures nothing. `edit_artifact`
+#     landed in #1316 without a bump and `analyse_goal` in #1321 without one
+#     either; both are covered by this bump rather than left uncounted.
+#   v14: `analyse_goal` learned that a goal asked AS A QUESTION is still a goal.
+#     v13 taught the action with imperative examples ("increase revenue by 5%",
+#     "reduce churn") and then drew the exclusion at "A GOAL IS NOT A QUESTION
+#     ABOUT A METRIC" — a line between statements and questions rather than
+#     between reporting a number and changing one. Observed live: "How to grow
+#     revenue by 5%" routed to `answer` and reached the DS agent, while "How can
+#     we grow revenue by 5%" routed correctly, which is a distinction no user
+#     could be expected to make. A v13 row and a v14 row answer the question
+#     differently for every interrogative goal, so they must not be pooled.
+#   v13: the where/what line inside `list_artifacts`. "Where on Sprntly do I
+#     find my created PRDs" is a request to be shown around the app, and it
+#     used to compete with the library listing; the answer path now holds the
+#     product's screen map (app/app_map.py), so a v13 row sends those to
+#     `answer` where a v12 row could reasonably have listed. Same menu, but a
+#     different question is being asked of it, so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v14"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -195,8 +231,24 @@ _PLANNER_THRESHOLD = 0.6
 # `qa_agent.answer`, reached by regex, and it is an ACTION (it rewrites a
 # ticket) rather than a way of answering a question.
 ACTION_ANSWER = "answer"
+
+# A business GOAL the user wants MOVED — "increase revenue by 5%", "reduce
+# churn", "improve activation this quarter". Its own action because the
+# machinery is a different SHAPE from answering: Goal Analysis stops and asks
+# what the metric means before it reads anything, states what it is going to
+# read, and only runs once the user approves — the whole point being that the
+# PM can defend the result afterwards.
+#
+# Routed as `answer` it produced exactly the failure the feature exists to
+# prevent: a user asked to increase revenue by 5% and got a list of
+# opportunities, with no definition confirmed, no plan shown, and nothing
+# approved. The planner had no route to Goal Analysis at all — the only way in
+# was a `+` menu item — so the model's only reachable choice was the wrong one.
+ACTION_ANALYSE_GOAL = "analyse_goal"
+
 _ACTIONS: frozenset[str] = frozenset({
     ACTION_ANSWER,
+    ACTION_ANALYSE_GOAL,
     "generate_prd",
     "edit_prd",
     "generate_tickets",
@@ -235,6 +287,15 @@ _ACTIONS: frozenset[str] = frozenset({
     # message, while a false create silently fills a shared team library with
     # documents nobody asked for.
     "create_artifact",
+    # Change the REPORT or DOCUMENT already open beside this chat: "convert the
+    # RICE section into a table", "cut the appendix", "rewrite the summary for
+    # an exec", "add a risks section to that report". Its own action rather
+    # than a shading of `edit_prd`, because the target is a different artifact
+    # behind a different endpoint — a PRD editor pointed at a voice-of-customer
+    # report edits a document by rules written about another one. Its argument
+    # is `instruction`; the TARGET comes from the SURFACE (the artifact the
+    # user has open), never from the model.
+    "edit_artifact",
     # Switch an EXISTING PRD into a different uploaded format and re-write it
     # in place (POST /v1/prd/{id}/change-template). Its own action rather than
     # a shading of `edit_prd`, because the reported failure was exactly that
@@ -277,6 +338,20 @@ _ACTIONS: frozenset[str] = frozenset({
     # the message and the user confirms, so a misread channel costs a glance
     # rather than a message in front of the wrong audience.
     "share_to_slack",
+    # Create a PROJECT — the shared container for one topic (its artifacts,
+    # its members, its own memory). Its own action rather than
+    # a shading of `create_artifact`, because the two produce different things
+    # and the confusion runs one way: a project is a CONTAINER and an artifact
+    # is a DOCUMENT, so "create a project for the billing revamp" answered as
+    # create_artifact writes a document nobody asked for and leaves the
+    # Projects screen empty.
+    #
+    # Before this the chat had no action at all here, and the failure was the
+    # one `create_artifact`'s note records for its own absence: the model knew
+    # the product had projects and replied in prose as though it had made one.
+    # Its argument is `task` — what the project is ABOUT, in the user's words,
+    # which becomes its name.
+    "create_project",
 })
 
 #: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
@@ -302,14 +377,26 @@ LIST_ARTIFACT_KINDS: frozenset[str] = frozenset({
 #: Tickets and prototypes have no such fallback surface, so they keep the rule.
 _NEEDS_TASK: frozenset[str] = frozenset({
     "generate_tickets", "generate_prototype", "multi_agent",
+    # Goal Analysis opens by asking what the goal's metric MEANS, and it can
+    # only ask that about a stated goal. With no task there is nothing to ask
+    # about, so this degrades to `answer` — which can ask what they meant.
+    ACTION_ANALYSE_GOAL,
     # A document with no brief is a blank page with a title. Unlike
     # `generate_prd` — which has a chat surface that asks "what should it
     # cover?" and waits — there is no such prompt for an arbitrary document
     # kind, so an empty task here would produce a generation about nothing.
     "create_artifact",
+    # A project with no subject is an untitled container. Unlike
+    # `generate_prd` there is no surface that asks "what should it cover?" and
+    # waits, so an empty task degrades to `answer` — which can ask.
+    "create_project",
 })
 _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     "edit_prd", "update_ticket",
+    # An edit with nothing to apply is worse than no action — the same rule the
+    # other three encode, and `answer` is the recoverable landing: it can ask
+    # what to change.
+    "edit_artifact",
     # An assignment with no instruction has nobody to assign and nothing to
     # assign them to — same "an action whose ARGUMENT is missing is worse than
     # no action" rule as the other two.
@@ -328,6 +415,17 @@ _TASK_CHARS = 4000
 # question; it is logged, so it gets the same one-line clamp every other
 # user-derived string in a prompt/log gets.
 _ENTITY_CHARS = 200
+
+# A `constraints.criterion` is free text naming the classification bar a
+# corpus count/analytical question should run against (see
+# `app.corpus_mapreduce`'s base_discipline+criterion composition). Not yet
+# emitted by the planner's own JSON schema (no `_PLAN_SCHEMA` property calls
+# for it) — this only carries a criterion through when a caller (a future
+# clarify-then-recut turn, or a direct API caller) already supplied one on the
+# raw plan; longer than `_ENTITY_CHARS` because it is a definitional clause,
+# not a name, but still capped the same way every other user-derived string in
+# a prompt/log is.
+_CRITERION_CHARS = 500
 
 # A `share_note` becomes the top line of a real Slack message, so it is capped
 # where a note stops being a note. Slack's own block limit is 3000 characters
@@ -372,7 +470,17 @@ _PLANNER_SCHEMA: dict = {
             "enum": sorted(_ACTIONS),
             "description": (
                 "What the user is asking the assistant to DO. 'answer' is the "
-                "normal outcome — the rest each hand off to a builder."
+                "normal outcome — the rest each hand off to a builder.\n"
+                "'analyse_goal' is for a business GOAL the user wants MOVED: "
+                "\"increase revenue by 5%\", \"reduce churn\", \"improve "
+                "activation this quarter\". It hands off to Goal Analysis, "
+                "which asks what the metric means, states what it will read, "
+                "and runs only once the user approves. Choose it even when you "
+                "could attempt an answer — a goal answered directly skips the "
+                "confirmation the user needs in order to defend the result. Do "
+                "NOT choose it for a QUESTION about a metric (\"what is our "
+                "churn?\", \"how did revenue move last quarter?\"), which "
+                "reports a number and is 'answer'."
             ),
         },
         # THE ACTION'S OWN CONVICTION, and it needs its own field because the
@@ -395,9 +503,11 @@ _PLANNER_SCHEMA: dict = {
             "type": "string",
             "description": (
                 "generate_prd / generate_tickets / generate_prototype / "
-                "create_artifact only: a self-contained brief for the thing to "
-                "build, synthesized from the WHOLE conversation, not the words "
-                "of the last message."
+                "create_artifact / analyse_goal only: a self-contained brief "
+                "for the thing to build, synthesized from the WHOLE "
+                "conversation, not the words of the last message. For "
+                "analyse_goal it is the GOAL in the user's own words, number "
+                "included."
             ),
         },
         "instruction": {
@@ -546,6 +656,22 @@ _PLANNER_SCHEMA: dict = {
                 "library, false for everything else."
             ),
         },
+        "include_team": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs the list of PEOPLE in this company's "
+                "workspace — their names, emails, jobs and access levels — true "
+                "when the question is ABOUT the team, false for everything else."
+            ),
+        },
+        "include_projects": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs this workspace's PROJECTS — what a "
+                "project is and which ones the caller belongs to — true when "
+                "the question is ABOUT projects, false for everything else."
+            ),
+        },
         "web_search": {
             "type": "boolean",
             "description": "Whether the public web should be searched.",
@@ -599,7 +725,8 @@ _PLANNER_SCHEMA: dict = {
         "reason", "action", "action_confidence",
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "sources",
-        "include_knowledge_graph", "include_library", "web_search", "in_scope",
+        "include_knowledge_graph", "include_library", "include_team",
+        "include_projects", "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -676,6 +803,21 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
+- edit_artifact — the user wants the REPORT or the DOCUMENT open beside this
+  chat CHANGED: "convert the RICE section into a table", "cut the appendix",
+  "rewrite the summary for an exec", "add a risks section to that report",
+  "make the report shorter". Set `instruction` to the change, self-contained.
+  A LINE ABOVE NAMING A REPORT OR A DOCUMENT IS THE PRECONDITION, and there
+  are two of them. "Active tab: report #45 … is open beside this chat" is the
+  reader looking at it. "In this chat: report #45 … was produced in this
+  conversation" is a document this thread made that is not on screen — still a
+  referent, because "that report" in the chat that wrote it means that report.
+  Either one is enough to choose this action; with NEITHER line present there
+  is nothing to edit and the request is `answer`. A PRD open instead is
+  edit_prd — the two are different documents behind different editors.
+  A QUESTION ABOUT the open document is `answer`, not this: "what does the
+  report say about pricing?" and "is the RICE section right?" want prose in the
+  chat. Only an instruction to CHANGE it is this action.
 - change_prd_template — the user wants an EXISTING PRD switched into a
   different uploaded format and re-written in that structure: "change the
   template to Acme", "switch this PRD to our lightweight format", "re-write
@@ -705,6 +847,35 @@ or wants an answer.
   a postmortem?" and "what goes in a launch plan?" all want prose in the chat,
   not a document filed in the shared library. When you are unsure, choose
   `answer` — the assistant can offer to write it, and the user can say yes.
+- create_project — create a PROJECT: the shared container for one topic, which
+  holds that topic's artifacts, its members, and its own memory.
+  "create a project for the billing revamp", "make a project for onboarding",
+  "start a project called Pricing 2027", "set up a project for this work". Set
+  `task` to what the project is ABOUT, in the user's own words and short — it
+  becomes the project's name ("Billing revamp", "Pricing 2027"), so give a
+  NAME, not a brief.
+  A PROJECT IS A CONTAINER, NOT A DOCUMENT. If they asked for something
+  WRITTEN — a plan, a spec, an update — that is create_artifact or
+  generate_prd, whichever fits. Only the container is this action, and a
+  question about projects ("what is a project", "what projects do I have") is
+  `answer` with include_projects=true.
+- analyse_goal — a business GOAL the user wants MOVED: "increase revenue by
+  5%", "reduce churn", "improve activation this quarter", "get retention up".
+  ASKED AS A QUESTION IS STILL A GOAL, and this is the most common way people
+  phrase one: "how to grow revenue by 5%", "how do we reduce churn?", "how can
+  we improve activation?", "what can we do about retention?", "ways to grow
+  revenue". All of these are `analyse_goal`.
+  Set `task` to the goal in the USER'S OWN WORDS, including any number they
+  gave ("increase revenue by 5%", not "revenue"). The number is part of the
+  goal and Goal Analysis asks about it.
+  THE LINE IS REPORT versus CHANGE, not statement versus question. "what is our
+  churn?", "how did revenue move last quarter?", "show me activation" ask what a
+  number IS or WAS — they REPORT, and they are `answer`. "how do we reduce
+  churn?" asks how to CHANGE it, and that is this action however it is phrased.
+  Choose it even when you could attempt an answer yourself. Goal Analysis
+  stops and asks what the metric means, states what it will read, and runs
+  only once the user approves — a goal answered directly skips the
+  confirmation the user needs in order to defend the result.
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -740,6 +911,13 @@ or wants an answer.
   a knowledge question sweeps connected sources for a tally no source keeps.
   `list_mode` is "items" for everything else. No task, no instruction, no
   sources, no pipeline.
+  WHAT, NOT WHERE. "What are my PRDs" is this action; "WHERE on Sprntly do I
+  find my PRDs", "where do I upload a template", "how do I connect Jira",
+  "where do I change my password" are asking to be shown around the app, and
+  those are plain `answer` — the answer path holds the map of this product's
+  screens and their links, and hands back the one they need. A question that
+  wants both ("where are my PRDs — show me the last three") is the LIST: the
+  items are clickable and land them there anyway.
 - share_to_slack — post a document the user ALREADY HAS into their Slack:
   "share this PRD on my slack channel and ask the team for feedback", "send
   the checkout tickets to #product", "post the weekly brief in slack", "share
@@ -880,11 +1058,18 @@ question that merely touches their topic belongs to sources or to a plain
 answer instead.
 
 - call-digest: summarize or recap the customer calls in a time window ("recap
-  last week's customer calls"). Fetches EVERY call in the window live, then
-  synthesizes — minutes of work.
-- call-listing: list or count recorded calls/transcripts ("the 5 latest
-  transcripts", "which calls did we have last week"). The index answers this
-  instantly; do not send a listing question anywhere else.
+  last week's customer calls"), OR count/list calls that match a CONTENT
+  filter — an ask, issue, or topic the call must actually contain ("how many
+  calls asked for SSO", "which calls raised a billing complaint"). The count
+  itself is not the point; the content match is, and only a live read of
+  each call can judge that. Fetches EVERY call in the window live, then
+  synthesizes/classifies — minutes of work.
+- call-listing: list or count recorded calls/transcripts by STRUCTURAL
+  properties only, with no content filter ("the 5 latest transcripts",
+  "which calls did we have last week", "how many calls did I have this
+  month"). The index answers this instantly; do not send a listing question
+  anywhere else, and never send a content-filtered count here — that is
+  call-digest above, even though both start with "how many calls".
 - single-call-read: read ONE named call, whatever the verb. "Summarize the
   Vandelay Industries call", "more details on the Maverik meeting", "what happened on
   the Acme call", "who was on the Litware briefing" are all this. The
@@ -1153,6 +1338,63 @@ question about the library.
 The action stays `answer` for these — a question about the library is still a
 question.
 
+=== QUESTIONS ABOUT THE TEAM ===
+
+Sprntly knows who is in this company's workspace — every member's name, email,
+job (Founder / PM / Engineer / Designer / …) and access level (owner / admin /
+member / viewer). That list is the ONLY record of who works here.
+
+Set include_team=true for any question about the PEOPLE in this workspace:
+"who's on my team", "do you know my team members and their roles", "who are our
+engineers", "what's Dave's email", "what does Priya do", "who can invite
+people", "how many people are in this workspace", "who should I ask about
+design".
+
+For these, also set include_knowledge_graph=false, pick NO sources and name NO
+documents — the team block is the WHOLE grounding, and the execution layer
+treats that combination as "answer from our own records alone". Every connected
+source is full of people (Slack authors, Jira assignees, call speakers) and not
+one of them is evidence of membership; a roster assembled from them is the
+exact wrong answer. A question that genuinely needs both — "what has Dave been
+working on this week" — is about the WORK, so it keeps the knowledge graph and
+its sources and sets include_team only if the person still has to be identified.
+
+ALSO SET IT WHEN THE QUESTION CROSSES THE TEAM WITH SOMETHING ELSE: "a table
+of each member and the number of PRDs they created", "which engineer owns the
+most tickets", "how many documents has each person written". Sprntly records no
+author on what it generates, so those tables cannot be built — and the roster
+block is what SAYS so. Without it the answer goes hunting for the documents in
+the connected sources and reports that none were found, to a workspace holding
+a dozen of its own. Keep those narrowed like any other team question.
+
+It is false for everything else, including a message that merely NAMES a
+teammate ("assign this to Dave", "share it with Priya"). Those are actions, and
+their own executors resolve the person.
+
+The action stays `answer` for these — a question about the team is still a
+question.
+
+=== QUESTIONS ABOUT PROJECTS ===
+
+A PROJECT is a Sprntly container for one topic: its artifacts, its members, its
+own memory. It is NOT a Jira project, a Confluence space, or
+anything in a connected tool, and a question about "my projects" is about these.
+
+Set include_projects=true for: "what projects do I have", "what is a project",
+"how do projects work", "which project is the billing work in", "what's in the
+Pricing project", "how many projects are there". Also set it on a message that
+asks to CREATE one — the answer or confirmation should be able to say what
+already exists.
+
+For these, set include_knowledge_graph=false, pick NO sources and name NO
+documents, on the same rule as the library and the team: the block is the whole
+grounding, and a connected tracker full of "projects" is the exact wrong answer.
+The exception is a question that names the connected tool itself ("what Jira
+projects can we push to") — that is the tracker, not this.
+
+It is false for everything else, including a message that merely mentions work
+happening on something.
+
 === KEYWORD PRIOR ===
 
 The input may carry a "Keyword match:" line naming a pipeline a keyword rule
@@ -1191,6 +1433,8 @@ class Plan:
     sources: list[str] = field(default_factory=list)
     include_knowledge_graph: bool = False
     include_library: bool = False
+    include_team: bool = False
+    include_projects: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1254,6 +1498,8 @@ class Plan:
             "sources": self.sources,
             "kg": self.include_knowledge_graph,
             "library": self.include_library,
+            "team": self.include_team,
+            "projects": self.include_projects,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -1359,6 +1605,93 @@ def _sources_block(connected: list[str]) -> str:
     return block
 
 
+def _open_artifact_block(
+    prd_id: Optional[int],
+    prd_title: Optional[str],
+    open_artifact: Optional[dict] = None,
+) -> str:
+    """What the tab that sent this message has OPEN beside the chat.
+
+        Active tab: PRD #123 — "Checkout v2" is open beside this chat.
+        Active tab: report #45 — "Voice of customer · June" is open beside this chat.
+
+    The planner used to be told NOTHING about the thread's open artifact, while
+    the pre-planner intent resolver rendered exactly the PRD line
+    (`chat_intent._render_context`). It cost real routing accuracy twice over:
+
+      * "build a report from this prd" planned as `answer` with the reason "no
+        PRD is open or identified in the thread — need to ask which PRD they
+        mean", on a thread that HAD one open. The endpoint held the id the whole
+        time and only used it AFTER the fact, to gate `_NEEDS_PRD` verdicts.
+      * "I am referring to the report" / "convert that section into a table"
+        had no referent at all, so an edit request was answered by printing the
+        rewritten section into the chat and telling the user to paste it in
+        themselves. `edit_artifact` reads this line as its precondition.
+
+    Empty when nothing is open: the absence is already the default the prompt
+    reasons from ("no PRD exists in this thread yet → generate_prd"), and a "No
+    PRD is open" line on every message is tokens spent to say nothing.
+
+    A PRD and another artifact can both be open (a thread with a PRD that also
+    produced a report), and both lines are rendered — the prompt's own rules
+    decide which one an instruction is about, which is a judgement it can only
+    make if it can see both.
+    """
+    lines = []
+    if prd_id:
+        title = f' — "{prd_title}"' if prd_title else ""
+        lines.append(f"Active tab: PRD #{prd_id}{title} is open beside this chat.")
+    if open_artifact:
+        kind = str(open_artifact.get("kind") or "").strip().lower()
+        oid = open_artifact.get("id")
+        # Only the two kinds the editor can actually act on. An unknown kind is
+        # dropped rather than rendered: a line naming something no action can
+        # target invites the model to choose one that will then be refused.
+        if kind in {"report", "document"} and oid is not None:
+            raw = str(open_artifact.get("title") or "").strip()
+            # One line, bounded: the title is customer text landing in a prompt,
+            # and a newline inside it could forge a section header here.
+            clean = " ".join(raw.split())[:120]
+            name = f' — "{clean}"' if clean else ""
+            # SAY WHICH IT IS. A document the reader has open and a document
+            # this thread produced are both referents an edit can act on, but
+            # they are not the same claim, and the prompt must not make the
+            # stronger one on the weaker evidence: "is open beside this chat"
+            # about a closed panel is a fact the model would reason from and
+            # the reader would not recognise. `origin` is set by whichever
+            # resolver found it (routes/chat.py).
+            if str(open_artifact.get("origin") or "").strip().lower() == "thread":
+                lines.append(
+                    f"In this chat: {kind} #{oid}{name} was produced in this "
+                    "conversation. It is not open on screen, but it is what "
+                    f'"that {kind}" / "the {kind}" refers to here.'
+                )
+            else:
+                lines.append(
+                    f"Active tab: {kind} #{oid}{name} is open beside this chat."
+                )
+    return "\n".join(lines) + "\n\n" if lines else ""
+
+
+def _goal_analysis_available(enterprise_id: str) -> bool:
+    """Is Goal Analysis enabled for this company? FAILS CLOSED.
+
+    One helper so the two places that need the answer — the prompt block that
+    stops the model choosing the action, and `apply_gates` which refuses it —
+    can never disagree. `read_feature_flags` is TTL-cached with write
+    invalidation, so the second read in a turn costs nothing.
+    """
+    try:
+        from app.entitlements import crucible_enabled, feature_flags_for_company
+        return crucible_enabled(feature_flags_for_company(enterprise_id))
+    except Exception:
+        logger.exception(
+            "[planner] crucible entitlement lookup failed for %s — "
+            "treating Goal Analysis as unavailable", enterprise_id,
+        )
+        return False
+
+
 def _build_input(
     question: str,
     *,
@@ -1368,6 +1701,13 @@ def _build_input(
     history: Optional[list[dict]],
     document_block: str = "",
     template_block: str = "",
+    open_prd_block: str = "",
+    # DEFAULTS CLOSED, like the feature it describes. A default of True means
+    # any caller that forgets the argument silently offers the action to a
+    # workspace that does not have it — fail-open plumbing under a fail-closed
+    # gate. `plan()` always passes the real value; every other caller (tests,
+    # future ones) gets the safe answer for free.
+    goal_analysis_available: bool = False,
 ) -> str:
     """The uncached half of the call, assembled in ASK_PLANNER_PROMPT.md §3's
     order: date, company skills, company formats, connected sources,
@@ -1390,14 +1730,53 @@ def _build_input(
         # user's point of view — a team's own method and a team's own form —
         # and a question about one is usually a question about both.
         + template_block
+        # A capability line, beside the sources block for the same reason: both
+        # say what this workspace CAN reach. Empty for a workspace that has it.
+        + _goal_analysis_block(goal_analysis_available)
         + _sources_block(connected)
         # After the sources it belongs with — a document IS a source — and still
         # ahead of the history and the question, which stay last so the thing
         # being judged is the most recent text in the prompt.
         + document_block
         + keyword_prior
+        # The thread's own state, beside the history it belongs with: what is
+        # OPEN in this tab is context for the message, not a company fact.
+        + open_prd_block
         + _render_history_via_qa(history)
         + f"Question: {question}"
+    )
+
+
+def _goal_analysis_block(available: bool) -> str:
+    """Tell the model when Goal Analysis is NOT available to this workspace.
+
+    ON THE UNCACHED `input`, never `_PLANNER_SYSTEM`, and this file states the
+    rule three times already for `_custom_skill_block`, `_document_block` and
+    `_template_block`: the system block is tenant-invariant so one Anthropic
+    cache entry serves every company. Unlike those three this carries no
+    customer text — it is one boolean, so there is no cross-tenant leak to worry
+    about — but it is still per-company, and putting it in the system block
+    would fork the shared entry in two for no reason when the uncached half
+    costs nothing.
+
+    WHY THE MODEL IS TOLD AT ALL, rather than leaving `apply_gates` to drop the
+    action. The gate runs AFTER the model has obeyed `_PLANNER_SYSTEM`'s "when
+    the action is anything other than `answer` … do not also pick a pipeline or
+    sources". So a non-entitled tenant typing a goal got the action dropped back
+    to `answer` with `pipeline_id` and `sources` already emptied — an answer
+    thinner than the one the same message got before `analyse_goal` existed.
+    A tenant without the feature must be affected NOT AT ALL, so the model has
+    to know before it chooses, not after.
+
+    `apply_gates` still refuses the action independently. This is what makes the
+    common path correct; that is what makes it safe."""
+    if available:
+        return ""
+    return (
+        "Goal Analysis is not available in this workspace. Never choose "
+        "`analyse_goal`; treat a goal the user wants moved as a question to "
+        "`answer`, and pick the pipeline and sources for it as you would for "
+        "any other question.\n\n"
     )
 
 
@@ -1543,7 +1922,15 @@ def _gate_constraints(raw: Any) -> dict:
     parse is dropped rather than guessed at.
 
     `bool` is an `int` subclass in Python, so `top_n: true` would otherwise
-    survive as `1`."""
+    survive as `1`.
+
+    `criterion` (see `_CRITERION_CHARS`) is gated the same way as `entity` —
+    trimmed, collapsed to one line, length-capped — and passed through
+    unchanged when present so a corpus count/analytical question's
+    classification bar (see `app.corpus_mapreduce`) can be caller-supplied
+    per query instead of hardcoded; the planner's own JSON schema does not
+    yet solicit this field (see `_CRITERION_CHARS`'s docstring), so today it
+    only survives when a caller already put one on the raw plan."""
     if not isinstance(raw, dict):
         return {}
     out: dict = {}
@@ -1561,6 +1948,9 @@ def _gate_constraints(raw: Any) -> dict:
     entity = raw.get("entity")
     if isinstance(entity, str) and entity.strip():
         out["entity"] = " ".join(entity.split())[:_ENTITY_CHARS]
+    criterion = raw.get("criterion")
+    if isinstance(criterion, str) and criterion.strip():
+        out["criterion"] = " ".join(criterion.split())[:_CRITERION_CHARS]
     return out
 
 
@@ -1747,6 +2137,23 @@ def apply_gates(
     action, task, instruction = _gate_action(
         out.get("action"), out.get("task"), out.get("instruction")
     )
+    # GOAL ANALYSIS IS ENTITLEMENT-GATED, and the gate belongs HERE rather than
+    # only on the route it dispatches to. The route's `require_crucible_module`
+    # returns 403, which for a chat message means the user typed a goal and got
+    # an error instead of the answer the assistant would otherwise have given.
+    # Dropping to `answer` degrades to the pre-existing behaviour instead, which
+    # is the right failure for a company that does not have the feature.
+    #
+    # FAILS CLOSED: any error reading the flags drops to `answer` too. The route
+    # is still the enforcing boundary — this never grants access the route would
+    # refuse, it only avoids routing into a refusal.
+    if action == ACTION_ANALYSE_GOAL:
+        if not _goal_analysis_available(enterprise_id):
+            logger.info(
+                "[planner] analyse_goal dropped to answer: crucible off for %s",
+                enterprise_id,
+            )
+            action, task, instruction = ACTION_ANSWER, "", ""
     # Absent → 1.0, never 0.0. See `Plan.action_confidence`: a missing field is
     # "this payload doesn't carry one", not "the model was unsure".
     raw_action_confidence = out.get("action_confidence")
@@ -1899,6 +2306,8 @@ def apply_gates(
         sources=sources,
         include_knowledge_graph=bool(out.get("include_knowledge_graph")),
         include_library=include_library,
+        include_team=bool(out.get("include_team")),
+        include_projects=bool(out.get("include_projects")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
@@ -1929,6 +2338,9 @@ def plan(
     *,
     enterprise_id: str,
     history: Optional[list[dict]] = None,
+    prd_id: Optional[int] = None,
+    prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
 ) -> Plan:
     """Run the planner over one question and return the GATED plan.
 
@@ -1981,6 +2393,8 @@ def plan(
         template_block=_template_block(templates),
         keyword_prior=keyword_prior,
         history=history,
+        open_prd_block=_open_artifact_block(prd_id, prd_title, open_artifact),
+        goal_analysis_available=_goal_analysis_available(enterprise_id),
     )
     # BEFORE the call, deliberately: a prompt that made the model fail — a 400,
     # a refusal, junk output — is exactly the prompt you most need to have seen.
@@ -2074,14 +2488,36 @@ _PLAN_MEMO_TTL_S = 180.0
 _plan_memo = TTLMap(_PLAN_MEMO_TTL_S)
 
 
-def _plan_memo_key(enterprise_id: str, question: str) -> str:
+def _plan_memo_key(
+    enterprise_id: str,
+    question: str,
+    prd_id: Optional[int] = None,
+    open_artifact: Optional[dict] = None,
+) -> str:
     """A stable key for one turn's plan. See `_plan_memo` for why history is
     deliberately absent.
+
+    WHAT IS OPEN is part of it, unlike history: the open PRD and the open
+    report/document are inputs to the plan now (`_open_artifact_block`), so the
+    same sentence asked on a thread with PRD 12 open and on one with PRD 40 open
+    are two different questions — sharing a verdict between them inside the TTL
+    would route one of them by the other's context, and "convert that into a
+    table" would edit the wrong document.
 
     Hashed rather than concatenated: the question can be tens of kilobytes (an
     inlined attachment block), and a dict key that large is pure memory overhead
     for a value that only has to be compared for equality."""
-    payload = json.dumps([enterprise_id, question], sort_keys=True, default=str)
+    payload = json.dumps(
+        [
+            enterprise_id,
+            question,
+            prd_id,
+            (open_artifact or {}).get("kind"),
+            (open_artifact or {}).get("id"),
+        ],
+        sort_keys=True,
+        default=str,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -2519,6 +2955,9 @@ def plan_for_answer(
     enterprise_id: Optional[str],
     question: str,
     history: Optional[list[dict]] = None,
+    prd_id: Optional[int] = None,
+    prd_title: Optional[str] = None,
+    open_artifact: Optional[dict] = None,
 ) -> Optional[Plan]:
     """The plan to execute for this turn, or None to answer the old way.
 
@@ -2546,7 +2985,7 @@ def plan_for_answer(
     # action, and the ask worker, which needs the plan to execute the answer —
     # and neither can be dropped. So the second one reads what the first
     # computed instead of paying for sonnet again.
-    key = _plan_memo_key(enterprise_id, question)
+    key = _plan_memo_key(enterprise_id, question, prd_id, open_artifact)
     memoised = _plan_memo.get(key)
     if memoised is not None:
         logger.info(
@@ -2556,7 +2995,14 @@ def plan_for_answer(
         return memoised
 
     try:
-        result = plan(question, enterprise_id=enterprise_id, history=history)
+        result = plan(
+            question,
+            enterprise_id=enterprise_id,
+            history=history,
+            prd_id=prd_id,
+            prd_title=prd_title,
+            open_artifact=open_artifact,
+        )
     except Exception:  # noqa: BLE001 — a planner outage must not break chat
         logger.exception("[planner] plan failed for %s — answering unplanned", enterprise_id)
         return None
@@ -2738,6 +3184,8 @@ def _log_comparison(
             "sources": planned.sources,
             "include_knowledge_graph": planned.include_knowledge_graph,
             "include_library": planned.include_library,
+            "include_team": planned.include_team,
+            "include_projects": planned.include_projects,
             "artifact_template_id": planned.artifact_template_id,
             "template_query": planned.template_query,
             "web_search": planned.web_search,

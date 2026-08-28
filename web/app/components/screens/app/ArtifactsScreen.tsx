@@ -42,12 +42,12 @@ const ARTIFACT_FILTERS: { id: ArtifactFilter; label: string }[] = [
   { id: "prototype", label: "Prototypes" },
   { id: "evidence", label: "Evidence" },
   { id: "ticket_set", label: "Tickets" },
-  // "Others", not "Documents": these are the artifacts that are not one of the
-  // named kinds above, and the label has to keep meaning that as the list
-  // grows. A user looking for a leadership update finds it by elimination —
-  // it is not a PRD, not a report, not tickets — which is exactly what the
-  // word says.
-  { id: "custom_artifact", label: "Others" },
+  // "Documents", not "Others". The label used to be "Others" on the reasoning
+  // that these are the artifacts which are not one of the named kinds above,
+  // so a user finds a leadership update by elimination. In practice nobody
+  // eliminates -- they look for the word for the thing they made, and a filter
+  // named after what it is NOT is a filter people report as missing.
+  { id: "custom_artifact", label: "Documents" },
 ]
 
 // The "+ New report" picker is GONE, not hidden. It was already dark behind
@@ -525,7 +525,7 @@ export type ArtifactsScreenProps = { focus?: string | null }
 
 export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
   const {
-    openContentPanel, openPrdTab, openReportTab, openTicketSetTab, showToast, contentPanelTab,
+    openContentPanel, openPrdTab, openReportTab, openTicketSetTab, openDocumentTab, showToast, contentPanelTab,
   } = useNavigation()
   const { setContent } = useContent()
   const { activeCompany } = useCompany()
@@ -709,10 +709,27 @@ export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
         return
       }
       if (a.type === "custom_artifact") {
-        // A document opens its own PAGE, not the chat's right-hand rail. The
-        // other artifacts here open in that rail because they are read
-        // alongside a conversation; a leadership update is WRITTEN, and
-        // writing wants the full measure of a page.
+        // A document born in a chat opens OVER that chat, with the panel's
+        // Document tab on it — the same posture as the PRD, report and ticket
+        // set rows beside it in this list. It used to open its own page on the
+        // reasoning that writing wants the full measure of a page; the page is
+        // still there and still does, but a row that behaved differently from
+        // every other row in the same list was the surprise, not the feature.
+        if (a.source.conversation_id != null && a.source.conversation_title) {
+          localStorage.setItem("sprntly_resume_conv", JSON.stringify({
+            dbId: a.source.conversation_id,
+            title: a.source.conversation_title,
+            fallbackTurns: [],
+            prdId: null,
+          }))
+          openDocumentTab({
+            conversationId: a.source.conversation_id,
+            documentId: a.open.custom_artifact_id,
+          })
+          return
+        }
+        // No chat behind it — uploaded, or its thread was deleted. There is no
+        // thread to open over, so the full page is where it reads.
         router.push(documentPath(a.open.custom_artifact_id))
         return
       }
@@ -724,7 +741,7 @@ export function ArtifactsScreen({ focus }: ArtifactsScreenProps = {}) {
       setContent({ evidenceGenerating: false })
       showToast("Couldn't open artifact", "The item failed to load. Try again.")
     }
-  }, [setContent, openContentPanel, openPrdTab, openReportTab, openTicketSetTab, router, showToast])
+  }, [setContent, openContentPanel, openPrdTab, openReportTab, openTicketSetTab, openDocumentTab, router, showToast])
 
   // ── `?focus=<type>-<id>` — open one artifact straight from a link ─────────
   //

@@ -189,24 +189,6 @@ def _stub_email(monkeypatch, *, ok: bool = True):
     return state
 
 
-# ── Projects-dark no-op (AC6) ─────────────────────────────────────────────
-
-
-def test_cycle_noops_when_projects_disabled(isolated_settings, monkeypatch):
-    monkeypatch.delenv("PROJECTS_ENABLED", raising=False)
-
-    def _boom(**kwargs):  # noqa: ARG001
-        raise AssertionError("must not call the LLM when Projects is dark")
-
-    monkeypatch.setattr(followup_mod, "call_json", _boom)
-
-    summary = followup_mod.run_task_followup_cycle()
-    assert summary == {
-        "due": 0, "finalized": 0, "pinged": 0, "rescheduled": 0,
-        "escalated": 0, "emailed": 0, "skipped": 0,
-    }
-
-
 # ── Cap / quiet-hours guards (AC7, AC8) ───────────────────────────────────
 
 

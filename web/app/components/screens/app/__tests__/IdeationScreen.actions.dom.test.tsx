@@ -128,7 +128,7 @@ describe("IdeationScreen — wired actions", () => {
       title: "PRD · Bulk onboarding",
       insightBody: "Admins re-key every seat by hand",
       seedQuery:
-        "Generate a brief for \"Bulk onboarding\" — an ideation idea that didn't make this week's top 3.",
+        "Generate a brief for \"Bulk onboarding\" — a backlog idea that didn't make this week's top 3.",
       source: { kind: "generateIdeation", ideationItemId: "a" },
     })
     // Generation no longer runs on the ideation surface itself.
@@ -152,13 +152,13 @@ describe("IdeationScreen — wired actions", () => {
     expect(dest).toContain("generate=1")
   })
 
-  it("+ Add idea persists via ideationApi.create", async () => {
+  it("+ Add to backlog persists via ideationApi.create", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Existing", rank: 4 })])
 
-    await act(async () => { fireEvent.click(screen.getByText("+ Add idea")) })
+    await act(async () => { fireEvent.click(screen.getByText("+ Add to backlog")) })
     const textarea = await screen.findByPlaceholderText(/Title, then a line on the problem/)
     await act(async () => { fireEvent.change(textarea, { target: { value: "My new idea" } }) })
-    await act(async () => { fireEvent.click(screen.getByLabelText("Add idea")) })
+    await act(async () => { fireEvent.click(screen.getByLabelText("Add to backlog")) })
 
     // New initiative is the default type → maps to the "something_new" tag.
     await waitFor(() => expect(createMock).toHaveBeenCalledWith("My new idea", "something_new"))
@@ -176,11 +176,11 @@ describe("IdeationScreen — wired actions", () => {
     await waitFor(() => expect(reorderMock).toHaveBeenCalledWith(["b", "a"]))
   })
 
-  it("Sync ideas re-fetches the list", async () => {
+  it("Sync backlog re-fetches the list", async () => {
     await renderWith([item({ id: "a", theme_id: "t4", title: "Existing", rank: 4 })])
     expect(listMock).toHaveBeenCalledTimes(1)
 
-    await act(async () => { fireEvent.click(screen.getByText("Sync ideas")) })
+    await act(async () => { fireEvent.click(screen.getByText("Sync backlog")) })
 
     await waitFor(() => expect(listMock).toHaveBeenCalledTimes(2))
   })
@@ -222,7 +222,7 @@ describe("IdeationScreen — wired actions", () => {
     expect(screen.queryByText("Voice")).toBeNull()
 
     // Add-idea card Voice button had no handler at all.
-    await act(async () => { fireEvent.click(screen.getByText("+ Add idea")) })
+    await act(async () => { fireEvent.click(screen.getByText("+ Add to backlog")) })
     await screen.findByPlaceholderText(/Title, then a line on the problem/)
     expect(screen.queryByText("Voice")).toBeNull()
   })

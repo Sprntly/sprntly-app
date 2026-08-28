@@ -42,6 +42,7 @@ from typing import Callable
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
 from app.prompt_history import clamp_turn_text
+from app.report_phases import ReportPhase, emit_report_phase
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -212,6 +213,100 @@ _REPORT_SCHEMA: dict = {
 }
 
 
+# ── Map-reduce section split (mirrors call_digest's VoC split) ────────────────
+#
+# The second report on the `answer_first.gateway_sections` primitive.
+# Gated behind `answer_first.report_mapreduce_enabled("market_intel")` (global
+# master + `MARKET_INTEL_MAPREDUCE_ENABLED`, both default OFF, answer-first on);
+# flag-off is byte-identical to today's single-call forced-JSON synthesis. The
+# base `_REPORT_SYSTEM` still governs every discipline rule (dated + sourced
+# facts, attributed figures, happened-vs-means); each directive only SCOPES which
+# parts each concurrent half writes. Split along "size the market" vs "act on and
+# illustrate it": A reads all events and sizes the movements; B draws the
+# implications and cites the specific dated events. No cross-section state, so the
+# two halves decode concurrently and merge A-then-B. On the chat path MI already
+# discards its structured half (`answer()` keeps only `data["answer"]`), so there
+# is NO reduce — prose only, `derive_metadata=False`, same as VoC.
+#
+# Hard per-section output ceiling. A cap is a CEILING, not a target: the lighter
+# Section A stops early on its own (`end_turn`), so the ceiling only bites the
+# heavier Section B (implications + recommendations + ALL quotes + bottom line).
+# Section B was observed truncating at 3200 — reports ended mid-sentence, losing
+# the whole Bottom Line — so this is 5000, real headroom above B's need.
+# (Single-pass MI output was ~5,620 tok; the naive "half" of 2,810 mis-sized B,
+# which is lopsidedly heavier than A — see NOTES on rebalancing the split.)
+_MI_SECTION_MAX_TOKENS = 5000
+
+_MI_SECTION_A = (
+    "You are writing ONE HALF of a combined market-intelligence report; a separate "
+    "pass writes the other half and the two halves are concatenated into the final "
+    "report the user reads. Write YOUR half TIGHTLY — aim for roughly half the "
+    "length of a complete report; do not pad, do not restate the other half, and "
+    "do NOT write a standalone full report. CRITICAL: do NOT write a document "
+    "title, and NEVER write any 'Part 1 of 2', 'Section A', or similar split "
+    "marker anywhere — begin directly at your first section heading. Write ONLY "
+    "these parts, in this order, as plain markdown:\n"
+    "1. SCOPE & WINDOW: state the window this report covers as explicit dates, say "
+    "which categories the sweep looked across (funding, M&A, entrants/launches, "
+    "category/pricing movement, regulation, analyst coverage), and the big "
+    "limitation — this is public web coverage, which over-reports funding and "
+    "under-reports failure.\n"
+    "2. MARKET MOVEMENTS: group the captured events by area (money = funding + "
+    "M&A, who entered or left, where the category/pricing is moving, regulation, "
+    "analyst coverage). For each area summarise what moved and how much, sized by "
+    "the number of dated events you found and attributed to their sources; SKIP an "
+    "area entirely when no records support it. Category size / growth figures are "
+    "stated as the claim of whoever published them, never as fact.\n"
+    "Reference events IN YOUR OWN WORDS — do NOT reproduce individual verbatim "
+    "event records, dated event lines, or a representative-events list; ALL of "
+    "those belong to the other half. Do NOT write implications/recommendations or "
+    "an executive summary. CRITICAL: this path is PROSE ONLY — do NOT emit a "
+    "`key_points` list, any JSON, a `window_label`, or a fenced metadata / "
+    "structured block (no ```metadata or ```json fence, no trailing "
+    "machine-readable 'metadata' section). Any machine-readable values are "
+    "discarded here, so IGNORE any instruction above to fill them. Write the "
+    "section body only."
+)
+_MI_SECTION_B = (
+    "You are writing the OTHER HALF of a combined market-intelligence report; the "
+    "first half (scope, window, and the sized market movements by area) is written "
+    "by a separate pass over the same events and placed BEFORE yours. Write YOUR "
+    "half TIGHTLY — aim for roughly half the length of a complete report; do not "
+    "pad, do NOT reproduce the movement sizing or scope, and do NOT write a "
+    "standalone full report. CRITICAL: do NOT write a document title, and NEVER "
+    "write any 'Part 2 of 2', 'Section B', or similar split marker anywhere — "
+    "begin directly at your first section heading. Write ONLY these parts, in this "
+    "order, as plain markdown:\n"
+    "1. IMPLICATIONS & RECOMMENDATIONS: what these movements MEAN for a product "
+    "team in this category — clearly labelled as your inference, distinct from what "
+    "happened — and the most important handful of actions, each tied to the "
+    "specific movement that drives it.\n"
+    "2. REPRESENTATIVE EVENTS: you own ALL the specific dated event citations for "
+    "the entire report — the strongest few events per area, each with its date and "
+    "source, quoted only as the source reported them (never estimate, never "
+    "convert a range to a point, never total figures the sources did not total). "
+    "Flag a gap rather than manufacture an event.\n"
+    "3. BOTTOM LINE: a short executive summary of what matters most, and say "
+    "plainly what the sweep did NOT find — a quiet quarter is a finding.\n"
+    "CRITICAL: the first half OWNS the sizing — the event counts per area and "
+    "every aggregate total. Do NOT independently recompute or restate any of those "
+    "numbers; you and the first half count from the same records separately and "
+    "will drift by an event or two, contradicting each other in one report. Refer "
+    "to them QUALITATIVELY instead (\"as sized above\", \"the busiest area\", "
+    "\"most of the activity\") or defer to the first half's counts — NEVER emit "
+    "your own hard number for a total the first half already stated.\n"
+    "CRITICAL: this path is PROSE ONLY — do NOT emit a `key_points` list, any "
+    "JSON, a `window_label`, or a fenced metadata / structured block (no "
+    "```metadata or ```json fence, no trailing machine-readable 'metadata' "
+    "section). Any machine-readable values are discarded here, so IGNORE any "
+    "instruction above to fill them. Write the section body only."
+)
+_MI_SECTIONS: list[tuple[str, str]] = [
+    ("scope-movements", _MI_SECTION_A),
+    ("implications-events-summary", _MI_SECTION_B),
+]
+
+
 def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
     """An Ask-shaped payload for the non-LLM branches, tagged so the UI
     attributes it to the market-intelligence path.
@@ -306,7 +401,9 @@ def _capture(enterprise_id: str, scope: str) -> tuple[list[dict], bool]:
 
 def answer(*, enterprise_id: str, question: str,
            history: list[dict] | None = None,
-           is_cancelled: Callable[[], bool] | None = None) -> dict | None:
+           is_cancelled: Callable[[], bool] | None = None,
+           on_delta=None,
+           on_phase: Callable[[str], None] | None = None) -> dict | None:
     """Run the market-intelligence pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
@@ -316,6 +413,16 @@ def answer(*, enterprise_id: str, question: str,
     `is_cancelled` is checked at the one boundary that matters — after the
     paid capture, before the paid synthesis — so a Stop in chat stops the
     second spend. The scheduled caller passes nothing.
+
+    `on_phase`, when supplied, narrates the two real legs of this wait —
+    GATHERING (the paid web capture) then WRITING (the document-scale
+    synthesis) — via the shared report vocabulary. A no-op without a sink.
+
+    `on_delta`, when supplied, is the Ask worker's token sink. It is used ONLY
+    on the map-reduce synthesis path (gated by
+    `answer_first.report_mapreduce_enabled("market_intel")`); with the gate off
+    the synthesis stays the single un-streamed forced-JSON call it is today, and
+    `on_delta` is ignored. The scheduled caller passes nothing.
     """
     from app.research.market import company_profile
 
@@ -338,6 +445,8 @@ def answer(*, enterprise_id: str, question: str,
         )
 
     scope = _scope_block(profile, question)
+    # GATHERING: the paid web search — the first minutes-long leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     try:
         records, truncated = _capture(enterprise_id, scope)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
@@ -369,31 +478,70 @@ def answer(*, enterprise_id: str, question: str,
         f"=== CAPTURED MARKET EVENTS — {len(records)} records (JSON, one "
         "object per event found on the public web) ==="
     )
+    # The per-turn header (history + question + coverage line) and the corpus
+    # (the captured records) — kept apart so the map-reduce path can put the
+    # corpus on the cacheable prefix while the single-call path inlines both,
+    # exactly as `call_digest.answer` does for VoC.
+    _report_header = (
+        _render_history(history) + f"Question: {question}\n\n{source_line}"
+    )
+    _report_input = f"{_report_header}\n\n{records_json}"
+    # WRITING: capture is done and records are counted — the document-scale
+    # synthesis is the second (and last) leg of the wait.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
-        result = llm_call(
-            enterprise_id=enterprise_id,
-            agent="qa",
-            purpose="market_intelligence_report",
-            model=ANSWER_MODEL,
-            system=_REPORT_SYSTEM,
-            input=(
-                _render_history(history) + f"Question: {question}\n\n"
-                f"{source_line}\n\n{records_json}"
-            ),
-            prompt_version="qa-market-intelligence-v1",
-            json_schema=_REPORT_SCHEMA,
-            skill=MI_SKILL,
-            max_tokens=16000,
-            # Records plus a document-scale report exceed the default per-request
-            # timeout — stream on the long read timeout, as the sibling reports do.
-            long_output=True,
-        )
-        data = result.output
-        if not isinstance(data, dict):
-            raise ValueError(f"expected dict output, got {type(data).__name__}")
-        report = str(data.get("answer") or "").strip()
-        if not report:
-            raise ValueError("synthesis returned an empty report")
+        from app import answer_first
+
+        if answer_first.report_mapreduce_enabled("market_intel"):
+            # Map-reduce (gated): split the one synthesis into two section calls
+            # that decode CONCURRENTLY over the same captured events (records on
+            # the cacheable
+            # prefix → section B is a cache-read), streamed via answer-first, merged
+            # A-then-B. Prose only (`derive_metadata=False`) — the chat path already
+            # discards MI's structured half, so there is nothing to reduce.
+            payload = answer_first.gateway_sections(
+                question=question,
+                forced_system=_REPORT_SYSTEM,
+                forced_user=_report_header,
+                user_cacheable_prefix=records_json,
+                sections=_MI_SECTIONS,
+                on_delta=on_delta,
+                default_confidence=0.6,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="market_intelligence_report",
+                prompt_version="qa-market-intelligence-v1",
+                model=ANSWER_MODEL,
+                skill=MI_SKILL,
+                max_tokens=_MI_SECTION_MAX_TOKENS,
+                derive_metadata=False,
+            )
+            report = str(payload.get("answer") or "").strip()
+            if not report:
+                raise ValueError("map-reduce synthesis returned an empty report")
+        else:
+            result = llm_call(
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="market_intelligence_report",
+                model=ANSWER_MODEL,
+                system=_REPORT_SYSTEM,
+                input=_report_input,
+                prompt_version="qa-market-intelligence-v1",
+                json_schema=_REPORT_SCHEMA,
+                skill=MI_SKILL,
+                max_tokens=16000,
+                # Records plus a document-scale report exceed the default
+                # per-request timeout — stream on the long read timeout, as the
+                # sibling reports do.
+                long_output=True,
+            )
+            data = result.output
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict output, got {type(data).__name__}")
+            report = str(data.get("answer") or "").strip()
+            if not report:
+                raise ValueError("synthesis returned an empty report")
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("market-intel: report synthesis failed for %s", enterprise_id)
         return _plain_payload(

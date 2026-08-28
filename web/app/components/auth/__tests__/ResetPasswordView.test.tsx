@@ -44,10 +44,15 @@ describe("ResetPasswordView", () => {
     expect(html).toContain("Passwords do not match.")
   })
 
-  it("shows a success state with a link to the app when mode is 'done'", () => {
+  it("reports the reset and heads for the app when mode is 'done'", () => {
+    // `done` is not a stop any more: the password is saved, the session is
+    // live, and the page is already navigating. It says so, keeps a link as
+    // the escape from a stuck redirect, and never asks anyone to sign in.
     const html = render({ mode: "done" })
-    expect(html).toMatch(/password (was |is )?updated|new password is set/i)
+    expect(html).toMatch(/password (was |is )?(updated|saved)|new password is set/i)
+    expect(html).toMatch(/taking you to sprntly/i)
     expect(html).toMatch(/href="\/?"/)
+    expect(html).not.toMatch(/sign in/i)
   })
 
   it("shows a 'no active recovery session' state when mode is 'no-session'", () => {

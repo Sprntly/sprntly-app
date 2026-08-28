@@ -53,7 +53,7 @@ if TYPE_CHECKING:  # pragma: no cover — typing only
     # `tracker` are already resolved here.
     from app.ask_planner import Plan as AskPlan
 
-from app import call_index, datasets
+from app import call_index, datasets, monthly_reports
 from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
@@ -86,7 +86,6 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
-    is_project_completion_request,
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
@@ -106,6 +105,15 @@ class AskCancelled(Exception):
     WITHOUT marking it `error` — the answer is simply abandoned. Raising it
     between LLM steps is what lets a Stop that lands before the expensive answer
     call actually save that call, rather than only discarding the result."""
+
+
+class EmptyScopedToolAnswer(RuntimeError):
+    """Raised by `_try_scoped_tool_answer` on a NON-private (group) surface when
+    the bounded tool loop produced no text — the empty-loop failure mode. It
+    mirrors the function's existing re-raise-on-failure contract for group
+    (which has no single-shot composer fallback): the caller's best-effort
+    wrapper turns it into an honest error, never a blank turn. The PRIVATE
+    surface never raises this — it returns `None` and degrades to the composer."""
 
 
 def _check_cancelled(is_cancelled: Optional[Callable[[], bool]]) -> None:
@@ -1021,32 +1029,56 @@ def _answer_single_shot(
     # built from has been assembled by now, so the label is true at the moment
     # it is published.
     emit_phase(on_phase, "Writing the answer…")
-    result = llm_call(
-        enterprise_id=enterprise_id,
-        agent="qa",
-        purpose="skill_answer",
-        model=model,
-        system=system,
-        input=_render_history(history) + kg_block + f"Question: {question}",
-        user_cacheable_prefix=(
-            "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p)
-            or None
-        ),
-        prompt_version="qa-skill-v1",
-        json_schema=_ASK_RESPONSE_SCHEMA,
-        skill=decision.skill_id,
-        skill_spec=skill_spec,
-        max_tokens=12000,
-        # Structured-call streaming: on_delta receives partial-JSON fragments
-        # of the tool input; the Ask worker's extractor turns them into text.
-        on_delta=on_delta,
+    _input = _render_history(history) + kg_block + f"Question: {question}"
+    _prefix = (
+        "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p) or None
     )
-    payload = (
-        result.output
-        if isinstance(result.output, dict)
-        else {"answer": str(result.output), "key_points": [], "citations": [],
-              "confidence": decision.confidence, "unanswered": ""}
-    )
+    from app import answer_first
+
+    if answer_first.enabled():
+        # Answer-first: stream the answer as plain markdown first, derive the
+        # structured fields after. Keeps this site's skill/method grounding and
+        # telemetry attribution; returns the same payload shape.
+        payload = answer_first.gateway(
+            question=question,
+            forced_system=system,
+            forced_user=_input,
+            on_delta=on_delta,
+            default_confidence=decision.confidence,
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="skill_answer",
+            prompt_version="qa-skill-v1",
+            model=model,
+            skill=decision.skill_id,
+            skill_spec=skill_spec,
+            user_cacheable_prefix=_prefix,
+            max_tokens=12000,
+        )
+    else:
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="skill_answer",
+            model=model,
+            system=system,
+            input=_input,
+            user_cacheable_prefix=_prefix,
+            prompt_version="qa-skill-v1",
+            json_schema=_ASK_RESPONSE_SCHEMA,
+            skill=decision.skill_id,
+            skill_spec=skill_spec,
+            max_tokens=12000,
+            # Structured-call streaming: on_delta receives partial-JSON fragments
+            # of the tool input; the Ask worker's extractor turns them into text.
+            on_delta=on_delta,
+        )
+        payload = (
+            result.output
+            if isinstance(result.output, dict)
+            else {"answer": str(result.output), "key_points": [], "citations": [],
+                  "confidence": decision.confidence, "unanswered": ""}
+        )
     payload["documents"] = documents
     return _tag(payload, decision)
 
@@ -1071,7 +1103,10 @@ _VOC_KG_SYSTEM = (
 )
 
 
-def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history) -> Optional[dict]:
+def _answer_voc_report(
+    decision: RouteDecision, enterprise_id, question, history, on_delta=None,
+    on_phase=None,
+) -> Optional[dict]:
     """Voice-of-customer answered from the KG alone — the PINNED path only.
 
     Used to render a pinned HTML template (`app.voc_report`, deleted): a fixed
@@ -1093,6 +1128,13 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     generic answer (which explains what to connect).
     """
     from app.graph.retrieval import VOC_SCALE, render_context_section
+    # Local import: report_phases imports emit_phase from THIS module, so a
+    # top-level import here would be a load-time cycle. At call time both are
+    # fully loaded (same lazy-import pattern the report dispatch below uses).
+    from app.report_phases import ReportPhase, emit_report_phase
+
+    # GATHERING: the KG bundle retrieval — the pinned path's evidence leg.
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
 
     # Same widened retrieval as the merged path (`call_digest.build_kg_context`).
     # These two are the only callers that pass a scale, and they must pass the
@@ -1104,6 +1146,44 @@ def _answer_voc_report(decision: RouteDecision, enterprise_id, question, history
     if not bundle:
         return None
     corpus_text = render_context_section(bundle)
+    _voc_system = (
+        ASK_SYSTEM
+        + today_line()
+        + connected_sources_line(enterprise_id)
+        + "\n\n"
+        + _VOC_KG_SYSTEM
+    )
+    _voc_input = (
+        _render_history(history)
+        + f"Question: {question}\n\n"
+        "=== KNOWLEDGE GRAPH — customer signal ===\n"
+        + corpus_text
+    )
+    _voc_model = HEAVY_MODEL if decision.skill_id in HEAVY_SKILLS else ANSWER_MODEL
+    # WRITING: the bundle is rendered — the document-scale synthesis is next.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
+    from app import answer_first
+
+    if answer_first.enabled():
+        try:
+            payload = answer_first.gateway(
+                question=question,
+                forced_system=_voc_system,
+                forced_user=_voc_input,
+                on_delta=on_delta,
+                default_confidence=decision.confidence,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="voc_from_kg",
+                prompt_version="qa-voc-kg-v1",
+                model=_voc_model,
+                skill=decision.skill_id,
+                max_tokens=12000,
+            )
+        except Exception:  # noqa: BLE001 — fall back to the generic answer
+            logger.exception("voc answer from KG failed for %s", enterprise_id)
+            return None
+        return _tag(payload, decision)
     try:
         result = llm_call(
             enterprise_id=enterprise_id,
@@ -1296,6 +1376,7 @@ def _dispatch_planned_method(
     dataset: str,
     fresh: Callable[[], bool],
     is_cancelled: Optional[Callable[[], bool]],
+    on_phase: Optional[Callable[[str], None]] = None,
 ) -> Optional[dict]:
     """Run the machinery the PLANNER named, or return None to keep going.
 
@@ -1326,6 +1407,37 @@ def _dispatch_planned_method(
     if not method or method not in _PLANNED_MACHINERY:
         return None
 
+    # A genuinely mapreducible count question ("how many calls asked for X")
+    # must run the count engine even when the planner named `call-listing` —
+    # its own instructions classify ANY "list or count recorded calls"
+    # question there (see `ask_planner._PLANNER_SYSTEM`'s call-listing
+    # bullet), and the planner is a model reading a sentence, not a
+    # guarantee. `is_mapreducible_count` is the SAME strict eligibility check
+    # `call_digest.answer` itself gates the engine on (excludes comparative/
+    # over-time, single-subject, report-shaped, and a bare aggregate with no
+    # content predicate) — so this redirect fires ONLY for a question that
+    # genuinely belongs to the engine, never for a bare "how many calls did I
+    # have", which the index already answers correctly and instantly. Dark-
+    # shipped identically to the engine itself: off unless the flag is on.
+    if method in _COUNT_ENGINE_REDIRECT_METHODS:
+        try:
+            from app.config import settings
+
+            if settings.voc_count_engine_enabled:
+                from app import call_digest
+
+                if call_digest.is_mapreducible_count(question):
+                    logger.info(
+                        "[planner] redirecting method=%s -> call-digest "
+                        "(mapreducible count) company=%s",
+                        method, enterprise_id,
+                    )
+                    method = "call-digest"
+        except Exception:  # noqa: BLE001 — a redirect check must never block dispatch
+            logger.exception(
+                "[planner] count-engine redirect check failed for %s", enterprise_id
+            )
+
     logger.info(
         "[planner] exec method=%s company=%s", method, enterprise_id
     )
@@ -1339,6 +1451,7 @@ def _dispatch_planned_method(
             fresh=fresh,
             is_cancelled=is_cancelled,
             plan=plan,
+            on_phase=on_phase,
         )
     except AskCancelled:
         raise  # a user Stop is not an engine declining — it must reach the caller
@@ -1364,7 +1477,9 @@ def _m_single_call_read(*, enterprise_id, question, history, fresh, **_kw) -> Op
     )
 
 
-def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Optional[dict]:
+def _m_call_digest(
+    *, enterprise_id, question, history, plan=None, on_phase=None, **_kw
+) -> Optional[dict]:
     """Live-fetch every call in a window and run a VoC pass over the corpus.
 
     THE EXPENSIVE ONE — ~168s and ~$0.23 per run, which is why its precondition
@@ -1372,7 +1487,12 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     ladder's digest branch applies, and its comment records why it was added:
     this was the only interceptor claiming its turn unconditionally, so a
     company with no call source at all got the digest's empty-corpus answer
-    instead of falling through to routing that could actually serve them."""
+    instead of falling through to routing that could actually serve them.
+
+    `on_phase`, when supplied, is forwarded to `call_digest.answer` — this is
+    the planned-dispatch entry point, so without this the digest's own
+    GATHERING/WRITING/ANALYZING narration never reached a planned turn (it
+    landed on `**_kw` and was silently dropped)."""
     from app import call_digest
 
     if not call_digest.has_call_source(enterprise_id):
@@ -1392,6 +1512,7 @@ def _m_call_digest(*, enterprise_id, question, history, plan=None, **_kw) -> Opt
     return call_digest.answer(
         enterprise_id=enterprise_id, question=question, history=history,
         constraints=(plan.constraints if plan is not None else None),
+        on_phase=on_phase,
     )
 
 
@@ -1481,6 +1602,19 @@ _PLANNED_MACHINERY: dict = {
     "ticket-update": _m_ticket_update,
     "tracker-lookup": _m_tracker_lookup,
 }
+
+
+#: Machinery ids a genuinely mapreducible-count question can land on by
+#: planner misclassification, and must be redirected to `call-digest` — see
+#: `_dispatch_planned_method`'s redirect block. `call-listing` is the one
+#: real case: its own instructions cover ANY "list or count recorded calls"
+#: question, so a content-filtered count ("how many calls asked for X") can
+#: land there instead of `call-digest`. `single-call-read` is deliberately
+#: EXCLUDED — `is_mapreducible_count` requires the plural/aggregate "how
+#: many/which <calls>" shape, which cannot co-occur with a single named-call
+#: reference, so including it would guard against a case that can never
+#: happen. No other `_PLANNED_MACHINERY` key names a calls-listing engine.
+_COUNT_ENGINE_REDIRECT_METHODS: frozenset[str] = frozenset({"call-listing"})
 
 
 #: Providers whose presence in a plan's `sources` means "this question is
@@ -1607,6 +1741,97 @@ def _library_only_plan(plan) -> bool:
     return bool(
         plan is not None
         and plan.include_library
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
+def _planned_team_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """The company's own member list, when the PLAN asked for it.
+
+    The third block in the `_planned_library_context` family and the same
+    shape: one deterministic read of the rows Settings → Team shows, handed to
+    `compose_ask_answer` as a THUNK so it runs in wave 1 beside the embedding
+    and the corpus load.
+
+    Never raises — `team_block` already swallows its own read failure and
+    returns "" — but wrapped anyway, on the rule every gather leg here
+    follows: no context block is worth an answer."""
+    if not enterprise_id or not plan.include_team:
+        return ""
+    try:
+        from app.team_context import team_block
+
+        block = team_block(enterprise_id)
+        logger.info(
+            "[planner] exec team company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a roster read degrades, it never breaks chat
+        logger.exception("[planner] team block failed for %s", enterprise_id)
+        return ""
+
+
+def _team_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the people here and
+    about nothing else — the exact twin of `_library_only_plan`, and it
+    narrows the grounding the same way for the same reason.
+
+    The contamination it excludes is people rather than templates: every
+    connected source and half the document index is full of Slack authors,
+    Jira assignees and call speakers, and a model asked "who's on my team"
+    with those beside the roster will fold them in. A mixed question — "what
+    has Dave shipped this week" — plans include_team WITH the knowledge graph
+    and keeps every reader it asked for."""
+    return bool(
+        plan is not None
+        and plan.include_team
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
+def _planned_projects_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """The workspace's projects, when the PLAN asked for them.
+
+    Third of the own-records thunks (`_planned_library_context`,
+    `_planned_team_context`), same shape and same wave. The block scopes itself
+    to the caller and their workspace off the request ContextVars — this
+    function passes only the company, exactly as its two siblings do.
+
+    Never raises — `projects_block` swallows its own read failure — but wrapped
+    anyway, on the rule every gather leg here follows."""
+    if not enterprise_id or not plan.include_projects:
+        return ""
+    try:
+        from app.projects_context import projects_block
+
+        block = projects_block(enterprise_id)
+        logger.info(
+            "[planner] exec projects company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a projects read degrades, never breaks chat
+        logger.exception("[planner] projects block failed for %s", enterprise_id)
+        return ""
+
+
+def _projects_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about projects and about
+    nothing else — the third twin of `_library_only_plan`.
+
+    The contamination it excludes is the word itself: every connected tracker
+    has "projects", the document index is full of them, and a model asked "what
+    projects do I have" with Jira beside the real list will answer with Jira."""
+    return bool(
+        plan is not None
+        and plan.include_projects
         and not plan.include_knowledge_graph
         and not plan.documents
         and not plan.sources
@@ -1764,6 +1989,73 @@ def _skip_project_connectors(
     return not names_source
 
 
+#: The pipeline ids that generate a REPORT — always company-wide, never
+#: project-scoped (`call_digest.answer`, `public_feedback.answer`,
+#: `company_research.answer`, `market_intel.answer`, and the pinned VoC path
+#: all key off `enterprise_id` alone; none takes a `project_id`). Deferring
+#: to one of these is never a project-scoping decision — it is standing the
+#: connector-blind project tool loop DOWN so the turn reaches the same
+#: company-wide report main chat already produces for the identical
+#: phrasing. Five `PIPELINE_SKILLS` report ids plus `call-digest` (the
+#: machinery id the live call-window fetch resolves to) — every other
+#: `_MACHINERY_IDS` member (`call-listing`, `single-call-read`,
+#: `data-analysis`, `tracker-lookup`, `ticket-update`) is excluded on
+#: purpose: those are lookups/utilities, not report generation.
+_REPORT_PIPELINE_IDS: frozenset[str] = PIPELINE_SKILLS | frozenset({"call-digest"})
+
+
+def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    report-generation pipeline at high confidence — the mirror of
+    `_skip_project_connectors`, one more narrow AND-clause on the sixth
+    branch's own claim rather than a new mechanism.
+
+    Root cause this closes: a report-phrased ask on a project surface
+    ("how have my customers been saying? give me a voice-of-customer
+    report") lexically matches `is_project_content_request` (a leading
+    interrogative plus a content noun) just as readily as a genuine
+    project-content question does, so the connector-blind project tool
+    loop claimed it and declined — it has no report-generation tool at
+    all. When the planner has already named a report pipeline for this
+    exact turn, that claim is wrong on its face: defer instead, so the
+    turn reaches the SAME company-wide report path
+    (`call_digest.answer` / `public_feedback.answer` / etc.) main chat's
+    identical phrasing already produces.
+
+    `plan.pipeline_id` is `None` unless it already cleared
+    `ask_planner._gate_pipeline`'s confidence bar (`_PLANNER_THRESHOLD`) —
+    reading its mere presence as "high confidence" needs no second
+    threshold to keep in sync with the planner's own gate. Restricted to
+    `plan.is_answer`: a `create_artifact`/`list_artifacts`/other non-answer
+    action turn (e.g. "show me the reports list", a listing of the
+    project's OWN artifacts) must never be read as a report-generation
+    request just because a stray `pipeline_id` happened to ride along.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan) leaves the
+    sixth branch's admission exactly as the gates above already decide it."""
+    return bool(
+        plan is not None
+        and plan.is_answer
+        and plan.pipeline_id in _REPORT_PIPELINE_IDS
+    )
+
+
+def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
+    """The specific subject this question is about, when the planner named one.
+
+    The planner already extracts it (`constraints.entity` — "the specific
+    company, customer, account, person, project or repo the question is
+    about"), so the report branches below can ask whether a saved report
+    actually covers what was asked rather than only whether one exists.
+
+    `None` for an unplanned turn, which leaves those branches deciding on
+    freshness alone exactly as they did before."""
+    if plan is None:
+        return None
+    return ((plan.constraints or {}).get("entity") or "").strip() or None
+
+
 def _render_scoped_transcript(history: Optional[list[dict]], question: str) -> str:
     """Render prior turns + the new question into the sixth branch's tool-loop
     user message — relocated VERBATIM from
@@ -1843,22 +2135,6 @@ _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
     re.IGNORECASE,
 )
 
-#: The completion sibling — a model turn that claims a delegated task is
-#: recorded/marked done ("noted, I'll mark that done", "got it, recorded",
-#: "marking the review complete") but never called `complete_task`, so the
-#: ledger was never written. Triggers the completion forcing pass. Scoped to
-#: a record/mark-done framing so it doesn't fire on `complete_task`'s own
-#: grounded confirmation ("I've marked … as done on the ledger").
-_COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
-    r"\b(?:i'?ll|i will|let me|going to|gonna)\b[^.!?\n]{0,40}?"
-    r"\b(?:mark\w*|record\w*|log\w*|updat\w*|clos\w*)\b[^.!?\n]{0,30}?"
-    r"\b(?:done|complete\w*|finished|off)\b"
-    r"|\b(?:noted|recorded|logged)\b[^.!?\n]{0,30}\b(?:done|complete\w*|finished)\b"
-    r"|\b(?:marking|recording|logging)\b[^.!?\n]{0,30}\b(?:done|complete\w*|as\s+finished)\b",
-    re.IGNORECASE,
-)
-
-
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
     enterprise_id: str, dataset: str,
@@ -1903,8 +2179,8 @@ def _try_scoped_tool_answer(
     # in the model's own claim.
     edit_prd_narrations: list[str] = []
     # Captures every `delegate_task` dispatch's handoff confirmation, in call
-    # order. `delegate_task` is a TERMINAL action: `_GROUP_SCOPE_SYSTEM`'s
-    # "once you call delegate_task ... you are DONE" contract says the turn
+    # order. `delegate_task` is a TERMINAL action: `_PRIVATE_SCOPE_SYSTEM`'s
+    # "once you call delegate_task ... you are done" contract says the turn
     # ends on the plain handoff, and the agent must NOT then also answer the
     # underlying question in the teammate's place. But `run_tool_loop` always
     # grants the model a post-tool turn, and guidance ALONE does not stop the
@@ -1934,11 +2210,14 @@ def _try_scoped_tool_answer(
         if read is not None:
             return read
         if name == "edit_prd" and scope.edit_prd_handler is not None:
-            # GROUP-only in-band PRD edit → applies DIRECTLY through the
-            # shared editor against the handler's own closed-over
-            # open-drawer target (never a model-supplied id). The handler
-            # always returns `(narration, None)` — the edit is already
-            # applied by the time the narration is produced.
+            # In-band PRD edit → applies DIRECTLY through the shared editor
+            # against the handler's own closed-over open-drawer target
+            # (never a model-supplied id). The handler always returns
+            # `(narration, None)` — the edit is already applied by the time
+            # the narration is produced. No surface currently populates
+            # `edit_prd_handler` (see `SurfaceScope.edit_prd_handler`), so
+            # this branch is presently unreachable but kept for signature
+            # stability.
             narration, _pending = scope.edit_prd_handler(tool_input)
             edit_prd_narrations.append(narration)
             return narration
@@ -1991,11 +2270,7 @@ def _try_scoped_tool_answer(
         return f"(unknown tool: {name})"
 
     system = "\n\n".join(p for p in (scope.system_addendum, scope.context_payload) if p)
-    user = (
-        scope.prerendered_transcript
-        if scope.prerendered_transcript is not None
-        else _render_scoped_transcript(history, question)
-    )
+    user = _render_scoped_transcript(history, question)
     meta: dict = {}
     try:
         from app.llm import DEFAULT_MODEL, run_tool_loop
@@ -2021,23 +2296,13 @@ def _try_scoped_tool_answer(
         # turns that DID call the tool are byte-unchanged (no extra LLM call).
         if not delegate_task_narrations and _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
             logger.warning(
-                "group_delegation_promise_without_tool_call project_id=%s — forcing delegate_task",
+                "delegation_promise_without_tool_call project_id=%s — forcing delegate_task",
                 scope.project_id,
             )
             run_tool_loop(
                 system=system, user=user, tools=list(scope.extra_tools),
                 dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
                 meta_out=meta, force_tool="delegate_task",
-            )
-        elif not complete_task_narrations and _COMPLETION_PROMISE_WITHOUT_TOOL_CALL_RE.search(text or ""):
-            logger.warning(
-                "group_completion_promise_without_tool_call project_id=%s — forcing complete_task",
-                scope.project_id,
-            )
-            run_tool_loop(
-                system=system, user=user, tools=list(scope.extra_tools),
-                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
-                meta_out=meta, force_tool="complete_task",
             )
     except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
         logger.warning(
@@ -2071,7 +2336,7 @@ def _try_scoped_tool_answer(
         # handler's own confirmation is authoritative regardless of outcome
         # (delivered, declined, or an ambiguity/who-did-you-mean prompt), so
         # it OVERRIDES the model's free text — mechanical enforcement of the
-        # `_GROUP_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
+        # `_PRIVATE_SCOPE_SYSTEM` contract, mirroring the `edit_prd` grounding
         # below. Last call wins, matching the `edit_prd` precedent. (Checked
         # before `edit_prd`: when no delegation occurred this list is empty
         # and the `edit_prd` path below is reached byte-for-byte unchanged.)
@@ -2082,40 +2347,41 @@ def _try_scoped_tool_answer(
         # `edit_prd` call's actual result. Last call wins — mirrors "the
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
-    elif (
-        scope.edit_prd_handler is not None
-        and _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE.search(text or "")
-    ):
-        # The OTHER mechanism: `edit_prd` was never invoked this turn at
-        # all, yet the model's own final text claims the PRD was changed.
-        # There is no tool result to ground on here (the tool never ran) —
-        # the only honest answer is to say so, never to relay the model's
-        # unearned success claim.
+
+    # Empty-text guard (the primary empty-loop fix). Reached only when NO
+    # terminal-tool narration override fired above (a delegate/complete/edit_prd
+    # turn always sets `text` to its handler's non-empty confirmation, so those
+    # legit-but-short answers never land here) — i.e. this is a genuine
+    # no-answer: `run_tool_loop` burned all its iterations on tool calls and
+    # returned "" (or whitespace). Surfacing that verbatim stores `{"answer":
+    # ""}` and the client renders a blank bubble. Treat it EXACTLY like the
+    # failure path above (`except` at the top of this function): the PRIVATE
+    # surface returns `None` so the caller falls through to the ordinary
+    # composer — which can actually answer — mirroring the AD-P7 single-shot
+    # degrade; any other (group) surface re-raises, matching the group
+    # no-single-shot-fallback contract. No telemetry line is logged on the
+    # degrade, same as the failure path (which returns before the log below).
+    if not (text or "").strip():
         logger.warning(
-            "group_edit_prd_claim_without_tool_call project_id=%s",
-            scope.project_id,
+            "scoped_tool_reply_empty project_id=%s surface=%s — tool loop "
+            "produced no text; degrading instead of answering blank",
+            scope.project_id, scope.surface.value,
         )
-        text = (
-            "I didn't actually make that change — open the PRD beside this "
-            "chat and ask me again so I can apply it."
+        if scope.surface == Surface.project_private:
+            return None
+        raise EmptyScopedToolAnswer(
+            f"scoped tool loop produced no text (project_id={scope.project_id})"
         )
 
     # Exactly one structured cost line per scoped reply — identifiers only,
-    # never the body/question (Rule #24). Relocated from the two duplicate
-    # call sites (`respond_individual`, `_respond_as_group_agent`) into this
-    # one shared branch.
+    # never the body/question (Rule #24). Relocated from `respond_individual`
+    # into this shared branch.
     from app.llm_telemetry import RunUsage, log_llm_run
 
-    operation = (
-        "projects.individual_chat.reply" if scope.surface == Surface.project_private
-        else "projects.group_chat.mention_reply"
-    )
-    # Identifiers only — matches each surface's pre-collapse identifier
-    # shape exactly (private: project_id alone; group: + conversation_id,
-    # threaded through `assigner_identity` alongside the delegation fields).
+    operation = "projects.individual_chat.reply"
+    # Identifiers only — matches the private surface's pre-collapse
+    # identifier shape exactly (project_id alone).
     identifier: dict = {"project_id": scope.project_id}
-    if scope.surface == Surface.project_group and "conversation_id" in identity:
-        identifier["conversation_id"] = identity["conversation_id"]
     usage = RunUsage(
         cache_creation_input_tokens=meta.get("cache_creation_input_tokens", 0),
         cache_read_input_tokens=meta.get("cache_read_input_tokens", 0),
@@ -2129,7 +2395,7 @@ def _try_scoped_tool_answer(
         duration_ms=int((time.monotonic() - start) * 1000),
         status="complete",
         model=meta.get("model") or DEFAULT_MODEL,
-        mode="individual" if scope.surface == Surface.project_private else "group",
+        mode="individual",
     )
     result: dict = {"answer": text, "citations": []}
     return result
@@ -2143,30 +2409,25 @@ def _fold_project_context(
     as one synthetic context row, reusing the exact technique `routes/
     ask.py:347` already uses for the private surface's own breadth block.
 
-    BREADTH-IDEMPOTENT for private — `scope.context_payload` is "" there
-    (that breadth already reached `history` independently, upstream, via
-    `routes/ask.py`, before `answer()` ever ran, so this adds no NEW
-    project information) — but LOAD-BEARING for group, which has no other
-    path for its roster/ledger/memory block to reach the composer at all.
+    LOAD-BEARING for the private surface, which has no other path for its
+    roster/ledger/memory block to reach the composer once the sixth-branch
+    gate declines a turn.
 
-    Also where the accept-with-nudge instruction reaches a plain-Q&A turn
-    on BOTH surfaces: `scope.system_addendum` carries the nudge sentence
-    (see `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`), so a
-    delegation-phrased ask the sixth-branch gate MISSED still tells the
-    user to phrase it explicitly rather than silently doing nothing.
+    Also where the accept-with-nudge instruction reaches a plain-Q&A turn:
+    `scope.system_addendum` carries the nudge sentence (see
+    `_PRIVATE_SCOPE_SYSTEM`), so a delegation-phrased ask the sixth-branch
+    gate MISSED still tells the user to phrase it explicitly rather than
+    silently doing nothing.
 
     A no-op (returns `history` unchanged) for `scope is None`/main, or a
     project scope whose `system_addendum`/`context_payload` are both empty.
 
-    `context_payload`, when non-empty (group only — private already leaves
-    it "", its own breadth having reached `history` upstream via `routes/
-    ask.py` WITH the same framing), is prepended with `PROJECT_FACTS_
-    AUTHORITATIVE_PREAMBLE` — the exact "answer from THIS block, don't
-    deflect" header the private surface already uses — so the group
-    composer fall-through frames its ledger/roster/memory facts the same
-    authoritative way instead of folding them as a passive, deflectable
-    "Context:" row. Join order is UNCHANGED: `system_addendum` first,
-    `context_payload` second."""
+    `context_payload`, when non-empty, is prepended with `PROJECT_FACTS_
+    AUTHORITATIVE_PREAMBLE` — the "answer from THIS block, don't deflect"
+    header — so the composer fall-through frames the project's
+    ledger/roster/memory facts authoritatively instead of folding them as
+    a passive, deflectable "Context:" row. Join order is UNCHANGED:
+    `system_addendum` first, `context_payload` second."""
     if scope is None or scope.surface == Surface.main:
         return history
     parts = []
@@ -2192,6 +2453,16 @@ def answer(
     prd_id: Optional[int] = None,
     evidence_id: Optional[int] = None,
     ticket_set_id: Optional[int] = None,
+    #: The chat thread this ask belongs to. Everything `app.thread_context`
+    #: grounds on is keyed off it — the thread is the boundary, so an artifact
+    #: from another conversation can never be read as "the report". Absent (a
+    #: Slack ask, a warm) simply means no thread grounding.
+    conversation_id: Optional[int] = None,
+    #: What the side panel is SHOWING — `{"kind": "report"|"document", "id":
+    #: int}`, the same shape the classify call already receives. It only
+    #: reorders what the thread already owns, so a stale pointer from the
+    #: thread the reader just left is ignored rather than fetched.
+    open_artifact: Optional[dict] = None,
     on_delta: Optional[Callable[[str], None]] = None,
     on_route: Optional[Callable[[Optional[str], str], None]] = None,
     on_phase: Optional[Callable[[str], None]] = None,
@@ -2250,8 +2521,8 @@ def answer(
     move the tenant boundary to whoever called us.
 
     `scope` — a `SurfaceScope` (see `app.surface_scope`) naming which of the
-    three answer surfaces (main / project_private / project_group) this turn
-    is for. `None` (every caller that predates this parameter) and
+    two answer surfaces (main / project_private) this turn is for. `None`
+    (every caller that predates this parameter) and
     `SurfaceScope(surface=Surface.main)` are BOTH no-ops — nothing below this
     docstring changes when `scope` carries no project tools. A project scope
     whose `extra_tools` is non-empty is claimed by the SIXTH ladder branch,
@@ -2282,17 +2553,6 @@ def answer(
         scope is not None and scope.surface != Surface.main and scope.extra_tools
         and (
             is_project_tool_request(routing_text, history)
-            # A first-person "I'm done with <task>" completion claim must REACH
-            # the tool loop so the model can call `complete_task` and the
-            # ledger actually records the completion — otherwise it falls to
-            # the composer, which answers conversationally but writes nothing
-            # (the completion-ledger defect). GROUP-only (the surface that
-            # carries `complete_task`); authz is enforced inside the handler,
-            # so admitting on the phrasing alone is safe.
-            or (
-                scope.surface == Surface.project_group
-                and is_project_completion_request(routing_text, history)
-            )
             or is_project_content_request(routing_text, history)
             # A bare "send/assign/hand/route to <roster member>" — no
             # pronoun object — is a delegation signal `is_project_tool_
@@ -2319,6 +2579,16 @@ def answer(
         # admits. One predicate now governs both this gate and the connector
         # skip → guaranteed symmetry.
         and _skip_project_connectors(scope, routing_text, history)
+        # Yield to the report pipeline when the planner has ALREADY resolved
+        # this turn to one at high confidence — same shape as the connector
+        # clause above, mirrored rather than reinvented. A report-phrased ask
+        # ("give me a voice-of-customer report") lexically satisfies
+        # `is_project_content_request` just like a genuine project-content
+        # question does, but the project tool loop has no report-generation
+        # tool and would only decline it. `plan` is already resolved by the
+        # caller (`ask_job_runner.run_ask_job`) before `answer()` ever runs,
+        # so this reads it rather than reordering anything below.
+        and not _defers_to_report_pipeline(plan)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
@@ -2440,6 +2710,7 @@ def answer(
             dataset=dataset,
             fresh=_index_fresh,
             is_cancelled=is_cancelled,
+            on_phase=on_phase,
         )
         if planned is not None:
             return planned
@@ -2996,6 +3267,31 @@ def answer(
 
         prd_context = build_ticket_set_context(enterprise_id, ticket_set_id)
 
+    # THE REST OF WHAT THIS THREAD MADE. The three builders above are addressed
+    # BY ID, and only a PRD, an evidence page and a ticket set have one to
+    # send — so a report or a document produced in this chat reached no builder
+    # at all and was never in the prompt. Reported: with a report open in the
+    # panel, "summarize the report" was answered out of a corpus file covering
+    # a different month, then a follow-up counted that file's themes as the
+    # report's. See app/thread_context.py.
+    #
+    # It APPENDS rather than replaces. A PRD tab whose thread also produced a
+    # report can be asked about either, and the id-addressed block stays first
+    # because the tab is the strongest statement of what the reader is looking
+    # at. With no id at all this is the whole grounding, which is the reported
+    # case.
+    #
+    # Scoped to `conversation_id` throughout: the thread is the boundary, and a
+    # report from another chat is not what "the report" means to someone typing
+    # in this one.
+    from app.thread_context import build_thread_artifact_context
+
+    thread_context = build_thread_artifact_context(
+        enterprise_id, conversation_id, focus=open_artifact
+    )
+    if thread_context:
+        prd_context = f"{prd_context}\n\n{thread_context}" if prd_context else thread_context
+
     if not decision.skill_id:
         # Direct path — corpus + KG, plus a bounded live read of every connected
         # source. Retrieval (the shared question embedding, KG theme kNN, the
@@ -3043,6 +3339,8 @@ def answer(
         # Separate from the live one because the two get opposite instructions
         # downstream (`compose_ask_answer`'s `library_context_fn` says why).
         library_context_fn = None
+        team_context_fn = None
+        projects_context_fn = None
         # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
         # With the connector refresh on a 10-minute cadence, the knowledge
         # graph already holds near-live connector data — so the per-question
@@ -3134,12 +3432,34 @@ def answer(
             library_context_fn = lambda: _planned_library_context(  # noqa: E731
                 enterprise_id, plan
             )
+            # The roster read is a Postgres SELECT too, and rides both branches
+            # for the same reason the library does: "who's on my team" is as
+            # askable from a PRD tab as from the main chat.
+            team_context_fn = lambda: _planned_team_context(  # noqa: E731
+                enterprise_id, plan
+            )
+            projects_context_fn = lambda: _planned_projects_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
             library_context_fn=library_context_fn,
-            library_only=_library_only_plan(plan),
+            team_context_fn=team_context_fn,
+            projects_context_fn=projects_context_fn,
+            # One flag, three blocks: each is an exhaustive read of Sprntly's
+            # own records, and a question about any of them is narrowed away
+            # from the corpus/KG/document index identically.
+            library_only=(
+                _library_only_plan(plan)
+                or _team_only_plan(plan)
+                or _projects_only_plan(plan)
+            ),
             on_delta=on_delta,
+            # Real pipeline-leg phases on the COMMON direct-answer path — the
+            # sink is already wired for the skill-routed path; this hands it to
+            # the direct path too, which previously emitted none.
+            on_phase=on_phase,
         )
 
     # Custom skill (PRD 1854): an uploaded skill runs through the generic
@@ -3161,15 +3481,34 @@ def answer(
             return _maybe_verify(payload, enterprise_id)
 
     # Public-feedback routed: the report needs the public WEB (app stores,
-    # Reddit, review sites), which the generic skill answer can't reach — it
-    # would answer from the KG's first-party signal. Run the dedicated
-    # web-search pipeline instead; it returns None only when the company
-    # profile can't be read, falling through to the generic answer.
-    if decision.skill_id == "public-feedback-report":
+    # Reddit, review sites). Same expired premise as the two branches below —
+    # "the generic answer would reach only the KG's first-party signal" stopped
+    # being true once the scheduled report started extracting itself into the
+    # graph, and a 3P feedback report's findings ARE public voice. Sweep only
+    # when this period has no saved report to answer from.
+    #
+    # Monthly here, not quarterly (PF_SPEC.cadence), so the fallback to a live
+    # sweep comes round twelve times a year rather than four — which matches
+    # how fast public sentiment actually moves.
+    if (
+        decision.skill_id == "public-feedback-report"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.PF_SPEC,
+            entity=_plan_entity(plan))
+    ):
         from app import public_feedback
 
         pf = public_feedback.answer(
-            enterprise_id=enterprise_id, question=question, history=history
+            enterprise_id=enterprise_id, question=question, history=history,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC/MI dispatch); ignored while that gate is off.
+            on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
+            # Whether the last capture can answer this at all: a follow-up
+            # about an app or company it never saw needs the sweep, not a
+            # filter over records that never mention it (CIR parity).
+            entity=_plan_entity(plan),
         )
         if pf is not None:
             return _maybe_verify(pf, enterprise_id)
@@ -3189,19 +3528,36 @@ def answer(
             # A sweep is several minutes of paid web search; each stage boundary
             # is a cancellation checkpoint, so a Stop actually stops it.
             is_cancelled=is_cancelled,
+            # The staged sweep narrates a per-stage checklist from inside the
+            # module — the longest wait in the product (competitive_intel parity).
+            on_phase=on_phase,
         )
         if cr is not None:
             return _maybe_verify(cr, enterprise_id)
 
     # Competitive-intelligence routed: the review needs the public WEB (what a
-    # rival shipped, their pricing page, their app-store rating), which the
-    # generic skill answer can't reach — it would answer from the KG's
-    # first-party signal, and the skill's own integrity rule then forbids the
-    # numbers it would need. Run the dedicated staged web-research pipeline
-    # instead (Scan when prior state exists, Review otherwise). It returns None
-    # only when the company profile can't be read, falling through to the
-    # generic answer.
-    if decision.skill_id == "competitive-intelligence-review":
+    # rival shipped, their pricing page, their app-store rating). That used to
+    # be unreachable from here — the KG held first-party signal alone, so the
+    # generic answer had no rival pricing to cite and the skill's integrity
+    # rule forbade inventing it. Hence the dedicated staged web-research
+    # pipeline (Scan when prior state exists, Review otherwise).
+    #
+    # THAT PREMISE EXPIRED when the scheduled reports began extracting
+    # themselves into the graph: a saved report puts its competitor findings in
+    # as dated, sourced signals carrying the report's own provenance. So the
+    # sweep is now the fallback, not the default — when this period's report
+    # already exists, fall through to the generic path, which reads those
+    # signals (`_retrieve_kg_bundle`) and answers in seconds instead of buying
+    # minutes of paid web search for findings we already hold.
+    #
+    # Cost of getting this wrong in the other direction is small: with no
+    # current report the sweep runs exactly as before.
+    if (
+        decision.skill_id == "competitive-intelligence-review"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.CIR_SPEC,
+            entity=_plan_entity(plan))
+    ):
         from app import competitive_intel
 
         cir = competitive_intel.answer(
@@ -3213,17 +3569,27 @@ def answer(
             # The sweep is the longest wait in the product; its own legs
             # (capture, then synthesis) publish from inside that module.
             on_phase=on_phase,
+            # WHO to research, when the question named someone the "vs Acme"
+            # regex cannot see ("a competitive review on Figma"). Without it
+            # the sweep falls back to the stored roster and researches a set
+            # the question never asked about.
+            entity=_plan_entity(plan),
         )
         if cir is not None:
             return _maybe_verify(cir, enterprise_id)
 
-    # Market-intelligence routed: the report is public-web news about the
-    # CATEGORY (funding, M&A, entrants, category movement, regulation, analyst
-    # coverage), which the generic skill answer can't reach — the KG holds
-    # first-party signal, not the trade press. Run the dedicated web-search
-    # pipeline instead; it returns None only when the company profile can't be
-    # read, falling through to the generic answer.
-    if decision.skill_id == "market-intelligence-report":
+    # Market-intelligence routed: public-web news about the CATEGORY (funding,
+    # M&A, entrants, category movement, regulation, analyst coverage). Same
+    # expired premise as the competitive branch above — "the KG holds
+    # first-party signal, not the trade press" stopped being true once the
+    # scheduled report started extracting itself into the graph. Sweep only
+    # when this period has no saved report to answer from.
+    if (
+        decision.skill_id == "market-intelligence-report"
+        and not monthly_reports.has_current_report(
+            enterprise_id, monthly_reports.MI_SPEC,
+            entity=_plan_entity(plan))
+    ):
         from app import market_intel
 
         mi = market_intel.answer(
@@ -3232,6 +3598,11 @@ def answer(
             # document-scale call; the boundary between them is a cancellation
             # checkpoint, so a Stop actually stops the second spend.
             is_cancelled=is_cancelled,
+            # Only consumed on the flagged map-reduce synthesis path (mirrors the
+            # VoC dispatch below); ignored while that gate is off.
+            on_delta=on_delta,
+            # Narrates its capture→synthesis legs (competitive_intel parity).
+            on_phase=on_phase,
         )
         if mi is not None:
             return _maybe_verify(mi, enterprise_id)
@@ -3272,6 +3643,9 @@ def answer(
                 enterprise_id=enterprise_id, question=question, history=history,
                 on_delta=on_delta,
                 constraints=(plan.constraints if plan is not None else None),
+                # Narrates its gather→synthesis legs (competitive_intel parity);
+                # David's most-used report and the reported blank-wait path.
+                on_phase=on_phase,
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).
@@ -3287,7 +3661,25 @@ def answer(
         # The unpinned VoC route — `call_digest.answer` just above — is the
         # common one and DOES stream: it swallows its own exception and returns
         # a payload, so it is terminal and cannot fall through.
-        voc = _answer_voc_report(decision, enterprise_id, question, history)
+        #
+        # Under answer-first the pinned VoC path DOES stream (its answer text is
+        # the terminal streamed call). It can still decline (None) on failure and
+        # fall through to `_answer_single_shot` below — a second generation into
+        # the SAME sink. `reset_stream` rewinds the sink so the restart frame
+        # supersedes the abandoned attempt rather than gluing onto it.
+        from app import answer_first
+
+        if answer_first.enabled():
+            voc = _answer_voc_report(
+                decision, enterprise_id, question, history, on_delta=on_delta,
+                on_phase=on_phase,
+            )
+            if voc is None:
+                answer_first.reset_stream(on_delta)
+        else:
+            voc = _answer_voc_report(
+                decision, enterprise_id, question, history, on_phase=on_phase,
+            )
         if voc is not None:
             return _maybe_verify(voc, enterprise_id)
 

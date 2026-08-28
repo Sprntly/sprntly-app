@@ -35,9 +35,7 @@ def test_surface_scope_frozen_and_defaulted():
     assert scope.roster == ()
     assert scope.assigner_identity is None
     assert scope.post_turn is None
-    assert scope.prerendered_transcript is None
     assert scope.capabilities is None
-    assert scope.multi_party is False
     with pytest.raises(dataclasses.FrozenInstanceError):
         scope.project_id = 5  # type: ignore[misc]
 
@@ -50,7 +48,6 @@ def test_surface_scope_main_is_noop():
     assert scope.is_noop is True
     assert scope.extra_tools == ()
     assert scope.system_addendum == ""
-    assert scope.prerendered_transcript is None
 
 
 def test_surface_scope_project_private_is_not_noop():
@@ -61,12 +58,32 @@ def test_surface_scope_project_private_is_not_noop():
 # ── the six-tool contract (AC6, AC11) ──────────────────────────────────────
 
 
-def test_surface_scope_project_private_carries_six_extra_tools():
+# Retargeted from the deleted `ask_job_runner._build_private_scope`: the private
+# scope (6 depth tools + composed system_addendum) is now built by
+# `ProjectContextAssembler.assemble` (`context_assembler_project.py`). These are
+# pure unit assertions with no DB, so the assembler's membership gate is stubbed
+# and its best-effort breadth/roster/instructions reads degrade to empty — the
+# `extra_tools` + `system_addendum` composition is DB-independent.
+def _assemble_private_scope_unit(monkeypatch, *, project_id: int = 9):
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+    from app.db import projects as projects_db
+
+    monkeypatch.setattr(projects_db, "project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr(projects_db, "is_project_member", lambda *a, **k: True)
+    req = AssembleRequest(
+        user_id="u1", company_id="c1", dataset="", conversation_id=None,
+        question="q", workspace_id="w1",
+        params={"project_id": project_id, "surface": "private"},
+    )
+    return ProjectContextAssembler().assemble(req)
+
+
+def test_surface_scope_project_private_carries_six_extra_tools(monkeypatch):
     from app import project_delegation, project_task_execution
-    from app.ask_job_runner import _build_private_scope
     from app.project_group_context import read_tools
 
-    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
+    scope = _assemble_private_scope_unit(monkeypatch)
     assert len(scope.extra_tools) == 6
     names = [t["name"] for t in scope.extra_tools]
     expected = [t["name"] for t in (
@@ -82,18 +99,18 @@ def test_surface_scope_project_private_carries_six_extra_tools():
     assert scope.edit_prd_handler is None
 
 
-def test_private_system_addendum_byte_identical():
-    """AC2: `_build_private_scope(...).system_addendum` is byte-identical to
-    the composed `_PRIVATE_SCOPE_SYSTEM` + roster block — the group prompt/
+def test_private_system_addendum_byte_identical(monkeypatch):
+    """AC2: the private surface's assembled `system_addendum` is byte-identical
+    to the composed `_PRIVATE_SCOPE_SYSTEM` + roster block — the group prompt/
     context/edit-tool convergence changed NOTHING about the private surface's
-    assembled system text (option (b): `_PRIVATE_SCOPE_SYSTEM` untouched)."""
-    from app.ask_job_runner import (
-        _PRIVATE_SCOPE_SYSTEM, _build_private_scope, _private_roster_block,
-    )
+    assembled system text (`_PRIVATE_SCOPE_SYSTEM` untouched). The composition
+    relocated verbatim into `ProjectContextAssembler.assemble`."""
+    from app.ask_job_runner import _PRIVATE_SCOPE_SYSTEM, _private_roster_block
 
-    scope = _build_private_scope(project_id=9, conversation_id=None, user_id="u1")
-    # project 9 has no members / no instructions in this unit context, so the
-    # composition is exactly the base system + the empty-roster block.
+    scope = _assemble_private_scope_unit(monkeypatch)
+    # No members / no instructions in this unit context (best-effort reads
+    # degrade to empty), so the composition is exactly the base system + the
+    # empty-roster block.
     expected = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block([])}"
     assert scope.system_addendum == expected
 

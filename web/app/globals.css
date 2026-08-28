@@ -103,6 +103,11 @@
     --app-shell-header-min: 82px;
     /* Sidebar: expanded width grows with nav content; collapsed rail width follows content */
     --sidebar-rail-expanded-min: 220px;
+    /* The LIVE width, moved by dragging the sidebar's right edge (see
+       lib/sidebarWidth.ts, which writes this property on the root element and
+       remembers it). Defaults to the shipped width, so a browser that has
+       never been dragged in renders exactly as before. */
+    --sidebar-w: var(--sidebar-rail-expanded-min);
 
     /* Scrollbars — see the quiet-scrollbar block below. The gutter is a fixed
        width in BOTH states; only the thumb's colour changes. */
@@ -1168,7 +1173,7 @@
 
   /* Expanded (default): content clears the 220px rail. */
   .app:not(.app--sidebar-collapsed) .main-column {
-    padding-left: var(--sidebar-rail-expanded-min);
+    padding-left: var(--sidebar-w);
   }
 
   /* Collapsed: content clears the 60px icon rail. */
@@ -1717,9 +1722,9 @@
   /* ── Rail layout (expanded) ── shares the .sb-rail-* markup with the collapsed
      rail; widening to 220px and left-aligning the items reveals inline labels. */
   .sidebar.sidebar--expanded {
-    width: var(--sidebar-rail-expanded-min);
-    min-width: var(--sidebar-rail-expanded-min);
-    max-width: var(--sidebar-rail-expanded-min);
+    width: var(--sidebar-w);
+    min-width: var(--sidebar-w);
+    max-width: var(--sidebar-w);
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
@@ -1894,11 +1899,22 @@
     align-items: stretch;
   }
 
+  /* SHORTER THAN THE COLLAPSED RAIL'S 42px SQUARES, on purpose. Collapsed,
+     each item is an icon and 42px is the touch target. Expanded, it is a row
+     of text, and at 42px the nine of them filled half the sidebar — which is
+     the space the threads now need. 34px still clears the 30px an icon plus
+     its padding wants. */
   .sidebar--expanded .sb-rail-item {
     width: 100%;
+    height: 34px;
     justify-content: flex-start;
     gap: 10px;
     padding: 0 12px;
+  }
+
+  .sidebar--expanded .sb-rail-new,
+  .sidebar--expanded .sb-rail-search {
+    height: 34px;
   }
 
   .sidebar--expanded .sb-rail-item.active::before {
@@ -2175,9 +2191,278 @@
     opacity: 1;
   }
 
+  /* ── Recent chats ─────────────────────────────────────────────────────
+     The list scrolls on its own rather than pushing the bottom row (Guide,
+     Settings, Feedback, the workspace switcher) off the sidebar. `min-height:
+     0` is what actually allows that inside a flex column — without it the
+     list refuses to shrink below its content and the overflow lands on the
+     whole sidebar instead. */
+  /* A screen rendered as a Settings pane (Templates, Skills).
+     FULL WIDTH, deliberately: both are listed in `FULL_BLEED_SECTIONS`, so
+     they escape `.pset-body`'s 860px cap. Their card grids are
+     `repeat(auto-fill, minmax(280px, 1fr))` — given the whole pane they lay
+     out three across, and under the cap they could only ever manage two with
+     the right third of the pane left empty. */
+  .settings-embedded {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    max-width: none;
+  }
+
+  .sb-chats {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    flex: 1 1 auto;
+    width: 100%;
+    margin-top: 10px;
+  }
+
+  .sb-chats-head {
+    padding: 0 10px 6px;
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--nav-text);
+    opacity: 0.55;
+  }
+
+  /* A hairline above the section, so the threads read as their own region
+     rather than as more nav items in a longer list. */
+  .sb-chats::before {
+    content: "";
+    display: block;
+    height: 1px;
+    margin: 0 10px 10px;
+    background: var(--nav-text);
+    opacity: 0.12;
+  }
+
+  .sb-chats-list {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    overflow-y: auto;
+    min-height: 0;
+    scrollbar-width: thin;
+  }
+
+  .sb-chat-item {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    width: 100%;
+    padding: 7px 10px;
+    border: none;
+    border-radius: 8px;
+    background: none;
+    color: var(--nav-text);
+    font-size: 13px;
+    line-height: 1.3;
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-chat-title {
+    /* One line, always. A wrapped title turns the list into paragraphs and
+       twenty rows into forty. `min-width: 0` is what actually lets a flex
+       child ellipsize — without it it refuses to shrink below its text. */
+    min-width: 0;
+    flex: 1 1 auto;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  /* OVER the end of the title, not beside it. Beside it, an always-present
+     "25 Aug, 11:56" would take a third of a 220px row away from the titles
+     even while invisible — layout does not care about opacity. Absolute, with
+     the row's own hover colour behind it, it costs nothing until it is wanted.
+
+     Only on the row under the pointer, and on keyboard focus: twenty stamps
+     down the side of the nav is a column of noise competing with the titles;
+     one, on the row you are looking at, is the answer to "which of these four
+     is which". */
+  .sb-chat-when {
+    position: absolute;
+    right: 10px;
+    top: 50%;
+    transform: translateY(-50%);
+    padding-left: 14px;
+    font-size: 11px;
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    opacity: 0;
+    pointer-events: none;
+    color: var(--nav-text);
+    background: linear-gradient(
+      to right,
+      transparent 0,
+      var(--nav-hover-solid, #16211b) 12px
+    );
+    transition: opacity 0.12s;
+  }
+
+  .sb-chat-item {
+    position: relative;
+  }
+
+  .sb-chat-item:hover .sb-chat-when,
+  .sb-chat-item:focus-visible .sb-chat-when {
+    opacity: 0.72;
+  }
+
+  .sb-chat-dot {
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    border: 1px solid currentColor;
+    opacity: 0.45;
+    transition: opacity 0.12s, background 0.12s;
+  }
+
+  .sb-chat-item:hover {
+    background: var(--nav-hover-bg, rgba(255, 255, 255, 0.07));
+    color: var(--nav-text-hover);
+  }
+
+  .sb-chat-item:hover .sb-chat-dot {
+    opacity: 1;
+    background: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .sb-chats-all {
+    flex: none;
+    padding: 8px 10px;
+    margin-top: 4px;
+    border-radius: 8px;
+    font-weight: 500;
+    border: none;
+    background: none;
+    color: var(--nav-text);
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+    opacity: 0.75;
+  }
+
+  .sb-chats-all:hover {
+    opacity: 1;
+    color: var(--nav-text-hover);
+    background: var(--nav-hover-bg, rgba(255, 255, 255, 0.07));
+  }
+
+  /* ── The draggable edge ───────────────────────────────────────────────
+     6px of grab area sitting half over the sidebar's edge and half past it,
+     which is what makes it findable without a visible gutter eating layout.
+     It draws nothing until you are on it. */
+  .sb-resizer {
+    position: absolute;
+    top: 0;
+    right: -3px;
+    width: 6px;
+    height: 100%;
+    z-index: 30;
+    cursor: col-resize;
+    background: transparent;
+    /* The handle must never scroll away from the edge it resizes. */
+    touch-action: none;
+  }
+
+  /* The always-there grip: a short bar at mid-height, faint enough to read as
+     an edge rather than a border, and the only standing hint that the nav can
+     be pulled. */
+  .sb-resizer-grip {
+    position: absolute;
+    top: 50%;
+    left: 2px;
+    width: 2px;
+    height: 28px;
+    transform: translateY(-50%);
+    border-radius: 2px;
+    background: var(--nav-text);
+    opacity: 0.28;
+    transition: opacity 0.12s, height 0.12s, background 0.12s;
+    pointer-events: none;
+  }
+
+  .sb-resizer:hover .sb-resizer-grip,
+  .sb-resizer:focus-visible .sb-resizer-grip {
+    opacity: 0.9;
+    height: 46px;
+  }
+
+  /* Dragging: the whole edge lights up, so the thing being moved is the thing
+     under the cursor. */
+  .sb-resizer:hover::after,
+  .sb-resizer:focus-visible::after,
+  body.is-sidebar-resizing .sb-resizer::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 2px;
+    width: 2px;
+    height: 100%;
+    background: var(--accent);
+    opacity: 0.85;
+  }
+
+  body.is-sidebar-resizing .sb-resizer-grip {
+    background: var(--accent);
+    opacity: 1;
+  }
+
+  /* Reusing the rail's tooltip, moved to hang off the EDGE rather than off an
+     icon 54px into the rail. */
+  .sb-resizer-tip {
+    left: 14px;
+  }
+
+  .sb-resizer:hover .sb-resizer-tip,
+  .sb-resizer:focus-visible .sb-resizer-tip {
+    opacity: 1;
+  }
+
+  /* …but never mid-drag: a label following the cursor while you are trying to
+     see where the edge lands is in the way. */
+  body.is-sidebar-resizing .sb-resizer-tip {
+    opacity: 0 !important;
+  }
+
+  .sb-resizer:focus-visible {
+    outline: none;
+  }
+
+  /* While dragging: no width easing anywhere (the sidebar AND the main column
+     it pushes), or the layout arrives 200ms after the cursor. And no text
+     selection, or a fast drag selects the whole nav on the way past. */
+  body.is-sidebar-resizing {
+    cursor: col-resize;
+    user-select: none;
+  }
+
+  body.is-sidebar-resizing .sidebar,
+  body.is-sidebar-resizing .main-column {
+    transition: none !important;
+  }
+
   .sb-rail-spacer {
     flex: 1 1 auto;
     min-height: 12px;
+  }
+
+  /* When the chats list is there, IT takes the free space — the spacer's whole
+     job was to push the bottom row down, and two growing siblings would split
+     the room between them, leaving the list half as tall for no reason. */
+  .sb-chats + .sb-rail-spacer {
+    flex: 0 0 auto;
   }
 
   .sb-rail-bottom {
@@ -2209,6 +2494,11 @@
   /* Display-only identity chip (sign-out moved to Settings → Account), so no
      pointer/hover affordances. */
   .sb-rail-avatar {
+    /* NEVER SHRINKS. A flex child defaults to `flex-shrink: 1`, so when the
+       row ran out of room this 32px box was the first thing to give — and a
+       squashed box with `border-radius: 50%` is an OVAL. The initials chip is
+       a fixed shape; the NAME beside it is the part that truncates. */
+    flex: none;
     width: 32px;
     height: 32px;
     border-radius: 50%;
@@ -2227,6 +2517,61 @@
      pinned on the right whatever the name length; collapsed, the avatar and
      name are hidden (see .sidebar--collapsed .sb-rail-avatar) and this is the
      row's only visible element — a lone rail icon. */
+  /* The identity row's actions — sync, feedback, settings — left to right.
+     Same 28px box as the sync button they sit beside, so the three read as one
+     control group rather than as a button with two afterthoughts. They replace
+     three full-width rows above the divider; the row was already the place an
+     action earned its slot over identity chrome, and now it holds all three. */
+  .sb-rail-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--nav-text);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-rail-action:hover {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-rail-action.active {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-rail-action:hover .nav-tooltip {
+    opacity: 1;
+    transform: translate(4px, -50%);
+  }
+
+  /* The three actions, inline with the name. `flex: none` so they keep their
+     full size and the NAME is what gives way — the name is truncatable, a
+     26px icon is not. */
+  .sb-rail-actions {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex: none;
+    margin-left: auto;
+  }
+
+  /* Collapsed, the avatar and name are hidden and these three are the whole
+     footer — stacked, since three of them do not fit across a 60px rail. */
+  .sidebar--collapsed .sb-rail-actions {
+    flex-direction: column;
+    align-items: center;
+    margin-left: 0;
+  }
+
   .sb-sync-btn {
     display: flex;
     align-items: center;
@@ -2615,8 +2960,8 @@
   }
 
   .main.main--reading .prd-chart {
-    margin: 12px 0 16px;
-    padding: 14px 14px;
+    margin: 16px 0 20px;
+    padding: 14px 2px 2px;
   }
 
   .main.main--reading .prd-foot {
@@ -4300,10 +4645,18 @@
     margin-left: 3px;
   }
 
+  /* FIXED, not absolute, and that is the whole fix for a menu that opened and
+     showed nothing. `.prd-tools-l` scrolls (`overflow-x: auto`), and a
+     CSS box that sets overflow on one axis clips the other too — so an
+     absolutely-positioned dropdown belonging to a trigger inside that row is
+     clipped away entirely, because it hangs BELOW the row. The overflow menu
+     escaped by living outside the row; the Style menu sits between Redo and
+     Bold and cannot move without reordering the bar. A fixed box is positioned
+     against the viewport instead, so no scrolling ancestor can clip it, and
+     `top`/`left`/`right` come from the trigger's own rect at open time (see
+     `ToolMenu` in PrdMarkdownEditor). */
   .prd-more-menu {
-    position: absolute;
-    top: calc(100% + 6px);
-    right: 0;
+    position: fixed;
     z-index: 40;
     min-width: 178px;
     padding: 5px;
@@ -4315,11 +4668,63 @@
     flex-direction: column;
   }
 
-  /* A menu opened from a control on the LEFT of the bar hangs left, so it
-     doesn't shoot off toward the middle of the panel. */
-  .prd-more-menu--left {
-    right: auto;
-    left: 0;
+  /* The colour picker's grid. Sized so ten swatches fit the menu's own
+     min-width (178px) without the popover having to grow: 10 x 14px + 9 gaps
+     of 3px + 10px of padding. */
+  .prd-colorgrid {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 3px;
+  }
+
+  .prd-colorgrid-row {
+    display: flex;
+    gap: 3px;
+  }
+
+  .prd-colorgrid-swatch {
+    width: 14px;
+    height: 14px;
+    padding: 0;
+    border-radius: 3px;
+    /* A hairline, or white and near-white swatches vanish into the menu. */
+    border: 1px solid rgba(10, 25, 18, 0.16);
+    cursor: pointer;
+  }
+
+  .prd-colorgrid-swatch:hover {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .prd-colorgrid-clear,
+  .prd-colorgrid-custom {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 6px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--ink);
+    font-size: 12.5px;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .prd-colorgrid-clear:hover,
+  .prd-colorgrid-custom:hover { background: var(--surface-3, rgba(10,25,18,0.05)); }
+
+  .prd-colorgrid-custom input[type="color"] {
+    width: 26px;
+    height: 18px;
+    padding: 0;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: none;
+    cursor: pointer;
   }
 
   .prd-more-item {
@@ -4549,12 +4954,21 @@
   }
 
   /* PRD infographics — bar / line / pie / stat / gauge charts rendered inline */
+  /* A FIGURE IN THE PROSE, not a widget parked in it. The card — border, fill,
+     radius — was doing the work that white space and a caption do better: it
+     boxed the chart off from the sentence that introduces it, which is the one
+     thing a reader needs to connect. What is left is air, a hairline to mark
+     where the prose stops, and the marks themselves carrying the colour.
+
+     The chrome the skill calls recessive is the chrome AROUND the data, not
+     the data. */
   .prd-chart {
-    margin: 16px 0 22px;
-    padding: 16px 18px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface-2);
+    margin: 22px 0 26px;
+    padding: 18px 2px 4px;
+    border: none;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: none;
   }
 
   .prd-chart-title {
@@ -4598,15 +5012,126 @@
   }
 
   .prd-bar-track {
-    height: 22px;
+    /* Capped, not filling its slot: the leftover is air, which is what keeps a
+       stack of bars readable as a ranking rather than as a block. */
+    height: 20px;
     background: var(--surface-3);
     border-radius: 6px;
     overflow: hidden;
   }
 
+  /* ── Chart motion ─────────────────────────────────────────────────────
+     Every mark below reveals off ONE flag — `[data-revealed]` on the figure,
+     set by an IntersectionObserver when the card is actually scrolled into
+     view (see `useRevealed`). Charts render inside a streaming reply, so a
+     mount-time animation would play against half a dataset in a card nobody
+     is looking at yet.
+
+     The resting state is the FINISHED chart. Everything here is an override
+     that applies only while `data-revealed="false"` — so a browser with no
+     observer, a test, or a printed page shows real data rather than an empty
+     frame. Decoration must never be load-bearing for reading the numbers. */
+
+  /* Bars grow from the baseline. */
+  .prd-chart[data-revealed="false"] .prd-bar-fill {
+    width: 0 !important;
+  }
+
+  .prd-bar-fill {
+    transition: width 620ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  /* The line draws itself, left to right. `pathLength: 1` on the element makes
+     the dash a fraction of the path, so shape does not change the duration. */
+  .prd-line-path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 760ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-path {
+    stroke-dashoffset: 1;
+  }
+
+  /* Dots land after the line reaches them, each carrying a 2px ring in the
+     surface colour so a marker sitting on the line, a gridline or a neighbour
+     still reads as its own mark. */
+  .prd-line-dot {
+    stroke: var(--surface-2);
+    stroke-width: 2;
+    opacity: 1;
+    transition: opacity 240ms ease;
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-dot {
+    opacity: 0;
+  }
+
+  /* Slices scale up from the centre of the ring, in order. */
+  .prd-pie-slice {
+    transform-origin: center;
+    transform: scale(1);
+    opacity: 1;
+    /* `fill-opacity` carries the DIM (hover), `opacity` carries the REVEAL.
+       Two rules on one property fight the moment someone hovers mid-reveal. */
+    transition: transform 460ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      opacity 300ms ease, fill-opacity 140ms ease;
+  }
+
+  /* The slice being read lifts a little out of the ring. */
+  .prd-pie-slice[data-active="true"] {
+    transform: scale(1.03);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-pie-slice {
+    transform: scale(0.86);
+    opacity: 0;
+  }
+
+  /* The gauge sweeps from empty. */
+  .prd-gauge-value {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 700ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-gauge-value {
+    stroke-dashoffset: 1;
+  }
+
+  /* Stat tiles rise. */
+  .prd-stat {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 320ms ease, transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-stat {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  /* ASKED FOR LESS MOTION MEANS NONE. `useRevealed` already returns revealed
+     on the first render under this query, so nothing should animate — this is
+     the belt to that braces: any mark that slips through has its transition
+     removed rather than slowed. */
+  @media (prefers-reduced-motion: reduce) {
+    .prd-bar-fill,
+    .prd-line-path,
+    .prd-line-dot,
+    .prd-pie-slice,
+    .prd-gauge-value,
+    .prd-stat {
+      transition: none !important;
+    }
+  }
+
   .prd-bar-fill {
     height: 100%;
-    border-radius: 6px;
+    /* Rounded at the DATA end, square at the baseline — a bar rounded at both
+       ends reads as floating, and at 0 it would show a lozenge where there is
+       no data. */
+    border-radius: 0 4px 4px 0;
     transition: width 0.3s ease;
   }
 
@@ -4653,11 +5178,87 @@
   }
 
   .prd-pie-legend li {
+    display: block;
+  }
+
+  /* The legend row is the keyboard's way into the ring, so it is a real
+     button: full width, its own hover and focus states, and the same
+     highlight the slice gets. */
+  .prd-pie-legend-row {
     display: grid;
     grid-template-columns: 12px 1fr auto;
     gap: 8px;
     align-items: center;
+    width: 100%;
+    padding: 4px 6px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: 12.5px;
+    text-align: left;
+    cursor: default;
+    transition: background 0.12s;
+  }
+
+  .prd-pie-legend-row:hover,
+  .prd-pie-legend-row[data-active="true"] {
+    background: var(--surface-3);
+  }
+
+  .prd-pie-legend-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .prd-pie-pct {
+    color: var(--muted);
+  }
+
+  /* The ring and its readout share one stacking context so the centre figure
+     sits in the hole rather than beside it. */
+  .prd-pie-ring {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+
+  .prd-pie-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    pointer-events: none;
+    text-align: center;
+    /* Inside a 88px hole — anything wider than this wraps into the ring. */
+    padding: 0 26px;
+  }
+
+  .prd-pie-center-val {
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .prd-pie-center-lbl {
+    font-size: 10.5px;
+    line-height: 1.2;
+    color: var(--muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  /* Pointing at a slice is reading, not clicking. */
+  .prd-pie-slice {
+    cursor: default;
   }
 
   .prd-pie-swatch {
@@ -10285,6 +10886,21 @@
     margin: 0.7em 0;
   }
 
+  /* A CHART IS NOT A CODE BLOCK. It arrives as a fenced ```chart block, so the
+     markdown renderer wraps it in <pre> and it inherited all of the chrome
+     above — a bordered, tinted, padded box — and then drew its own card inside
+     that. Two frames around one figure, which is what "it looks some way"
+     was. The fence is a transport detail; strip it and let the figure be the
+     only container. */
+  .ai-bar-reply-answer pre:has(.prd-chart) {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+  }
+
   .ai-bar-reply-answer pre code {
     border: 0;
     padding: 0;
@@ -10365,6 +10981,35 @@
        is what balances a short-value column against a prose one. Safe because
        the table above scrolls rather than overflowing. */
     white-space: nowrap;
+  }
+
+  /* Label columns, marked per-table by AskReplyBody's `table` override (see
+     lib/tableColumnKinds). The rules above stop a short column collapsing to
+     one letter; these stop it being WRAPPED to spare a prose column beside it
+     — the "Dimension / What It Is" shape, where `Inputs & Data Sources` came
+     out stacked over two lines while the prose ran the full message width.
+
+     Two declarations, both needed. `white-space: nowrap` raises the column's
+     min-content to the whole label, so auto layout can no longer wrap it
+     mid-phrase; `width: 1px` then stops it claiming more than that, since a
+     used width can never go below min-content — the standard shrink-to-fit
+     idiom. Width alone would still let the label wrap; nowrap alone would let
+     a short column drift wider than it needs.
+
+     Positional rather than a `<colgroup>`: `<col>` accepts width but not
+     white-space, and this needs both. Enumerated to 8 because the classifier
+     declines past that — a table that wide is heading for the scroller, and
+     pinning columns there makes it worse. */
+  .ai-bar-reply-answer .md-label-col-1 tr > :nth-child(1),
+  .ai-bar-reply-answer .md-label-col-2 tr > :nth-child(2),
+  .ai-bar-reply-answer .md-label-col-3 tr > :nth-child(3),
+  .ai-bar-reply-answer .md-label-col-4 tr > :nth-child(4),
+  .ai-bar-reply-answer .md-label-col-5 tr > :nth-child(5),
+  .ai-bar-reply-answer .md-label-col-6 tr > :nth-child(6),
+  .ai-bar-reply-answer .md-label-col-7 tr > :nth-child(7),
+  .ai-bar-reply-answer .md-label-col-8 tr > :nth-child(8) {
+    white-space: nowrap;
+    width: 1px;
   }
 
   .ai-bar-reply-answer a {
@@ -10857,22 +11502,6 @@
     font-size: 13px;
     line-height: 1.5;
     font-style: italic;
-  }
-
-  .cw-err {
-    padding: 11px 13px;
-    border-radius: var(--radius-sm);
-    background: var(--danger-soft);
-    border: 1px solid var(--danger-border);
-    color: var(--danger-ink);
-    font-size: 13px;
-    line-height: 1.5;
-  }
-
-  .cw-err b {
-    display: block;
-    font-weight: 600;
-    margin-bottom: 2px;
   }
 
   /* Streamed text held after the live preview dropped — marked as frozen rather
@@ -12038,6 +12667,81 @@
   .setx-nav-item.soon {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+
+  /* ---- The pane dropdown ------------------------------------------------
+     A row that owns several views opens under itself. The height animates via
+     `grid-template-rows: 0fr -> 1fr`, which is the one way to transition to a
+     content height nobody has to hardcode — a max-height guess either clips a
+     four-item drawer or makes a two-item one crawl open against dead space. */
+  .setx-nav-chev {
+    flex: none;
+    transition: transform 0.18s ease;
+  }
+
+  .setx-nav-item[aria-expanded="true"] .setx-nav-chev {
+    transform: rotate(180deg);
+  }
+
+  .setx-nav-sub {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.18s ease;
+  }
+
+  .setx-nav-sub[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  .setx-nav-sub-inner {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    /* The rail the views hang from — it reads as one group and lines the
+       labels up under the parent row's icon. */
+    margin: 0 0 0 19px;
+    padding-left: 10px;
+    border-left: 1px solid var(--line);
+  }
+
+  .setx-nav-sub[data-open="true"] .setx-nav-sub-inner {
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+
+  .setx-nav-subitem {
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-3);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .setx-nav-subitem:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .setx-nav-subitem.active {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--surface-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .setx-nav-sub,
+    .setx-nav-chev {
+      transition: none;
+    }
   }
 
   .setx-nav-badge {
@@ -24951,7 +25655,12 @@
 /* ── Goal Analysis panel (engine name Crucible; never shown) ─────────────── */
 .ga { display: flex; flex-direction: column; gap: 14px; font-size: 13px; }
 .ga-goal { font-weight: 600; font-size: 14px; margin: 0; }
-.ga-ask { margin: 0; line-height: 1.5; }
+/* `white-space: pre-line` because the ask is composed with real newlines and
+   bullet characters — an ambiguous-metric question lists each candidate on its
+   own line. Collapsed by default, it rendered as one unreadable run-on:
+   "…do not mean the same thing: • Monthly Active Users — … • Weekly Active
+   Users — …". */
+.ga-ask { margin: 0; line-height: 1.5; white-space: pre-line; }
 .ga-provenance { margin: 0; opacity: 0.65; font-size: 12px; }
 .ga-definition {
   width: 100%; padding: 8px 10px; border: 1px solid var(--border, #e5e5e5);
@@ -24964,7 +25673,119 @@
 }
 .ga-confirm:disabled { opacity: 0.45; cursor: default; }
 .ga-loading, .ga-empty { opacity: 0.7; margin: 0; }
+
+/* Goal Analysis gates rendered IN THE CHAT THREAD (GoalGateCard). Sits inside
+   an existing .bc-agent-body, so it styles only its own internals and inherits
+   the agent chrome — the same arrangement .cqc-* uses for the clarify card.
+   Without these the card rendered as a bare textarea and a default button. */
+.ggc { display: flex; flex-direction: column; gap: 12px; font-size: 13px; }
+/* `pre-line` for the same reason .ga-ask needs it: the ask is composed with
+   real newlines, and collapsed it becomes one unreadable run-on. */
+.ggc-ask { margin: 0; line-height: 1.55; white-space: pre-line; }
+.ggc-provenance { margin: 0; opacity: 0.65; font-size: 12px; }
+.ggc-note { margin: 0; font-size: 12.5px; opacity: 0.72; line-height: 1.5; }
+.ggc-definition {
+  width: 100%; padding: 8px 10px; border: 1px solid var(--border, #e5e5e5);
+  border-radius: 8px; font: inherit; resize: vertical; background: transparent;
+  color: inherit;
+}
+.ggc-confirm {
+  align-self: flex-start; padding: 7px 14px; border-radius: 8px;
+  border: 1px solid transparent; background: var(--accent, #111); color: #fff;
+  cursor: pointer; font: inherit;
+}
+.ggc-confirm:disabled { opacity: 0.45; cursor: default; }
+/* The settled record: what was agreed, kept in the thread rather than
+   collapsed to a bare "done". Muted, because it is history now. */
+.ggc-settled {
+  gap: 4px; padding: 10px 12px; border-radius: 8px;
+  border: 1px solid var(--border, #e5e5e5);
+}
+.ggc-settled-label {
+  margin: 0; font-size: 11.5px; letter-spacing: 0.02em;
+  text-transform: uppercase; opacity: 0.6;
+}
+.ggc-settled-body { margin: 0; line-height: 1.5; }
+/* THE DEFINITION, EDITABLE WHERE IT IS READ. A proposal you cannot change in
+   place is an assertion with a polite tone, so this is a real field rather
+   than a quote with an "edit" affordance somewhere else. */
+.ga-plan-definition-edit {
+  width: 100%; margin-top: 6px; padding: 8px 10px;
+  font: inherit; line-height: 1.5; resize: vertical;
+  border: 1px solid var(--border, #e5e5e5); border-radius: 6px;
+  background: var(--surface, transparent); color: inherit;
+}
+/* THE APPROACH BLOCK. Sits above the detail and is meant to be the only
+   thing most readers read, so it gets the room a lead paragraph gets. */
+.ga-plan-steps {
+  margin: 8px 0 0; padding-left: 1.25em;
+  display: flex; flex-direction: column; gap: 6px;
+}
+.ga-plan-steps li { line-height: 1.55; }
+.ga-plan-step-items {
+  margin: 4px 0 0; padding-left: 1.1em;
+  display: flex; flex-direction: column; gap: 3px;
+  list-style: disc;
+}
+.ga-plan-step-items li { line-height: 1.5; opacity: 0.9; }
+/* The example claim, set as a quote rather than buried in the statement. */
+.ga-finding-example {
+  margin: 6px 0 0; padding: 0 0 0 10px;
+  border-left: 2px solid var(--border, #e5e5e5);
+  line-height: 1.5; opacity: 0.85;
+}
+/* The suggestion leads the card, so it gets the emphasis the counts used to. */
+.ga-finding-rec { margin: 6px 0 8px; }
+.ga-finding-rec p { margin: 0; line-height: 1.55; }
+.ga-finding-rec-why { opacity: 0.8; margin-top: 2px !important; }
+/* The appendix: found and ranked like the rest, set aside for THIS goal. */
+.ga-doc-aside { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border, #e5e5e5); }
+.ga-doc-aside-list { margin: 8px 0 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 5px; }
+.ga-doc-aside-list li { line-height: 1.5; opacity: 0.85; }
+/* The scoring table. Wide content scrolls in its own box, never the page. */
+.ga-rice-scroll { overflow-x: auto; margin-top: 8px; }
+.ga-rice { border-collapse: collapse; width: 100%; font-size: 13px; }
+.ga-rice th, .ga-rice td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border, #e5e5e5); }
+.ga-rice th { font-weight: 600; opacity: 0.7; white-space: nowrap; }
+.ga-rice td { vertical-align: top; }
+.ga-plan-approach { padding-bottom: 4px; }
+/* THE HANDOFF LINE. Where the answer went, said in the thread rather than
+   left for the reader to infer from a panel that opened by itself. Separated
+   by a rule because it is the one forward-looking sentence on a card that is
+   otherwise a record of a decision already made. */
+.ggc-settled-next {
+  margin: 6px 0 0; padding-top: 6px; line-height: 1.5;
+  border-top: 1px solid var(--border, #e5e5e5);
+}
+/* Beside the live controls, never instead of them — a refused gate is usually
+   retryable, and the run is still waiting server-side. */
+.ggc-error { margin: 0; color: var(--danger, #b42318); line-height: 1.5; }
+/* The approved plan, kept legible after the decision. Read-only: a settled
+   gate is a record, not a control. */
+.ggc-settled-sources {
+  margin: 2px 0 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 2px;
+}
+.ggc-settled-sources li { line-height: 1.5; }
+/* A dropped source stays VISIBLE and struck, never removed — the whole point
+   is that a narrower run is stated rather than silently smaller.
+   THE STRIKE IS ON THE SOURCE, NOT ON THE DISCLOSURE. Striking and dimming the
+   whole row put "— dropped by you" — the words that carry the fact — at 0.55
+   opacity and through a line, which is under AA for 13px text and unreadable
+   to exactly the reader who most needs it. Anyone who cannot resolve a
+   strike-through has only those words left, so they stay at full strength. */
+.ggc-src-out { line-height: 1.5; }
+.ggc-src-struck { text-decoration: line-through; opacity: 0.75; }
+.ggc-src-note { font-weight: 500; }
 .ga-error { color: var(--danger, #b42318); margin: 0; }
+/* The way back from a poll that stopped itself. Inline in the banner, because
+   a stop the reader cannot undo is indistinguishable from a panel that broke.
+   Underlined rather than coloured: it sits inside .ga-error, so a second
+   colour there reads as a second severity. */
+.ga-error-retry {
+  padding: 0; border: 0; background: none; font: inherit; color: inherit;
+  text-decoration: underline; cursor: pointer;
+}
 
 /* Coverage sits ABOVE the findings: a note that a third of the evidence was
    undated changes how every number below it reads. */
@@ -24994,3 +25815,254 @@
 .ga-considered summary { cursor: pointer; opacity: 0.75; }
 .ga-considered ul { margin: 8px 0 0; padding-left: 16px;
   display: flex; flex-direction: column; gap: 6px; }
+
+.ga-sources { margin: 6px 0 0; font-size: 12px; opacity: 0.72; }
+.ga-sources-label { text-transform: uppercase; letter-spacing: 0.04em;
+  font-size: 10px; opacity: 0.75; }
+
+/* ── The report, and the plan that precedes it ────────────────────────────
+   Both read as a DOCUMENT, not a dashboard: one column, generous leading,
+   headings that carry the argument. The panel is narrow, so the measure is
+   already about right — what has to be bought back is vertical air and a type
+   scale with more than one step in it, because a wall of 13px chips is what
+   made the old list scan as a control surface instead of a report. */
+.ga-doc, .ga-plan {
+  display: flex; flex-direction: column; gap: 26px;
+  font-size: 13.5px; line-height: 1.62; letter-spacing: 0.002em;
+}
+.ga-doc-header { display: flex; flex-direction: column; gap: 6px; }
+.ga-doc-eyebrow {
+  margin: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
+  text-transform: uppercase; opacity: 0.55;
+}
+.ga-doc-title {
+  margin: 0; font-size: 21px; line-height: 1.28; font-weight: 650;
+  letter-spacing: -0.01em;
+}
+.ga-doc-section, .ga-plan-section {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.ga-doc-section + .ga-doc-section { border-top: 1px solid var(--border, #ececec);
+  padding-top: 22px; }
+.ga-doc-h2 {
+  margin: 0; font-size: 15px; font-weight: 640; letter-spacing: -0.005em;
+}
+.ga-doc-h3 {
+  margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; opacity: 0.6;
+}
+.ga-doc-lede { margin: 0; }
+.ga-doc-note { margin: 0; font-size: 12.5px; opacity: 0.72; }
+/* ── The report as an editable document ───────────────────────────────────
+   The run is immutable; the report is a document ABOUT it. These are the two
+   states that distinction has to be visible in.
+
+   The ACTIONS sit under the title, quiet: editing a report detaches it from
+   its run for good, so the control that does it should not read as the
+   obvious next thing to press. The note beside them carries the consequence,
+   BEFORE the click rather than after it. */
+.ga-doc-actions {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-top: 4px;
+}
+.ga-doc-action {
+  font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px;
+  border: 1px solid var(--border, #ececec); background: var(--surface, #fff);
+  color: inherit; cursor: pointer;
+}
+.ga-doc-action:disabled { opacity: 0.45; cursor: default; }
+.ga-doc-actions-note {
+  flex-basis: 100%; margin: 0; font-size: 12px; opacity: 0.66;
+}
+.ga-doc-editing { display: flex; flex-direction: column; gap: 14px; }
+/* The DETACHED banner is the product's own honesty, so it is given the weight
+   of a real notice rather than a footnote. Its untouched sibling below is
+   deliberately plainer: nothing has happened yet, and a notice that fires
+   before there is anything to notice is one people learn to skip. */
+.ga-doc-detached, .ga-doc-attached {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 14px; border-radius: 8px;
+  border: 1px solid var(--border, #ececec);
+  background: var(--surface-2, #f7f7f6);
+}
+.ga-doc-detached { border-left: 2px solid var(--accent, #111); }
+.ga-doc-detached-lede { margin: 0; font-size: 12.5px; line-height: 1.55; }
+.ga-doc-detached-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+/* The confirmed definition, quoted verbatim. It is the one sentence the whole
+   report is measured against, so it is set apart rather than paraphrased. */
+.ga-doc-quote {
+  margin: 0; padding: 10px 14px; border-left: 2px solid var(--accent, #111);
+  background: var(--surface-2, #f7f7f6); border-radius: 0 8px 8px 0;
+  font-size: 13.5px;
+}
+/* The headline finding, in the one place the report raises its voice. */
+.ga-doc-headline { margin: 0; font-size: 16.5px; line-height: 1.45; font-weight: 560; }
+.ga-doc-sources, .ga-doc-list, .ga-doc-ruled-out, .ga-doc-gaps {
+  margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 8px; font-size: 13px;
+}
+.ga-doc-list, .ga-doc-ruled-out { padding-left: 16px; list-style: disc; }
+.ga-doc-source-count {
+  font-variant-numeric: tabular-nums; font-weight: 650;
+}
+.ga-doc-findings {
+  margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 22px;
+}
+.ga-doc-finding { display: flex; flex-direction: column; gap: 2px; }
+.ga-doc-finding-head { display: flex; gap: 10px; align-items: baseline; }
+.ga-doc-rank {
+  font-variant-numeric: tabular-nums; font-weight: 700; font-size: 12px;
+  opacity: 0.4; min-width: 14px;
+}
+.ga-doc-claims { opacity: 0.6; }
+.ga-doc-summary { cursor: pointer; margin-bottom: 10px; }
+.ga-doc-summary::marker { color: var(--accent, #111); }
+/* The closing section. Tinted, because "what this cannot tell you" is the
+   part a reader skips, and it is the part that keeps the rest honest. */
+.ga-doc-limits {
+  background: var(--surface-2, #f7f7f6); border-radius: 10px; padding: 18px;
+}
+.ga-doc-section + .ga-doc-limits { border-top: none; }
+.ga-doc-gaps { gap: 14px; }
+.ga-doc-gap-q { margin: 0; font-weight: 620; }
+.ga-doc-gap-why, .ga-doc-gap-fix { margin: 2px 0 0; font-size: 12.5px; opacity: 0.75; }
+
+/* The plan step. Same document voice, plus the controls that make it a
+   decision rather than a notice. */
+.ga-plan-sources { margin: 0; padding: 0; list-style: none;
+  display: flex; flex-direction: column; gap: 12px; }
+.ga-plan-source {
+  display: flex; gap: 10px; align-items: flex-start; cursor: pointer;
+}
+.ga-plan-source input { margin-top: 3px; }
+.ga-plan-witness { font-size: 12px; opacity: 0.68; }
+
+/* The run narrating itself while it works — see GoalRunNarration.tsx. Reads as
+   a funnel, so the nesting is the point: each rule's count sits under the step
+   that applied it. */
+.ga-narration { margin: 0; padding-left: 1.1rem; display: grid; gap: 6px; font-size: 13px; }
+.ga-narration > li { line-height: 1.45; }
+.ga-narration-drops { margin: 4px 0 0; padding-left: 1.1rem; display: grid; gap: 3px; opacity: 0.82; }
+/* The funnel, kept beside the finished report. Folded by default: it is the
+   evidence for the ranking, not the ranking, so it should be reachable rather
+   than in the way. */
+.ga-narration-recap { margin-top: 18px; border-top: 1px solid var(--border, #e5e5e5); padding-top: 12px; }
+.ga-narration-recap > summary { cursor: pointer; font-size: 12.5px; opacity: 0.72; }
+.ga-narration-recap > summary:hover { opacity: 1; }
+.ga-narration-recap .ga-narration { margin-top: 10px; }
+
+/* ── Settings pane nav ────────────────────────────────────────────────────
+   Lifted from feat/billing/stripe-subscriptions-and-credits, where it was
+   built so a six-card Billing pane stopped being a long scroll. The settings
+   NAV had the same disease — fifteen rows — so the primitive comes to main
+   ahead of that branch and is used to fold six of them away. Kept byte-for-
+   byte apart from this note, so the merge with that branch is a no-op. */
+/* The nav is a RAIL at the edge of the pane, not a column inside the content.
+   `.pset-body` caps every pane at 860px, which would put the rail in the
+   middle of the screen — so a pane that uses this primitive opts out of that
+   cap and the content column keeps its own readable width instead.
+   `:has()` rather than a modifier class so no pane has to remember to add
+   one; using the primitive is the whole opt-in. */
+.pset-body:has(.setpane-shell) {
+  max-width: none;
+}
+
+.setpane-shell {
+  container-type: inline-size;
+  container-name: setpane;
+}
+
+.setpane-split {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 216px;
+  gap: 40px;
+  align-items: start;
+}
+
+/* Prose and forms still want a comfortable measure — only the RAIL moves to
+   the edge, not the card with it. */
+.setpane-main {
+  min-width: 0;
+  max-width: 820px;
+}
+
+.setpane-nav {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  position: sticky;
+  top: 12px;
+  padding-left: 18px;
+  border-left: 1px solid var(--line);
+}
+
+.setpane-nav-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.setpane-nav-item:hover {
+  background: var(--surface-3, rgba(18, 32, 26, 0.05));
+  color: var(--ink);
+}
+
+.setpane-nav-item.active {
+  background: var(--surface-3, rgba(18, 32, 26, 0.06));
+  color: var(--ink);
+  font-weight: 500;
+}
+
+/* The one number each section is about, readable without opening it. */
+.setpane-nav-hint {
+  font-size: 11px;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.setpane-nav-item.active .setpane-nav-hint {
+  color: var(--ink-2);
+}
+
+/* Measured against the PANE's own width, not the viewport: this primitive is
+   shared, and the settings sidebar already takes 228px of the screen. Below
+   the split point the rail becomes a scrollable row above the card — a 216px
+   rail beside a narrow card would squeeze both. */
+@container setpane (max-width: 720px) {
+  .setpane-split {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .setpane-nav {
+    position: static;
+    flex-direction: row;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 0 0 2px;
+    border-left: none;
+    border-bottom: 1px solid var(--line);
+    order: -1;
+  }
+
+  .setpane-nav-item {
+    width: auto;
+    white-space: nowrap;
+  }
+
+  .setpane-nav-hint {
+    display: none;
+  }
+}

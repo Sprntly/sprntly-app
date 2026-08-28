@@ -47,14 +47,18 @@ export function ResetPasswordView(props: ResetPasswordViewProps) {
   } = props
 
   if (mode === "done") {
+    // NOT A STOP. The password is saved and the session is live, so the page
+    // is already on its way into the app — this renders for the moment that
+    // takes. The link is the way out if the redirect never lands, not the way
+    // in: nobody should have to click anything to finish resetting a password.
     return (
       <AuthShell tag="Password reset">
         <div className="auth-h">All <em>set.</em></div>
-        <div className="auth-sub">Your new password is updated. You&apos;re signed in.</div>
+        <div className="auth-sub">
+          Your new password is saved. Taking you to Sprntly&hellip;
+        </div>
         <div style={{ marginTop: 16 }}>
-          <Link href="/" className="btn btn-brand btn-block">
-            Continue to Sprntly
-          </Link>
+          <Link href="/" className="auth-link">Continue to Sprntly</Link>
         </div>
       </AuthShell>
     )

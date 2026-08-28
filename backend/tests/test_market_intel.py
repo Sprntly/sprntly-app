@@ -186,6 +186,45 @@ def test_answer_happy_path_returns_the_report(monkeypatch):
     assert calls["llm"]["long_output"] is True
 
 
+def test_phases_name_capture_then_synthesis_in_order(monkeypatch):
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(mi, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(
+        mi, "llm_call",
+        lambda **kw: SimpleNamespace(output=dict(REPORT_DATA)))
+    phases: list[str] = []
+    mi.answer(enterprise_id="e1", question="run a market intelligence report",
+              on_phase=phases.append)
+    # GATHERING (the paid web capture) then WRITING (the synthesis) — the two
+    # real legs, via the shared report vocabulary.
+    assert phases == [
+        "Gathering the latest information…",
+        "Writing your report…",
+    ]
+
+
+def test_no_synthesis_phase_when_capture_found_nothing(monkeypatch):
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(mi, "_capture", lambda *a, **k: ([], False))
+    phases: list[str] = []
+    mi.answer(enterprise_id="e1", question="market intelligence report",
+              on_phase=phases.append)
+    # An empty capture returns before the synthesis leg — only GATHERING fired.
+    assert phases == ["Gathering the latest information…"]
+
+
+def test_pipeline_runs_unchanged_without_a_phase_sink(monkeypatch):
+    _patch_profile(monkeypatch)
+    monkeypatch.setattr(mi, "_capture", lambda *a, **k: (list(RECORDS), False))
+    monkeypatch.setattr(
+        mi, "llm_call",
+        lambda **kw: SimpleNamespace(output=dict(REPORT_DATA)))
+    with_sink = mi.answer(enterprise_id="e1", question="market intelligence report",
+                          on_phase=lambda _l: None)
+    without = mi.answer(enterprise_id="e1", question="market intelligence report")
+    assert with_sink == without
+
+
 def test_synthesis_failure_is_graceful(monkeypatch):
     _patch_profile(monkeypatch)
     monkeypatch.setattr(mi, "_capture", lambda *a, **k: (list(RECORDS), False))

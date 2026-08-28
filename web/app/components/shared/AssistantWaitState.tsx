@@ -36,6 +36,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { SprntlyThinkingMark } from "./SprntlyMark"
+import { GROUNDED_PROGRESS_ENABLED } from "../../lib/friendlyPhase"
 
 // ── Copy ────────────────────────────────────────────────────────────────────
 export const WAIT_PHASE_WORKING = "Working on your question"
@@ -75,6 +76,41 @@ function shuffledCycle(): string[] {
   return [opener, ...rest]
 }
 
+// ── Grounded progress (flagged) ─────────────────────────────────────────────
+// GROUNDED_PROGRESS_ENABLED is the build-time flag, OFF by default (imported from
+// lib/friendlyPhase so the ask runner and this component share one source). OFF
+// is byte-identical to the whimsy cycle above.
+//
+// ON, the wait line is driven by, in order of preference:
+//   1. a fixed real signal (streaming / dropped / resumed / caller phase),
+//   2. `livePhase` — the REAL backend pipeline-leg phase event, curated to
+//      user-facing copy (e.g. "Looking through your connected sources…"),
+//   3. the TIME-BASED grounded beats below, the fallback for the ~6.5s planner
+//      preamble which emits no event at all.
+// So a real signal always wins over the timed beat once one has arrived.
+
+/** The time-based fallback beats, timed to the measured pipeline: an ask spends
+ *  ~6.5s in the planner preamble (one Sonnet call that classifies the question
+ *  and picks the approach) BEFORE any phase event fires, so these narrate that
+ *  window. Past ~12s with still no real phase, it settles on the claim-free
+ *  generic line rather than falsely holding "Pulling in your data…" for a
+ *  minute. None of these claims a step that isn't happening; the boundary times
+ *  are the honest soft part — the known AVERAGE, not a per-request event. */
+const GROUNDED_PROGRESS_STAGES: readonly { untilMs: number; label: string }[] = [
+  { untilMs: 3000, label: "Understanding your question…" },
+  { untilMs: 6500, label: "Planning the best approach…" },
+  { untilMs: 12000, label: "Pulling in your data…" },
+  { untilMs: Number.POSITIVE_INFINITY, label: "Working on your answer…" },
+]
+
+/** The grounded beat for `elapsedMs` — the first stage whose window it's in. */
+function groundedStageLabel(elapsedMs: number): string {
+  for (const stage of GROUNDED_PROGRESS_STAGES) {
+    if (elapsedMs < stage.untilMs) return stage.label
+  }
+  return GROUNDED_PROGRESS_STAGES[GROUNDED_PROGRESS_STAGES.length - 1].label
+}
+
 export const WAIT_NOTE_GENERIC = "This one usually takes under a minute."
 export const WAIT_NOTE_LONG_SKILL =
   "A competitive report reads sources across the web — this one usually takes a few minutes."
@@ -87,9 +123,11 @@ export const WAIT_NOTE_RESUMED = "This answer was already running before you rel
 export const WAIT_STOPPED = "You stopped this response."
 export const WAIT_TIMED_OUT =
   "This is taking longer than expected. It's still running on our side — reload and it will pick up where it left off."
-export const WAIT_FAILED_TITLE = "That answer didn't come through."
-export const WAIT_FAILED_BODY =
-  "Nothing was saved. Send the question again, or try it with fewer files attached."
+// One line for EVERY failure kind — a dropped connection, a backend 500, a
+// tenant-gate 404. The person cannot act on the difference between them, and
+// the old copy guessed wrong about the common case: it blamed attachments when
+// what usually happened is the connection cutting out mid-answer.
+export const WAIT_FAILED = "There was an interruption, try again."
 
 // ── Rung thresholds ─────────────────────────────────────────────────────────
 /** Rung 0 → 1. Below this an indicator only flickers on a fast answer. */
@@ -206,6 +244,11 @@ type Props = {
   streamDropped?: boolean
   /** Rung 6 — this ask was re-attached rather than POSTed. */
   resumed?: boolean
+  /** The real backend pipeline-leg phase, ALREADY curated to user-facing copy
+   *  ("Looking through your connected sources…"). Consulted ONLY when the
+   *  grounded-progress flag is on, where it outranks the time-based beat but not
+   *  a fixed signal (streaming/dropped/resumed/phase). Ignored flag-off. */
+  livePhase?: string
   /** Deterministic slash-pinned skill label, e.g. "Competitive intelligence
    *  report". Never a guess: only set when the draft began with a known trigger. */
   skillLabel?: string | null
@@ -225,6 +268,7 @@ export function AssistantWaitState({
   streaming,
   streamDropped,
   resumed,
+  livePhase,
   skillLabel,
   longSkill,
   onStop,
@@ -264,14 +308,29 @@ export function AssistantWaitState({
           : null
   const [cyclePool] = useState(shuffledCycle)
   const [cycleIdx, setCycleIdx] = useState(0)
-  const targetPhrase = fixedPhrase ?? cyclePool[cycleIdx % cyclePool.length]
+  // Flag ON: the wait line is a REAL curated phase (`livePhase`) the moment one
+  // has arrived, else a grounded, time-driven beat — either way replacing the
+  // whimsy cycle until a fixed signal (streaming) takes over. `now` ticks every
+  // second, so the timed beat advances at the stage boundaries on its own — no
+  // self-advancing cycle. Flag OFF: `groundedLabel` is null and everything below
+  // is byte-identical to the shuffled cycle.
+  const groundedLabel = GROUNDED_PROGRESS_ENABLED
+    ? (livePhase ?? groundedStageLabel(Math.max(0, now - start)))
+    : null
+  const targetPhrase =
+    fixedPhrase ?? groundedLabel ?? cyclePool[cycleIdx % cyclePool.length]
+  // The typewriter only self-advances for the whimsy cycle; the grounded beat is
+  // clocked by `now`, and a fixed phrase never advances.
+  const cycleActive = fixedPhrase === null && groundedLabel === null
   const { typed, settled } = useTypedPhrase(
     targetPhrase,
-    fixedPhrase === null,
+    cycleActive,
     () => setCycleIdx((i) => i + 1),
   )
-  // What the live region (and the tests) read: the STATE, not the animation.
-  const srLine = fixedPhrase ?? WAIT_PHASE_WORKING
+  // What the live region (and the tests) read: the STATE, not the animation. The
+  // grounded beat IS a state change worth announcing (real progress), so it is
+  // the announced line when the flag is on.
+  const srLine = fixedPhrase ?? groundedLabel ?? WAIT_PHASE_WORKING
 
   const elapsed = Math.max(0, now - start)
 
@@ -386,18 +445,38 @@ export function WaitTimedOutState({
  *  role="alert" because the chat surface had NO alert, status or live region at
  *  all — a screen-reader user got total silence on failure.
  *
- *  The copy is FIXED. The raw error is deliberately not rendered: a backend
- *  detail string is meaningless to the person reading it, and the 404 the tenant
- *  gate raises must read as "didn't come through" with no hint that the row
- *  exists somewhere else. */
-export function WaitFailedState({ onAskAgain }: { onAskAgain?: () => void }) {
+ *  The copy is FIXED BY DEFAULT. The raw error is deliberately not rendered: a
+ *  backend detail string is meaningless to the person reading it, and the 404
+ *  the tenant gate raises must read as an interruption with no hint that the
+ *  row exists somewhere else.
+ *
+ *  A PROVIDER NOTICE IS THE ONE EXCEPTION, and it is not a raw error — it is a
+ *  TYPED, server-authored, deliberately user-safe sentence produced for exactly
+ *  this purpose ("the account is out of credits or rate limited"). Suppressing
+ *  it left the durable turn saying "There was an interruption" while a toast —
+ *  transient, and gone by the time anyone scrolled back — carried the truth.
+ *  Observed on staging with `credit_balance: 0`: two toasts fired for one
+ *  event, saying different things, and the turn kept the less useful one.
+ *
+ *  AND THE RETRY GOES WITH IT when an admin has to act. "Ask again" on an
+ *  out-of-credits account is a control that cannot work, which is worse than
+ *  no control: it reads as though the failure were transient. A transient
+ *  overload (`needsAdmin: false`) keeps it, because there retrying is exactly
+ *  right. */
+export function WaitFailedState({
+  onAskAgain,
+  notice,
+}: {
+  onAskAgain?: () => void
+  notice?: { message: string; needsAdmin: boolean } | null
+}) {
+  const canRetry = onAskAgain && !(notice && notice.needsAdmin)
   return (
     <div className="cw">
-      <div className="cw-err bc-error" role="alert">
-        <b>{WAIT_FAILED_TITLE}</b>
-        {WAIT_FAILED_BODY}
+      <div className="bc-error" role="alert">
+        {notice ? notice.message : WAIT_FAILED}
       </div>
-      {onAskAgain ? (
+      {canRetry ? (
         <div className="cw-actions">
           <button type="button" className="cw-btn cw-btn--primary" onClick={onAskAgain}>Ask again</button>
         </div>

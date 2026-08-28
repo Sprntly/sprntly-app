@@ -31,10 +31,12 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Callable
 
 from app.prompt_history import clamp_turn_text
 from app.graph.gateway import llm_call
 from app.llm import call_with_web_search
+from app.report_phases import ReportPhase, emit_report_phase
 from app.report_records import parse_records
 
 logger = logging.getLogger(__name__)
@@ -251,6 +253,130 @@ _REPORT_SCHEMA: dict = {
 }
 
 
+# ── Map-reduce section split (mirrors call_digest/market_intel) ───────────────
+#
+# The third report on the `answer_first.gateway_sections` primitive. Gated behind
+# `answer_first.report_mapreduce_enabled("public_feedback")` (global master +
+# `PUBLIC_FEEDBACK_MAPREDUCE_ENABLED`, both default OFF, answer-first on); flag-off
+# is byte-identical to today's single-call forced-JSON synthesis. The base
+# `_REPORT_SYSTEM` still governs every discipline rule (posts-not-users, verbatim
+# platform-attributed quotes, percentages over collected records); each directive
+# only SCOPES which parts each concurrent half writes. Split along "size the
+# feedback" vs "act on and illustrate it": A reads all posts and sizes the themes;
+# B recommends and cites the verbatim posts. No cross-section state, so the halves
+# decode concurrently and merge A-then-B.
+#
+# Unlike MI, PF query mode consumes a saved `{window_label, metadata}` structured
+# half, so the map-reduce path runs a small PF-specific REDUCE (`_pf_reduce`) after
+# the merge to reproduce + save it — the prose is still `derive_metadata=False`.
+#
+# Hard per-section output CEILING (not a target): the lighter Section A stops
+# early on its own, so this only bites the heavier Section B (recommendations +
+# ALL quotes + bottom line) — the same lopsided shape that truncated MI's Section
+# B at its cap. Set to 5000 proactively (matching MI's raised cap) so PF's Section
+# B finishes rather than losing its Bottom Line. (Single-pass PF output was ~7,054
+# tok; the naive "half" of 3,527 under-sized the heavier B.) The generic
+# truncation detection in `gateway_sections` catches it loudly if it ever trips.
+_PF_SECTION_MAX_TOKENS = 5000
+
+_PF_SECTION_A = (
+    "You are writing ONE HALF of a combined public-feedback report; a separate "
+    "pass writes the other half and the two halves are concatenated into the final "
+    "report the user reads. Write YOUR half TIGHTLY — aim for roughly half the "
+    "length of a complete report; do not pad, do not restate the other half, and "
+    "do NOT write a standalone full report. CRITICAL: do NOT write a document "
+    "title, and NEVER write any 'Part 1 of 2', 'Section A', or similar split "
+    "marker anywhere — begin directly at your first section heading. Write ONLY "
+    "these parts, in this order, as plain markdown:\n"
+    "1. SCOPE & COVERAGE: state the window this report covers as explicit dates, "
+    "which surfaces the sweep searched (app stores, Reddit, review sites, social), "
+    "and which filters were applied (or none).\n"
+    "2. THEMES: the feedback themes, each sized in POSTS WE FOUND (NEVER users — "
+    "counts are posts, never people), with the source channels each was heard on, "
+    "and the product vs non-product proportion (if non-product is the majority, "
+    "say so). Percentages only over the collected records.\n"
+    "3. SENTIMENT: per theme and per channel, from the posts' own language.\n"
+    "4. NOTABLE SIGNALS: the month-by-month shape oldest to newest (a month with "
+    "no records is zero), who is outright LEAVING (angry is not leaving), the "
+    "new / still-unresolved / looks-fixed split, and anything brand new this "
+    "period.\n"
+    "Reference posts IN YOUR OWN WORDS — do NOT include any verbatim quotes or a "
+    "representative-quotes list; ALL verbatim posts belong to the other half. Do "
+    "NOT write recommendations or an executive summary. CRITICAL: this path is "
+    "PROSE ONLY — do NOT emit a `key_points` list, any JSON, a `window_label`, or "
+    "a fenced metadata / structured block (no ```metadata or ```json fence, no "
+    "trailing machine-readable 'metadata' section). Any machine-readable values "
+    "are produced separately, so IGNORE any instruction above to fill them. Write "
+    "the section body only."
+)
+_PF_SECTION_B = (
+    "You are writing the OTHER HALF of a combined public-feedback report; the "
+    "first half (scope, the themes sized in posts, sentiment, and notable signals) "
+    "is written by a separate pass over the same posts and placed BEFORE yours. "
+    "Write YOUR half TIGHTLY — aim for roughly half the length of a complete "
+    "report; do not pad, do NOT reproduce the theme sizing or scope, and do NOT "
+    "write a standalone full report. CRITICAL: do NOT write a document title, and "
+    "NEVER write any 'Part 2 of 2', 'Section B', or similar split marker anywhere "
+    "— begin directly at your first section heading. Write ONLY these parts, in "
+    "this order, as plain markdown:\n"
+    "1. RECOMMENDATIONS: about five, product-actionable only, each led by its "
+    "user-facing problem line; a recommendation resting on stale records carries a "
+    "check-this-first line.\n"
+    "2. REPRESENTATIVE QUOTES: you own ALL verbatim quotes for the entire report — "
+    "real quotes only, verbatim from the records, platform-attributed and dated; "
+    "never a paraphrase in quotation marks. Flag a quote gap rather than "
+    "manufacture one.\n"
+    "3. BOTTOM LINE: a short executive summary of what matters most and the big "
+    "limitation of this sweep.\n"
+    "CRITICAL: the first half OWNS the sizing — the post counts, the "
+    "product / non-product split, and every aggregate total. Do NOT independently "
+    "recompute or restate any of those numbers; you and the first half count from "
+    "the same records separately and will drift by a post or two, contradicting "
+    "each other in one report. Refer to them QUALITATIVELY instead (\"as sized "
+    "above\", \"most feedback is product-related\", \"the majority\") or defer to "
+    "the first half's split — NEVER emit your own hard number for a total the "
+    "first half already stated.\n"
+    "CRITICAL: this path is PROSE ONLY — do NOT emit a `key_points` list, any "
+    "JSON, a `window_label`, or a fenced metadata / structured block (no "
+    "```metadata or ```json fence, no trailing machine-readable 'metadata' "
+    "section). Any machine-readable values are produced separately, so IGNORE any "
+    "instruction above to fill them. Write the section body only."
+)
+_PF_SECTIONS: list[tuple[str, str]] = [
+    ("scope-themes-sentiment-signals", _PF_SECTION_A),
+    ("recommendations-quotes-summary", _PF_SECTION_B),
+]
+
+# The REDUCE that makes PF different from MI. The map-reduce path is prose-only,
+# but PF query mode answers follow-ups from a saved `{window_label, metadata}`
+# (`_answer_from_run`), so those MUST still be produced and saved. This is the
+# report schema MINUS `answer` — exactly the structured half the single-pass call
+# emitted alongside its prose.
+_PF_REDUCE_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "window_label": _REPORT_SCHEMA["properties"]["window_label"],
+        "metadata": _PF_METADATA_SCHEMA,
+    },
+    "required": ["window_label", "metadata"],
+}
+_PF_REDUCE_SYSTEM = (
+    "You produce ONLY the machine-readable structured half of a public-feedback "
+    "report — `window_label` and `metadata`. A prose report has ALREADY been "
+    "written from the captured records and shown to the user; you do NOT rewrite, "
+    "summarise, or extend it. Read the report and the records below and fill the "
+    "two values so they AGREE with the report.\n"
+    "- `window_label`: the human window this report covers, e.g. "
+    "\"Feb - Jul 2026\".\n"
+    "- `metadata`: the rollup. Every count is POSTS WE FOUND, never users, and "
+    "must agree with the report. `by_month` runs oldest to newest with a zero for "
+    "months where we found nothing. `totals.leaving` counts only people who said "
+    "outright they are leaving. Neither value may be empty — follow-up questions "
+    "are answered from `metadata`, so an empty one leaves them nothing to answer "
+    "from. Return the structured values only; never return the report text."
+)
+
+
 # ── Query mode — follow-ups answered from the latest stored run ──────────────
 # The skill's references/query-guide.md governs these answers. A follow-up that
 # FILTERS the captured set ("what did the App Store say", "show me March",
@@ -330,6 +456,28 @@ def is_followup_query(question: str) -> bool:
     if _REPORT_SHAPED.search(question):
         return False
     return any(p.search(question) for p in _QUERY_SHAPES)
+
+
+def _run_covers(run: dict, entity: str | None) -> bool:
+    """Can this stored run answer a follow-up about `entity`?
+
+    Query mode answers off the records already on file and buys no web sweep,
+    and `_QUERY_SYSTEM` holds it to those records — right for a subject the
+    sweep collected, and the wrong answer entirely for one it never saw. A
+    company, product or app the last capture never touched is not something
+    this report knows; going back to the web is, and it is the only thing that
+    turns "I don't have that" into an answer.
+
+    True whenever nothing specific was named — the ordinary follow-up ("show
+    me the pricing complaints") is a filter over the report itself.
+    """
+    subject = " ".join((entity or "").split()).lower()
+    if not subject:
+        return True
+    # ponytail: substring scan of the records, so a name mentioned once counts
+    # as covered. Enough while the failure is a subject that appears nowhere.
+    return subject in json.dumps(
+        run.get("records") or [], ensure_ascii=False).lower()
 
 
 def _answer_from_run(
@@ -478,12 +626,68 @@ def _capture(enterprise_id: str, scope: str, subject: str) -> tuple[list[dict], 
     return records, truncated
 
 
-def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None) -> dict | None:
+def _pf_reduce(*, enterprise_id: str, question: str, report: str,
+               records_json: str) -> tuple[str, dict]:
+    """Produce the `{window_label, metadata}` structured half the prose-only
+    map-reduce path does not, so PF query mode still has a saved run to answer
+    follow-ups from. ONE small structured call over the merged prose + the
+    captured records (the records ride the cacheable prefix the section calls just
+    warmed, so this is a cache-read). Returns `("", {})` on any failure — the same
+    degrade the single-pass path tolerates (query mode falls back to a fresh run).
+
+    Runs INLINE (simplest, preserves query mode). A future optimization is to
+    DEFER this reduce to a background lane after delivery (the PRD-warm precedent)
+    so even this small call is off the critical path.
+    """
+    try:
+        res = llm_call(
+            enterprise_id=enterprise_id,
+            agent="qa",
+            purpose="public_feedback_report_reduce",
+            model=ANSWER_MODEL,
+            system=_PF_REDUCE_SYSTEM,
+            input=(
+                f"Question: {question}\n\n=== THE REPORT (already written and "
+                f"shown to the user) ===\n{report}\n\nNow produce ONLY the "
+                "machine-readable `window_label` and `metadata` for this report, "
+                "agreeing with it and with the captured records above."
+            ),
+            prompt_version="qa-public-feedback-reduce-v1",
+            json_schema=_PF_REDUCE_SCHEMA,
+            user_cacheable_prefix=records_json,
+            max_tokens=4000,
+        )
+        data = res.output if isinstance(res.output, dict) else {}
+    except Exception:  # noqa: BLE001 — query mode degrades to a fresh run
+        logger.exception("public-feedback: map-reduce reduce failed for %s", enterprise_id)
+        return "", {}
+    return str(data.get("window_label") or "")[:200], (data.get("metadata") or {})
+
+
+def answer(*, enterprise_id: str, question: str, history: list[dict] | None = None,
+           on_delta=None,
+           on_phase: Callable[[str], None] | None = None,
+           entity: str | None = None) -> dict | None:
     """Run the public-feedback pipeline and return an Ask-shaped payload.
 
     Returns None when the company profile can't be read at all, so qa_agent
     falls through to the generic skill answer; every other degraded case
-    returns a helpful plain message instead."""
+    returns a helpful plain message instead.
+
+    `on_delta`, when supplied, is the Ask worker's token sink. It is used ONLY on
+    the map-reduce synthesis path (gated by
+    `answer_first.report_mapreduce_enabled("public_feedback")`); with the gate off
+    the synthesis stays the single un-streamed forced-JSON call it is today and
+    `on_delta` is ignored. The scheduled caller passes nothing.
+
+    `entity`, when supplied, is the subject the planner read out of the
+    question (`constraints.entity`). It decides whether query mode is eligible
+    at all: a follow-up about a company or app the last capture never saw
+    cannot be answered off that capture, and this pipeline can go and look.
+
+    `on_phase`, when supplied, narrates the two real legs — GATHERING (the paid
+    public-web capture) then WRITING (the synthesis) — via the shared report
+    vocabulary. A no-op without a sink."""
     from app.research.market import company_profile
 
     # Follow-up filter over an existing run → query mode (seconds, no web
@@ -497,7 +701,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             run = db.latest_public_feedback_run(enterprise_id)
         except Exception:  # noqa: BLE001 — treat as no stored run
             logger.exception("public-feedback: latest-run read failed for %s", enterprise_id)
-        if run:
+        if run and _run_covers(run, entity):
             try:
                 return _answer_from_run(
                     enterprise_id=enterprise_id, question=question,
@@ -522,6 +726,8 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
     scope = _scope_block(profile, question)
     product = profile.get("product") or {}
     subject = product.get("name") or profile.get("display_name") or ""
+    # GATHERING: the paid public-web sweep (app stores / Reddit / reviews).
+    emit_report_phase(on_phase, ReportPhase.GATHERING)
     try:
         records, truncated = _capture(enterprise_id, scope, subject)
     except Exception:  # noqa: BLE001 — surface as a graceful chat message
@@ -552,34 +758,80 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
         f"=== CAPTURED PUBLIC FEEDBACK — {len(records)} records (JSON, one "
         "object per piece of feedback found on the public web) ==="
     )
+    # The per-turn header (history + question + coverage line) and the corpus
+    # (the captured records) — kept apart so the map-reduce path can put the
+    # corpus on the cacheable prefix while the single-call path inlines both,
+    # exactly as call_digest/market_intel do.
+    _report_header = (
+        _render_history(history) + f"Question: {question}\n\n{source_line}"
+    )
+    _report_input = f"{_report_header}\n\n{records_json}"
+    # WRITING: capture is done — the document-scale synthesis is the last leg.
+    emit_report_phase(on_phase, ReportPhase.WRITING)
     try:
-        result = llm_call(
-            enterprise_id=enterprise_id,
-            agent="qa",
-            purpose="public_feedback_report",
-            model=ANSWER_MODEL,
-            system=_REPORT_SYSTEM,
-            input=(
-                _render_history(history) + f"Question: {question}\n\n"
-                f"{source_line}\n\n{records_json}"
-            ),
-            # v2: the pinned template and its filling schema are gone; the
-            # report is markdown and the structured half is `window_label` +
-            # `metadata` only. Not comparable to a v1 row.
-            prompt_version="qa-public-feedback-v2",
-            json_schema=_REPORT_SCHEMA,
-            skill=PF_SKILL,
-            max_tokens=16000,
-            # Records + a long report exceed the default per-request timeout —
-            # stream on the long read timeout, as the template build did.
-            long_output=True,
-        )
-        data = result.output
-        if not isinstance(data, dict):
-            raise ValueError(f"expected dict output, got {type(data).__name__}")
-        report = str(data.get("answer") or "").strip()
-        if not report:
-            raise ValueError("synthesis returned an empty report")
+        from app import answer_first
+
+        if answer_first.report_mapreduce_enabled("public_feedback"):
+            # Map-reduce (gated): split the one synthesis into two section calls
+            # that decode CONCURRENTLY over the same captured posts (records on the
+            # cacheable
+            # prefix → section B is a cache-read), streamed via answer-first, merged
+            # A-then-B. Prose only (`derive_metadata=False`); the PF-specific reduce
+            # below reproduces the `{window_label, metadata}` query mode needs.
+            payload = answer_first.gateway_sections(
+                question=question,
+                forced_system=_REPORT_SYSTEM,
+                forced_user=_report_header,
+                user_cacheable_prefix=records_json,
+                sections=_PF_SECTIONS,
+                on_delta=on_delta,
+                default_confidence=0.6,
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="public_feedback_report",
+                prompt_version="qa-public-feedback-v2",
+                model=ANSWER_MODEL,
+                skill=PF_SKILL,
+                max_tokens=_PF_SECTION_MAX_TOKENS,
+                derive_metadata=False,
+            )
+            report = str(payload.get("answer") or "").strip()
+            if not report:
+                raise ValueError("map-reduce synthesis returned an empty report")
+            window_label, metadata = _pf_reduce(
+                enterprise_id=enterprise_id, question=question,
+                report=report, records_json=records_json,
+            )
+        else:
+            result = llm_call(
+                enterprise_id=enterprise_id,
+                agent="qa",
+                purpose="public_feedback_report",
+                model=ANSWER_MODEL,
+                system=_REPORT_SYSTEM,
+                input=_report_input,
+                # v2: the pinned template and its filling schema are gone; the
+                # report is markdown and the structured half is `window_label` +
+                # `metadata` only. Not comparable to a v1 row.
+                prompt_version="qa-public-feedback-v2",
+                json_schema=_REPORT_SCHEMA,
+                skill=PF_SKILL,
+                max_tokens=16000,
+                # Records + a long report exceed the default per-request timeout —
+                # stream on the long read timeout, as the template build did.
+                long_output=True,
+            )
+            data = result.output
+            if not isinstance(data, dict):
+                raise ValueError(f"expected dict output, got {type(data).__name__}")
+            report = str(data.get("answer") or "").strip()
+            if not report:
+                raise ValueError("synthesis returned an empty report")
+            # Was `data["eyebrow"]`, a field of the deleted report schema. Same
+            # value, now asked for by name — query mode reads it back off the
+            # stored run to date its answers.
+            window_label = str(data.get("window_label") or "")[:200]
+            metadata = data.get("metadata") or {}
     except Exception:  # noqa: BLE001 — never break the chat
         logger.exception("public-feedback: report synthesis failed for %s", enterprise_id)
         return _plain_payload(
@@ -587,10 +839,6 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             "synthesizing the report. Please retry."
         )
 
-    # Was `data["eyebrow"]`, a field of the deleted report schema. Same value,
-    # now asked for by name — query mode reads it back off the stored run to
-    # date its answers.
-    window_label = str(data.get("window_label") or "")[:200]
     try:
         from app import db
 
@@ -599,7 +847,7 @@ def answer(*, enterprise_id: str, question: str, history: list[dict] | None = No
             question=question,
             window_label=window_label,
             records=records,
-            metadata=data.get("metadata") or {},
+            metadata=metadata,
             # The column is still `html` — it is the stored copy of the answer,
             # and renaming it is a migration. It now holds markdown.
             html=report,

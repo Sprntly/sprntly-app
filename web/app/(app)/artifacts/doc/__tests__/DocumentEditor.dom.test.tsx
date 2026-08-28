@@ -16,6 +16,10 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest"
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 import { DocumentEditor } from "../DocumentEditor"
+import {
+  execDocumentCommand,
+  UNSUPPORTED_DOCUMENT_COMMANDS,
+} from "../../../../lib/documentToolbarExec"
 
 beforeAll(() => {
   // ProseMirror measures the caret; jsdom returns nothing for these.
@@ -88,6 +92,57 @@ describe("the editor renders the document it is given", () => {
     expect(out).toContain("<li>")
   })
 
+  it("keeps a table a table, rather than flattening it into a paragraph", async () => {
+    // THE DEFECT: a report's summary grid arrived as one run-on paragraph —
+    // "ThemeAccounts Raising ItNature of Signal…", every cell concatenated with
+    // no separator. Nothing was wrong with the data: the row held real <table>
+    // markup, and `report_markdown` converts the engines' markdown grids with
+    // markdown's `tables` extension. The schema had no table node, and
+    // ProseMirror drops a node it cannot place while KEEPING ITS TEXT.
+    //
+    // Asserted on the cells rather than on the tag alone, because the failure
+    // was never a missing <table> at the reader — it was two cells becoming
+    // one string, which is what makes the grid unreadable.
+    const html =
+      "<table><thead><tr><th>Theme</th><th>Accounts</th></tr></thead>" +
+      "<tbody><tr><td>Async exercises</td><td>11</td></tr></tbody></table>"
+    const { container } = await mount({ initialHtml: html })
+    const pm = container.querySelector(".tiptap")!
+    expect(pm.querySelectorAll("table")).toHaveLength(1)
+    expect([...pm.querySelectorAll("th")].map((c) => c.textContent)).toEqual([
+      "Theme", "Accounts",
+    ])
+    expect([...pm.querySelectorAll("td")].map((c) => c.textContent)).toEqual([
+      "Async exercises", "11",
+    ])
+    // And no paragraph is carrying the cells instead — the flattened shape.
+    // (`textContent` is not the instrument for this: it concatenates cell text
+    // with no separator for a REAL table too, so it reads the same either way.)
+    expect([...pm.querySelectorAll("p")].map((n) => n.textContent)).not.toContain(
+      "ThemeAccountsAsync exercises11",
+    )
+  })
+
+  it("keeps the table when a real edit is saved back", async () => {
+    // The display bug was the visible half. The other half is destructive: an
+    // update serializes what the SCHEMA kept, so with no table node the first
+    // genuine keystroke anywhere in the document wrote the flattened body over
+    // the stored one — one edit from losing the grid for good.
+    const { onChange, container, getEditor } = await mount({
+      initialHtml:
+        "<p>intro</p><table><tbody><tr><td>cell a</td><td>cell b</td></tr></tbody></table>",
+    })
+    const wrapper = container.querySelector("[data-doc-editor]") as HTMLElement
+    wrapper.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true }))
+    getEditor().commands.insertContentAt(1, "x")
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    const saved = onChange.mock.calls.at(-1)![0] as string
+    expect(saved).toContain("<table")
+    expect(saved).toContain("cell a")
+    expect(saved).toContain("cell b")
+    expect(saved).not.toContain("cell acell b")
+  })
+
   it("renders a font/colour span from stored styles", async () => {
     const { container } = await mount({
       initialHtml: '<p><span style="font-family: Georgia; color: #B42318">styled</span></p>',
@@ -133,7 +188,9 @@ describe("opening a document is not editing it", () => {
     })
     onChange.mockClear()
     selectAll()
-    fireEvent.click(container.querySelector('[data-doc-toolbar] button')!)
+    // Bold BY NAME, not "the first button in the bar" — the bar's first button
+    // is Undo now that it carries the same controls as the panel's.
+    fireEvent.click(container.querySelector('[data-testid="doc-bold"]')!)
     await waitFor(() => expect(onChange).toHaveBeenCalled())
     expect(onChange.mock.calls.at(-1)?.[0]).toContain("<strong>")
   })
@@ -167,6 +224,236 @@ describe("opening a document is not editing it", () => {
     getEditor().commands.insertContentAt(1, "X")
 
     await waitFor(() => expect(onChange).toHaveBeenCalled())
+  })
+
+  // ── The bar that is not inside this component ─────────────────────────────
+  //
+  // Both panel hosts pin `PrdToolbar` OUTSIDE the wrapper the listeners above
+  // are attached to — the document tab renders it at the top of the panel, the
+  // report portals it into a slot elsewhere in the tree — and drive this editor
+  // through `execDocumentCommand`. So none of the events above ever fire for a
+  // toolbar click, and the gate swallowed the edit: the text changed on screen,
+  // the status pill went on reading "Saved", and the formatting was gone on
+  // reopen with nothing anywhere saying so.
+  //
+  // `hideToolbar` and NO event on the editor, because that is the shape of the
+  // defect. A click inside the document first would mark interaction and the
+  // test would pass with the fix reverted.
+  it.each([
+    ["bold", undefined, "<strong>"],
+    ["italic", undefined, "<em>"],
+    ["formatBlock", "h2", "<h2>"],
+    ["insertUnorderedList", undefined, "<ul>"],
+  ])("saves a %s from a toolbar mounted outside this component", async (
+    cmd, value, expected,
+  ) => {
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<p>hello</p>",
+      hideToolbar: true,
+    })
+    onChange.mockClear()
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 6 })
+
+    expect(execDocumentCommand(editor, cmd, value)).toBe(true)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain(expected)
+  })
+
+  it("undo from that toolbar saves too", async () => {
+    // Undo and redo dispatch their own transactions from the history plugin
+    // rather than the chain's, which is why the marker is sticky per editor
+    // and not carried on the transaction.
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<p>hello</p>",
+      hideToolbar: true,
+    })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 6 })
+    execDocumentCommand(editor, "bold")
+    onChange.mockClear()
+
+    execDocumentCommand(editor, "undo")
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).not.toContain("<strong>")
+  })
+
+  it("a document nobody touched is still not saved by another one's toolbar", async () => {
+    // The marker is per editor, not per module: opening a second document must
+    // not inherit the first one's "this has been edited" state, or merely
+    // opening it would bump its version — the defect the gate exists to stop.
+    const first = await mount({ initialHtml: "<p>one</p>", hideToolbar: true })
+    execDocumentCommand(
+      first.getEditor() as unknown as Parameters<typeof execDocumentCommand>[0],
+      "bold",
+    )
+    const second = await mount({
+      initialHtml: "<h1>Title</h1><p>two</p><hr>",
+      hideToolbar: true,
+    })
+    await new Promise((r) => setTimeout(r, 50))
+    expect(second.onChange).not.toHaveBeenCalled()
+  })
+})
+
+describe("one bar, one set of controls, whatever the artifact is", () => {
+  // The report this closes: "table is not in report and full page doc editor.
+  // Indent, outdent, align x3 is also not in those. All the controls should be
+  // in all of the toolbar." They were omitted because this editor's schema had
+  // no extension behind them — so the omission was honest, and the fix is the
+  // extensions, not the buttons.
+
+  //: Every command `PrdToolbar` can emit, with what it must leave behind.
+  const COMMANDS: [string, string | undefined, RegExp][] = [
+    ["bold", undefined, /<strong>/],
+    ["italic", undefined, /<em>/],
+    ["underline", undefined, /<u>/],
+    ["strikeThrough", undefined, /<s>/],
+    ["insertUnorderedList", undefined, /<ul>/],
+    ["insertOrderedList", undefined, /<ol>/],
+    ["insertHorizontalRule", undefined, /<hr>/],
+    ["formatBlock", "h2", /<h2>/],
+    ["formatBlock", "blockquote", /<blockquote>/],
+    ["formatBlock", "pre", /<pre>/],
+    ["createLink", "https://sprntly.ai", /<a [^>]*href="https:\/\/sprntly\.ai"/],
+    ["insertTable", undefined, /<table/],
+    ["justifyCenter", undefined, /text-align: center/],
+    ["justifyRight", undefined, /text-align: right/],
+    ["indent", undefined, /margin-left: 24px/],
+    ["fontName", "Georgia, 'Times New Roman', serif", /font-family: Georgia/],
+    ["fontSize", "19px", /font-size: 19px/],
+    ["foreColor", "#B42318", /color: rgb\(180, 35, 24\)|color: #B42318/],
+    ["hiliteColor", "#FEF3C7", /background-color/],
+  ]
+
+  it.each(COMMANDS)("answers %s", async (cmd, value, expected) => {
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<p>hello world</p>",
+      hideToolbar: true,
+    })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 6 })
+    onChange.mockClear()
+
+    expect(execDocumentCommand(editor, cmd, value), `${cmd} was not handled`).toBe(true)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toMatch(expected)
+  })
+
+  it("hides nothing from this host any more", () => {
+    // The `omit` mechanism stays — a host that genuinely cannot run a command
+    // should leave it out rather than render it inert — but this editor now
+    // answers everything, so the set is empty.
+    expect([...UNSUPPORTED_DOCUMENT_COMMANDS]).toEqual([])
+  })
+
+  it("indents a list by nesting the item, not by nudging a margin", async () => {
+    // What every editor does, and what <ul><li><ul> is for. A margin on a list
+    // item would look the same and mean nothing to anything reading the HTML.
+    const { onChange, getEditor } = await mount({
+      initialHtml: "<ul><li><p>one</p></li><li><p>two</p></li></ul>",
+      hideToolbar: true,
+    })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 9, to: 9 })
+
+    expect(execDocumentCommand(editor, "indent")).toBe(true)
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    const html = onChange.mock.calls.at(-1)?.[0] as string
+    expect(html).toMatch(/<ul>[\s\S]*<ul>/)
+    expect(html).not.toMatch(/margin-left/)
+  })
+
+  it("outdents back to flush, and no further", async () => {
+    const { getEditor } = await mount({
+      initialHtml: '<p style="margin-left: 24px">indented</p>',
+      hideToolbar: true,
+    })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 1 })
+
+    expect(execDocumentCommand(editor, "outdent"), "the stored indent was not read back").toBe(true)
+    // Already flush: nothing to do, and it says so rather than reporting an
+    // edit that would mark the document dirty for no reason.
+    expect(execDocumentCommand(editor, "outdent")).toBe(false)
+  })
+
+  it("stops indenting before the text marches off the page", async () => {
+    const { getEditor } = await mount({ initialHtml: "<p>x</p>", hideToolbar: true })
+    const editor = getEditor() as unknown as Parameters<typeof execDocumentCommand>[0]
+    ;(editor as unknown as { commands: { setTextSelection: (r: unknown) => void } })
+      .commands.setTextSelection({ from: 1, to: 1 })
+    for (let i = 0; i < 6; i++) expect(execDocumentCommand(editor, "indent")).toBe(true)
+    // There is no horizontal scroll on a document page: past the ceiling the
+    // text would be unreachable except by outdenting blind.
+    expect(execDocumentCommand(editor, "indent")).toBe(false)
+  })
+
+  it("opens the same colour grid the panel's bar opens", async () => {
+    const { container, getByTestId, onChange, selectAll } = await mount()
+    selectAll()
+    fireEvent.click(getByTestId("doc-color"))
+
+    const swatches = container.querySelectorAll(".prd-colorgrid-swatch")
+    expect(swatches.length).toBeGreaterThanOrEqual(40)
+
+    fireEvent.click(getByTestId("doc-color-grid-ff0000"))
+
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toMatch(/color: rgb\(255, 0, 0\)|#FF0000/i)
+    // Chosen means chosen: the popover closes rather than sitting over the text.
+    expect(container.querySelector('[data-testid="doc-color-menu"]')).toBeNull()
+  })
+
+  it("offers the same controls on its own bar", async () => {
+    // The full-page editor draws its own toolbar rather than PrdToolbar, so
+    // parity has to be asserted here too — this is the half the report named.
+    const { container } = await mount()
+    for (const testId of [
+      "doc-undo", "doc-redo", "doc-insertTable", "doc-insertHorizontalRule",
+      "doc-justifyLeft", "doc-justifyCenter", "doc-justifyRight",
+      "doc-indent", "doc-outdent",
+    ]) {
+      expect(
+        container.querySelector(`[data-testid="${testId}"]`),
+        `the full-page bar is missing ${testId}`,
+      ).not.toBeNull()
+    }
+  })
+})
+
+describe("the schema registers each extension exactly once", () => {
+  it("warns about no duplicate extension name", async () => {
+    // `@tiptap/extension-underline` was registered alongside StarterKit v3,
+    // which already ships one, so every mount logged "Duplicate extension
+    // names found: ['underline']" — the state TipTap itself calls out as
+    // leading to issues. Link was disabled in the StarterKit config for
+    // exactly this reason; underline was the one that got missed.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {})
+    try {
+      await mount({ initialHtml: "<p>hello</p>" })
+      const messages = warn.mock.calls.map((c) => c.join(" "))
+      expect(messages.filter((m) => m.includes("Duplicate extension names"))).toEqual([])
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
+  it("still underlines, on StarterKit's own mark", async () => {
+    const { container, onChange, selectAll } = await mount({ initialHtml: "<p>hello</p>" })
+    selectAll()
+    fireEvent.click(container.querySelector('[data-testid="doc-underline"]')!)
+    await waitFor(() => expect(onChange).toHaveBeenCalled())
+    expect(onChange.mock.calls.at(-1)?.[0]).toContain("<u>")
   })
 })
 

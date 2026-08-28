@@ -109,6 +109,12 @@ export interface UseConversationGenerationDeps {
   /** The live content-panel state (read for the open ticket-set slice). */
   content: AppContentState
   showToast: (title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => void
+  /** Tenant/dataset scope — passed to `customArtifactsApi.generate` so the
+   *  backend can ground a THIN-context document (a fresh "generate a report
+   *  on X" with no prior thread to draw on) on a real retrieval-backed answer
+   *  instead of writing one that honestly says it has nothing to say. See
+   *  custom_artifact_generate.py's `_ground_thin_context`. */
+  activeCompany: string
 }
 
 export function useConversationGeneration({
@@ -127,6 +133,7 @@ export function useConversationGeneration({
   postOpenArtifactReply,
   markTicketSetAutoOpened,
   postSummary,
+  activeCompany,
 }: UseConversationGenerationDeps) {
   // "What are my PRDs?" — the rows rode the envelope; render them as clickable
   // cards on a turn (empty included: "none yet" is the listing's own honest
@@ -335,6 +342,10 @@ export function useConversationGeneration({
           task: envelope.task?.trim() || seedQuery,
           context: threadContextFor(tabId),
           conversation_id: attachTo,
+          // Lets the backend fall back to a real retrieval-backed answer when
+          // the thread context above is thin (a fresh ask with nothing prior
+          // to draw on) — see the `dataset` doc on customArtifactsApi.generate.
+          dataset: activeCompany,
         })
         // NEVER OPEN THIS CONVERSATION'S DOCUMENT OVER SOMEONE ELSE'S: the
         // round trips mean the user may have moved on, and this pair is
@@ -350,7 +361,7 @@ export function useConversationGeneration({
         )
       }
     })()
-  }, [seedGenerationTurn, makeHandle, setContent, openContentPanel, showToast, threadContextFor, persistence])
+  }, [seedGenerationTurn, makeHandle, setContent, openContentPanel, showToast, threadContextFor, persistence, activeCompany])
 
   // A document attached to a "make a PRD" command is the chat entry to the
   // PRD-IMPORT flow: upload the file to POST /v1/prd/import — the same conversion

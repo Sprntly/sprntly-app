@@ -53,7 +53,7 @@ from app.connectors.google_meet import (
     participant_display_name,
     sync_context,
 )
-from app.kg_ingest.types import RawRecord
+from app.kg_ingest.types import TRANSCRIPT_CHAR_CEILING, RawRecord
 
 logger = logging.getLogger(__name__)
 
@@ -62,15 +62,17 @@ logger = logging.getLogger(__name__)
 #: one costs three API round trips (participants + transcripts + entries), so
 #: this is also the request budget — 300 calls against a 600/min per-user quota.
 _MAX_CONFERENCES = 100
-#: Per-record extraction budget. Under the runner's 6000-char batch budget
-#: (_BATCH_CHAR_BUDGET) so one record always fits in one batch — a transcript
-#: that blew the budget would be split across batches mid-sentence and both
-#: halves would lose their context. An hour-long call is ~50,000 characters, so
-#: this genuinely truncates; the first 4,000 characters of a call are where the
-#: agenda and the customer's actual complaint live. Same figure as the Zoom
-#: puller, deliberately: two meeting connectors truncating differently would
-#: make the same call look different depending which tool recorded it.
-_TEXT_CHARS = 4000
+#: Per-record extraction ceiling — a DEFENSIVE bound, not a head-truncation
+#: window. Meet is a call-shaped provider (`_CALL_PROVIDERS`), extracted ONE
+#: CALL PER DOCUMENT, so this never shares a batch with another record. The
+#: prior 4,000-char head bound genuinely truncated an hour-long call
+#: (~50,000 characters) and a fact stated only in the transcript can sit
+#: anywhere in the call — closing Meet's latent Loss-A, same finding as
+#: Fireflies/Zoom. Same shared constant as the Zoom puller, deliberately:
+#: two meeting connectors bounding differently would make the same call look
+#: different depending which tool recorded it
+#: (`app.kg_ingest.types.TRANSCRIPT_CHAR_CEILING`).
+_TEXT_CHARS = TRANSCRIPT_CHAR_CEILING
 #: Global safety valve. The content-hash ledger makes RE-syncs free, but the
 #: FIRST sync pays the LLM for everything. Lower than Zoom's 300 because Meet's
 #: coverage is one organizer's calendar rather than a whole account's hosts —

@@ -44,10 +44,10 @@ describe("ProjectsRoute — ?chat= initial-tab routing (AC-3)", () => {
     expect(screen.getByTestId("project-detail-screen-stub").textContent).toBe("id=7 initialChat=individual")
   })
 
-  it("?id=7&chat=group mounts with initialChat='group'", () => {
+  it("test_route_chat_group_param_mounts_private — ?chat=group is no longer a recognized value; initialChat resolves undefined so the shell mounts its one (private) surface", () => {
     searchString = "id=7&chat=group"
     render(React.createElement(ProjectsRoute))
-    expect(screen.getByTestId("project-detail-screen-stub").textContent).toBe("id=7 initialChat=group")
+    expect(screen.getByTestId("project-detail-screen-stub").textContent).toBe("id=7 initialChat=undefined")
   })
 
   it("?id=7&chat=bogus → initialChat is undefined (falls to the shell's own default)", () => {

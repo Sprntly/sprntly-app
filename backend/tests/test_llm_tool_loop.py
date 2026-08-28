@@ -103,3 +103,37 @@ def test_run_tool_loop_respects_max_iters(monkeypatch):
     )
     assert fake.n == 3  # bounded
     assert isinstance(out, str)
+
+
+def test_run_tool_loop_warns_when_exhausted_empty(monkeypatch, caplog):
+    """Exhaustion guard: when the model calls a tool on every turn and never
+    composes a closing text turn, the loop returns "" — and now emits a
+    WARNING so the empty-answer failure mode stops being invisible in logs."""
+    import logging
+
+    def always_tool(**_):
+        return _Msg(
+            [_Block(type="tool_use", id="tu", name="calc", input={})],
+            stop_reason="tool_use",
+        )
+
+    class _Eternal:
+        def __init__(self):
+            self.messages = self
+
+        def create(self, **kwargs):
+            return always_tool()
+
+    monkeypatch.setattr(llm, "get_client", lambda: _Eternal())
+    with caplog.at_level(logging.WARNING, logger="app.llm"):
+        out = llm.run_tool_loop(
+            system="s", user="u",
+            tools=[{"name": "calc", "description": "d", "input_schema": {"type": "object"}}],
+            dispatch=lambda n, i: "x",
+            max_iters=2,
+        )
+    assert out == ""  # no closing text ever produced
+    assert any(
+        "run_tool_loop exhausted" in r.getMessage() and "max_iters=2" in r.getMessage()
+        for r in caplog.records
+    )

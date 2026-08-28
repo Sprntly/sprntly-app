@@ -58,6 +58,11 @@ def _seed_prd(*, brief_id: int, title: str, status: str = "ready",
             "source": source,
             "theme_id": theme_id,
             "generated_at": generated_at,
+            # READ, so the auto-archive rule (db.prds.is_hidden_from_library)
+            # does not hold these rows out of the listing. These tests are
+            # about family collapse and brief anchoring; stamped rather than
+            # re-sourced, because `source` decides what a family IS.
+            "first_read_at": "2026-08-25T00:00:00Z",
         })
         .execute()
         .data[0]["id"]

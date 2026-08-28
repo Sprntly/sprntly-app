@@ -1978,7 +1978,7 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
     declines falls through to the composer, not to a refusal, so a false
     negative costs an un-actioned request rather than a wrong answer (see
     the accept-with-nudge addendum this gate's decline path relies on to
-    close that gap, `_PRIVATE_SCOPE_SYSTEM`/`_GROUP_SCOPE_SYSTEM`).
+    close that gap, `_PRIVATE_SCOPE_SYSTEM`).
 
     `history` is accepted for signature parity with its sibling gates (every
     ladder predicate above `route()` takes it) but is not consulted for
@@ -1996,9 +1996,11 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
 #: "the review is done", "wrapped up the deck", "sent it over". First-person
 #: framing (the assignee signalling their OWN completion) so it does not fire
 #: on "is the review done?" (a question — vetoed below) or "mark X done"
-#: aimed at someone else's task. Feeds the group tool-loop's `complete_task`
-#: admission gate; a false positive costs at most one graceful "no open task
-#: to mark done" reply from the handler, never a wrong write.
+#: aimed at someone else's task. Currently unreferenced (its sole caller,
+#: `is_project_completion_request`, lost its only call site when the
+#: group-only `complete_task` admission path was removed) — kept, not
+#: deleted, per this ticket's comment-only scope for this file; flagged
+#: for a follow-up dead-code pass.
 _PROJECT_TOOL_COMPLETE_VERB = re.compile(
     r"\b(?:i'?m|i am|it'?s|its|that'?s|thats|this is|we'?re|we are|all)\s+"
     r"(?:now\s+)?(?:done|finished|complete|completed|wrapped\s+up|ready|good\s+to\s+go)\b"
@@ -2020,7 +2022,10 @@ _PROJECT_TOOL_COMPLETE_VERB = re.compile(
 
 def is_project_completion_request(question: str, history: list[dict] | None = None) -> bool:
     """True when the speaker is reporting that a task assigned to THEM is
-    finished — the entry gate for the group tool-loop's `complete_task`.
+    finished. Currently unreferenced — its sole call site was the
+    group-only `complete_task` admission path removed with the group
+    surface; kept, not deleted, per this ticket's comment-only scope for
+    this file (flagged for a follow-up dead-code pass).
 
     Sibling of `is_project_tool_request`: cheap regex, veto-set discipline.
     The mention/interrogative veto is reused so "is the review done?" (a
@@ -2066,9 +2071,8 @@ _PROJECT_CONTENT_NOUN = re.compile(
 
 #: PROJECT-EDIT verb — an instruction to change the project's document. Kept
 #: distinct from the read/delegate/execute gates: these phrasings ask to
-#: MUTATE the PRD, which the group surface handles via its in-band `edit_prd`
-#: tool. Anchored to an edit verb (below) AND an edit-target NOUN so plain
-#: chatter never matches.
+#: MUTATE the PRD via an in-band `edit_prd` tool. Anchored to an edit verb
+#: (below) AND an edit-target NOUN so plain chatter never matches.
 _PROJECT_EDIT_VERB = re.compile(
     r"\b(?:edit|update|updating|change|changing|revise|rewrite|reword|modify|"
     r"amend|append|tighten|expand|shorten|delete|remove|drop|insert|replace|"
@@ -2076,8 +2080,8 @@ _PROJECT_EDIT_VERB = re.compile(
     re.I,
 )
 
-#: PROJECT-EDIT target NOUN — what the edit is aimed at. The group agent can
-#: only edit the project's PRD, so the anchor set is the PRD / document family.
+#: PROJECT-EDIT target NOUN — what the edit is aimed at. The agent can only
+#: edit the project's PRD, so the anchor set is the PRD / document family.
 _PROJECT_EDIT_NOUN = re.compile(
     r"\bprds?\b|\bdocs?\b|\bdocument\b|\bspec\b|\brequirements?\b|\bsection\b",
     re.I,
@@ -2091,12 +2095,12 @@ def is_project_edit_request(question: str, history: list[dict] | None = None) ->
     `routing_text`, noun-anchored so plain chatter or a bare interrogative
     never matches.
 
-    Unlocks the sixth-branch tool loop for a group turn so the model can call
-    the in-band `edit_prd` tool — but ONLY on the group surface, which is the
-    only one that registers an edit tool/handler (`qa_agent.answer` guards this
-    gate on `scope.edit_prd_handler`, so it can never widen main/private
-    routing). `history` is accepted for signature parity with every other
-    ladder predicate but not consulted in v1."""
+    Unlocks the sixth-branch tool loop for a project turn so the model can
+    call the in-band `edit_prd` tool — but ONLY for a surface that registers
+    an edit handler (`qa_agent.answer` guards this gate on `scope.
+    edit_prd_handler`, so it can never widen main/private routing when no
+    surface populates that field). `history` is accepted for signature
+    parity with every other ladder predicate but not consulted in v1."""
     q = question or ""
     if not q.strip():
         return False

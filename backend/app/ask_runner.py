@@ -46,6 +46,8 @@ from app.prompts import (
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_LIBRARY_ADDENDUM,
     ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
+    ASK_SYSTEM_PROJECTS_ADDENDUM,
+    ASK_SYSTEM_TEAM_ADDENDUM,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -62,6 +64,35 @@ logger = logging.getLogger(__name__)
 # independently verified truth; a customer's own typo renders as-is rather
 # than being "corrected" toward a more plausible-looking value.
 WORKSPACE_CONFIG_HEADER = "WORKSPACE CONFIGURATION (self-reported by this team)"
+
+# What onboarding actually captured, and where each answer is maintained
+# afterwards. Asked "what is their north star goal", chat replied that no
+# connected source states one and told the team to connect Google Drive,
+# Confluence or Notion — to a workspace that had picked a north star on the
+# onboarding metrics page and can see it in Settings > Metrics. The answer was
+# not retrieved-and-lost; it was never in the prompt. This block carried the
+# company name, the product name and the website and nothing else, so every
+# strategy question the team had already answered looked to the model like a
+# question no source had answered, and the only remedy it could name was a
+# connector.
+#
+# The reads below mirror the facts block onboarding's own drafting pass
+# assembles (`app/onboarding/wizard_drafts._facts_block`) — same wizard fields,
+# rendered compactly rather than as raw JSON, because this one rides a cached
+# answer prefix instead of a one-off draft call.
+_CONFIG_COMPANY_COLUMNS = (
+    "mission, strategy, portfolio, industry, business_type, competitors, "
+    "planning_cycle, prioritization_framework, decision_process, "
+    "business_context_summary"
+)
+
+#: Per-line cap. Long enough for a pasted strategy paragraph, short enough that
+#: one verbose field cannot crowd out the rest of the configuration.
+_CONFIG_VALUE_MAX_CHARS = 1200
+
+#: Cap on the structured 8-layer lens, matching what synthesis and ideation
+#: already give it (`app/synthesis/agent.py`).
+_CONFIG_LENS_MAX_CHARS = 1500
 
 # Hostnames that are obviously infra, not a brand site — a preview-deploy
 # domain, or localhost. The website is omitted rather than rendered when it
@@ -100,10 +131,13 @@ def _should_skip_website(url: str) -> bool:
 
 
 def company_facts_block(enterprise_id: str | None) -> str:
-    """The workspace's self-reported identity — company name
-    (`companies.display_name`) and its primary product's name/website
-    (`products`, `is_primary` row) — rendered for the answer prompt as
-    configuration of record, not verified fact (see `WORKSPACE_CONFIG_HEADER`).
+    """Everything this workspace has told us about itself — its identity
+    (`companies.display_name`, the `is_primary` `products` row) and the answers
+    onboarding collected and Settings maintains: mission, strategy, portfolio,
+    positioning, users, competitors, the chosen success metrics, how the team
+    plans and decides, and the business context it accepted. Rendered for the
+    answer prompt as configuration of record, not verified fact (see
+    `WORKSPACE_CONFIG_HEADER`).
 
     Returns "" for every degradation path — no tenant, no company row, no
     product row, every field empty/guarded, or any read failure — so chat
@@ -135,9 +169,126 @@ def company_facts_block(enterprise_id: str | None) -> str:
         lines.append(f"Product name: {product_name}")
     if website:
         lines.append(f"Website: {website}")
+    _add_config_line(lines, "Positioning", product.get("positioning"))
+    _add_config_line(lines, "Users / customers", product.get("users_description"))
+    lines.extend(_captured_context_lines(enterprise_id))
     if not lines:
         return ""
     return WORKSPACE_CONFIG_HEADER + "\n" + "\n".join(lines)
+
+
+def _add_config_line(lines: list[str], label: str, value: object) -> None:
+    """Append `label: value` when the workspace actually filled that field in.
+    An empty field is simply absent — never rendered as "unknown", which the
+    model would otherwise repeat back as a finding of its own."""
+    if value in (None, "", [], {}):
+        return
+    if isinstance(value, list):
+        text = ", ".join(_clean_text(str(v)) for v in value if v not in (None, ""))
+    elif isinstance(value, dict):
+        text = "; ".join(
+            f"{k}: {_clean_text(str(v))}"
+            for k, v in value.items()
+            if v not in (None, "", [], {})
+        )
+    else:
+        text = _clean_text(str(value))
+    if not text:
+        return
+    if len(text) > _CONFIG_VALUE_MAX_CHARS:
+        text = text[: _CONFIG_VALUE_MAX_CHARS - 1].rstrip() + "…"
+    lines.append(f"{label}: {text}")
+
+
+def _captured_context_lines(enterprise_id: str) -> list[str]:
+    """The rest of what this workspace has told us about itself: the onboarding
+    wizard's answers, plus whatever Settings has edited since.
+
+    Best-effort exactly like the identity lines above — a read that fails
+    contributes nothing and the answer proceeds on what did load, so a
+    workspace that skipped onboarding gets the same block it got before."""
+    lines: list[str] = []
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client().table("companies")
+            .select(_CONFIG_COMPANY_COLUMNS)
+            .eq("id", enterprise_id)
+            .limit(1)
+            .execute()
+            .data
+        ) or []
+        company = dict(rows[0]) if rows else {}
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "workspace context unavailable for %s; answering without it",
+            enterprise_id, exc_info=True,
+        )
+        company = {}
+
+    _add_config_line(lines, "Industry", company.get("industry"))
+    _add_config_line(lines, "Business type", company.get("business_type"))
+    _add_config_line(lines, "Mission & vision", company.get("mission"))
+    _add_config_line(lines, "Strategy / OKRs", company.get("strategy"))
+    _add_config_line(lines, "Portfolio", company.get("portfolio"))
+    _add_config_line(lines, "Named competitors", company.get("competitors"))
+
+    # The metrics this team picked, north star first — the exact field the
+    # reported answer went hunting for in the connectors.
+    try:
+        from app.kpi_tree import load_kpi_tree
+
+        tree = load_kpi_tree(enterprise_id)
+    except Exception:  # noqa: BLE001
+        tree = None
+    if tree is not None:
+        lines.append("Success metrics (chosen by this team):")
+        lines.extend(
+            f"  {ln}" for ln in tree.render_for_prompt().splitlines() if ln.strip()
+        )
+
+    _add_config_line(lines, "Planning cycle", company.get("planning_cycle"))
+    _add_config_line(
+        lines, "Prioritization framework", company.get("prioritization_framework")
+    )
+    _add_config_line(lines, "How the team decides", company.get("decision_process"))
+
+    # Workspace-owned since 2026-07-22 (see wizard_drafts): the team's own
+    # scope, strategy, roadmap and free-form context.
+    try:
+        from app.db.workspaces import default_workspace_for_company
+
+        workspace = dict(default_workspace_for_company(enterprise_id) or {})
+    except Exception:  # noqa: BLE001
+        workspace = {}
+    _add_config_line(lines, "Team name", workspace.get("name"))
+    _add_config_line(lines, "Team scope of work", workspace.get("team_scope"))
+    _add_config_line(lines, "Team strategy", workspace.get("team_strategy"))
+    _add_config_line(lines, "Team roadmap", workspace.get("team_roadmap"))
+    _add_config_line(lines, "Additional context", workspace.get("additional_context"))
+
+    # The prose the team read and ACCEPTED at the end of onboarding, then the
+    # structured lens the research agents maintain underneath it.
+    _add_config_line(
+        lines,
+        "Business context (accepted by this team)",
+        company.get("business_context_summary"),
+    )
+    try:
+        from app.business_context import load_business_context
+
+        doc = load_business_context(enterprise_id)
+    except Exception:  # noqa: BLE001
+        doc = None
+    if doc is not None:
+        rendered = doc.render_for_prompt(max_chars=_CONFIG_LENS_MAX_CHARS)
+        if rendered.strip():
+            lines.append("Researched business context:")
+            lines.extend(
+                f"  {ln}" for ln in rendered.splitlines() if ln.strip()
+            )
+    return lines
 
 
 # ── Uploaded-document grounding (existence-vs-retrieval contract) ───────────
@@ -575,6 +726,49 @@ def active_project_id() -> int | None:
     """This ask's project id, or None on a non-project ask / when nothing set
     one. Read by `qa_agent.answer()` to gate the connector-lookup interceptors."""
     return _active_project_id.get()
+
+
+# THIS ASK'S WORKSPACE. The company is a parameter everywhere; the WORKSPACE is
+# not, and two reads need it: a project list is scoped to `(company_id,
+# workspace_id)` and further to the caller's own memberships, so a block that
+# skipped either would show a member of Workspace A the projects of Workspace B.
+#
+# Rides a ContextVar for the same reason the four values above do — threading a
+# parameter through `answer()` is the qa_agent.py edit this mechanism exists to
+# avoid. Set once per ask in `ask_job_runner._run_sync`, which already receives
+# `workspace_id` from the route. `None` on any caller that does not set it, and
+# every reader treats None as "cannot scope — render nothing".
+_active_workspace_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "ask_runner_active_workspace_id", default=None
+)
+
+
+def set_active_workspace_id(workspace_id: str | None):
+    """Record THIS ask's workspace. Call from `ask_job_runner._run_sync` beside
+    `set_active_conversation`, and always undo in the same `finally` — a pooled
+    worker thread holding a previous ask's workspace would scope the next
+    caller's project list to someone else's workspace.
+
+    Returns an opaque token for `reset_active_workspace_id`."""
+    return _active_workspace_id.set(workspace_id)
+
+
+def reset_active_workspace_id(token) -> None:
+    """Undo `set_active_workspace_id` — call from a `finally`."""
+    _active_workspace_id.reset(token)
+
+
+def active_workspace_id() -> str | None:
+    """This ask's workspace id, or None when nothing set one."""
+    return _active_workspace_id.get()
+
+
+def active_user_id() -> str | None:
+    """This ask's CALLER, or None when nothing set one. The same slot
+    `set_active_conversation` fills — exposed on its own because a reader can
+    need the person without needing the conversation (the project list is
+    membership-scoped, and membership is a property of the user alone)."""
+    return _active_conversation_user_id.get()
 
 
 def _owned_conversation_attachments(
@@ -1602,6 +1796,11 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
             schema=_ASK_RESPONSE_SCHEMA,
             max_tokens=12000,
             background=True,
+            # Warm-only path: `_warm_one` is the sole caller (the predefined and
+            # per-insight Ask prompts pre-generated after a brief), so nothing is
+            # ever waiting on this and it always takes the half-price path.
+            batch=True,
+            batch_label="ask.warm",
         )
 
 
@@ -1823,6 +2022,24 @@ def _gather(tasks: dict, deadline_s: float = _GATHER_DEADLINE_S) -> dict:
 
 
 @timed_def("qa:compose")
+def _emit_ask_phase(on_phase, label: str) -> None:
+    """Publish a user-facing pipeline-leg phase for the chat wait surface, when a
+    sink is wired. Kept LOCAL (rather than reusing qa_agent.emit_phase) to avoid
+    an import cycle — qa_agent imports compose_ask_answer from this module.
+
+    Best-effort: the sink is display-only SSE transport (token_stream.phase_sink),
+    so a failure here must never take the answer down with it. A no-op when no
+    sink is wired (tests, direct callers). The raw label is curated to
+    user-facing copy on the frontend (web/app/lib/friendlyPhase.ts) before it is
+    ever shown — the egress contract lives there."""
+    if on_phase is None:
+        return
+    try:
+        on_phase(label)
+    except Exception:  # noqa: BLE001 — display only, never break the answer
+        logger.debug("ask phase publish failed for %r", label, exc_info=True)
+
+
 def compose_ask_answer(
     dataset: str,
     question: str,
@@ -1833,8 +2050,11 @@ def compose_ask_answer(
     live_context: str = "",
     live_context_fn=None,
     library_context_fn=None,
+    team_context_fn=None,
+    projects_context_fn=None,
     library_only: bool = False,
     on_delta=None,
+    on_phase=None,
 ) -> dict:
     """Generate an Ask answer from BOTH the legacy corpus AND the knowledge
     graph (#18 — chat answers from the brain, not only the markdown corpus).
@@ -1894,12 +2114,40 @@ def compose_ask_answer(
     the wrong answer to "what skills do I have". Same slot, same wave, its own
     section and its own addendum — the shape every other block here already has.
 
+    `team_context_fn`, when given, is a thunk producing the company's own
+    TEAM block (app/team_context.py) — who is in this workspace, with each
+    member's email, job and access level — asked for by the planner when the
+    question is about the people here. Its own parameter for the same reason
+    the library has one: it needs the OPPOSITE instruction to the live sweep
+    (this list is exhaustive, and a name found in a connected source is not a
+    member), and it must be able to ride a prompt that carries neither the
+    library nor a sweep.
+
+    `projects_context_fn`, when given, is a thunk producing the PROJECTS block
+    (app/projects_context.py) — what a project is in this product, and the ones
+    the caller belongs to. Its own parameter for the same reason as the two
+    above, plus one specific to it: the block scopes itself to the caller and
+    their workspace off the request ContextVars, so it must run INSIDE this
+    request rather than be resolved by a caller that has neither.
+
+    `library_only` covers ALL THREE of those blocks, despite its name: they are
+    the exhaustive reads of Sprntly's OWN records, and a question about any of
+    them is narrowed away from the corpus, the KG and the document index by the
+    same verdict (`qa_agent._library_only_plan` / `_team_only_plan` /
+    `_projects_only_plan`).
+
     `on_delta`, when given, receives the PARTIAL-JSON fragments of the streamed
     tool input as the model writes them (the call switches to the streaming
     transport + long read timeout, mirroring the gateway's long-output path).
     The Ask worker wraps it in app.ask_stream.AnswerFieldExtractor to
     token-stream just the answer text to the client — progressive display only;
     the returned payload stays the authoritative answer.
+
+    `on_phase`, when given, receives a short user-facing label at each real
+    pipeline boundary (retrieval start, answer dispatch) so the chat wait surface
+    shows grounded progress instead of a stale timed beat on this — the COMMON —
+    direct-answer path. Mirrors `qa_agent._answer_single_shot`, which already
+    instruments its own path; display-only and best-effort (see `_emit_ask_phase`).
 
     Returns the raw response payload (answer/key_points/citations/...); the
     caller strips citations + logs to ask_log as before."""
@@ -1942,6 +2190,14 @@ def compose_ask_answer(
     # index for these asks is what settles it.
     wants_corpus_and_kg = not prd_context and not library_only
 
+    # Boundary 1 — retrieval starts. Announced only on the path that actually
+    # reads connected sources (the common direct-answer ask); the PRD-grounded
+    # and library-only branches skip corpus/KG, so claiming a source search there
+    # would be a phase we don't back. Same label family as
+    # `qa_agent._answer_single_shot`, so the frontend's curator already maps it.
+    if wants_corpus_and_kg:
+        _emit_ask_phase(on_phase, "Searching your connected sources…")
+
     # WAVE 1 — everything that needs nothing.
     #
     # The embedding is resolved on THIS thread rather than as a task: it
@@ -1953,6 +2209,10 @@ def compose_ask_answer(
         wave1["live"] = live_context_fn
     if library_context_fn is not None:
         wave1["library"] = library_context_fn
+    if team_context_fn is not None:
+        wave1["team"] = team_context_fn
+    if projects_context_fn is not None:
+        wave1["projects"] = projects_context_fn
     if wants_corpus_and_kg:
         wave1["corpus"] = lambda: load_corpus(dataset)
 
@@ -1994,6 +2254,8 @@ def compose_ask_answer(
     # concurrent route and only qa_agent's planned path uses it.
     live_context = live_context or (gathered.get("live") or "")
     library_context = gathered.get("library") or ""
+    team_context = gathered.get("team") or ""
+    projects_context = gathered.get("projects") or ""
     corpus = gathered.get("corpus") if wants_corpus_and_kg else None
 
     # WAVE 2 — the two consumers of the vector, which do not feed each other.
@@ -2047,13 +2309,21 @@ def compose_ask_answer(
                   # model answered "your templates" from the document index's
                   # Confluence pages instead.
                   + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                  # The roster rides the PRD tab too — "who owns this" is asked
+                  # from beside a PRD as often as from the main chat.
+                  + (ASK_SYSTEM_TEAM_ADDENDUM if team_context else "")
+                  + (ASK_SYSTEM_PROJECTS_ADDENDUM if projects_context else "")
                   + today_line() + connected_sources_line(enterprise_id))
-        if library_context:
-            # The block is per-company and self-invalidating (uploads change
-            # it), so it rides the uncached user turn — the per-PRD cacheable
-            # prefix below must stay byte-stable across the conversation.
+        own_records = "\n\n---\n\n".join(
+            p for p in (library_context, team_context, projects_context) if p
+        )
+        if own_records:
+            # The block is per-company and self-invalidating (uploads and
+            # membership change it), so it rides the uncached user turn — the
+            # per-PRD cacheable prefix below must stay byte-stable across the
+            # conversation.
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
-                kg_context=library_context, question=question
+                kg_context=own_records, question=question
             )
         else:
             user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
@@ -2085,6 +2355,10 @@ def compose_ask_answer(
         # nearest section to the question is the one a model weighs hardest.
         if library_context:
             context_sections.append(library_context)
+        if team_context:
+            context_sections.append(team_context)
+        if projects_context:
+            context_sections.append(projects_context)
 
         if context_sections:
             # Each addendum is gated on ITS OWN section being present. The KG
@@ -2096,6 +2370,8 @@ def compose_ask_answer(
                       + (ASK_SYSTEM_KG_ADDENDUM if bundle else "")
                       + (ASK_SYSTEM_LIVE_SWEEP_ADDENDUM if live_context else "")
                       + (ASK_SYSTEM_LIBRARY_ADDENDUM if library_context else "")
+                      + (ASK_SYSTEM_TEAM_ADDENDUM if team_context else "")
+                      + (ASK_SYSTEM_PROJECTS_ADDENDUM if projects_context else "")
                       + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question
@@ -2138,20 +2414,49 @@ def compose_ask_answer(
     # `{}` (and every counter below defaults to 0) if the provider returns
     # none.
     meta_out: dict = {}
-    with company_llm_key(enterprise_id):
-        payload = call_json(
-            system=system,
-            user=user,
-            user_cacheable_prefix=cacheable,
-            schema=_ASK_RESPONSE_SCHEMA,
+    from app import answer_first
+
+    # Boundary 2 — the answer generation call is about to dispatch. On this path
+    # the gap before the first token is the model's own prefill / cache-write
+    # (measured ~24s on a cold prefix), during which the old surface sat on a
+    # stale timed beat. This is a REAL boundary — everything the answer is built
+    # from is assembled by now — so the label is true the moment it publishes,
+    # and it honestly covers the prefill window until the first delta flips the
+    # line to "Writing the answer". It does NOT shorten that prefill; that is the
+    # separate cache-warmth lever.
+    _emit_ask_phase(on_phase, "Putting your answer together…")
+
+    if answer_first.enabled():
+        # Answer-first: stream the answer as plain markdown FIRST (dedicated
+        # answer-only prompt), then derive the structured fields with a cheap
+        # follow-up. Same corpus (the cacheable prefix), same display transport,
+        # same returned payload shape — only WHEN the answer text streams changes.
+        payload = answer_first.direct(
+            question=question,
+            forced_system=system,
+            forced_user=user,
+            cacheable=cacheable,
+            enterprise_id=enterprise_id,
+            on_delta=on_delta,
+            default_confidence=None,
             max_tokens=12000,
             meta_out=meta_out,
-            # Token-streaming a chat answer implies the streaming transport
-            # (and its long read timeout) — same pattern as the gateway.
-            stream=on_delta is not None,
-            timeout=LONG_REQUEST_TIMEOUT_S if on_delta is not None else None,
-            on_json_delta=on_delta,
         )
+    else:
+        with company_llm_key(enterprise_id):
+            payload = call_json(
+                system=system,
+                user=user,
+                user_cacheable_prefix=cacheable,
+                schema=_ASK_RESPONSE_SCHEMA,
+                max_tokens=12000,
+                meta_out=meta_out,
+                # Token-streaming a chat answer implies the streaming transport
+                # (and its long read timeout) — same pattern as the gateway.
+                stream=on_delta is not None,
+                timeout=LONG_REQUEST_TIMEOUT_S if on_delta is not None else None,
+                on_json_delta=on_delta,
+            )
 
     # Server-derived, never model-authored — the model attributes a loaded
     # document by filename inline; this is what lets the client resolve that
@@ -2281,7 +2586,8 @@ def warm_predefined_asks(dataset: str, sema: asyncio.Semaphore) -> None:
 
 
 def warm_brief_dynamic_asks(
-    dataset: str, brief: dict, sema: asyncio.Semaphore
+    dataset: str, brief: dict, sema: asyncio.Semaphore,
+    insight_indices: list[int] | None = None,
 ) -> None:
     """Warm the per-insight Ask prompts that the BriefScreen fires when the
     user clicks "Ask Sprntly" on a finding card.
@@ -2289,10 +2595,21 @@ def warm_brief_dynamic_asks(
     Frontend pattern (web/app/lib/brief-adapter.ts):
         askQuestion: `Tell me more about: ${insight.title}`
 
-    For each insight in the brief, we precompute the same text and warm a
-    cache row so the click renders instantly.
+    For each insight in scope, we precompute the same text and warm a cache row
+    so the click renders instantly.
+
+    `insight_indices` limits the warm to those insights (the caller's
+    `settings.evidence_warm_count` ranking). None means every insight, which is
+    what this did unconditionally before — the evidence and PRD warms are both
+    capped, and warming an Ask for an insight whose evidence and PRD were judged
+    not worth pre-generating is the same speculation wearing a different hat.
     """
-    for insight in brief.get("insights") or []:
+    insights = brief.get("insights") or []
+    if insight_indices is not None:
+        chosen = [insights[i] for i in insight_indices if 0 <= i < len(insights)]
+    else:
+        chosen = insights
+    for insight in chosen:
         title = (insight or {}).get("title")
         if not title:
             continue

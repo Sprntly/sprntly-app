@@ -29,6 +29,8 @@ from __future__ import annotations
 import hashlib
 import logging
 import uuid
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from app import datasets
 from app.brief_gate import (
@@ -42,7 +44,8 @@ from app.ingest import is_unparsed_stub
 from app.db.briefs import get_current_brief
 from app.db.companies import company_id_for_slug, slug_for_company_id
 from app.graph.extractor import _NS, extract_document
-from app.graph.facade import GraphFacade
+from app.graph.config_layers import config_get
+from app.graph.facade import GraphFacade, _parse_iso
 from app.graph.types import Source
 from app.synthesis.agent import EmptyKnowledgeGraphError, run_synthesis
 
@@ -51,6 +54,25 @@ logger = logging.getLogger(__name__)
 # Bounds so a seed can never hang the request / scheduler cycle. The KG is
 # idempotent (content-keyed signal ids), so a capped first pass that misses a
 # few docs is corrected on the next run; the point is to never block.
+# Floor on how often the Top Insights brief is RECOMPOSED, in hours.
+#
+# The refresh gate below skips synthesis only when ZERO new signals have landed
+# since the current brief. Seeding runs first and connector syncs write signals
+# continuously, so in practice almost every call cleared that bar: production
+# ran `compose_top_insights` 520 times in 30 days across 11 companies — 1-3 per
+# company per active hour — for a brief the product delivers WEEKLY. Each run is
+# an opus composition over a 32.5k-token method block.
+#
+# So the gate needs a second condition: new signals AND enough time since the
+# last composition. Six hours keeps a same-day feel (a doc uploaded this morning
+# is reflected by the afternoon) while cutting recompositions by roughly 4x.
+# It is a floor on the SCHEDULED/incidental path only — an explicit
+# "Regenerate" always passes `force=True` and recomposes now.
+#
+# Per-company overridable via config `brief.min_recompose_hours`; 0 disables the
+# floor and restores the old any-new-signal behaviour.
+MIN_RECOMPOSE_HOURS = 6
+
 MAX_SEED_DOCS = 25          # corpus docs extracted in one seed pass
 MAX_SEED_CONNECTORS = 6     # connector pulls attempted in one seed pass
 
@@ -121,6 +143,54 @@ def mark_corpus_doc_ingested(
     return sha
 
 
+def _min_recompose_hours(company_id: str) -> float:
+    """The company's recompose floor in hours (see MIN_RECOMPOSE_HOURS).
+
+    Config-resolved so a company that genuinely wants a fresher brief can be
+    tuned without a deploy. A non-numeric or negative value falls back to the
+    default rather than disabling the floor by accident — 0 disables it, but
+    only when it is actually written as 0.
+    """
+    raw = config_get("brief.min_recompose_hours", company_id,
+                     default=MIN_RECOMPOSE_HOURS)
+    try:
+        hours = float(raw)
+    except (TypeError, ValueError):
+        return float(MIN_RECOMPOSE_HOURS)
+    return hours if hours >= 0 else float(MIN_RECOMPOSE_HOURS)
+
+
+def _within_recompose_floor(company_id: str, prior_ts: Any) -> bool:
+    """True when the current brief is too young to recompose.
+
+    Fails OPEN — an unparseable or future-dated timestamp returns False, so the
+    floor can never wedge a company into never regenerating. The failure mode we
+    are willing to accept here is one extra composition; the one we are not is a
+    brief frozen forever.
+    """
+    hours = _min_recompose_hours(company_id)
+    if hours <= 0:
+        return False
+    try:
+        generated_at = _parse_iso(prior_ts)
+    except Exception:  # noqa: BLE001 — see the fail-open note above
+        # Deliberately broad. `generated_at` comes off a DB row, and any shape
+        # this cannot parse (an int, a dict, a format change) must degrade to
+        # "compose it" rather than propagate. A narrower catch missed a plain
+        # int and raised AttributeError out of the gate.
+        logger.warning(
+            "brief recompose floor: unparseable generated_at %r for company=%s "
+            "— composing rather than skipping", prior_ts, company_id,
+        )
+        return False
+    if generated_at is None:
+        return False
+    if generated_at.tzinfo is None:
+        generated_at = generated_at.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - generated_at
+    return timedelta() <= age < timedelta(hours=hours)
+
+
 def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     """Incrementally extract the company's corpus into the KG.
 
@@ -134,14 +204,30 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     is skipped, the rest proceed; the source row is recorded ONLY after a
     successful extract, so a failed doc retries on the next run. Missing corpus
     is not fatal — a company might be connector-only.
+
+    TWO BOUNDS on that retry-forever property, both learned the hard way:
+
+      * `MAX_SEED_DOCS` counts ATTEMPTS, not successes. It used to count only
+        successful extracts, so the cap was unreachable in the one case it most
+        needed to hold — when every doc fails, nothing increments, and the whole
+        corpus is re-attempted on every run.
+      * A provider LIMIT error (out of credit, over quota) aborts the pass
+        immediately rather than being isolated per doc. Per-doc isolation is
+        right for a bad document and exactly wrong for a dead account: the next
+        doc will fail identically, so isolating it just means failing N times
+        instead of once. A company whose key ran dry drove ~200k such calls over
+        nine days at roughly one per second, each one taking a slot in the
+        process-wide LLM concurrency gate that every interactive request queues
+        behind. The tokens were free; the throughput was not.
     """
     # Lazy import — matches the lazy-import style this module already uses
     # for connector-path imports (see _seed_from_connectors below), so no
     # module-load cycle is created between synthesis_brief and connectors.
     from app.connectors.slack_sync import SLACK_CORPUS_DOC_STEM
+    from app.llm_errors import PROVIDER_LIMIT, classify_provider_error
 
     totals = {"signals": 0, "themes": 0, "skipped": 0, "docs": 0, "unchanged": 0,
-              "unreadable": 0, "kg_excluded": 0}
+              "unreadable": 0, "kg_excluded": 0, "attempted": 0, "aborted": 0}
     try:
         corpus = load_corpus(slug)
     except (FileNotFoundError, RuntimeError) as e:
@@ -166,6 +252,7 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
     doc_categories = datasets.md_file_categories(slug)
 
     extracted = 0
+    attempted = 0
     for doc in corpus.docs:
         # A placeholder for a file we couldn't read is not content: extracting
         # it spends an LLM call on the words "its content is not included in
@@ -185,9 +272,13 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
         if sha in existing:
             totals["unchanged"] += 1
             continue
-        # Cap NEW extractions per run; keep cheaply skipping unchanged docs.
-        if extracted >= MAX_SEED_DOCS:
+        # Cap ATTEMPTED extractions per run; keep cheaply skipping unchanged
+        # docs. Counting attempts rather than successes is the point: a corpus
+        # where every extract fails must still stop at the cap.
+        if attempted >= MAX_SEED_DOCS:
             continue
+        attempted += 1
+        totals["attempted"] = attempted
         category = doc_categories.get(f"{doc.name}.md", "")
         evidence = EVIDENCE_UPLOAD_CATEGORIES.get(category)
         try:
@@ -224,7 +315,19 @@ def _seed_from_corpus(facade: GraphFacade, company_id: str, slug: str) -> dict:
                 config={"content_sha": sha, "doc": doc.name},
             ))
             existing.add(sha)
-        except Exception:  # noqa: BLE001 — error-isolation per doc
+        except Exception as exc:  # noqa: BLE001 — error-isolation per doc
+            # A dead account is not a per-doc problem. Isolating it would make
+            # every remaining doc fail the same way, so stop the pass instead
+            # and let the caller surface the reason. See the docstring.
+            if classify_provider_error(exc) == PROVIDER_LIMIT:
+                totals["aborted"] = 1
+                logger.warning(
+                    "seed: aborting corpus extraction for company=%s after a "
+                    "provider limit error on doc %s (%d attempted, %d extracted) "
+                    "— the remaining docs would fail identically",
+                    company_id, doc.name, attempted, extracted,
+                )
+                raise
             logger.exception("seed: corpus extraction failed for doc %s", doc.name)
     return totals
 
@@ -379,7 +482,9 @@ def generate_all_synthesis_briefs() -> None:
         if not slug:
             continue
         try:
-            generate_brief_for(slug)
+            # Startup/background pass: nobody is waiting, so take the
+            # half-price batch path.
+            generate_brief_for(slug, batch=True)
             warm_synthesis_drilldowns(slug)
         except EmptyKnowledgeGraphError:
             # Benign: this company simply has no themes/signals yet (nothing
@@ -392,7 +497,16 @@ def generate_all_synthesis_briefs() -> None:
                              slug)
 
 
-def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict:
+def generate_brief_for(
+    company_id_or_slug: str, *, deliver: bool = True, force: bool = False,
+    # Passed straight to run_synthesis. OFF by default because two user-facing
+    # routes reach this function (`routes/brief.py`, and `routes/synthesis.py`
+    # via run_synthesis); only the scheduler's background passes opt in.
+    batch: bool = False,
+    # Passed through to run_synthesis — see the note there on why the bound is
+    # the caller's to choose.
+    batch_deadline_s: float | None = None,
+) -> dict:
     """Generate + persist the KG-driven Top Insights brief for one company.
 
     ``deliver=False`` suppresses the on-generation Slack/email push (see
@@ -415,16 +529,29 @@ def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict
     KG. The check runs before the cache-return too, so an evidence-less company
     yields nothing from this path rather than re-serving a stale brief.
 
-    Refresh-gating: if a current brief already exists AND no new signal has
-    entered the KG since it was generated, synthesis is skipped and the
-    existing brief is returned unchanged (an unchanged company keeps its brief
-    instead of regenerating an identical one). Seeding still runs first — it is
-    what CREATES the new signals we then detect — so a newly-uploaded doc adds
-    fresh signals, `has_signals_since` becomes True, and we synthesize. The
-    check is timestamp-based, so it also catches signals written by other paths
-    (DS agent, connector sync) since the last brief. The first-ever brief
+    Refresh-gating, in two parts. Synthesis is skipped and the existing brief
+    returned unchanged unless BOTH hold:
+
+      1. a new signal has entered the KG since the current brief was generated
+         (an unchanged company keeps its brief rather than regenerating an
+         identical one), and
+      2. the current brief is at least `MIN_RECOMPOSE_HOURS` old.
+
+    Condition 1 alone was the whole gate, and it almost never fired: seeding
+    runs first (it is what CREATES the signals we then detect) and connector
+    syncs write signals continuously, so a weekly brief was being recomposed on
+    opus several times an hour. Condition 2 is what makes the gate mean
+    something — see MIN_RECOMPOSE_HOURS.
+
+    Both checks are timestamp-based, so they also catch signals written by other
+    paths (DS agent, connector sync) since the last brief. The first-ever brief
     (no prior) always synthesizes, preserving EmptyKnowledgeGraphError on an
     empty KG.
+
+    `force=True` bypasses condition 2 only — an explicit user "Regenerate"
+    recomposes now even if the current brief is minutes old. It does NOT bypass
+    condition 1: with nothing new in the graph there is nothing to recompose
+    into, and the result would be identical output at full cost.
     """
     company_id, slug = resolve_company(company_id_or_slug)
     facade = GraphFacade()
@@ -447,14 +574,22 @@ def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict
         raise NoBriefDataSourceError(NO_DATA_SOURCE_MESSAGE)
 
     # Skip the expensive synthesis when nothing new has entered the KG since the
-    # current brief was generated.
-    if prior is not None and prior_ts and not facade.has_signals_since(
-        company_id, prior_ts
-    ):
+    # current brief was generated, OR when the current brief is younger than the
+    # recompose floor. Both return the existing brief untouched.
+    skip_reason = None
+    if prior is not None and prior_ts:
+        if not facade.has_signals_since(company_id, prior_ts):
+            skip_reason = "KG unchanged"
+        elif not force and _within_recompose_floor(company_id, prior_ts):
+            skip_reason = (
+                f"brief younger than the {_min_recompose_hours(company_id)}h "
+                f"recompose floor"
+            )
+    if skip_reason:
         logger.info(
-            "KG unchanged since brief %s (generated_at=%s) for company=%s "
+            "%s since brief %s (generated_at=%s) for company=%s "
             "(slug=%s) — skipping synthesis, returning existing brief",
-            prior.get("id"), prior_ts, company_id, slug,
+            skip_reason, prior.get("id"), prior_ts, company_id, slug,
         )
         # Flag that this brief came from cache (synthesis skipped ⇒ NOT delivered
         # this run). The weekly scheduler tick uses this to deliver the brief on
@@ -462,4 +597,5 @@ def generate_brief_for(company_id_or_slug: str, *, deliver: bool = True) -> dict
         prior["_from_cache"] = True
         return prior
 
-    return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver)
+    return run_synthesis(facade, company_id, dataset_slug=slug, deliver=deliver,
+                         batch=batch, batch_deadline_s=batch_deadline_s)

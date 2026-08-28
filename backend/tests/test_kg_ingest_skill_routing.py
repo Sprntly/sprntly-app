@@ -40,6 +40,13 @@ def captured_skill_ids(monkeypatch):
         return {"signals": 1, "themes": 0, "skipped": 0}
 
     monkeypatch.setattr(runner, "extract_document", fake_extract)
+    # skill_id routing is about extract_document, not the directed-checklist
+    # second pass — stub it so a fireflies (call-provider) sync in this file
+    # never reaches a real LLM call.
+    monkeypatch.setattr(
+        runner, "run_checklist_pass",
+        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+    )
     return calls
 
 

@@ -1,10 +1,11 @@
 "use client"
 
-import { useCallback, useEffect, useRef } from "react"
+import { useCallback, useEffect, useRef, useState } from "react"
 import { EditorContent, useEditor, type Editor } from "@tiptap/react"
 import StarterKit from "@tiptap/starter-kit"
-import Underline from "@tiptap/extension-underline"
 import Link from "@tiptap/extension-link"
+import { TableKit } from "@tiptap/extension-table"
+import TextAlign from "@tiptap/extension-text-align"
 import {
   BackgroundColor,
   Color,
@@ -12,14 +13,15 @@ import {
   FontSize,
   TextStyle,
 } from "@tiptap/extension-text-style"
+import { execDocumentCommand, isToolbarDriven } from "../../../lib/documentToolbarExec"
+import { INDENTABLE, Indent } from "./editorIndent"
 import {
   FONT_FAMILIES,
   FONT_SIZES,
   HEADING_LEVELS,
-  HIGHLIGHT_COLORS,
-  TEXT_COLORS,
   normalizeHref,
 } from "./editorSchema"
+import { ColorGrid } from "../../../components/shared/ColorGrid"
 
 // ── The document editor ──────────────────────────────────────────────────────
 //
@@ -48,6 +50,7 @@ export function DocumentEditor({
   onChange,
   onBlur,
   onReady,
+  hideToolbar = false,
 }: {
   initialHtml: string
   editable?: boolean
@@ -65,6 +68,14 @@ export function DocumentEditor({
   onChange?: (html: string) => void
   onBlur?: () => void
   onReady?: (editor: Editor) => void
+  /** Render no toolbar inside the editor.
+   *
+   *  The chat panel pins its own bar to the TOP of the panel — the posture the
+   *  PRD already takes — so the controls stay put while the document scrolls
+   *  under them. Inside the editor the bar scrolled away with the text, which
+   *  is the report this closes. The full-page route keeps the built-in one:
+   *  there the editor IS the page, so in-flow is where that bar belongs. */
+  hideToolbar?: boolean
 }) {
   // Has a person actually touched this editor yet?
   //
@@ -123,12 +134,46 @@ export function DocumentEditor({
         // two Link marks in one schema is a duplicate-name error.
         link: false,
       }),
-      Underline,
+      // NO `Underline` HERE. StarterKit v3 ships one, and registering
+      // `@tiptap/extension-underline` alongside it put a second mark of the
+      // same name in the schema — TipTap warned "Duplicate extension names
+      // found: ['underline']" on every single mount. Link above was disabled
+      // for exactly this reason; underline was the one that got missed. The
+      // button is unchanged: `toggleUnderline` comes from StarterKit's copy.
       TextStyle,
       FontFamily,
       FontSize,
       Color,
       BackgroundColor,
+      // A TABLE IS CONTENT, AND A SCHEMA THAT LACKS IT DELETES IT SILENTLY.
+      // ProseMirror parses `initialHtml` against this extension list and drops
+      // every node it cannot place, KEEPING THE TEXT. Without the table nodes a
+      // report's summary grid came back as one run-on paragraph — the cells of
+      // "Theme | Accounts | Nature of signal" concatenated into
+      // "ThemeAccountsNature of signal" with no separator, which reads as a
+      // rendering bug and is really a parse loss. The report engines write
+      // these grids constantly (RICE, prevalence counts, theme summaries), and
+      // `report_markdown` converts them with markdown's `tables` extension, so
+      // the HTML arriving here has always had real <table> markup in it.
+      //
+      // Worse than the display: `onUpdate` serializes what the schema kept, so
+      // the first genuine keystroke anywhere in the document saved the
+      // flattened body back over the stored one. The table was not just
+      // invisible, it was one edit away from being gone.
+      //
+      // `resizable: false` because column widths are the one part of this the
+      // server does NOT keep: the sanitizer allows `colspan`, `rowspan` and
+      // `style` on cells and nothing else, so a dragged width would vanish on
+      // save with no error — the same trap the heading levels avoid. Structure
+      // survives the round trip; geometry was never ours to store.
+      TableKit.configure({ table: { resizable: false } }),
+      // Alignment and indentation, both stored as inline style on the block
+      // and both on the server's CSS allowlist — `text-align` was already
+      // there, `margin-left` went in with `editorIndent`. They were the last
+      // two controls the toolbar offered on a PRD and not here, which made one
+      // bar mean two different things depending on which artifact was open.
+      TextAlign.configure({ types: [...INDENTABLE] }),
+      Indent,
       Link.configure({
         openOnClick: false,
         autolink: true,
@@ -140,7 +185,15 @@ export function DocumentEditor({
     ],
     content: initialHtml || "",
     onUpdate: ({ editor: ed }) => {
-      if (!interactedRef.current) return
+      // `isToolbarDriven` is the second half of this gate, and it exists
+      // because the gate's listeners below only cover the editor's own
+      // wrapper. Both panel hosts pin the formatting bar OUTSIDE that wrapper
+      // (the report's is portalled into a slot elsewhere in the tree), so
+      // clicking Bold there marked nothing: the text went bold, the status
+      // pill still read "Saved", and the edit was gone on reopen. Every one of
+      // those clicks goes through `execDocumentCommand`, which is where it is
+      // now recorded.
+      if (!interactedRef.current && !isToolbarDriven(ed)) return
       onChange?.(ed.getHTML())
     },
     onBlur: () => onBlur?.(),
@@ -194,7 +247,7 @@ export function DocumentEditor({
       data-doc-editor
       ref={wrapperRef}
     >
-      {editable && <Toolbar editor={editor} />}
+      {editable && !hideToolbar && <Toolbar editor={editor} />}
       <EditorContent editor={editor} />
       <style>{`
         [data-doc-editor] .tiptap { outline: none; min-height: 320px; }
@@ -215,6 +268,36 @@ export function DocumentEditor({
           padding: 12px 14px; overflow-x: auto;
         }
         [data-doc-editor] .tiptap a { color: var(--accent, #179463); }
+        /* Tables. The browser's default is a borderless grid that reads as
+           columns of loose text, so the rules that matter are the separators
+           and the header weight — the same treatment the docs site gives a
+           table, scoped here rather than shared because that stylesheet is the
+           marketing site's. The default auto layout is left alone: a report
+           grid has one long prose column and several short ones, and a fixed
+           layout would give them equal widths. */
+        [data-doc-editor] .tiptap table {
+          border-collapse: collapse;
+          width: 100%;
+          margin: 0 0 0.85em;
+          font-size: 0.95em;
+        }
+        [data-doc-editor] .tiptap th,
+        [data-doc-editor] .tiptap td {
+          border: 1px solid var(--line, #E8E6E0);
+          padding: 8px 10px;
+          text-align: left;
+          vertical-align: top;
+        }
+        [data-doc-editor] .tiptap th {
+          background: var(--surface-2, #F4F1EA);
+          font-weight: 600;
+        }
+        /* The cell the caret is in, while editing. TipTap marks a multi-cell
+           selection with this class; without a rule the selection is invisible
+           and a cell-wide delete looks like it did nothing. */
+        [data-doc-editor] .tiptap .selectedCell {
+          background: var(--accent-alpha-10, rgba(23, 148, 99, 0.10));
+        }
         /* NO placeholder rule here on purpose. The obvious one styles
            p.is-editor-empty::before with attr(data-placeholder), which only
            works with @tiptap/extension-placeholder — not installed, so the
@@ -254,6 +337,15 @@ function Toolbar({ editor }: { editor: Editor }) {
 
   return (
     <div data-doc-toolbar style={S.bar} role="toolbar" aria-label="Formatting">
+      {/* Everything below that is not a mark or a block type runs through
+          `execDocumentCommand` — the same translation the panel's bar uses, so
+          the two bars cannot drift into meaning different things by the same
+          name. `Btn`'s pressed state is for marks; these have none. */}
+      <Cmd ed={editor} cmd="undo" label="&#8630;" title="Undo" />
+      <Cmd ed={editor} cmd="redo" label="&#8631;" title="Redo" />
+
+      <Sep />
+
       <Btn ed={editor} name="bold" label="B" title="Bold"
            style={{ fontWeight: 800 }}
            run={() => editor.chain().focus().toggleBold().run()} />
@@ -305,25 +397,30 @@ function Toolbar({ editor }: { editor: Editor }) {
         }
         options={FONT_SIZES}
       />
-      <Select
+      {/* The SAME picker the panel's bar opens — a grid plus the platform's own
+          colour dialog, rather than the five-entry <select> this was. Two bars
+          offering different colours would be two documents' worth of palette. */}
+      <ColorPopover
         testId="doc-color"
-        aria-label="Text colour"
-        value={(editor.getAttributes("textStyle").color as string) || ""}
-        onChange={(v) =>
-          v ? editor.chain().focus().setColor(v).run() : editor.chain().focus().unsetColor().run()
+        title="Text colour"
+        swatch={(editor.getAttributes("textStyle").color as string) || "#1A1A17"}
+        clearLabel="Default"
+        onPick={(v) =>
+          v
+            ? editor.chain().focus().setColor(v).run()
+            : editor.chain().focus().unsetColor().run()
         }
-        options={TEXT_COLORS}
       />
-      <Select
+      <ColorPopover
         testId="doc-highlight"
-        aria-label="Highlight"
-        value={(editor.getAttributes("textStyle").backgroundColor as string) || ""}
-        onChange={(v) =>
+        title="Highlight"
+        swatch={(editor.getAttributes("textStyle").backgroundColor as string) || "#FEF3C7"}
+        clearLabel="None"
+        onPick={(v) =>
           v
             ? editor.chain().focus().setBackgroundColor(v).run()
             : editor.chain().focus().unsetBackgroundColor().run()
         }
-        options={HIGHLIGHT_COLORS}
       />
 
       <Sep />
@@ -336,6 +433,17 @@ function Toolbar({ editor }: { editor: Editor }) {
            run={() => editor.chain().focus().toggleBlockquote().run()} />
       <Btn ed={editor} name="codeBlock" label="&lt;/&gt;" title="Code block"
            run={() => editor.chain().focus().toggleCodeBlock().run()} />
+
+      <Cmd ed={editor} cmd="insertTable" label="Table" title="Insert a table" />
+      <Cmd ed={editor} cmd="insertHorizontalRule" label="&#8213;" title="Divider" />
+
+      <Sep />
+
+      <Cmd ed={editor} cmd="justifyLeft" label="&#8801;" title="Align left" />
+      <Cmd ed={editor} cmd="justifyCenter" label="&#8788;" title="Align centre" />
+      <Cmd ed={editor} cmd="justifyRight" label="&#8803;" title="Align right" />
+      <Cmd ed={editor} cmd="outdent" label="&#8592;|" title="Decrease indent" />
+      <Cmd ed={editor} cmd="indent" label="|&#8594;" title="Increase indent" />
 
       <Sep />
 
@@ -350,6 +458,98 @@ function Toolbar({ editor }: { editor: Editor }) {
         Clear
       </button>
     </div>
+  )
+}
+
+/** A colour trigger and the grid it opens, for the full-page bar.
+ *
+ *  The panel's bar hangs its grid off `PrdToolbar`'s own menu machinery; this
+ *  bar has none, so the open state lives here. Click-away and Escape close it,
+ *  the same two gestures that close the other one — a popover you can only
+ *  dismiss by choosing something is a trap. */
+function ColorPopover({ testId, title, swatch, clearLabel, onPick }: {
+  testId: string
+  title: string
+  swatch: string
+  clearLabel: string
+  onPick: (value: string) => void
+}) {
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") setOpen(false) }
+    document.addEventListener("mousedown", onDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [open])
+
+  return (
+    <div ref={ref} style={{ position: "relative", display: "inline-flex" }}>
+      <button
+        type="button"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid={testId}
+        onMouseDown={(e) => e.preventDefault()}
+        onClick={() => setOpen((v) => !v)}
+        style={{ ...S.btn, display: "inline-flex", alignItems: "center", gap: 6 }}
+      >
+        <span aria-hidden style={{
+          width: 13, height: 13, borderRadius: 3, background: swatch,
+          border: "1px solid var(--line, #E8E6E0)",
+        }} />
+        <span aria-hidden>▾</span>
+      </button>
+      {open && (
+        <div
+          className="prd-more-menu"
+          role="menu"
+          data-testid={`${testId}-menu`}
+          style={{ position: "absolute", top: "calc(100% + 6px)", left: 0 }}
+        >
+          <ColorGrid
+            testId={`${testId}-grid`}
+            clearLabel={clearLabel}
+            onPick={(v) => { onPick(v); setOpen(false) }}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** A toolbar button whose whole job is one `execDocumentCommand`. Separate
+ *  from `Btn` because these commands have no `isActive` state to reflect —
+ *  there is no such thing as "the caret is inside an undo". */
+function Cmd({ ed, cmd, label, title }: {
+  ed: Editor
+  cmd: string
+  label: string
+  title: string
+}) {
+  return (
+    <button
+      type="button"
+      title={title}
+      aria-label={title}
+      data-testid={`doc-${cmd}`}
+      // Same reason as `Btn`: the selection IS the argument to these commands,
+      // and it does not survive the focus move a plain mousedown causes.
+      onMouseDown={(e) => e.preventDefault()}
+      onClick={() => execDocumentCommand(ed, cmd)}
+      style={S.btn}
+      dangerouslySetInnerHTML={{ __html: label }}
+    />
   )
 }
 

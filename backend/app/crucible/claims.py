@@ -86,8 +86,49 @@ DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 # `project_mgmt` is the execution source (§4.5): authoritative about what THIS
 # ORGANISATION did, never about users. A Jira ticket saying "users churn
 # because export is slow" is one engineer's framing typed into a text field.
+#: What each source is a legitimate WITNESS to. SPEC §4.5.
+#:
+#: I tried to widen this after measuring that 661 `project_mgmt -> preference`
+#: claims were being rejected on a real tenant, and I was wrong to. A tracker
+#: ticket reading "customers want bulk export" is a PM's PARAPHRASE; the
+#: authoritative witness for what a customer wants is the customer, and
+#: `customer_voice` is where that lives. Letting the tracker vote on preference
+#: would let one engineer's framing of a user's motive enter the substrate
+#: carrying the weight of a structured field.
+#:
+#: The rejections were real but the diagnosis was wrong. They were concentrated
+#: in clusters that held ONLY tracker claims — an artefact of grouping, which
+#: was splitting the corpus into single-source buckets. Grouping by the graph's
+#: own themes mixes sources within a theme, so a theme carrying both a customer
+#: call and the tickets about it now has an authoritative member. See
+#: app/crucible/kg_themes.py.
+#:
+#: Authority is not weight: `DEFAULT_STRENGTH` separately caps a self-reporting
+#: source at `reported`.
 AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
-    "customer_voice":   frozenset({"preference", "mechanism"}),
+    # `constraint` BECAUSE A CUSTOMER IS THE WITNESS TO ITS OWN BLOCKER.
+    #
+    # The extractor types a blocked deal as `deal_blocker` -> `constraint`
+    # (KIND_TO_CLAIM_TYPE above). Without this entry, a tenant whose only
+    # connected source is call recordings had every blocked deal REFUTED as
+    # "no source that may speak to this claim type reported it" — three real
+    # blockers across three named accounts, weeks apart, produced zero findings
+    # and three lines in the ruled-out ledger. The identical sentence typed
+    # into Slack surfaced, because `communication` already had `constraint`.
+    #
+    # That asymmetry was not the self-selection rule doing its job. The rule is
+    # about MAGNITUDE — `test_a_self_selected_source_can_never_size_a_population`
+    # asserts exactly that, for `customer_voice` and `communication` together —
+    # and it is untouched here. Authority is not sizing: `score_impact` reads
+    # `impact_inputs` and nothing else, which
+    # `assert_impact_ignores_corroboration` sweeps every field to enforce. What
+    # this entry changes is whether the claim survives Stage 4 and how much
+    # confidence it carries, not how big anything is.
+    #
+    # And on the merits: nobody is better placed than the customer to report
+    # their own procurement queue, security review or budget freeze. That is a
+    # claim about themselves, not about the market.
+    "customer_voice":   frozenset({"preference", "mechanism", "constraint"}),
     "communication":    frozenset({"attempt", "existence", "constraint"}),
     "project_mgmt":     frozenset({"attempt", "existence", "constraint"}),
     "analytics":        frozenset({"magnitude", "direction"}),
@@ -104,6 +145,8 @@ AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
     "verbal_claim":     frozenset(),
     "agent_inferred":   frozenset(),
 }
+
+
 
 # ── source_type → the strongest thing it can support ─────────────────────────
 # A CEILING, not an assignment. `measured` here means the source records what

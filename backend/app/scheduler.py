@@ -18,11 +18,12 @@ Runs inside the FastAPI process. Two jobs (opt-in via SCHEDULER_ENABLED=true):
   refresh_connectors — re-pulls connector data into the KG every
                        CONNECTOR_REFRESH_INTERVAL_MINUTES (10m) so chat, brief
                        and KG read near-live data.
-  monthly_reports_tick — once a month per company (first configured brief
-                       weekday, at the brief time), runs each registered
-                       intelligence report, saves it into the artifacts
-                       library and extracts it into the KG so questions can
-                       be answered from it (app.monthly_reports).
+  monthly_reports_tick — each intelligence report on its own calendar
+                       (competitive + market quarterly, 3P feedback monthly)
+                       at 10:00 in the company's timezone: runs it, saves it
+                       into the artifacts library and extracts it into the KG
+                       so questions can be answered from it
+                       (app.monthly_reports).
 """
 from __future__ import annotations
 
@@ -285,7 +286,9 @@ async def _run_synthesis_for_all_companies() -> None:
             try:
                 # generate_brief_for is blocking (LLM + Supabase); keep it off the
                 # event loop so one slow company can't stall the scheduler thread.
-                await asyncio.to_thread(generate_brief_for, ws_slug)
+                # Scheduled cycle — nothing is waiting, so this takes the
+                # half-price Message Batches path (app.llm_batch).
+                await asyncio.to_thread(generate_brief_for, ws_slug, batch=True)
                 logger.info("Scheduler: synthesis brief for %s → ok", ws_slug)
                 # Parity with the legacy path: warm evidence/PRD/Ask drill-downs so
                 # the first user click is instant. Error-isolated in the helper.
@@ -440,7 +443,12 @@ async def _generate_brief_for_company(slug: str) -> None:
     from app.brief_runner import warm_synthesis_drilldowns
     from app.synthesis_brief import generate_brief_for
 
-    await asyncio.to_thread(generate_brief_for, slug, deliver=False)
+    # Generation runs GENERATION_LEAD (3h) before delivery and delivers
+    # separately, so minutes of batch latency cost nothing here. 45 minutes is
+    # well inside that lead and this path handles ONE company, so the bound does
+    # not multiply the way it would in the all-company cycles.
+    await asyncio.to_thread(generate_brief_for, slug, deliver=False,
+                            batch=True, batch_deadline_s=45 * 60)
     # Warm evidence/PRD/Ask drill-downs so the first user click is instant.
     # Error-isolated in the helper.
     warm_synthesis_drilldowns(slug)
@@ -543,14 +551,16 @@ async def _run_exact_delivery(
 
 
 async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
-    """Drive the monthly intelligence reports for every company.
+    """Drive the scheduled intelligence reports for every company.
 
     Ticks hourly (MONTHLY_REPORTS_TICK_MINUTES). For each company it resolves
-    the same timezone + configured day/time the brief uses and asks the pure
-    `app.monthly_reports.due_specs` decision — which forces the frequency to
-    MONTHLY (first configured weekday of the month) whatever brief cadence
-    the company picked, and reads its once-per-cycle state from the saved
-    reports themselves, so a restart can never double-run a month.
+    the timezone, then asks the pure
+    `app.monthly_reports.due_specs` decision — which runs each report on its
+    OWN calendar (competitive + market intelligence quarterly, 3P feedback
+    monthly) and reads once-per-period state from the saved reports
+    themselves, so a restart can never double-run a period. A tenant that
+    onboards mid-period simply has no report for it, which is what makes the
+    join run fall out of the same check.
 
     Single-phase by design, unlike the brief's generate-then-deliver split:
     nobody is waiting at an exact instant for a report. It takes minutes to
@@ -583,7 +593,7 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
         tz, schedule = _resolve_company_schedule(company)
         try:
             due = await asyncio.to_thread(
-                monthly_reports.due_specs, company_id, now, tz, schedule
+                monthly_reports.due_specs, company_id, now, tz
             )
         except Exception as exc:  # noqa: BLE001 — one company never stops the tick
             logger.error(
@@ -834,6 +844,22 @@ def _run_orphan_ask_job_sweep() -> None:
             logger.info("Failed %d abandoned Goal Analysis run(s)", n)
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("orphan Goal Analysis sweep failed")
+    try:
+        # Report documents no run points at. `link_document`'s compare-and-set
+        # covers the double-click race — the loser deletes its own document —
+        # but not a process death BETWEEN create and link, because the process
+        # that would clean up is gone. Deletes only what is provably untouched;
+        # see the docstring for why an edited stray is left alone.
+        from app.db.crucible_runs import sweep_stranded_documents
+
+        swept = sweep_stranded_documents()
+        if swept.get("deleted") or swept.get("kept_edited"):
+            logger.info(
+                "Swept %d stranded Goal Analysis document(s); kept %d with edits",
+                swept["deleted"], swept["kept_edited"],
+            )
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("stranded Goal Analysis document sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

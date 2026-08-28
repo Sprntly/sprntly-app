@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import random
-import re
 import sys
 import time
 import uuid
@@ -28,7 +27,6 @@ from app.db import (
     find_cached_ask,
     get_ask_job,
     start_ask_job,
-    suppress_ask_job,
 )
 from app.deps.ownership import (
     require_owned_dataset,
@@ -45,11 +43,6 @@ from app.routes.conversations import TurnAttachment
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1/ask", tags=["ask"])
-
-# The @Sprntly agent token — word-boundary so "@Sprntly" / "@sprntly" match but
-# "@sprntlybot" does not. Mirrors routes/projects.py `_MENTION_RE`; the group
-# 2-mode gate uses it to decide whether a multi-human turn addressed the agent.
-_MENTION_RE = re.compile(r"@sprntly\b", re.IGNORECASE)
 
 
 # Strong refs to in-flight background Ask tasks. asyncio holds only a weak
@@ -159,6 +152,36 @@ class AskIn(BaseModel):
     # PRD tab's context already carries its evidence and tickets.
     evidence_id: int | None = Field(default=None, ge=1)
     ticket_set_id: int | None = Field(default=None, ge=1)
+    # What the side panel is SHOWING — `{"kind": "report"|"document", "id":
+    # int}`, the same shape the classify call already receives as
+    # `open_artifact`, sent by the same client helper
+    # (`openArtifactForPanel`).
+    #
+    # Unlike the three ids above, this addresses NOTHING on its own and is
+    # therefore not ownership-gated here: `app.thread_context` uses it only to
+    # ORDER the artifacts of `conversation_id`, and every one of those is read
+    # company-scoped. A pointer at another tenant's report matches no row in
+    # this thread and reorders nothing — it cannot pull a document in. That is
+    # deliberate: an id that fetches needs a gate, an id that sorts does not.
+    open_artifact: dict | None = None
+
+    @field_validator("open_artifact")
+    @classmethod
+    def _panel_pointer_shape(cls, v: dict | None) -> dict | None:
+        """Accept only the shape the sorter understands, and drop the rest.
+
+        A malformed pointer must not raise — the panel's state is a hint, and
+        failing an ask because a client sent a stale shape would trade a good
+        answer for an error. Anything unrecognised becomes None, which is
+        exactly "nothing is open".
+        """
+        if not isinstance(v, dict):
+            return None
+        kind = str(v.get("kind") or "").strip().lower()
+        raw_id = v.get("id")
+        if kind not in {"report", "document"} or not isinstance(raw_id, int):
+            return None
+        return {"kind": kind, "id": raw_id}
     # Individual-project-chat send identity: the idempotency key a
     # retry/double-submit carries for the persisted `conversation_turns`
     # user turn (project branch only — ignored on the main/PRD/artifact
@@ -265,116 +288,6 @@ def _load_history(
         return []
 
 
-# How many of the most-recent group turns to fold into the agent's history — a
-# sane recent-turns cap so a long-running group thread can't grow the prompt
-# unboundedly (the per-turn clamp is applied downstream in
-# `qa_agent._render_history`, unchanged, exactly as for `_load_history`).
-_GROUP_HISTORY_TURNS = 30
-
-
-def _load_group_history(
-    conversation_id: int | None,
-    project_id: int | None,
-    user_id: str,
-    exclude_client_message_id: str | None,
-) -> list[dict]:
-    """Prior GROUP thread turns [{role, content}] for the @Sprntly reply, oldest
-    first, so the group agent sees what teammates said — NOT the owner-gated
-    `_load_history` (a group conversation's `user_id` is only its creator, so a
-    non-creator member's reply would get empty history and the creator's would
-    be author-stripped). Read from the group turn store (`list_group_turns`,
-    author-enriched), with the author folded into each user turn's content so
-    the model knows who said what without changing the `[{role, content}]` shape
-    the downstream render expects.
-
-    MEMBERSHIP- AND BINDING-GATED (IDOR boundary): this runs in the ROUTE,
-    BEFORE the assembler's 403, and `list_group_turns` itself only guards
-    `kind='group'`, NOT membership OR project/company scope. So TWO checks run
-    here: (1) `is_project_member` for the client-supplied `project_id` — a
-    non-member gets `[]`; and (2) a bind of `conversation_id` to that
-    `project_id` via the server-derived canonical group id
-    (`get_group_chat_id`) — a member who passes a FOREIGN project's (or
-    tenant's) group `conversation_id` also gets `[]`, never that other team's
-    thread. Both denials share the leak-free `[]` shape.
-
-    Excludes the CURRENT turn: Feature #1 posts the user's turn to the group
-    store BEFORE this ask fires, so `list_group_turns` already contains it. The
-    ask carries that turn's `client_message_id`; drop the matching turn (it is
-    passed as the question, so injecting it as history too would duplicate it).
-    Falls back to dropping the trailing user turn if no key is available.
-
-    Bounded to the most recent `_GROUP_HISTORY_TURNS`. Best-effort: no id/
-    project, non-member, or any read error → `[]` (history must never break the
-    reply)."""
-    if not conversation_id or project_id is None:
-        return []
-    try:
-        from app.db.conversations import list_group_turns
-        from app.db.projects import get_group_chat_id, is_project_member
-
-        # IDOR boundary, part 1 — a non-member of the client-supplied project
-        # reads nothing.
-        if not is_project_member(project_id, user_id):
-            return []
-
-        # IDOR boundary, part 2 — bind conversation_id ↔ project_id. The client
-        # supplies BOTH the project_id (membership-checked above) AND the
-        # conversation_id, but the membership check alone never ties them
-        # together: a member of project A could pass project B's group
-        # conversation_id and fold a FOREIGN team's (cross-project, even
-        # cross-tenant) thread into the prompt. `list_group_turns` only guards
-        # `kind='group'`, not project/company scope, so it can't catch this on
-        # its own. Resolve the project's OWN canonical group conversation
-        # (server-derived, never client-trusted — the same posture
-        # `project_group_context._load_group_window` uses) and require the
-        # client's id to match it. No group chat for this project, or any
-        # mismatch → deny, leak-free, same `[]` shape as the non-member deny.
-        canonical_conversation_id = get_group_chat_id(project_id)
-        if canonical_conversation_id is None or canonical_conversation_id != conversation_id:
-            return []
-
-        # Belt-and-suspenders — also scope the turn read by the owning project,
-        # so a future caller that forgets the binding above still can't read
-        # another project's turns.
-        turns = list_group_turns(conversation_id, project_id=project_id)  # author-enriched DTOs
-        excluded_by_key = False
-        out: list[dict] = []
-        for t in turns:
-            if (
-                exclude_client_message_id
-                and t.get("client_message_id") == exclude_client_message_id
-            ):
-                excluded_by_key = True
-                continue  # the current turn — passed as the question, not history
-            content = (t.get("content") or "").strip()
-            if not content:
-                continue
-            role = t.get("role") or "user"
-            if role == "user":
-                # Fold the author into the content so the model reads a
-                # multi-party transcript ("Name (role): message") without
-                # changing the {role, content} shape. Agent turns stay plain
-                # (they are Sprntly's own voice).
-                author = t.get("author_name") or "Someone"
-                job_role = t.get("author_job_role")
-                prefix = f"{author} ({job_role})" if job_role else author
-                content = f"{prefix}: {content}"
-            out.append({"role": role, "content": content})
-
-        # Fallback current-turn exclusion: if the ask carried no key to match on,
-        # the current message is still the most-recent turn — drop a trailing
-        # user turn so the question isn't duplicated into history.
-        if not excluded_by_key and not exclude_client_message_id and out and out[-1]["role"] == "user":
-            out.pop()
-
-        return out[-_GROUP_HISTORY_TURNS:]
-    except Exception:  # noqa: BLE001 — history must never break the reply
-        logger.warning(
-            "group history load failed conversation_id=%s", conversation_id
-        )
-        return []
-
-
 def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
     """Resolve the pre-warm cache for this question, applying the same waiting +
     synthetic-delay behavior the old synchronous endpoint did. Returns the
@@ -411,13 +324,12 @@ def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
 
 
 # ── One authorization posture for the project-chat ask lifecycle ─────────────
-# The gates below (project membership + the group 2-mode gate) share ONE
-# posture: a project-chat ask is authorized SYNCHRONOUSLY at the /v1/ask route,
-# BEFORE any job is spawned or tokens spent, and every check FAILS CLOSED (a
-# check that can't be established denies rather than admits). This is
-# deliberately the SAME gate the async project assembler already runs, hoisted
-# earlier so a denial costs no LLM round-trip and never leaks a raw backend
-# error to the client.
+# The membership gate below shares this posture: a project-chat ask is
+# authorized SYNCHRONOUSLY at the /v1/ask route, BEFORE any job is spawned or
+# tokens spent, and the check FAILS CLOSED (a check that can't be established
+# denies rather than admits). This is deliberately the SAME gate the async
+# project assembler already runs, hoisted earlier so a denial costs no LLM
+# round-trip and never leaks a raw backend error to the client.
 #
 # NOTE: a third change — recording an owner `user_id` on the ask row and
 # gating GET/cancel/stream to that owner — is DEFERRED pending an ownership
@@ -430,16 +342,31 @@ def _resolve_cache_hit(dataset: str, question: str) -> dict | None:
 def _project_source(body: "AskIn") -> tuple[int, dict] | None:
     """The `(project_id, params)` a project-scoped ask targets, or None for a
     non-project ask. Project chats carry their project on `context_source`
-    (`{"kind": "project", "params": {"project_id", "surface"}}`), never on the
-    top-level `body.project_id`."""
+    (`{"kind": "project", "params": {"project_id", "surface"}}`) OR on the
+    top-level `body.project_id`, which the individual-project-chat client
+    sends. BOTH must reach the membership gate — see the comment below."""
     src = body.context_source if isinstance(body.context_source, dict) else None
-    if not src or src.get("kind") != "project":
-        return None
-    params = src.get("params") or {}
-    proj_raw = params.get("project_id")
-    if proj_raw is None:
-        return None
-    return int(proj_raw), params
+    if src and src.get("kind") == "project":
+        params = src.get("params") or {}
+        proj_raw = params.get("project_id")
+        if proj_raw is not None:
+            return int(proj_raw), params
+
+    # THE TOP-LEVEL FIELD IS ALSO A PROJECT SCOPE, and it was ungated.
+    #
+    # The docstring below used to say project chats "never" use
+    # `body.project_id`. The individual-project-chat client does exactly that —
+    # `web/app/lib/api.ts` sends it, with a comment promising it is
+    # "membership-gated server-side" — and because this returned None for it,
+    # `_gate_project_membership` never ran on that path. A foreign tenant got
+    # 200 where the gate would have said 404, and a same-tenant non-member got
+    # 200 instead of 403. `test_ask_project_context.py` asserts both and has
+    # been failing on main, reporting a real IDOR as a red lane nobody read.
+    #
+    if body.project_id is not None:
+        return int(body.project_id), {}
+
+    return None
 
 
 def _gate_project_membership(
@@ -460,30 +387,6 @@ def _gate_project_membership(
         raise HTTPException(404, "Project not found")
     if not is_project_member(project_id, company.user_id):
         raise HTTPException(403, "You are not a member of this project.")
-
-
-def _group_is_multi_human(project_id: int) -> bool:
-    """Whether the project has ≥2 human members — the group 2-mode gate's
-    multi-human test. FAILS CLOSED: any read error is treated as multi-human
-    (→ suppress), after ONE retry. A count hiccup must never drop the gate into
-    solo-mode and let Sprntly interject into a shared thread."""
-    from app.db.projects import count_project_members
-
-    for attempt in range(2):
-        try:
-            return count_project_members(project_id) >= 2
-        except Exception:  # noqa: BLE001 — fail CLOSED toward multi-human
-            logger.warning(
-                "count_project_members failed project_id=%s attempt=%s",
-                project_id, attempt, exc_info=True,
-            )
-    return True
-
-
-def _mentions_agent(question: str | None) -> bool:
-    """True when the turn `@Sprntly`-mentions the agent (word-boundary,
-    case-insensitive) — the same token the group send path recognises."""
-    return bool(_MENTION_RE.search(question or ""))
 
 
 @router.post("")
@@ -527,41 +430,13 @@ async def ask(
             raise HTTPException(404, "Ticket set not found")
 
     # ── Project-scoped ask: synchronous authorization, BEFORE any generation ──
-    # A project chat carries its project on `context_source`. Two gates fire
-    # here, at the route, before the job is spawned:
-    #   Part 3 — membership: a non-member 403s NOW (no ask-planner token burn,
-    #            no raw 403 leaking from a background job). BOTH surfaces.
-    #   Part 1 — group 2-mode gate: in a MULTI-human group, Sprntly is fully
-    #            silent unless the turn @Sprntly-mentions it. Evaluated
-    #            pre-generation and FAIL-CLOSED, so an untagged multi-human ask
-    #            does NO LLM work, stores NO readable answer, and broadcasts
-    #            nothing — closing the old fail-OPEN, pay-then-suppress bug.
+    # A project chat carries its project on `context_source`. Membership: a
+    # non-member 403s NOW (no ask-planner token burn, no raw 403 leaking from
+    # a background job).
     _proj = _project_source(body)
     if _proj is not None:
-        _project_id, _proj_params = _proj
+        _project_id, _ = _proj
         _gate_project_membership(_project_id, company)
-        if _proj_params.get("surface") == "group" and not _mentions_agent(body.question):
-            if _group_is_multi_human(_project_id):
-                # Suppress BEFORE generation: persist a job row for the question
-                # so the client's POST still gets a pollable ask_id, mark it
-                # terminally silenced (empty response), and return a no-answer
-                # terminal state the client renders as nothing. No LLM work runs,
-                # no group turn is persisted, nothing is broadcast — the sender
-                # reads NOTHING.
-                ask_id = start_ask_job(
-                    company_id=enterprise_id,
-                    dataset=body.dataset,
-                    question=body.question,
-                    conversation_id=body.conversation_id,
-                    pinned_skill=body.pinned_skill,
-                )
-                suppress_ask_job(ask_id)
-                logger.info(
-                    "group_reply_suppressed_pregen project_id=%s conversation_id=%s "
-                    "reason=multi_human_no_mention",
-                    _project_id, body.conversation_id,
-                )
-                return {"ask_id": ask_id, "status": "cancelled"}
 
     # History loads BEFORE the cache resolution (not after, as it did before
     # this fix) so eligibility can be derived from it: a thread that already
@@ -571,23 +446,7 @@ async def ask(
     from app.timing import timed
 
     with timed("route:ask.history"):
-        # GROUP surface: load PRIOR thread history from the group turn store
-        # (membership-gated, author-attributed) instead of the owner-gated
-        # `_load_history` — so the @Sprntly reply sees what teammates said. Only
-        # the `surface == "group"` branch changes; main/private keep
-        # `_load_history` exactly, byte-identical.
-        _hist_ctx = body.context_source if isinstance(body.context_source, dict) else None
-        _hist_params = (_hist_ctx or {}).get("params") or {}
-        if _hist_ctx and _hist_ctx.get("kind") == "project" and _hist_params.get("surface") == "group":
-            _hist_proj = _hist_params.get("project_id")
-            history = _load_group_history(
-                body.conversation_id,
-                int(_hist_proj) if _hist_proj is not None else None,
-                company.user_id,
-                body.client_message_id,
-            )
-        else:
-            history = _load_history(body.conversation_id, enterprise_id, company.user_id)
+        history = _load_history(body.conversation_id, enterprise_id, company.user_id)
 
     # 1) Cache hit short-circuit — the home + Ask Sprntly starter chips send
     # deterministic prompts pre-warmed at brief-generation time. We persist the
@@ -677,6 +536,9 @@ async def ask(
             prd_id=body.prd_id,
             evidence_id=body.evidence_id,
             ticket_set_id=body.ticket_set_id,
+            # What the panel is SHOWING, so `app.thread_context` puts that
+            # document first among the ones this thread produced.
+            open_artifact=body.open_artifact,
             # Attachment context for a captured HTML report: the chat room and
             # PRD this ask ran in (see app/report_capture.py).
             conversation_id=body.conversation_id,
@@ -712,6 +574,9 @@ async def ask(
             prd_id=body.prd_id,
             evidence_id=body.evidence_id,
             ticket_set_id=body.ticket_set_id,
+            # What the panel is SHOWING, so `app.thread_context` puts that
+            # document first among the ones this thread produced.
+            open_artifact=body.open_artifact,
             # Attachment context for a captured HTML report — see above.
             conversation_id=body.conversation_id,
             # The caller's own identity — see above.

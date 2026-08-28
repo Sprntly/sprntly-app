@@ -1026,6 +1026,15 @@ def _call_part_a(ctx: dict, author: str | None = None, background: bool = False,
         skill=_SKILL,
         background=background,
         on_delta=on_delta,
+        # `background=True` means pre-generation with nobody waiting — exactly
+        # the precondition for the half-price Batches path — so the two travel
+        # together rather than adding a second flag that could drift from it.
+        # Audited: the only caller that reaches HERE with background=True is
+        # `_warm_one_prd`. Every user-facing entry point (routes/prd.py,
+        # routes/brief.py, the multi-agent orchestrator) leaves it False and so
+        # still runs live. A future caller wanting the low-priority lane WHILE
+        # someone waits needs its own flag.
+        batch=background,
     )
 
 
@@ -1582,10 +1591,15 @@ def _ensure_impl_spec_locked(
     return {"llm_part": llm_part, "cached": False}
 
 
-def _top_insight_indices(insights: list, count: int) -> list[int]:
+def top_insight_indices(insights: list, count: int) -> list[int]:
     """Original indices of the `count` insights a user is likeliest to open:
     the LLM-flagged headline insight first, then by confidence descending —
-    the same hero-selection order the brief UI renders."""
+    the same hero-selection order the brief UI renders.
+
+    Public because the evidence warm in `app.brief_runner` picks its insights
+    the same way. Both warms are the same bet on the same click, so they must
+    agree on WHICH insight that click lands on — warming insight 0's PRD and
+    insight 2's evidence would leave every reader half-cold."""
     ranked = sorted(
         range(len(insights)),
         key=lambda i: (
@@ -1657,7 +1671,7 @@ async def warm_prds_for_brief(brief: dict) -> None:
     if not brief_id or not insights:
         return
 
-    indices = _top_insight_indices(insights, count)
+    indices = top_insight_indices(insights, count)
     started = time.perf_counter()
     await asyncio.gather(
         *(

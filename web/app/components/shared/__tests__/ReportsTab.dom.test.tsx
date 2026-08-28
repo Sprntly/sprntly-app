@@ -104,7 +104,7 @@ describe("ReportsTab — several reports in one thread", () => {
 
     expect(reportGet).toHaveBeenCalledWith(8)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("Competitors · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("Competitors · Q2"),
     )
     const frame = document.querySelector("iframe") as HTMLIFrameElement
     expect(frame.getAttribute("srcdoc")).toContain("<h1>Competitors · Q2</h1>")
@@ -130,7 +130,7 @@ describe("ReportsTab — several reports in one thread", () => {
       fireEvent.click(document.querySelector('[data-report-id="9"]') as HTMLElement)
     })
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
   })
 })
@@ -144,7 +144,7 @@ describe("ReportsTab — arriving on one specific report", () => {
 
     expect(reportGet).toHaveBeenCalledWith(9)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
   })
 
@@ -192,7 +192,7 @@ describe("ReportsTab — arriving on one specific report", () => {
 
     expect(reportGet).toHaveBeenCalledWith(9)
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     expect(screen.queryByTestId("reports-back")).toBeNull()
   })
@@ -223,24 +223,28 @@ describe("ReportsTab — a thread with one report", () => {
     await renderTab([ROWS[0]])
 
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     // A "All reports" button leading to a one-item list shows the reader nothing.
     expect(screen.queryByTestId("reports-back")).toBeNull()
   })
 })
 
-describe("ReportsTab — a skill='saved-chat' report renders as markdown", () => {
-  const savedChatDoc = (id: number, title: string, markdown: string) => ({
+describe("ReportsTab — a report renders as the rich document it is", () => {
+  // Reports are HTML now: captured as HTML, and the rows written before that
+  // converted on the way out of the API (`app/report_markdown.py`). The panel
+  // renders one through the SAME editor a team document uses — that is what
+  // makes "edit the report in the panel" the same gesture on both.
+  const htmlDoc = (id: number, title: string, html: string) => ({
     id, skill: "saved-chat", title, question: "",
-    html: markdown,
+    html,
     created_at: new Date().toISOString(), conversation_id: 77, prd_id: null,
     share_mode: "private", share_token: null,
   })
 
-  it("renders the stored markdown as elements, not the HTML-document iframe", async () => {
+  it("renders the document, not the sandboxed iframe", async () => {
     reportGet.mockResolvedValue(
-      savedChatDoc(8, "Competitors · Q2", "# Prioritization\n\n**Ship A** first\n\n- One\n- Two"),
+      htmlDoc(8, "Competitors · Q2", "<h1>Prioritization</h1><p><strong>Ship A</strong> first</p>"),
     )
 
     await renderTab()
@@ -248,14 +252,9 @@ describe("ReportsTab — a skill='saved-chat' report renders as markdown", () =>
       fireEvent.click(document.querySelector('[data-report-id="8"]') as HTMLElement)
     })
 
-    await waitFor(() =>
-      expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy(),
-    )
-    const body = screen.getByTestId("saved-chat-markdown")
-    expect(body.querySelector("h1")?.textContent).toBe("Prioritization")
-    expect(body.querySelector("strong")?.textContent).toBe("Ship A")
-    expect(body.querySelectorAll("li").length).toBe(2)
-    // Never the sandboxed-iframe path — that's reserved for a real HTML document.
+    await waitFor(() => expect(screen.getByTestId("report-document")).toBeTruthy())
+    // The iframe path is reserved for a legacy self-contained document, which
+    // owns its own <head> and <style>.
     expect(document.querySelector("iframe")).toBeNull()
   })
 
@@ -275,16 +274,16 @@ describe("ReportsTab — a skill='saved-chat' report renders as markdown", () =>
   })
 })
 
-describe("ReportsTab — a scheduled monthly report (markdown body, report skill)", () => {
-  it("renders as markdown: the body decides, not only the skill id", async () => {
-    // A scheduled monthly run (app.monthly_reports) saves the report skill's
-    // markdown answer — same skill id as the legacy HTML-document rows, but
-    // the stored body is markdown. The sniff routes it to the markdown
-    // renderer; handing it to the iframe would show a wall of raw markdown.
+
+describe("ReportsTab — a scheduled monthly report", () => {
+  it("renders as a document: the API serves HTML whatever is stored", async () => {
+    // A scheduled monthly run saves the report skill's answer, and the read
+    // route converts it — so what reaches this panel is the same HTML shape
+    // every other report arrives in, editable in the same editor.
     reportGet.mockResolvedValue({
       id: 8, skill: "competitive-intelligence-review",
       title: "Competitive Intelligence report · June 2026", question: "",
-      html: "## Competitive review\n\n**Acme** shipped X\n\n- One\n- Two",
+      html: "<h2>Competitive review</h2><p><strong>Acme</strong> shipped X</p>",
       created_at: new Date().toISOString(), conversation_id: 77, prd_id: null,
       share_mode: "private", share_token: null,
     })
@@ -294,12 +293,7 @@ describe("ReportsTab — a scheduled monthly report (markdown body, report skill
       fireEvent.click(document.querySelector('[data-report-id="8"]') as HTMLElement)
     })
 
-    await waitFor(() =>
-      expect(screen.getByTestId("saved-chat-markdown")).toBeTruthy(),
-    )
-    const body = screen.getByTestId("saved-chat-markdown")
-    expect(body.querySelector("h2")?.textContent).toBe("Competitive review")
-    expect(body.querySelector("strong")?.textContent).toBe("Acme")
+    await waitFor(() => expect(screen.getByTestId("report-document")).toBeTruthy())
     expect(document.querySelector("iframe")).toBeNull()
   })
 })
@@ -367,7 +361,7 @@ describe("ReportsTab — nothing to show", () => {
 
     await act(async () => { release(doc(9, "VoC · Q2")) })
     await waitFor(() =>
-      expect(screen.getByTestId("reports-detail-title").textContent).toBe("VoC · Q2"),
+      expect(document.querySelector("iframe")?.getAttribute("title")).toBe("VoC · Q2"),
     )
     expect(screen.queryByTestId("reports-detail-empty")).toBeNull()
   })
