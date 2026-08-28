@@ -486,3 +486,107 @@ def test_one_stalled_chunk_falls_back_without_affecting_other_chunks(mod, monkey
     # Chunk 2 (FF2) fell back to sync.
     assert sync_calls == [("extract", "fireflies-backfill-FF2"),
                           ("checklist", "fireflies-backfill-FF2")]
+
+
+# ── malformed batch-result shape: skip gracefully, don't take the batch down ─
+#
+# Live-verify (2026-08-27): one call's batched MAIN-pass result had `signals`
+# come back as a bare string instead of a list — an `AttributeError: 'str'
+# object has no attribute 'get'` deep inside the write path, on the exact
+# same bulk backfill run that also tripped the statement_timeout burst.
+# `app.graph.extractor._finish_extract`/`_finish_checklist` now guard the
+# shape explicitly (`MalformedLLMResultError`); this proves the CLI's own
+# per-call isolation (`_run_batched`) still degrades that ONE call gracefully
+# — logged, ledger not advanced, retried next run — while the OTHER call in
+# the SAME batch/chunk writes and advances normally. Uses the REAL (not
+# monkeypatched) `parse_extract_response`/`parse_checklist_response` so this
+# exercises the actual guard, not a stand-in.
+
+
+def _tool_use_message(input_dict: dict):
+    """A minimal stand-in for a batched Anthropic `Message` whose forced
+    `submit_response` tool was invoked with `input_dict` — the shape
+    `app.llm.parse_tool_response` expects."""
+    return SimpleNamespace(content=[
+        SimpleNamespace(type="tool_use", name="submit_response", input=input_dict)
+    ])
+
+
+def test_malformed_batch_result_shape_is_skipped_other_call_in_batch_still_processes(
+    mod, monkeypatch, caplog,
+):
+    records = [_rec("FF1"), _rec("FF2")]
+    requests, unit_by_id = mod._build_batch_requests(records, "ent-x")
+
+    results = {}
+    for r in requests:
+        pass_name, rec, _doc_name, _text = unit_by_id[r.custom_id]
+        if rec.external_id == "FF1" and pass_name == "main":
+            # The exact live-verify shape: 'signals' is a bare string.
+            results[r.custom_id] = _tool_use_message(
+                {"signals": "a bare string, not a list"})
+        elif pass_name == "main":
+            results[r.custom_id] = _tool_use_message({"signals": []})
+        else:
+            results[r.custom_id] = _tool_use_message({"checklist": []})
+
+    hashes = {id(r): f"hash-{r.external_id}" for r in records}
+    recorded = []
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: recorded.append(a))
+
+    with caplog.at_level("WARNING"):
+        tally, extracted = mod._run_batched(
+            object(), "ent-x", records, hashes, unit_by_id, results,
+        )
+
+    assert extracted == {"FF2"}, (
+        "FF1's malformed batch result must not be counted as extracted")
+    assert len(recorded) == 1, (
+        "only FF2's ledger hash advances — FF1 is retried on the next run")
+    assert any("FF1" in r.message for r in caplog.records), (
+        "the skip must be logged, not silently swallowed")
+    # No exception escaped _run_batched — the whole point of the guard.
+
+
+# ── write throttle: pace the batched-write loop (burst-load 57014 guard) ────
+
+
+def _empty_result_for(unit_by_id: dict, custom_id: str):
+    pass_name, *_rest = unit_by_id[custom_id]
+    return _tool_use_message({"signals": []} if pass_name == "main"
+                             else {"checklist": []})
+
+
+def test_run_batched_pauses_write_throttle_seconds_between_calls(mod, monkeypatch):
+    """WRITE_THROTTLE_S paces the batched-write loop — a burst-write guard
+    against the transient 57014 a tight-window insert burst tripped live
+    (see the module-level comment). Proven via a spy on time.sleep, never a
+    real wait."""
+    records = [_rec("FF1"), _rec("FF2")]
+    requests, unit_by_id = mod._build_batch_requests(records, "ent-x")
+    results = {r.custom_id: _empty_result_for(unit_by_id, r.custom_id)
+               for r in requests}
+    hashes = {id(r): f"hash-{r.external_id}" for r in records}
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+    sleeps = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+
+    mod._run_batched(object(), "ent-x", records, hashes, unit_by_id, results)
+
+    assert sleeps == [mod.WRITE_THROTTLE_S] * len(records)
+
+
+def test_write_throttle_disabled_when_set_to_zero(mod, monkeypatch):
+    monkeypatch.setattr(mod, "WRITE_THROTTLE_S", 0)
+    records = [_rec("FF1")]
+    requests, unit_by_id = mod._build_batch_requests(records, "ent-x")
+    results = {r.custom_id: _empty_result_for(unit_by_id, r.custom_id)
+               for r in requests}
+    hashes = {id(r): f"hash-{r.external_id}" for r in records}
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+    sleeps = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+
+    mod._run_batched(object(), "ent-x", records, hashes, unit_by_id, results)
+
+    assert sleeps == []

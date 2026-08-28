@@ -11,6 +11,7 @@ in the AI layer; the facade only exposes primitives (`find_candidates`).
 from __future__ import annotations
 
 import logging
+import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -45,6 +46,78 @@ _ACTIVE_SIGNALS_LIMIT = 1000
 class TenantViolationError(PermissionError):
     """Raised when an operation's enterprise_id mismatches the entity's.
     Map this to HTTP 403 in FastAPI handlers."""
+
+
+#: Postgres SQLSTATE for a statement_timeout cancellation. Live-verify
+#: (2026-08-27): a bulk Fireflies KG backfill wrote ~250 calls' signals into
+#: `kg_signal` in a tight window (chunk 1) and 23 of those writes failed with
+#: exactly this — a transient burst-load timeout, not a real data problem.
+#: The backfill's per-call isolation already recovers (skips the call,
+#: leaves its ledger hash unrecorded so it retries next run), but a couple
+#: of quick retries clears the transient case before it ever needs that
+#: fallback.
+_STATEMENT_TIMEOUT_SQLSTATE = "57014"
+
+#: 1 initial attempt + 2 retries. A statement_timeout is a "the server was
+#: momentarily busy" signal, not "this write is wrong" — two short retries
+#: is enough headroom to ride out a burst without turning a persistent
+#: outage into a long stall (a genuinely down/overloaded DB still fails
+#: after this and falls through to the caller's existing per-call skip).
+_WRITE_RETRY_ATTEMPTS = 3
+#: Backoff before retry 1 and retry 2, respectively (short — this guards a
+#: transient burst, not a sustained outage, and every caller of a write
+#: going through this wrapper is on a background/batch path, never an
+#: interactive request waiting on it).
+_WRITE_RETRY_BACKOFF_S = (0.25, 0.75)
+
+
+def _is_statement_timeout(exc: Exception) -> bool:
+    """True iff `exc` is Postgres' 57014 (statement_timeout cancellation) —
+    a transient burst-load failure, not a real data problem. Mirrors the
+    typed-code-then-text-fallback style already used for
+    `app.db.connections._is_undefined_column_error` / this module's own
+    `graph.extractor._is_duplicate_signal`: a `.code` check first (the
+    supabase-py `postgrest.exceptions.APIError` shape), a text fallback
+    second so it also recognises the error surfaced as a plain message."""
+    if getattr(exc, "code", None) == _STATEMENT_TIMEOUT_SQLSTATE:
+        return True
+    text = str(getattr(exc, "message", "") or exc).lower()
+    return "57014" in text or "statement timeout" in text
+
+
+def _with_timeout_retry(fn):
+    """Call `fn()`, retrying a FEW times with a short backoff when it fails
+    with a transient Postgres statement_timeout (57014) — see
+    `_is_statement_timeout`. Any other exception (including a timeout that
+    persists past the last retry) propagates completely unchanged, so every
+    existing caller's error handling (e.g. `write_signal`'s duplicate-key
+    check one layer up in `graph.extractor`) is unaffected.
+
+    Narrow and opt-in per call site on purpose: this wraps ONE write's
+    `.execute()` call, not a blanket decorator over every facade method, so
+    the common single-write happy path (the live sync's per-call write) pays
+    nothing extra — the loop below returns on the very first successful
+    call, same as calling `fn()` directly."""
+    last_exc: Exception | None = None
+    for attempt in range(_WRITE_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 — re-raised below when not a timeout / retries exhausted
+            if not _is_statement_timeout(exc):
+                raise
+            last_exc = exc
+            if attempt < _WRITE_RETRY_ATTEMPTS - 1:
+                delay = _WRITE_RETRY_BACKOFF_S[
+                    min(attempt, len(_WRITE_RETRY_BACKOFF_S) - 1)
+                ]
+                logger.warning(
+                    "kg_signal write hit a transient statement_timeout "
+                    "(57014) — retrying in %.2fs (attempt %d/%d)",
+                    delay, attempt + 2, _WRITE_RETRY_ATTEMPTS,
+                )
+                time.sleep(delay)
+    assert last_exc is not None  # loop always either returns or sets this
+    raise last_exc
 
 
 def _iso(dt: datetime) -> str:
@@ -176,6 +249,12 @@ class GraphFacade:
         return ent.id
 
     def write_signal(self, enterprise_id: str, signal: Signal) -> Signal:
+        """Insert one signal row. The `.execute()` call is retried a couple
+        of times on a transient Postgres statement_timeout (57014) before
+        giving up — see `_with_timeout_retry`. Every other failure (a real
+        duplicate-key, a bad column value, an RLS/transport error) surfaces
+        immediately and unchanged; callers keep their existing handling
+        (`graph.extractor._is_duplicate_signal`) exactly as before."""
         self._assert_tenant(enterprise_id, signal.enterprise_id)
         row = {
             "id": signal.id,
@@ -198,7 +277,7 @@ class GraphFacade:
             "channel": signal.channel,
             "evidence_eligible": signal.evidence_eligible,
         }
-        self._tbl("kg_signal").insert(row).execute()
+        _with_timeout_retry(lambda: self._tbl("kg_signal").insert(row).execute())
         return signal
 
     def write_relationship(self, enterprise_id: str, rel: Relationship) -> Relationship:

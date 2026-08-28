@@ -53,6 +53,7 @@ import json
 import logging
 import re
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -98,6 +99,19 @@ CHUNK_SIZE = 250
 #: so 4h is generous headroom without being unbounded. Overridable per run via
 #: `--batch-deadline-hours` for an operator backfilling a very large history.
 DEFAULT_BATCH_DEADLINE_HOURS = 4.0
+
+#: A small pause after each call's writes land, WITHIN a chunk's write loop
+#: (both the batched-results path and the sync-fallback path). Live-verify
+#: (2026-08-27): chunk 1 of a bulk backfill wrote ~250 calls' signals back
+#: to back with no gap and 23 of those `kg_signal` inserts hit a transient
+#: Postgres statement_timeout (57014) under the burst. `GraphFacade.write_signal`
+#: now retries a transient timeout on its own (see `app.graph.facade`), but
+#: spreading the burst out in the first place means fewer retries are ever
+#: needed. Small enough that even a full CHUNK_SIZE-call chunk (250 * 0.02s
+#: = 5s) is a rounding error next to the LLM batch wait it follows; a test
+#: that cares about wall-clock time can `monkeypatch.setattr(mod,
+#: "WRITE_THROTTLE_S", 0)`.
+WRITE_THROTTLE_S = 0.02
 
 logger = logging.getLogger("backfill_fireflies_kg")
 
@@ -396,6 +410,12 @@ def _run_batched(
             extracted.add(rec.external_id)
         except Exception:  # noqa: BLE001 — per-call isolation, matches sync_provider
             logger.exception("batch-result write failed for call %s", rec.external_id)
+        # Batch results all land at once (no LLM round-trip pacing this loop
+        # the way the sync-fallback path is naturally paced), so this is
+        # exactly the tight-window insert burst that tripped 57014s live —
+        # see WRITE_THROTTLE_S's module-level comment.
+        if WRITE_THROTTLE_S:
+            time.sleep(WRITE_THROTTLE_S)
     return tally, extracted
 
 
