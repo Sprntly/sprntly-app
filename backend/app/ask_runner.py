@@ -1885,6 +1885,7 @@ def _retrieve_kg_bundle(
     question_embedding: list[float] | None = None,
     embedding_unavailable: bool = False,
     scale: dict | None = None,
+    content_leg: bool = True,
 ) -> dict | None:
     """Best-effort KG retrieval for the Ask question (#18). Returns the bundle
     or None when there's no tenant context or the KG yields nothing / errors.
@@ -1904,6 +1905,17 @@ def _retrieve_kg_bundle(
     KG-only path keep sharing one retrieval, which is the whole reason both go
     through here (see `call_digest.build_kg_context`).
 
+    `content_leg` defaults True: this function backs the direct Ask answer
+    path — an entity-named question like "what's the latest on AIG"
+    must reach content-matched signals no topic-theme wires it to — and that
+    is the majority of callers. The two VoC-scale callers (`call_digest.
+    build_kg_context`, `qa_agent`'s pinned voice-of-customer report) pass
+    `content_leg=False` explicitly: Leg C injecting content-matched signals
+    into a calibrated feedback COUNT would change what "all of it" means for
+    a widened, exhaustive retrieval whose whole point is Legs A+B's existing
+    breadth — that is exactly the "must not silently change" caller this
+    param exists to let opt out.
+
     Resilient by construction: a missing tenant, an empty KG, a fake backend
     with no pgvector, or any read failure all collapse to None so the caller
     runs the legacy corpus-only path (pre-#18 behaviour)."""
@@ -1918,6 +1930,7 @@ def _retrieve_kg_bundle(
             facade, enterprise_id, question,
             question_embedding=question_embedding,
             skip_semantic=embedding_unavailable,
+            content_leg=content_leg,
             **(scale or {}),
         )
     except Exception:  # noqa: BLE001 — KG must never break Ask

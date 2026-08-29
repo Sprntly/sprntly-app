@@ -14,6 +14,8 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from datetime import datetime
+from typing import Optional
 
 from app.graph.config_layers import resolve_config
 from app.graph.embeddings import embed_texts
@@ -187,6 +189,7 @@ def extract_document(
     skill_id: str | None = None,
     source_ref: tuple[str, str] | None = None,
     triage: bool = False,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """Extract one document into the KG.
 
@@ -253,6 +256,20 @@ def extract_document(
     this call writes also gets the PROMOTED typed field ``Signal.skill_id``
     set to the resolved skill id or the literal ``"generic"`` tag when none
     applied — see ``app.graph.types.Signal``.
+
+    ``valid_at`` (default ``None`` — every pre-existing caller unaffected)
+    stamps every signal this call writes with the fact's REAL-WORLD date
+    rather than ingest time, which is ``Signal.valid_at``'s
+    ``default_factory=_now`` fallback. Historical/backfilled documents (a
+    call from months ago, re-extracted today) need this: an ingest-time
+    default collapses the whole backfilled history into one same-day
+    ``stale_after`` window, which is wrong for anything but a live sync of
+    fresh data. The connector runner and the Fireflies KG backfill both pass
+    the call's own date (``RawRecord.timestamp``) here for call-shaped
+    providers; every other caller (uploads, roadmap, research — no natural
+    "as-of" date) leaves this ``None`` and keeps the ingest-time default.
+    ``Signal.__post_init__`` derives ``stale_after`` from ``valid_at``
+    automatically, so this is the ONLY thing that needs threading through.
 
     ``source_ref`` = ``(provider, external_id)`` names the SINGLE source record
     this call extracts from, when the caller can guarantee one — the connector
@@ -327,6 +344,7 @@ def extract_document(
         triage_category=triage_category,
         source_ref=source_ref,
         tau_high=tau_high, tau_low=cfg["resolution"]["tau_low"],
+        valid_at=valid_at,
     )
 
 
@@ -356,6 +374,7 @@ def _finish_extract(
     source_ref: tuple[str, str] | None,
     tau_high: float,
     tau_low: float,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """The part of `extract_document` that runs AFTER the model responds:
     parse `output` (an `llm_call(...).output` dict — a plain `{"signals": [...]}`
@@ -421,6 +440,7 @@ def _finish_extract(
         force_source_type=force_source_type,
         source_type_default=source_type_default,
         tau_high=tau_high, tau_low=tau_low,
+        valid_at=valid_at,
     )
 
 
@@ -463,6 +483,7 @@ def parse_extract_response(
     force_source_type: str | None = None,
     provenance_extra: dict[str, object] | None = None,
     source_ref: tuple[str, str] | None = None,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """Parse one batched `Message` (the main extraction pass — a request
     `build_extract_request` built, run through `app.llm_batch.run_batch`) into
@@ -472,7 +493,10 @@ def parse_extract_response(
     No `skill_id` / `triage_category`: a request `build_extract_request` built
     never carries a skill (see its docstring), and triage — a PRE-extraction
     filter — has already run (or been deliberately skipped) before the
-    request was ever built, so there is nothing to re-apply here."""
+    request was ever built, so there is nothing to re-apply here.
+
+    ``valid_at``: same contract as `extract_document`'s — the caller's own
+    per-call date (the Fireflies backfill's batch path)."""
     output = parse_tool_response(message, _EXTRACT_SCHEMA)
     cfg = resolve_config(enterprise_id)
     return _finish_extract(
@@ -485,6 +509,7 @@ def parse_extract_response(
         triage_category=None,
         source_ref=source_ref,
         tau_high=cfg["resolution"]["tau_high"], tau_low=cfg["resolution"]["tau_low"],
+        valid_at=valid_at,
     )
 
 
@@ -505,6 +530,7 @@ def _write_items(
     tau_low: float,
     force_source_type: str | None = None,
     source_type_default: str | None = None,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """Shared write path: signal-schema `items` -> embedded/theme-resolved
     Signals + theme Relationships in the graph. Factored out of
@@ -517,7 +543,17 @@ def _write_items(
     checklist pass to stamp ``provenance["checklist_category"]`` per-item,
     since a checklist batch mixes categories in one call unlike a normal
     document's uniform `provenance_extra`); every pre-existing caller's items
-    never carry that key, so behaviour there is unchanged."""
+    never carry that key, so behaviour there is unchanged.
+
+    ``valid_at`` (default ``None``): the real-world date to stamp on every
+    `Signal` this writes, in place of the `valid_at` field's ingest-time
+    default — see `extract_document`'s docstring. Passed through, not
+    defaulted here: only present as an explicit kwarg on the `Signal(...)`
+    call below when the caller supplied one, so a caller that leaves this
+    `None` gets EXACTLY the pre-existing `Signal(default_factory=_now)`
+    behaviour, not a `valid_at=None` override of it (a dataclass field's
+    `default_factory` only fires when the kwarg is omitted, not when it is
+    passed explicitly as `None`)."""
     if not items:
         return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
 
@@ -609,6 +645,9 @@ def _write_items(
             properties=props,
             embedding=vec,
             confidence=float(item.get("confidence", 0.8)),
+            # Present ONLY when the caller supplied one — see this function's
+            # docstring on why `valid_at=None` cannot be passed literally.
+            **({"valid_at": valid_at} if valid_at is not None else {}),
             provenance={"source": "extractor", "doc": doc_name,
                         "prompt_version": prompt_version,
                         **source_prov,
@@ -930,6 +969,7 @@ def run_checklist_pass(
     origin: str | None = None,
     provenance_extra: dict[str, object] | None = None,
     source_ref: tuple[str, str] | None = None,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """Directed-checklist second pass over one call's text (§(c)). Runs a
     SEPARATE, directed LLM call (own system prompt + schema, NOT the shared
@@ -964,6 +1004,11 @@ def run_checklist_pass(
 
     Returns the same shape as `extract_document`: ``{signals, themes,
     skipped, signal_ids}``.
+
+    ``valid_at``: same contract as `extract_document`'s — the caller passes
+    the SAME call date to both this pass and the main `extract_document`
+    call for one call's transcript, so every signal either pass writes for
+    it dates and stales identically.
     """
     result = llm_call(
         enterprise_id=enterprise_id, agent=agent, purpose="extract_checklist",
@@ -975,6 +1020,7 @@ def run_checklist_pass(
         facade, enterprise_id, result.output,
         doc_name=doc_name, text=text, origin=origin,
         provenance_extra=provenance_extra, source_ref=source_ref,
+        valid_at=valid_at,
     )
 
 
@@ -995,6 +1041,7 @@ def _finish_checklist(
     origin: str | None,
     provenance_extra: dict[str, object] | None,
     source_ref: tuple[str, str] | None,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """The part of `run_checklist_pass` that runs AFTER the model responds:
     the grounding gate + item-building + `_write_items` write, factored out
@@ -1100,6 +1147,7 @@ def _finish_checklist(
         provenance_extra=provenance_extra, resolved_skill_id=None,
         triage_category=None, prompt_version=CHECKLIST_PROMPT_VERSION,
         tau_high=cfg["resolution"]["tau_high"], tau_low=cfg["resolution"]["tau_low"],
+        valid_at=valid_at,
     )
 
 
@@ -1128,18 +1176,23 @@ def parse_checklist_response(
     origin: str | None = None,
     provenance_extra: dict[str, object] | None = None,
     source_ref: tuple[str, str] | None = None,
+    valid_at: Optional[datetime] = None,
 ) -> dict:
     """Parse one batched `Message` (the checklist pass — a request
     `build_checklist_request` built, run through `app.llm_batch.run_batch`)
     into signals, through the EXACT same `_finish_checklist` tail
     `run_checklist_pass`'s live call uses. `text` MUST be the same full
     transcript the request was built from — it is what the grounding check
-    verifies each quote against."""
+    verifies each quote against.
+
+    ``valid_at``: same contract as `parse_extract_response`'s — the caller's
+    own per-call date (the Fireflies backfill's batch path)."""
     output = parse_tool_response(message, _CHECKLIST_SCHEMA)
     return _finish_checklist(
         facade, enterprise_id, output,
         doc_name=doc_name, text=text, origin=origin,
         provenance_extra=provenance_extra, source_ref=source_ref,
+        valid_at=valid_at,
     )
 
 
