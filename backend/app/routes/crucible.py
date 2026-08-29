@@ -667,6 +667,15 @@ class ApprovePlan(BaseModel):
     #: agreeing to the proposal exactly as it was shown, which the server can
     #: read straight off the stored plan.
     definition_text: Optional[Annotated[str, StringConstraints(max_length=4_000)]] = None
+    #: ── WHAT THE RUN CANNOT KNOW, ANSWERED AT THE GATE. ────────────────
+    #: All optional: a reader who skips them gets exactly the document they got
+    #: before, with the corresponding sections stating what is missing rather
+    #: than guessing at it.
+    #: Bounded because a value typed into a box reaches arithmetic — a negative
+    #: or absurd account value would render a headline nobody could defend.
+    account_value: Optional[Annotated[float, Field(ge=0, le=100_000_000)]] = None
+    decision_owner: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
+    needed_by: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
     # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
     # ten 40,000-char hypotheses render past the document limit with only a
@@ -717,6 +726,14 @@ async def approve(
     # carries none is them agreeing to it as shown. Blank-after-strip is
     # treated as "no change" rather than as an empty definition — `confirm_goal`
     # refuses to lock nothing, and a 500 there would strand a claimed run.
+    # THE ANSWERS TO WHAT THE RUN COULD NOT KNOW. Folded into the stored plan
+    # below, beside the definition, because the report renders from that plan
+    # and an answer that never reaches it is an answer nobody gave.
+    answered = {
+        "account_value": body.account_value,
+        "decision_owner": (body.decision_owner or "").strip(),
+        "needed_by": (body.needed_by or "").strip(),
+    }
     edited = (body.definition_text or "").strip()
     definition_text = edited or (meta.get("plan") or {}).get("definition_text") or ""
 
@@ -726,6 +743,7 @@ async def approve(
         definition_text=definition_text,
         confirmed_by=company.user_id,
         approved=True,
+        answered=answered,
         excluded_sources=tuple(body.excluded_sources),
         hypotheses=tuple(body.hypotheses),
     )
@@ -752,6 +770,7 @@ def execute_run(
     approved: bool = False,
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
+    answered: Optional[dict] = None,
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -954,6 +973,12 @@ def execute_run(
             if plan_json:
                 # The words the run actually worked from — the reader's edit
                 # when they made one, the proposal verbatim when they did not.
+                # The gate's answers, recorded beside the definition they sit
+                # next to on screen. Empty ones are not written: a blank field
+                # means "I did not answer", never "the value is nothing".
+                for key, val in (answered or {}).items():
+                    if val not in (None, ""):
+                        plan_json[key] = val
                 plan_json["definition_text"] = definition_text
                 # AND IT IS ADOPTED, which is the whole meaning of this click.
                 # `definition_adopted` was written False at plan time to say

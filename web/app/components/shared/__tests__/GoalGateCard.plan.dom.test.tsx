@@ -614,3 +614,58 @@ describe("the definition is confirmed in the plan, not one screen earlier", () =
       .toContain(PLAN.definition_text)
   })
 })
+
+describe("the gate asks what it cannot know", () => {
+  // Apurva: "the plan gate can start asking questions it doesn't know answers
+  // to." Until now it asked one thing — what the metric means — and everything
+  // else it lacked was reported afterwards as a limit.
+  it("asks for the three, and says they are optional", () => {
+    renderPlan()
+    const box = screen.getByTestId("goal-plan-unknowns").textContent ?? ""
+    expect(box).toMatch(/what I cannot know/i)
+    expect(box).toMatch(/will not guess/i)
+    expect(box).toMatch(/stays stated as missing/i)
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
+  })
+
+  it("carries the answers on approve", () => {
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.change(screen.getByLabelText(/one account worth/i),
+      { target: { value: "12000" } })
+    fireEvent.change(screen.getByLabelText(/who decides/i),
+      { target: { value: "VP Product" } })
+    fireEvent.change(screen.getByLabelText(/when do you need/i),
+      { target: { value: "before the Q3 review" } })
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+
+    const d = onApprove.mock.calls[0][0]
+    expect(d.account_value).toBe(12000)
+    expect(d.decision_owner).toBe("VP Product")
+    expect(d.needed_by).toBe("before the Q3 review")
+  })
+
+  it("sends nothing for a field left blank", () => {
+    // EMPTY MEANS UNANSWERED, never zero. A blank account value reaching the
+    // arithmetic as 0 would render a stake of nothing and read as a
+    // measurement.
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    const d = onApprove.mock.calls[0][0]
+    expect(d.account_value).toBeUndefined()
+    expect(d.decision_owner).toBeUndefined()
+    expect(d.needed_by).toBeUndefined()
+  })
+
+  it("ignores a zero or unparseable account value rather than sending it", () => {
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.change(screen.getByLabelText(/one account worth/i),
+      { target: { value: "0" } })
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    expect(onApprove.mock.calls[0][0].account_value).toBeUndefined()
+  })
+})

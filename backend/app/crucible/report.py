@@ -232,6 +232,52 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
 MAX_RICE_ROWS = 10
 
 
+def _decision_section(plan: dict, findings: list[dict]) -> str:
+    """The memo's decision box: who signs off, by when, and what is at stake.
+
+    ONLY WHAT WAS ANSWERED. Apurva opened the gate to questions the run cannot
+    answer for itself; a reader who skipped them gets no box rather than a box
+    of blanks, because a decision box with an empty owner is worse than none —
+    it implies the decision has a home when it does not.
+
+    WHAT IS AT STAKE IS DERIVED, NOT ASSERTED. The memo writes "if we do
+    nothing" as a forecast. This corpus cannot forecast, so the line states
+    what the evidence COUNTS — accounts touched by findings that bear on the
+    goal — which is a fact rather than a prediction.
+    """
+    owner = str(plan.get("decision_owner") or "").strip()
+    needed = str(plan.get("needed_by") or "").strip()
+    if not owner and not needed:
+        return ""
+    sized = [f for f in findings if f.get("impact_value") is not None]
+    reach = sum(float(f.get("impact_value") or 0) for f in sized)
+    value = plan.get("account_value")
+    out = ["<h2>The decision</h2>"]
+    bits = []
+    if owner:
+        bits.append(f"<strong>Owner</strong> {_esc_clipped(owner, MAX_PARAM_NAME_CHARS)}")
+    if needed:
+        bits.append(f"<strong>Needed by</strong> {_esc_clipped(needed, MAX_PARAM_NAME_CHARS)}")
+    out.append(_p(" · ".join(bits)))
+    if sized:
+        money = ""
+        if isinstance(value, (int, float)) and value > 0:
+            # ONE MULTIPLICATION, AND IT IS LABELLED. `account_value` is an
+            # estimate somebody typed, so the product is an estimate too — said
+            # here in the same breath rather than in a footnote.
+            money = (
+                f" — about {reach * float(value):,.0f} on your own figure of "
+                f"{float(value):,.0f} per account, which is an estimate you "
+                f"gave rather than something measured"
+            )
+        out.append(_p(
+            f"The findings that bear on this goal touch <strong>{reach:g} "
+            f"accounts</strong>{money}. That is what the evidence counts, not "
+            f"a forecast of what changes if you act."
+        ))
+    return "".join(out)
+
+
 def _rice_section(findings: list[dict], framework: str) -> str:
     """The ranking, and the arithmetic behind it — the memo's §04.
 
@@ -1303,6 +1349,7 @@ def render_report_html(
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
             _definition_section(run, plan),
             _what_was_read_section(run, plan),
+            _decision_section(plan, kept),
             _funnel_section(len(findings), len(kept)),
             _rice_section(kept, str(plan.get("framework") or "")),
             _headline_section(kept),

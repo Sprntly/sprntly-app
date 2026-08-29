@@ -128,6 +128,33 @@ class RunPlan:
     #: it in the plan is what makes it a choice they can override rather than a
     #: convention they discover afterwards.
     framework: str = "RICE"
+    #: ── THINGS THIS RUN CANNOT KNOW, AND NOW ASKS FOR. ──────────────────
+    #:
+    #: Apurva: "the plan gate can start asking questions it doesn't know
+    #: answers to." Until now the gate asked exactly one thing — what the
+    #: metric means — and everything else it lacked was reported as a limit.
+    #: Four of the reference memo's sections are unreachable for want of three
+    #: numbers, none of which are in any corpus and all of which a PM knows.
+    #:
+    #: EACH IS OPTIONAL AND EACH IS AN ASSUMPTION WHEN GIVEN. A value typed
+    #: into a box is not evidence: it ships as an `AssumedParam` with the range
+    #: it plausibly spans, so the document can say what the headline becomes at
+    #: the pessimistic end rather than presenting an estimate as a measurement.
+    #: That is I8, and it is the difference between asking for input and
+    #: laundering a guess into a number.
+    #:
+    #: WHAT IS DELIBERATELY NOT ASKED HERE: effort. It is per-finding, the
+    #: findings do not exist at plan time, and one value applied to every row
+    #: is a common divisor that cannot change a ranking.
+    #:
+    #: What one account is worth per year, in the reader's own currency. Turns
+    #: reach-in-accounts into money, which is the spine of the reference memo.
+    account_value: Optional[float] = None
+    #: Who signs off. The memo's decision box names one.
+    decision_owner: str = ""
+    #: When the decision is needed. Free text on purpose — "before the Q3 QBR"
+    #: is a real answer and a date picker would refuse it.
+    needed_by: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -144,6 +171,9 @@ class RunPlan:
             "definition_note": self.definition_note,
             "definition_adopted": self.definition_adopted,
             "framework": self.framework,
+            "account_value": self.account_value,
+            "decision_owner": self.decision_owner,
+            "needed_by": self.needed_by,
         }
 
 
@@ -285,6 +315,9 @@ def build_plan(
     definition_note: str = "",
     definition_adopted: bool = False,
     framework: str = "RICE",
+    account_value: Optional[float] = None,
+    decision_owner: str = "",
+    needed_by: str = "",
 ) -> RunPlan:
     """What this run will try to establish, where it will look, and what it
     will not be able to tell you."""
@@ -305,4 +338,7 @@ def build_plan(
         definition_note=definition_note,
         definition_adopted=definition_adopted,
         framework=framework or "RICE",
+        account_value=account_value,
+        decision_owner=decision_owner,
+        needed_by=needed_by,
     )
