@@ -40,11 +40,18 @@ vi.mock("../../lib/supabase/client", () => ({
 const refresh = vi.fn(async () => {})
 let ws: {
   loading: boolean
-  workspace: { onboarding_completed_at: string | null; onboarding_step: number } | null
+  workspace: {
+    onboarding_completed_at: string | null
+    onboarding_step: number
+    // The payment gate reads these off the company row.
+    plan?: string | null
+    subscription_status?: string | null
+  } | null
 } = { loading: true, workspace: null }
 
+let lockMode = "off"
 vi.mock("../../context/WorkspaceContext", () => ({
-  useWorkspace: () => ({ ...ws, refresh }),
+  useWorkspace: () => ({ ...ws, refresh, subscriptionLockMode: lockMode }),
 }))
 
 import { OnboardingRequiredGuard } from "../OnboardingRequiredGuard"
@@ -55,6 +62,7 @@ afterEach(() => {
   postLoginPath.mockReset()
   refresh.mockClear()
   pathname = "/"
+  lockMode = "off"
   ws = { loading: true, workspace: null }
 })
 
@@ -82,7 +90,13 @@ describe("OnboardingRequiredGuard", () => {
   it("redirects a company-but-unfinished user to the resume step after a refresh (no postLoginPath)", async () => {
     ws = {
       loading: false,
-      workspace: { onboarding_completed_at: null, onboarding_step: 3 },
+      workspace: {
+        onboarding_completed_at: null,
+        onboarding_step: 3,
+        // Past the payment gate — see the gate's own tests below.
+        plan: "starter",
+        subscription_status: "active",
+      },
     }
     const { queryByText } = renderGuard()
     // Step 3 → the third slug ("connectors"), mapped locally via slugForStep.
@@ -182,5 +196,125 @@ describe("OnboardingRequiredGuard", () => {
     await waitFor(() =>
       expect(replace).toHaveBeenCalledWith("/onboarding/your-name"),
     )
+  })
+
+  it("sends an UNPAID company's unfinished onboarding to the payment gate", async () => {
+    // THE HOLE THIS CLOSES: postLoginPath gates a fresh sign-in, but this guard
+    // is the other door — a reload, a bookmark, a deep link, anyone already
+    // signed in. Gating only the sign-in path let all of them resume at their
+    // numbered step and never see the gate at all.
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: null,
+        onboarding_step: 3,
+        plan: "starter",
+        subscription_status: null,
+      },
+    }
+    renderGuard()
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/onboarding/plan"))
+    // NOT the resume step — the gate comes first.
+    expect(replace).not.toHaveBeenCalledWith("/onboarding/connectors")
+  })
+
+  it("does not gate a plan that was never sold through Stripe", async () => {
+    // LEGACY and ENTERPRISE carry a null subscription_status by design.
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: null,
+        onboarding_step: 3,
+        plan: "legacy",
+        subscription_status: null,
+      },
+    }
+    renderGuard()
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/onboarding/connectors"),
+    )
+  })
+
+  it("hard lock: a lapsed company is routed to Billing from the app", async () => {
+    // `enforce.bill` already refuses their work, so without this the app
+    // renders completely normally and every action fails generically — a
+    // working-looking product where nothing works.
+    lockMode = "hard"
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: "2026-06-01T00:00:00Z",
+        onboarding_step: 10,
+        plan: "starter",
+        subscription_status: "canceled",
+      },
+    }
+    const { queryByText } = renderGuard()
+    await waitFor(() =>
+      expect(replace).toHaveBeenCalledWith("/settings?section=billing"),
+    )
+    // …and the app is not painted on the way out.
+    expect(queryByText("APP_CONTENT")).toBeNull()
+  })
+
+  it("hard lock: Billing itself stays reachable — locking that away is a trap", () => {
+    lockMode = "hard"
+    pathname = "/settings"
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: "2026-06-01T00:00:00Z",
+        onboarding_step: 10,
+        subscription_status: "canceled",
+      },
+    }
+    const { getByText } = renderGuard()
+    expect(getByText("APP_CONTENT")).toBeTruthy()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  it("read_only never redirects — reading what they paid for is not hostage to a card", () => {
+    lockMode = "read_only"
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: "2026-06-01T00:00:00Z",
+        onboarding_step: 10,
+        subscription_status: "canceled",
+      },
+    }
+    const { getByText } = renderGuard()
+    expect(getByText("APP_CONTENT")).toBeTruthy()
+    expect(replace).not.toHaveBeenCalledWith("/settings?section=billing")
+  })
+
+  it("past_due is NOT locked — Stripe is still working the card", () => {
+    lockMode = "hard"
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: "2026-06-01T00:00:00Z",
+        onboarding_step: 10,
+        subscription_status: "past_due",
+      },
+    }
+    const { getByText } = renderGuard()
+    expect(getByText("APP_CONTENT")).toBeTruthy()
+    expect(replace).not.toHaveBeenCalled()
+  })
+
+  it("an unset mode locks nobody — a failed fetch must not wall off a working app", () => {
+    lockMode = "off"
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: "2026-06-01T00:00:00Z",
+        onboarding_step: 10,
+        subscription_status: "canceled",
+      },
+    }
+    const { getByText } = renderGuard()
+    expect(getByText("APP_CONTENT")).toBeTruthy()
+    expect(replace).not.toHaveBeenCalled()
   })
 })

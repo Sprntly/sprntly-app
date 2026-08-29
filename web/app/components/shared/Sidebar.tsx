@@ -4,7 +4,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
+import { useRouter } from "next/navigation"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
+import { trialDaysLeft, trialLabel } from "../../lib/billingAccess"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
 import {
@@ -42,6 +44,7 @@ const SHOW_SIDEBAR_SEARCH = false
 export function Sidebar({ activeCompany }: SidebarProps = {}) {
   const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
   const { content } = useContent()
+  const router = useRouter()
   const auth = useAuth()
   const {
     profile,
@@ -51,6 +54,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
     orgRole,
     setActiveWorkspace,
   } = useWorkspace()
+  const trialDays = trialDaysLeft(workspace)
   const [feedbackOpen, setFeedbackOpen] = useState(false)
   // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
   // active dataset — the same run the scheduler triggers, not a bespoke
@@ -310,6 +314,34 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           the identity row below now, beside Sync — three actions on one line
           instead of three lines — and Guide moved into Settings itself, where
           the rest of the read-about-it surfaces already live. */}
+      {/* ON TRIAL, EVERYWHERE. A countdown that lives only on the billing
+          screen is a countdown nobody sees: you visit that screen once, at
+          signup, and then not again until something goes wrong. This sits
+          above the identity row so the fact travels with you, and it is a
+          button rather than a label because the one question it raises —
+          "what happens when it ends?" — is answered one click away.
+
+          It renders ONLY while trialling, so it costs a fully-paid workspace
+          no rail space at all. */}
+      {trialDays != null && (
+        <button
+          type="button"
+          className="sb-trial"
+          data-testid="sidebar-trial"
+          title={`Free trial — ${trialLabel(trialDays)}`}
+          aria-label={`Free trial, ${trialLabel(trialDays)}. Open billing.`}
+          onClick={() => router.push("/settings?section=billing")}
+        >
+          {/* Collapsed, the rail hides the words and keeps the number — the
+              one part that still means something at 56px wide. */}
+          <span className="sb-trial-num">{trialDays}</span>
+          <span className="sb-trial-copy">
+            <span className="sb-trial-label">Free trial</span>
+            <span className="sb-trial-days">{trialLabel(trialDays)}</span>
+          </span>
+        </button>
+      )}
+
       <div className="divider-nav" />
 
       {/* User identity row — the avatar/name are display only (signing out

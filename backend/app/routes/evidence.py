@@ -29,6 +29,7 @@ from app.db import (
     find_latest_failed_evidence,
     start_evidence,
 )
+from app.billing import enforce
 from app.deps.ownership import require_owned_brief, require_owned_evidence
 from app.evidence_kg import generate_evidence_kg
 from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
@@ -98,6 +99,10 @@ async def generate(
                 "variant": _VARIANT,
                 "error": failed.get("error"),
             }
+
+    # Billable action — charged here, AFTER the reuse checks above, so
+    # returning an existing document costs nothing.
+    enforce.bill(company.company_id, "evidence", actor_user_id=company.user_id)
 
     insight = insights[body.insight_index]
     title = insight.get("title") or f"Insight #{body.insight_index + 1}"

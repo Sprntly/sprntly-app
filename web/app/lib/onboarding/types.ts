@@ -102,6 +102,15 @@ export type WorkspaceCompany = {
   id: string
   slug: string
   display_name: string
+  /** Billing, read straight off the companies row (the `companies(*)` embed
+   *  already returns them). Present so the onboarding payment gate can decide
+   *  where to send someone without a round trip on every sign-in — see
+   *  lib/billingAccess. Null on a company created before billing shipped. */
+  plan: string | null
+  subscription_status: string | null
+  /** While `subscription_status` is "trialing" this IS the trial end — the
+   *  date of the first charge. See lib/billingAccess's trialDaysLeft. */
+  current_period_end: string | null
   /** @deprecated Use `product` — kept for rows not yet migrated to products table */
   product_description: string | null
   product: WorkspaceProduct | null

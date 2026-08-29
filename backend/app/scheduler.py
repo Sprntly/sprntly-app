@@ -47,6 +47,7 @@ from app.brief_schedule import (
     should_run_brief,
 )
 from app.config import settings
+from app.billing import plans
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
 from app.kg_ingest.auto_sync import (
@@ -75,6 +76,63 @@ _scheduler: AsyncIOScheduler | None = None
 _last_brief_generation: dict[str, datetime] = {}
 _last_brief_delivery: dict[str, datetime] = {}
 
+
+
+def _billing_allows_scheduled_work(company: dict) -> bool:
+    """Whether the scheduler should spend OUR money on this tenant tonight.
+
+    Scheduled work — connector refreshes, KG synthesis, brief generation — is
+    not charged to anyone's credit balance. It is our Anthropic bill, run on a
+    timer, for every company in the table. So a company whose subscription has
+    lapsed keeps costing us money indefinitely while being unable to use any of
+    what that money produces.
+
+    Deliberately keyed on `settings.billing_enforced` rather than on
+    `subscription_lock_mode`: the lock mode decides what a LAPSED CUSTOMER SEES,
+    which is a product question, while this is a question about our own spend.
+    With enforcement off — CI, local dev, and any deploy that has not turned
+    billing on — every company is worked as before.
+
+    `past_due` still runs, for the same reason it still grants access: Stripe is
+    working the card and the customer has not gone anywhere.
+    """
+    if not settings.billing_enforced:
+        return True
+    # ABSENT IS NOT LAPSED. `list_companies` selects these best-effort, and its
+    # fallback select drops them entirely — so a schema quirk or an older test
+    # client would otherwise read as "no subscription" for EVERY tenant and
+    # silently stop the whole scheduler. Fail open: a missing signal means we
+    # do not know, and not knowing must not cancel everyone's briefs.
+    if "subscription_status" not in company and "plan" not in company:
+        return True
+    allowed = plans.subscription_grants_access(
+        company.get("plan"), company.get("subscription_status")
+    )
+    if not allowed:
+        logger.info(
+            "scheduler: skipping company=%s plan=%s status=%s — subscription inactive",
+            company.get("slug") or company.get("id"),
+            company.get("plan"),
+            company.get("subscription_status"),
+        )
+    return allowed
+
+
+def _billable(companies: list[dict] | None) -> list[dict]:
+    """Drop the tenants we should not be spending on. One filter, four callers.
+
+    TAKES THE ROWS, rather than fetching them. Fetching here looked tidier and
+    was wrong: this module reaches `list_companies` two different ways — a
+    module-level import at the top of the file, and a function-local import
+    inside the synthesis cycle — and the suite patches BOTH targets depending
+    on the test. Centralising the fetch picked one of them and silently broke
+    every test that patches the other, in a scheduler where "returned nothing"
+    is a log line rather than an error.
+
+    So each loop keeps whatever it already resolved, and only the decision is
+    shared. Slightly less tidy, and it cannot go quietly wrong.
+    """
+    return [c for c in (companies or []) if _billing_allows_scheduled_work(c)]
 
 def _company_workspace_slugs(company_id: str | None, company_slug: str) -> list[tuple[str, str]]:
     """(ledger_key, dataset_slug) pairs to generate briefs for — one per
@@ -129,7 +187,7 @@ def _refresh_all_company_connectors() -> None:
     # exhausted LLM credit balance and an expired Zoom refresh token.
     logger.info("refresh-connectors: cycle START")
     try:
-        companies = list_companies() or []
+        companies = _billable(list_companies())
     except Exception:
         logger.exception("refresh-connectors: failed to list companies")
         return
@@ -256,7 +314,7 @@ async def _run_synthesis_for_all_companies() -> None:
     from app.synthesis_brief import generate_brief_for
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:
         logger.error("Scheduler: failed to list companies: %s", exc)
         return
@@ -349,7 +407,7 @@ async def _run_brief_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Top Insights tick: failed to list companies: %s", exc)
         return
@@ -577,7 +635,7 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Monthly reports tick: failed to list companies: %s", exc)
         return

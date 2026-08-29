@@ -39,6 +39,15 @@ export function apiErrorMessage(status: number, body: unknown): string {
         .filter(Boolean)
       if (parts.length) return parts.join(" · ")
     }
+    // A structured detail: `{error: "...", message: "..."}`. The billing routes
+    // return these so the client can BRANCH on `error` (insufficient_credits vs
+    // subscription_inactive) while still having something readable to show.
+    // Without this branch every one of them rendered as "Request failed (502)",
+    // which is exactly the actionable half thrown away.
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as { message?: unknown }).message
+      if (typeof message === "string" && message.trim()) return message
+    }
   }
   if (typeof body === "string" && body.trim()) return body
   return `Request failed (${status})`
@@ -103,9 +112,61 @@ async function request<T>(
     }
   }
   if (!res.ok) {
+    // A 402 is announced GLOBALLY before it is thrown.
+    //
+    // The backend has always returned a structured, actionable body here —
+    // `{error: "insufficient_credits" | "subscription_inactive", message, needed,
+    // balance}` — and nothing on the client ever read it. So a customer whose
+    // subscription had lapsed clicked Generate and got whatever generic failure
+    // that particular surface happens to render, with no mention of billing and
+    // no way to find out.
+    //
+    // Announcing it here rather than handling it in each surface is the whole
+    // point: there are eight billable routes and every one of them would
+    // otherwise need its own copy of the same branch, and the ninth would be
+    // added without one.
+    if (res.status === 402) notifyPaymentRequired(parsed)
     throw new ApiError(res.status, parsed)
   }
   return parsed as T
+}
+
+/** What a 402 actually said, once the envelope is unwrapped. */
+export type PaymentRequired = {
+  /** "insufficient_credits" | "subscription_inactive", or "" if unrecognised. */
+  reason: string
+  message: string
+  /** Present on insufficient_credits. */
+  needed?: number
+  balance?: number
+  feature?: string
+}
+
+const PAYMENT_REQUIRED_EVENT = "sprntly:payment-required"
+
+function notifyPaymentRequired(body: unknown): void {
+  if (typeof window === "undefined") return
+  const detail = (body as { detail?: unknown } | null)?.detail
+  const d = (detail && typeof detail === "object" ? detail : {}) as Record<string, unknown>
+  const payload: PaymentRequired = {
+    reason: typeof d.error === "string" ? d.error : "",
+    message:
+      typeof d.message === "string" && d.message.trim()
+        ? d.message
+        : "Your subscription is not active. Choose a plan to keep generating.",
+    needed: typeof d.needed === "number" ? d.needed : undefined,
+    balance: typeof d.balance === "number" ? d.balance : undefined,
+    feature: typeof d.feature === "string" ? d.feature : undefined,
+  }
+  window.dispatchEvent(new CustomEvent(PAYMENT_REQUIRED_EVENT, { detail: payload }))
+}
+
+/** Subscribe to 402s from anywhere in the app. Returns an unsubscribe. */
+export function onPaymentRequired(fn: (p: PaymentRequired) => void): () => void {
+  if (typeof window === "undefined") return () => {}
+  const handler = (e: Event) => fn((e as CustomEvent<PaymentRequired>).detail)
+  window.addEventListener(PAYMENT_REQUIRED_EVENT, handler)
+  return () => window.removeEventListener(PAYMENT_REQUIRED_EVENT, handler)
 }
 
 export const api = {
@@ -2010,9 +2071,15 @@ export const workspacesApi = {
   // workspace creation is org-admin gated, unlike the per-workspace `role`
   // each summary row carries.
   list: () =>
-    api.get<{ workspaces: WorkspaceSummary[]; org_role?: string | null }>(
-      "/v1/workspaces",
-    ),
+    api.get<{
+      workspaces: WorkspaceSummary[]
+      org_role?: string | null
+      /** "off" | "read_only" | "hard" — what a lapsed customer sees. Served
+       *  here rather than as a NEXT_PUBLIC_ var because `web/` is a static
+       *  export: those inline at BUILD time, so changing the mode would mean a
+       *  rebuild and redeploy instead of a restart. */
+      subscription_lock_mode?: string | null
+    }>("/v1/workspaces"),
   create: (name: string) =>
     api.post<WorkspaceSummary>("/v1/workspaces", { name }),
   /** PATCH any subset of the name + the five workspace-owned fields. */
@@ -5168,6 +5235,167 @@ export const usageApi = {
       )}${usageProviderQuery(provider)}`,
     ),
 }
+
+// ── Billing: plan, credits, top-ups, referrals ──
+// Every figure here is COMPANY-level. A Team plan's credits are described as
+// "pooled" and a company-level balance is exactly that, so nothing on this
+// surface is per-user or per-workspace.
+//
+// Owner/admin only (the backend 403s otherwise) — what the company pays is
+// commercially sensitive, same posture as the Claude-key and usage panes.
+
+export type BillingInvoice = {
+  id: number
+  stripe_invoice_id: string
+  plan: string | null
+  /** MINOR UNITS. The display layer divides — a float here is how money
+   *  quietly goes missing. */
+  amount_paid_cents: number
+  currency: string
+  status: string | null
+  period_start: string | null
+  period_end: string | null
+  paid_at: string | null
+  invoice_number: string | null
+  hosted_invoice_url: string | null
+  invoice_pdf_url: string | null
+}
+
+export type BillingPlanChange = {
+  id: number
+  plan: string
+  status: string | null
+  previous_plan: string | null
+  previous_status: string | null
+  source: string | null
+  created_at: string
+}
+
+export type BillingLedgerEntry = {
+  id: number
+  /** Negative on a spend, positive on a grant. */
+  delta: number
+  reason: "monthly_grant" | "spend" | "referral" | "topup" | "refund" | "adjustment"
+  /** Which surface a spend went to; null on grants. */
+  feature: string | null
+  balance_after: number
+  actor_user_id: string | null
+  created_at: string
+}
+
+export type BillingReferral = {
+  id: string
+  /** No `invitee_email` and no per-row `code`: nobody types an address any
+   *  more, and every arrival shares the referrer's one permanent code. What a
+   *  row carries is when they arrived and whether it converted. */
+  status: "pending" | "signed_up" | "rewarded" | "void"
+  reward_credits: number | null
+  created_at: string
+  signed_up_at?: string | null
+  rewarded_at?: string | null
+}
+
+export type BillingSummary = {
+  plan: string
+  plan_label: string
+  /** Legacy and Enterprise have no ceiling. */
+  unlimited: boolean
+  /** Null when `unlimited` — the backend never sends the internal -1 sentinel,
+   *  which would otherwise render as "-1 credits". */
+  credit_balance: number | null
+  monthly_credits: number | null
+  subscription_status: string | null
+  /** False when the subscription is canceled/unpaid. `past_due` stays true —
+   *  Stripe is still retrying the card. */
+  has_access: boolean
+  current_period_end: string | null
+  /** A cancellation is scheduled: access continues until `cancels_at`. Stripe
+   *  keeps `subscription_status` at "active" throughout, which is why the
+   *  access rule needs no special case. */
+  cancel_at_period_end: boolean
+  /** When access actually stops — the end of the period already paid for.
+   *  Null unless a cancellation is pending. */
+  cancels_at: string | null
+  first_paid_at: string | null
+  refund_window_days: number
+  /** False in any environment without Stripe credentials (local dev, CI).
+   *  The pane renders read-only rather than offering buttons that 503. */
+  billing_configured: boolean
+  has_subscription: boolean
+  /** Credit price per action, keyed by the backend's feature slug. */
+  topup_presets: number[]
+  topup_min_usd: number
+  topup_max_usd: number
+  credits_per_topup_usd: number
+  history: BillingLedgerEntry[]
+  /** One row per payment, newest first — the money record. */
+  invoices?: BillingInvoice[]
+  /** Plan changes. Served for support questions; deliberately NOT rendered —
+   *  the customer-facing history is payments and credits, not tier moves. */
+  subscription_history?: BillingPlanChange[]
+  referrals: BillingReferral[]
+  /** Your one permanent link, and its code. Shared with anyone; whoever
+   *  signs up through it is attributed. */
+  referral_code?: string | null
+  referral_url?: string | null
+  /** Null when uncapped, which it now is. */
+  referral_invites_remaining: number | null
+  referral_reward_credits: number
+}
+
+export type BillingInterval = "monthly" | "annual"
+
+export const billingApi = {
+  summary: () => api.get<BillingSummary>("/v1/billing/summary"),
+  /** Returns a hosted Stripe Checkout URL to redirect to. `web/` is a static
+   *  export with no server, so the redirect is a plain `location.assign`. */
+  /** `returnPath` is a PATH on this app, never a URL — the backend validates
+   *  it as an open-redirect boundary and falls back to Settings → Billing if it
+   *  is anything else. Onboarding passes its own step so someone mid-signup
+   *  comes back to the gate rather than being dropped into Settings. */
+  checkout: (
+    plan: string,
+    interval: BillingInterval = "monthly",
+    returnPath?: string,
+  ) =>
+    api.post<{ url: string }>("/v1/billing/checkout", {
+      plan,
+      interval,
+      ...(returnPath ? { return_path: returnPath } : {}),
+    }),
+  /** The hosted customer portal: card, invoices and receipts. Cancellation is
+   *  in-app (below) so the user never leaves the pane to leave. */
+  portal: () => api.post<{ url: string }>("/v1/billing/portal"),
+  /** Cancel at the END of the paid period — the plan, credits and access all
+   *  continue until then. Reversible with `resume` up to that moment. */
+  cancel: () =>
+    api.post<{ cancel_at_period_end: boolean; cancels_at: string | null }>(
+      "/v1/billing/cancel",
+    ),
+  resume: () =>
+    api.post<{ cancel_at_period_end: boolean }>("/v1/billing/resume"),
+  /** Move a LIVE subscription onto a different plan. NOT a checkout: checkout
+   *  always creates a new subscription, so sending an existing customer
+   *  through it leaves them paying for two. */
+  changePlan: (plan: string, interval: BillingInterval = "monthly") =>
+    api.post<{ plan: string; subscription_status: string | null }>(
+      "/v1/billing/change-plan",
+      { plan, interval },
+    ),
+  topup: (amountUsd: number) =>
+    api.post<{ url: string; credits: number }>("/v1/billing/topup", {
+      amount_usd: amountUsd,
+    }),
+  /** Attach a newly created company to the referral that brought it. Called
+   *  once during onboarding, right after the company row is created — the same
+   *  moment `orgInviteApi.claim()` runs, and for the same reason: companies are
+   *  created client-side through Supabase, so this is the backend's only
+   *  chance to learn a new tenant exists. Grants nothing; the reward fires on
+   *  the company's first paid invoice. */
+  claimReferral: (code: string) =>
+    api.post<{ claimed: boolean }>("/v1/billing/referrals/claim", { code }),
+}
+
 
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the

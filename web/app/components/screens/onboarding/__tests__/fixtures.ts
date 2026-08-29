@@ -38,6 +38,12 @@ export function makeWorkspace(
     id: "ws-1",
     slug: "acme",
     display_name: "Acme",
+    // Billing defaults to "has paid" so the hundreds of onboarding tests
+    // that predate the payment gate are not all rerouted through it. A test
+    // about the gate passes its own plan/status.
+    plan: "starter",
+    subscription_status: "active",
+    current_period_end: null,
     product_description: null,
     product: null,
     account_type: "company",

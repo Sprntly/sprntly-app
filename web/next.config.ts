@@ -16,6 +16,12 @@ const nextConfig: NextConfig = {
   // Default: "export" (Apurva's static-export/nginx deploy). Local dev:
   // set DISABLE_STATIC_EXPORT=1 to enable SSR so dynamic routes work in dev.
   output: process.env.DISABLE_STATIC_EXPORT === "1" ? undefined : "export",
+  // `next dev` and `next build` share `.next` by default, so a verification
+  // build run while a dev server is up overwrites the manifests that server is
+  // serving from — every static route starts 404ing and only already-compiled
+  // dynamic routes still resolve. Set NEXT_DIST_DIR to give a build its own
+  // directory and leave a running dev server alone.
+  ...(process.env.NEXT_DIST_DIR ? { distDir: process.env.NEXT_DIST_DIR } : {}),
   ...(basePath ? { basePath } : {}),
   trailingSlash: false,
   images: {

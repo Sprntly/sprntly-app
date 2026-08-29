@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +140,51 @@ class Settings(BaseSettings):
     # ingest, the catalog backfill, the scheduled brief). Off by default: the
     # trade is latency for money, so each call site opts in and this switch
     # turns the whole mechanism off again without a revert.
+    # WHAT A LAPSED CUSTOMER SEES. `enforce.bill` already refuses their work at
+    # the server; this decides how honest the app looks about it.
+    #
+    #   "off"       — nothing changes. The app renders normally and each action
+    #                 fails with a 402. This is today's behaviour and the worst
+    #                 of the three: a working-looking app where nothing works.
+    #   "read_only" — existing artifacts stay readable, creating anything is
+    #                 routed to Billing. Work they already paid to produce is
+    #                 not held hostage to an expired card.
+    #   "hard"      — every route goes to Billing. Nothing else is reachable
+    #                 except signing out.
+    #
+    # Applies to `canceled` and `unpaid` only. NOT `past_due`: Stripe is still
+    # retrying the card there and the customer may not even know yet — locking
+    # someone out mid-retry is how a bounced card becomes a cancellation.
+    subscription_lock_mode: str = "off"
+
+    @field_validator("subscription_lock_mode", mode="before")
+    @classmethod
+    def _clean_lock_mode(cls, v: object) -> str:
+        """Normalise, and never fail OPEN in silence.
+
+        `SUBSCRIPTION_LOCK_MODE=hard # off|read_only|hard` in a .env file
+        arrives here as the whole string INCLUDING the comment, which matched
+        none of the three values and therefore disabled the lock — quietly,
+        because "unrecognised" and "off" were the same answer. A setting that
+        turns itself off when someone documents it inline is a trap, and it
+        cost a testing session to find.
+
+        So: take the first token, lowercase it, and SAY SO when the result is
+        not a mode we know. The fallback is still "off" — failing closed would
+        wall every customer out of a working app over a typo — but it is now a
+        log line rather than silence.
+        """
+        text = str(v or "").split("#", 1)[0].strip().strip("\"'").lower()
+        if text in ("off", "read_only", "hard"):
+            return text
+        if text:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "subscription_lock_mode=%r is not off|read_only|hard — treating as 'off'",
+                v,
+            )
+        return "off"
     llm_batch_enabled: bool = False
 
     # When True, a backend startup whose prototype template version is greater
@@ -180,6 +226,44 @@ class Settings(BaseSettings):
     evidence_warm_count: int = 1
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
+
+    # ── Stripe ────────────────────────────────────────────────────────────
+    # Unset everywhere except the environments that actually sell. Billing is
+    # INERT without a secret key: routes 503 with "billing is not configured"
+    # rather than half-working, which keeps local dev and CI from needing
+    # credentials at all (see app/billing/stripe_client.py::configured).
+    # The paywall's master switch, OFF by default and deliberately separate
+    # from having Stripe credentials.
+    #
+    # Two reasons it is not simply `bool(stripe_secret_key)`. First, staging
+    # shares the PROD Supabase project, so a paywall that switched itself on
+    # the moment this merged would start refusing real customers' generations
+    # before anyone had looked at it. Second, an env var going missing in prod
+    # would silently make everything free — a fail-open on a money path — and
+    # an explicit flag makes the enforced state a decision rather than a side
+    # effect.
+    #
+    # OFF means `app.billing.enforce` is a no-op: nothing is gated and nothing
+    # is debited. Subscriptions, top-ups and referrals all still work, so the
+    # rollout is: ship, subscribe a test company, watch the webhooks land, then
+    # flip this on.
+    billing_enforced: bool = False
+    stripe_secret_key: str = ""
+    # From the Stripe dashboard's webhook endpoint. Signature verification is
+    # skipped-and-rejected without it — an unverified webhook body is attacker
+    # input that grants credits, so a missing secret must fail closed.
+    stripe_webhook_secret: str = ""
+    # Price ids, created in the Stripe dashboard rather than in code so pricing
+    # can change without a deploy. One per (plan x interval); an empty one
+    # makes that specific plan unbuyable and is reported as such.
+    stripe_price_starter_monthly: str = ""
+    stripe_price_starter_annual: str = ""
+    stripe_price_product_builder_monthly: str = ""
+    stripe_price_product_builder_annual: str = ""
+    # Where Checkout and the customer portal send the browser back to. The web
+    # app is a static export, so these are plain page URLs with no server-side
+    # callback handler behind them.
+    billing_return_url: str = "http://localhost:3000/settings?section=billing"
 
     demo_password: str = ""
     jwt_secret: str = "dev-only-change-me"

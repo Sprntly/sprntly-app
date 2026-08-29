@@ -1,4 +1,5 @@
-import { onboardingApi, orgInviteApi } from "../api"
+import { billingApi, onboardingApi, orgInviteApi } from "../api"
+import { takeReferralCode } from "../referral"
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
@@ -81,6 +82,9 @@ function rowToCompany(
     ws.is_default === true && ws.slug === "default" && wsName === "Default"
   return {
     id: String(row.id),
+    plan: (row.plan as string | null) ?? null,
+    subscription_status: (row.subscription_status as string | null) ?? null,
+    current_period_end: (row.current_period_end as string | null) ?? null,
     slug: String(row.slug),
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
@@ -468,6 +472,20 @@ export async function createWorkspace(input: {
         await orgInviteApi.claim()
       } catch {
         /* no pending invite, or transient — onboarding proceeds regardless */
+      }
+      // Referral attribution: if this person arrived on a friend's `?ref=`
+      // link, record who to pay. Nothing is granted here — the referrer is
+      // credited when THIS company subscribes, so signing up (free and
+      // repeatable) never pays out. Best-effort for the same reason as the
+      // org-invite claim above: an unknown code must not block someone
+      // creating their workspace.
+      const referralCode = takeReferralCode()
+      if (referralCode) {
+        try {
+          await billingApi.claimReferral(referralCode)
+        } catch {
+          /* unknown or already-claimed code — onboarding proceeds regardless */
+        }
       }
       // No name yet (import-first) → no product row. `products_name_nonempty`
       // rejects a blank one, and the company/product steps both upsert it.

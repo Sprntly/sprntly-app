@@ -60,6 +60,7 @@ from app.db.prds import (
     save_prd_version,
     update_prd_content,
 )
+from app.billing import enforce
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
 from app.prd_command import classify_prd_command
 from app.prd_runner import (
@@ -151,6 +152,10 @@ async def generate(
                 "variant": PRD_VARIANT,
                 "project_id": existing_project_id,
             }
+
+    # Billable action — charged here, AFTER the reuse check above, so
+    # returning an existing document costs nothing.
+    enforce.bill(company.company_id, "prd", actor_user_id=company.user_id)
 
     insight = insights[body.insight_index]
     title = insight.get("title") or f"Insight #{body.insight_index + 1}"

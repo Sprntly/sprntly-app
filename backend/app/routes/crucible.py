@@ -36,6 +36,7 @@ from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
 from app.crucible.pipeline import build_findings
 from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
+from app.billing import enforce
 from app.db import crucible_runs as runs_db
 from app.entitlements import require_crucible_module
 
@@ -109,6 +110,8 @@ async def start(
     company: WorkspaceContext = Depends(require_crucible_module),
 ):
     """Start a run. Returns the row immediately, `resolving_goal`."""
+    # Billable action. Goal Analysis is a multi-stage sweep, hence the price.
+    enforce.bill(company.company_id, "crucible", actor_user_id=company.user_id)
     row = await asyncio.to_thread(
         runs_db.create,
         company.company_id,

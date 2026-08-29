@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from app import db
 from app.agent_tools import registry
 import app.agent_tools.github  # noqa: F401 — side-effect: registers GitHub tools
+from app.billing import enforce
 from app.auth import CompanyContext
 from app.config import settings
 from app.entitlements import require_agents_module
@@ -133,6 +134,9 @@ def chat_with_tools(
         body.installation_id, company.company_id
     ):
         raise HTTPException(404, "GitHub installation not found")
+    # Billable action — charged after the ownership gate so a rejected call
+    # costs nothing, and before the tool loop burns any tokens.
+    enforce.bill(company.company_id, "chat", actor_user_id=company.user_id)
     # Bind the company's own Claude key (if configured) so this factory returns a
     # client keyed to it. The binding now spans the WHOLE tool loop, not just the
     # factory call: usage metering reads the acting company from this same

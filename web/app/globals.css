@@ -2481,6 +2481,79 @@
     margin: 4px 0;
   }
 
+  /* The trial countdown, carried on every screen. It sits above the identity
+     row and renders only while trialling, so a paid workspace loses no rail
+     space to it. */
+  .sb-trial {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .sb-trial:hover {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  /* The number keeps a fixed square so a two-digit count does not resize the
+     row, and so it still lines up with the avatar below when the rail is
+     collapsed to icons. */
+  .sb-trial-num {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--ink);
+    color: var(--surface-2, #fff);
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sb-trial-copy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  .sb-trial-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .sb-trial-days {
+    font-size: 10.5px;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* Collapsed to icons: the words go, the number stays — it is the only part
+     that still says anything at 56px wide. */
+  .sidebar--collapsed .sb-trial {
+    justify-content: center;
+    padding: 7px 0;
+  }
+
+  .sidebar--collapsed .sb-trial-copy {
+    display: none;
+  }
+
   .sb-rail-user {
     display: flex;
     flex-direction: column;
@@ -19828,6 +19901,150 @@
     margin-bottom: 16px;
   }
 
+  /* Onboarding payment gate (`/onboarding/plan`) — the unnumbered step between
+     creating a company and the rest of the flow. Two self-serve plans, an
+     interval toggle, and a sales line for the tiers that carry no self-serve
+     price. */
+  .onb-form-notice {
+    color: var(--ink-2);
+    font-size: 13px;
+    padding: 8px 12px;
+    background: var(--surface-3);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+  }
+
+  .onb-plan-toggle {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    margin: 4px 0 18px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+  }
+
+  .onb-plan-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .onb-plan-toggle-btn.active {
+    background: var(--surface-2);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .onb-plan-save {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-ink);
+  }
+
+  /* Two cards, side by side where there is room. `auto-fit` rather than a
+     fixed two-column grid so a third self-serve plan would not need a CSS
+     change to sit correctly. */
+  .onb-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .onb-plan-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+
+  .onb-plan-card:hover {
+    border-color: var(--line-strong);
+  }
+
+  /* The chosen plan carries a 2px ring drawn with box-shadow rather than a
+     thicker border, so selecting one does not resize the card and nudge its
+     neighbour. */
+  .onb-plan-card.active {
+    border-color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--ink);
+  }
+
+  .onb-plan-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-plan-price {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .onb-plan-per {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+
+  .onb-plan-credits {
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+
+  .onb-plan-blurb {
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  .onb-plan-continue {
+    width: 100%;
+  }
+
+  .onb-plan-sales {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .onb-plan-sales a {
+    color: var(--ink-2);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* Waiting on the webhook after a successful Checkout. Deliberately calm:
+     the money has already moved, so this must not read as an error state. */
+  .onb-plan-spinner {
+    margin-top: 18px;
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
   /* Import-context step (onboarding 02) — bring existing AI-assistant
      context in. One option card (copy the prompt / upload the .md) plus a
      manual-entry escape hatch beneath it. The card is a <div>, not a
@@ -25947,6 +26164,444 @@
 .ga-plan-source input { margin-top: 3px; }
 .ga-plan-witness { font-size: 12px; opacity: 0.68; }
 
+/* ── Settings → Billing ───────────────────────────────────────────────────
+   Plan, credits, top-ups, referrals. Payment method / invoices / cancellation
+   are deliberately absent: they live in Stripe's hosted portal, one button
+   away, rather than being rebuilt inside a static export. */
+
+.bill-inert {
+  margin-bottom: 14px;
+}
+
+/* ON TRIAL. The plan name alone is a half-truth while a trial runs — it says
+   Starter and says nothing about nobody having been charged yet, or when that
+   changes. Deliberately NOT a warning colour: a trial is the good state, and
+   painting it amber makes a working account look broken. */
+.bill-trial {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}
+
+.bill-trial-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--surface-2, #fff);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.bill-trial-copy {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.bill-trial-copy strong {
+  color: var(--ink);
+}
+
+.bill-hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  padding: 16px 0 4px;
+}
+
+.bill-hero-plan,
+.bill-hero-credits {
+  flex: 1;
+  min-width: 190px;
+}
+
+.bill-hero-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.bill-hero-name {
+  display: block;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-top: 4px;
+}
+
+.bill-hero-of {
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.bill-hero-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+
+/* Magnitude, not identity — one hue, no categorical palette. */
+.bill-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(18, 32, 26, 0.07));
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.bill-meter-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+
+.bill-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.bill-actions-hint,
+.bill-refund {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-refund {
+  margin-top: 12px;
+  line-height: 1.5;
+}
+
+/* ── Plans ── */
+
+.bill-interval {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3, rgba(18, 32, 26, 0.05));
+  margin-bottom: 16px;
+}
+
+.bill-interval-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.bill-interval-tab.on {
+  background: var(--surface-2);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.bill-save {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.bill-plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.bill-plan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.bill-plan.featured {
+  border-color: var(--accent);
+}
+
+.bill-plan.current {
+  background: var(--surface-3, rgba(18, 32, 26, 0.03));
+}
+
+.bill-plan-tag {
+  position: absolute;
+  top: -8px;
+  left: 16px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.bill-plan-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+.bill-plan-price .amt {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bill-plan-price .per {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.bill-plan-blurb {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.bill-plan-credits {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+  margin: 0 0 6px;
+}
+
+.bill-plan .btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: auto;
+}
+
+.bill-code-hint {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 14px;
+}
+
+/* ── Top-ups ── */
+
+.bill-topups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.bill-topup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bill-topup:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.bill-topup:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bill-topup-amt {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bill-topup-credits {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.bill-topup-custom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.bill-topup-custom label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-topup-custom input {
+  width: 110px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ── Referrals ── */
+
+.bill-referral-copy {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.5;
+  margin: 0 0 14px;
+}
+
+.bill-invite {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bill-invite input {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.bill-invite-left {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-referrals {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+
+.bill-referral {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.bill-referral:last-child {
+  border-bottom: none;
+}
+
+.bill-referral-email {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bill-referral-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(18, 32, 26, 0.06));
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.bill-referral-status.s-rewarded {
+  background: var(--accent-soft, rgba(23, 148, 99, 0.12));
+  color: var(--accent-ink, var(--accent));
+  font-weight: 500;
+}
+
+/* ── History ── */
+
+.bill-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bill-history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.bill-history-row:last-child {
+  border-bottom: none;
+}
+
+.bill-history-what {
+  flex: 1;
+}
+
+.bill-history-when {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.bill-history-delta {
+  min-width: 62px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.bill-history-delta.in {
+  color: var(--accent);
+}
+
+.bill-history-delta.out {
+  color: var(--ink-3);
+}
+
+.bill-referral-link {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}
+
 /* The run narrating itself while it works — see GoalRunNarration.tsx. Reads as
    a funnel, so the nesting is the point: each rule's count sits under the step
    that applied it. */
@@ -25967,111 +26622,387 @@
    NAV had the same disease — fifteen rows — so the primitive comes to main
    ahead of that branch and is used to fold six of them away. Kept byte-for-
    byte apart from this note, so the merge with that branch is a no-op. */
-/* The nav is a RAIL at the edge of the pane, not a column inside the content.
-   `.pset-body` caps every pane at 860px, which would put the rail in the
-   middle of the screen — so a pane that uses this primitive opts out of that
-   cap and the content column keeps its own readable width instead.
-   `:has()` rather than a modifier class so no pane has to remember to add
-   one; using the primitive is the whole opt-in. */
-.pset-body:has(.setpane-shell) {
-  max-width: none;
-}
-
+/* The views run ACROSS THE TOP of the pane, under its header. `.pset-body`
+   caps a pane at 860px, which is the right measure for the card and for the
+   row above it too - so unlike the old right-hand rail this needs no opt-out
+   of that cap. */
 .setpane-shell {
-  container-type: inline-size;
-  container-name: setpane;
-}
-
-.setpane-split {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 216px;
-  gap: 40px;
-  align-items: start;
-}
-
-/* Prose and forms still want a comfortable measure — only the RAIL moves to
-   the edge, not the card with it. */
-.setpane-main {
-  min-width: 0;
-  max-width: 820px;
-}
-
-.setpane-nav {
   display: flex;
   flex-direction: column;
-  gap: 1px;
-  position: sticky;
-  top: 12px;
-  padding-left: 18px;
-  border-left: 1px solid var(--line);
+  min-width: 0;
+}
+
+.setpane-main {
+  min-width: 0;
+}
+
+/* PLAIN LABELS ON A RULE, not buttons in boxes. Six outlined pills read as six
+   things to press, which is a lot of chrome for what is really one question -
+   which view am I looking at - and the boxes competed with the actual buttons
+   on the card below. The labels carry themselves; only the current one is
+   marked, by weight and a rule under it that sits ON the row's own border.
+
+   Nothing wraps: six items reflowing to a second line stop reading as one set
+   of views, so the row scrolls instead. */
+.setpane-nav {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 22px;
+  margin: 0 0 22px;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  /* The scroll is a fallback for a narrow pane, not a feature to decorate. */
+  scrollbar-width: none;
+}
+
+.setpane-nav::-webkit-scrollbar {
+  display: none;
 }
 
 .setpane-nav-item {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 10px;
-  width: 100%;
-  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  /* The bottom padding is what puts the active rule on the nav's own border
+     rather than floating above it. */
+  padding: 0 0 12px;
   border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--ink-2);
+  border-radius: 0;
+  background: none;
+  color: var(--ink-3);
   font-size: 13px;
-  text-align: left;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
   cursor: pointer;
+  transition: color 0.12s, box-shadow 0.12s;
 }
 
 .setpane-nav-item:hover {
-  background: var(--surface-3, rgba(18, 32, 26, 0.05));
   color: var(--ink);
 }
 
+/* `inset` box-shadow rather than a border, so the marked item does not grow
+   2px taller than the rest and shunt the row. */
 .setpane-nav-item.active {
-  background: var(--surface-3, rgba(18, 32, 26, 0.06));
   color: var(--ink);
-  font-weight: 500;
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ink);
 }
 
 /* The one number each section is about, readable without opening it. */
 .setpane-nav-hint {
   font-size: 11px;
-  color: var(--ink-3);
+  color: var(--ink-4);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
+.setpane-nav-item:hover .setpane-nav-hint,
 .setpane-nav-item.active .setpane-nav-hint {
+  color: var(--ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setpane-nav-item {
+    transition: none;
+  }
+}
+
+/* Cancellation lives on the Billing card, not behind the Stripe portal — the
+   user should not have to leave the product to leave the product. */
+
+/* Deliberately quiet: a destructive action people rarely want should not
+   compete with the plan buttons above it. */
+.bill-cancel-link {
+  margin-top: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.bill-cancel-link:hover:not(:disabled) {
+  color: var(--urgent, #c63f35);
+}
+
+.bill-ending {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.03));
+}
+
+.bill-ending-copy {
+  flex: 1;
+  min-width: 240px;
+  font-size: 13px;
+  line-height: 1.5;
   color: var(--ink-2);
 }
 
-/* Measured against the PANE's own width, not the viewport: this primitive is
-   shared, and the settings sidebar already takes 228px of the screen. Below
-   the split point the rail becomes a scrollable row above the card — a 216px
-   rail beside a narrow card would squeeze both. */
-@container setpane (max-width: 720px) {
-  .setpane-split {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
+.bill-ending-copy strong {
+  color: var(--ink);
+}
 
-  .setpane-nav {
-    position: static;
-    flex-direction: row;
-    gap: 4px;
-    overflow-x: auto;
-    padding: 0 0 2px;
-    border-left: none;
-    border-bottom: 1px solid var(--line);
-    order: -1;
-  }
+.bill-ending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 
-  .setpane-nav-item {
-    width: auto;
-    white-space: nowrap;
-  }
+/* The confirm itself is the only red thing on the pane. */
+.bill-cancel-confirm {
+  padding: 7px 14px;
+  border: 1px solid var(--urgent-br, #f2cfc9);
+  border-radius: var(--radius-sm);
+  background: var(--urgent-b, #fcebe8);
+  color: var(--urgent, #c63f35);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
 
-  .setpane-nav-hint {
-    display: none;
+.bill-cancel-confirm:hover:not(:disabled) {
+  background: var(--urgent, #c63f35);
+  border-color: var(--urgent, #c63f35);
+  color: #fff;
+}
+
+.bill-cancel-confirm:disabled,
+.bill-cancel-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Payment required (402) ───────────────────────────────────────────────
+   Every billable route can return one, and until now none of them said so:
+   the structured body the backend sends was thrown away and each surface
+   rendered its own generic failure. Deliberately a modal — a lapsed
+   subscription is not a toast you scroll past, it is the reason the thing you
+   just clicked did nothing. */
+.pay-req-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(18, 32, 26, 0.32);
+}
+
+.pay-req {
+  width: min(420px, 100%);
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-lg, 0 12px 40px rgba(18, 32, 26, 0.18));
+}
+
+.pay-req-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 8px;
+}
+
+.pay-req-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+.pay-req-nums {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: 10px 0 0;
+}
+
+.pay-req-nums strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fix is the primary action and sits last, where the eye lands. */
+.pay-req-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* The action inside a status banner. A link, not a button-shaped control: it
+   sits mid-sentence and a filled button there would out-shout the sentence
+   explaining why it is needed. */
+.bill-subscribe-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.bill-subscribe-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ── Subscriptions (the money record) ────────────────────────────────────
+   One row per payment. Four columns that stay aligned down the list: what it
+   was for, the period it covers, the amount, and the PDF. Grid rather than
+   flex so the amounts line up in a column the eye can scan. */
+.bill-invoices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bill-invoice {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-invoice:last-child {
+  border-bottom: none;
+}
+
+.bill-invoice-plan {
+  color: var(--ink);
+  font-weight: 500;
+  min-width: 0;
+}
+
+/* The invoice number is reference data, not the headline. */
+.bill-invoice-num {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-invoice-period {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.bill-invoice-amount {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.bill-invoice-pdf {
+  min-width: 30px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bill-invoice-pdf:hover {
+  color: var(--ink);
+}
+
+@media (max-width: 620px) {
+  /* Amount and PDF stay on the first line with the plan; the period drops
+     under them rather than squeezing every column to nothing. */
+  .bill-invoice {
+    grid-template-columns: minmax(0, 1fr) auto auto;
   }
+  .bill-invoice-period {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── The referral link ────────────────────────────────────────────────────
+   One permanent link, not a form. The input is readonly and selects on focus
+   so it stays copyable when the clipboard API is blocked — which it is in
+   plenty of browsers and contexts, and a Copy button that silently does
+   nothing is worse than no button. */
+.bill-reflink {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0 18px;
+}
+
+.bill-reflink-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+}
+
+.bill-reflink-input:focus {
+  outline: 2px solid var(--line-strong);
+  outline-offset: -1px;
+}
+
+/* Who has arrived. No email column — nobody types an address any more, so a
+   row carries a date and whether it converted. */
+.bill-referral {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-referral:last-child {
+  border-bottom: none;
+}
+
+.bill-referral-when {
+  color: var(--ink-2);
+}
+
+.bill-referral-status {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* The converted state is the only one worth colouring — it is the one the
+   reader is looking for. */
+.bill-referral-status.s-rewarded {
+  color: var(--accent-ink, var(--ink));
+  font-weight: 600;
 }

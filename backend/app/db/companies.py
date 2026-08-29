@@ -45,7 +45,17 @@ def list_companies() -> list[dict]:
     try:
         result = (
             client.table("companies")
-            .select("id, slug, display_name, notification_settings, feature_flags")
+            # `plan` and `subscription_status` are selected for the scheduler,
+            # which skips tenants whose subscription has lapsed rather than
+            # spending our own Anthropic budget on them nightly. They ride the
+            # BEST-EFFORT select on purpose: if the column is missing (the fake
+            # test client, or a schema older than the billing migration) the
+            # fallback below leaves them absent, and the scheduler's guard has
+            # to treat "absent" as "do not know" rather than as "lapsed".
+            .select(
+                "id, slug, display_name, notification_settings, feature_flags, "
+                "plan, subscription_status"
+            )
             .order("slug", desc=False)
             .execute()
         )

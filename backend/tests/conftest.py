@@ -678,7 +678,10 @@ CREATE TABLE companies (
     business_context_refresh_error TEXT,
     business_context_refresh_started_at TEXT,
     business_context_refresh_heartbeat_at TEXT,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at          TEXT NOT NULL DEFAULT (datetime('now')),
+    -- One permanent referral link per company
+    -- (20260829190000_company_referral_code.sql).
+    referral_code TEXT
 );
 
 CREATE TABLE company_members (
@@ -1747,12 +1750,59 @@ CREATE UNIQUE INDEX credit_ledger_idem_uidx
     ON credit_ledger (company_id, reason, ref_id)
     WHERE ref_id IS NOT NULL;
 
+-- Subscription history (mirrors 20260829120000_subscription_events.sql).
+-- `companies` holds only the CURRENT subscription state and every webhook
+-- overwrites it, so without this the database could say "Starter, active,
+-- today" and nothing about how it got there.
+CREATE TABLE subscription_events (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id             TEXT NOT NULL,
+    plan                   TEXT NOT NULL,
+    status                 TEXT,
+    previous_plan          TEXT,
+    previous_status        TEXT,
+    stripe_subscription_id TEXT,
+    current_period_end     TEXT,
+    source                 TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX subscription_events_company_time_idx
+    ON subscription_events (company_id, created_at DESC);
+
+-- Subscription payments (mirrors 20260829180000_subscription_invoices.sql).
+-- One row per invoice actually paid — the money record, in currency, which is
+-- what a customer opens billing to see. UNIQUE on the Stripe invoice id is the
+-- idempotency guard: Stripe retries for days, and two events can describe one
+-- payment.
+CREATE TABLE subscription_invoices (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id             TEXT NOT NULL,
+    stripe_invoice_id      TEXT NOT NULL UNIQUE,
+    stripe_subscription_id TEXT,
+    plan                   TEXT,
+    amount_paid_cents      INTEGER NOT NULL DEFAULT 0,
+    currency               TEXT NOT NULL DEFAULT 'usd',
+    status                 TEXT,
+    period_start           TEXT,
+    period_end             TEXT,
+    paid_at                TEXT,
+    invoice_number         TEXT,
+    hosted_invoice_url     TEXT,
+    invoice_pdf_url        TEXT,
+    created_at             TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX subscription_invoices_company_time_idx
+    ON subscription_invoices (company_id, paid_at DESC);
+
 CREATE TABLE referrals (
     id                  TEXT PRIMARY KEY,
     referrer_company_id TEXT NOT NULL,
     referrer_user_id    TEXT,
-    invitee_email       TEXT NOT NULL,
-    code                TEXT NOT NULL UNIQUE,
+    -- Optional since 20260829190000: a referral row is created when someone
+    -- ARRIVES through a link, and at that moment we know their company,
+    -- not their address.
+    invitee_email       TEXT,
+    code                TEXT NOT NULL,
     status              TEXT NOT NULL DEFAULT 'pending',
     invitee_company_id  TEXT,
     reward_credits      INTEGER,
@@ -1761,8 +1811,9 @@ CREATE TABLE referrals (
     rewarded_at         TEXT
 );
 CREATE INDEX idx_referrals_referrer ON referrals (referrer_company_id, created_at);
-CREATE UNIQUE INDEX referrals_referrer_email_uidx
-    ON referrals (referrer_company_id, lower(invitee_email));
+-- The per-invite uniqueness is gone (20260829190000): every row now carries
+-- the REFERRER'S single permanent code, so uniqueness on code would reject the
+-- second person to use a link — which is the whole feature.
 
 CREATE TABLE stripe_events (
     id           TEXT PRIMARY KEY,
