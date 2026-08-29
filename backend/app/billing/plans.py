@@ -38,13 +38,71 @@ LEGACY = "legacy"
 # `plan` carries no check constraint.
 LAUNCH_DEFAULT_PLAN = STARTER
 
+# THE ONE PLACE A CREDIT HAS A DOLLAR PRICE. Every other figure in this file is
+# derived from it: the plan allowances below, the top-up conversion, and the
+# referral reward.
+#
+# It was anchored to Starter's $35 promo-code rate (500 credits for $35 is
+# ~14.3 credits/$) and rounded DOWN to 14 so a top-up is never a cheaper way to
+# buy credits than subscribing. Note that invariant holds against the PROMO
+# price and not the $59 list price — at list, a top-up buys more credits per
+# dollar than the Starter subscription does. Left as it is pending a pricing
+# decision; flagged here so it is not rediscovered as a surprise.
+CREDITS_PER_TOPUP_USD = 14
+
+# ---------------------------------------------------------------------------
+# What a plan's monthly credits are, and WHY they are that number
+# ---------------------------------------------------------------------------
+#
+# Owner decision, 2026-08-28. The allowance is DERIVED, not chosen:
+#
+#     credits = (list price per month - PLATFORM_FEE_USD) x CREDITS_PER_TOPUP_USD
+#
+# A customer paying $59 has $5 taken for the platform, and the remaining $54 is
+# handed back to them as credits at the same rate a top-up buys them. The point
+# of deriving it rather than picking round numbers is that the previous numbers
+# had drifted badly against the prices they were supposed to reflect: Starter
+# under-granted by ~250 credits while Product Builder granted almost DOUBLE what
+# its price supported, which is why it was by a distance the best value in the
+# lineup and Team was the worst.
+#
+# ONE ALLOWANCE PER PLAN, priced off the MONTHLY list price, deliberately. An
+# annual customer pays less per month and gets the same monthly credits — the
+# discount is on the money, not on the allowance — and `companies.plan` stores
+# no interval to key a second number off anyway.
+#
+# WHAT THIS DOES NOT COVER, and it is the open question rather than an
+# oversight: background pipeline work (`kg_ingest` and friends) is ~41% of real
+# LLM spend and no credit is ever charged for it. It scales with how much data a
+# customer connects, not with what they generate, so a flat $5 covers a light
+# tenant and badly under-covers a heavy one. Flat is the deliberate call for now.
+PLATFORM_FEE_USD = 5
+
+# Monthly LIST price. The Stripe price objects are the billing authority — these
+# exist so the allowance formula has an input and so a price change here shows up
+# as a credit change rather than being silently forgotten.
+PLAN_LIST_PRICE_USD: dict[str, float] = {
+    STARTER: 59.0,
+    PRODUCT_BUILDER: 99.0,
+    # Team is sold annually at $20,000; the formula wants a monthly figure.
+    TEAM: 20_000 / 12,
+}
+
+
+def _allowance(plan: str) -> int:
+    """The derived monthly grant. Floored, never rounded up — the formula is a
+    ceiling on what we owe, so a fractional credit is ours, not theirs."""
+    creditable = PLAN_LIST_PRICE_USD[plan] - PLATFORM_FEE_USD
+    return int(creditable * CREDITS_PER_TOPUP_USD)
+
+
 # Monthly credit grant per plan. Team's is described in the pricing table as
 # "pooled" — the balance is company-level for every plan, so pooling needs no
 # separate mechanism; it is simply what a company-level balance already does.
 PLAN_CREDITS: dict[str, int] = {
-    STARTER: 500,
-    PRODUCT_BUILDER: 2_500,
-    TEAM: 15_000,
+    STARTER: _allowance(STARTER),
+    PRODUCT_BUILDER: _allowance(PRODUCT_BUILDER),
+    TEAM: _allowance(TEAM),
     # Negotiated per deal; the contract, not this file, is the limit.
     ENTERPRISE: UNLIMITED,
     # Pre-billing companies. Nothing was ever sold to them on a credit basis,
@@ -171,13 +229,33 @@ def subscription_grants_access(plan: str | None, status: str | None) -> bool:
 # Cancel-and-refund window
 # ---------------------------------------------------------------------------
 #
-# There is no free trial (owner decision, 2026-08-21). This replaces it: pay,
-# and if you cancel within the window we refund you. The REFUND ITSELF IS NOT
-# AUTOMATIC — cancelling is self-serve through the Stripe portal, and a staff
-# member then approves the refund from the admin panel, having seen how many
-# credits were consumed. That stops the obvious hole (spend the month's credits
-# on day one, cancel on day six, keep both the output and the money).
+# There is no free trial for a company that has already bought once (owner
+# decision, 2026-08-21). This replaces it: pay, and if you cancel within the
+# window we refund you. The REFUND ITSELF IS NOT AUTOMATIC — cancelling is
+# self-serve through the Stripe portal, and a staff member then approves the
+# refund from the admin panel, having seen how many credits were consumed. That
+# stops the obvious hole (spend the month's credits on day one, cancel on day
+# six, keep both the output and the money).
 REFUND_WINDOW_DAYS = 7
+
+# THE FIRST SUBSCRIPTION A COMPANY EVER BUYS GETS A TRIAL (owner decision,
+# 2026-08-28), because payment is about to move to the front of onboarding.
+# Asking a stranger for money at step one of ten, before a single brief exists,
+# is the steepest drop-off available; asking for the CARD at step one and the
+# money a week later is not. Stripe Checkout still collects the card up front
+# on a trialling subscription, so nothing about "card on file" is given up.
+#
+# Deliberately keyed on whether the company has EVER paid rather than on which
+# screen started the checkout. A client-supplied "this is onboarding" flag
+# would be a free trial for anyone who could spell it, and a company coming
+# back to resubscribe after cancelling has already seen the product — the trial
+# is not for them.
+TRIAL_DAYS = 7
+
+# Matches REFUND_WINDOW_DAYS on purpose: a first-time buyer gets seven days
+# before any money moves, and a repeat buyer gets seven days to ask for it
+# back. One promise, told two ways, so support never has to explain two
+# different weeks.
 
 # What a user may buy on top of their plan. The custom amount is bounded on
 # both ends: below the floor the Stripe fee eats the purchase, and the ceiling
@@ -186,19 +264,35 @@ TOPUP_PRESET_USD = (20, 50, 100)
 TOPUP_MIN_USD = 5
 TOPUP_MAX_USD = 2_000
 
-# Credits per dollar on a top-up. Anchored to Starter's headline rate — $35 for
-# 500 credits is ~14.3 credits/$ — and rounded DOWN to 14 so that topping up is
-# never a cheaper way to buy credits than subscribing.
-CREDITS_PER_TOPUP_USD = 14
+# See CREDITS_PER_TOPUP_USD, defined above the allowance formula that needs it.
 
-# Referral reward, granted ONCE, when the invited company's first invoice
-# actually pays (owner decision 2026-08-21). Not on signup and not on card
-# entry: a card can be added and abandoned, and virtual cards make that free.
+# Referral reward, granted ONCE, when the invited company's subscription goes
+# LIVE — which now means a card on file and a trial started, not a first
+# invoice paid (owner decision 2026-08-29, revising 2026-08-21).
+#
+# The earlier rule waited for money to actually move. That made sense before
+# the trial existed; with one, the invitee's first charge is seven days after
+# they subscribe, so a referrer who did everything right waited a week to see
+# anything and had no way to tell whether it had worked. Subscribing IS the
+# conversion — the card is on file and Stripe has accepted it.
+#
+# Still not on signup: an account with no card is not a referral converted, and
+# rewarding one would make the programme free to farm.
+#
 # $10 at the top-up rate.
 REFERRAL_REWARD_CREDITS = 10 * CREDITS_PER_TOPUP_USD
-# How many invites one company may have outstanding. From the spec: "users can
-# invite 3 friends".
-MAX_REFERRAL_INVITES = 3
+
+# NO CAP on how many people one company may invite (owner decision
+# 2026-08-29). The previous limit of three was arbitrary, and the thing that
+# actually bounds the cost is not the invite count: an invite pays nothing
+# until the invitee subscribes with a real card, so an unconverted invite costs
+# us precisely nothing. Capping invites capped the upside without capping the
+# downside.
+#
+# Kept as a constant rather than deleted because the outstanding-invite count is
+# still worth showing; `remaining_invites` reads it and returns None when there
+# is no ceiling.
+MAX_REFERRAL_INVITES: int | None = None
 
 
 def topup_credits_for_usd(amount_usd: int) -> int:

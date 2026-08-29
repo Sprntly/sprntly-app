@@ -16,6 +16,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
+// The rail carries a trial countdown that links to billing, so it now uses the
+// router directly — `goTo` takes a screen id and the settings SECTION rides
+// the query string.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
+
 vi.mock("../../../context/NavigationContext", () => ({
   useNavigation: () => ({ currentScreen: "brief", goTo: vi.fn(), goToNewChat: vi.fn() }),
 }))

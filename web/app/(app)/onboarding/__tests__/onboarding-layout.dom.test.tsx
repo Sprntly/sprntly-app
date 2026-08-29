@@ -18,7 +18,12 @@ const routerMock = { push: vi.fn(), replace: vi.fn() }
 const onboardingMock = vi.fn()
 const authMock = vi.fn()
 
-vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
+// The layout also carries the payment gate now, which reads the pathname to
+// avoid gating the plan route itself.
+vi.mock("next/navigation", () => ({
+  useRouter: () => routerMock,
+  usePathname: () => "/onboarding/company",
+}))
 
 // Keep OnboardingProvider as a transparent pass-through so the layout mounts;
 // drive useOnboarding from the test.

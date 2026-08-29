@@ -8,7 +8,7 @@
 // skips the background analysis; a successful save with a workspace present
 // goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 2) +
 // upsertPrimaryProduct → background website analysis → push(/onboarding/
-// import-context); a first-time save (no workspace) creates one with
+// the PAYMENT GATE); a first-time save (no workspace) creates one with
 // account_type "company" (the personal split is retired).
 //
 // It leads the flow again since 2026-07-27, ahead of the import step, because
@@ -165,7 +165,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -203,7 +203,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
@@ -233,7 +233,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
     })
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>

@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
+import { ONBOARDING_PLAN_PATH } from "../../../lib/billingPlans"
 import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
@@ -188,7 +189,17 @@ export function CompanyStep() {
       // runs server-side; the provider outlives this navigation.
       const analysisSite = ws?.product?.website ?? normalizedSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
-      router.push("/onboarding/import-context")
+      // The PAYMENT GATE sits between company creation and the rest of the
+      // flow. `onboarding_step` above is still import-context on purpose: the
+      // gate is unnumbered, so the persisted marker names the step they will
+      // resume ONCE they have paid, and postLoginPath keeps routing them back
+      // here until they have. Someone who abandons at Checkout therefore comes
+      // back to the gate rather than to a half-built workspace, and their
+      // company row — the reason to put payment this early — already exists.
+      //
+      // The gate forwards straight through for a company that already has a
+      // live subscription, so an invited teammate never sees it.
+      router.push(ONBOARDING_PLAN_PATH)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
       setSaving(false)

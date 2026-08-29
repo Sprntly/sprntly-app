@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +140,51 @@ class Settings(BaseSettings):
     # ingest, the catalog backfill, the scheduled brief). Off by default: the
     # trade is latency for money, so each call site opts in and this switch
     # turns the whole mechanism off again without a revert.
+    # WHAT A LAPSED CUSTOMER SEES. `enforce.bill` already refuses their work at
+    # the server; this decides how honest the app looks about it.
+    #
+    #   "off"       — nothing changes. The app renders normally and each action
+    #                 fails with a 402. This is today's behaviour and the worst
+    #                 of the three: a working-looking app where nothing works.
+    #   "read_only" — existing artifacts stay readable, creating anything is
+    #                 routed to Billing. Work they already paid to produce is
+    #                 not held hostage to an expired card.
+    #   "hard"      — every route goes to Billing. Nothing else is reachable
+    #                 except signing out.
+    #
+    # Applies to `canceled` and `unpaid` only. NOT `past_due`: Stripe is still
+    # retrying the card there and the customer may not even know yet — locking
+    # someone out mid-retry is how a bounced card becomes a cancellation.
+    subscription_lock_mode: str = "off"
+
+    @field_validator("subscription_lock_mode", mode="before")
+    @classmethod
+    def _clean_lock_mode(cls, v: object) -> str:
+        """Normalise, and never fail OPEN in silence.
+
+        `SUBSCRIPTION_LOCK_MODE=hard # off|read_only|hard` in a .env file
+        arrives here as the whole string INCLUDING the comment, which matched
+        none of the three values and therefore disabled the lock — quietly,
+        because "unrecognised" and "off" were the same answer. A setting that
+        turns itself off when someone documents it inline is a trap, and it
+        cost a testing session to find.
+
+        So: take the first token, lowercase it, and SAY SO when the result is
+        not a mode we know. The fallback is still "off" — failing closed would
+        wall every customer out of a working app over a typo — but it is now a
+        log line rather than silence.
+        """
+        text = str(v or "").split("#", 1)[0].strip().strip("\"'").lower()
+        if text in ("off", "read_only", "hard"):
+            return text
+        if text:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "subscription_lock_mode=%r is not off|read_only|hard — treating as 'off'",
+                v,
+            )
+        return "off"
     llm_batch_enabled: bool = False
 
     # When True, a backend startup whose prototype template version is greater

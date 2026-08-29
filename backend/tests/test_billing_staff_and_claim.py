@@ -54,23 +54,19 @@ def invitee(monkeypatch):
     return _client(monkeypatch, slug="invitee-co")
 
 
-def _invite_from(referrer_company: str, email: str = "friend@example.com") -> dict:
-    return referrals.create_invite(
-        referrer_company_id=referrer_company,
-        referrer_user_id="u-referrer",
-        invitee_email=email,
-    )
+def _link_code(referrer_company: str) -> str:
+    """A company's permanent referral code. No address, no pre-minted invite —
+    the code exists as soon as anyone asks for it and is shared with whoever."""
+    return referrals.code_for_company(referrer_company)
 
 
 def test_claiming_records_the_referrer_without_paying_yet(invitee):
     """Signing up is free and infinitely repeatable, so it must grant nothing.
-    The reward is the friend's first PAID invoice."""
+    The reward lands when the friend SUBSCRIBES."""
     referrer = seed_company(user_id="u-r1", slug="r1-co")
-    invite = _invite_from(referrer)
+    code = _link_code(referrer)
 
-    res = invitee.client.post(
-        "/v1/billing/referrals/claim", json={"code": invite["code"]}
-    )
+    res = invitee.client.post("/v1/billing/referrals/claim", json={"code": code})
 
     assert res.status_code == 200
     assert res.json()["claimed"] is True
@@ -87,31 +83,63 @@ def test_an_unknown_code_is_a_quiet_no_op_not_an_error(invitee):
     assert res.json()["claimed"] is False
 
 
-def test_a_spent_code_cannot_be_claimed_twice(invitee, monkeypatch):
+def test_the_SAME_link_works_for_more_than_one_person(invitee, monkeypatch):
+    """The whole point of a shareable link. The old model spent a code on the
+    first person to use it, because it had been cut for one address."""
     referrer = seed_company(user_id="u-r2", slug="r2-co")
-    invite = _invite_from(referrer)
+    code = _link_code(referrer)
     other = _client(monkeypatch, slug="other-co")
 
-    first = invitee.client.post(
-        "/v1/billing/referrals/claim", json={"code": invite["code"]}
-    )
-    second = other.client.post(
-        "/v1/billing/referrals/claim", json={"code": invite["code"]}
-    )
+    first = invitee.client.post("/v1/billing/referrals/claim", json={"code": code})
+    second = other.client.post("/v1/billing/referrals/claim", json={"code": code})
 
     assert first.json()["claimed"] is True
+    assert second.json()["claimed"] is True
+    assert len(referrals.list_for_company(referrer)) == 2
+
+
+def test_one_company_cannot_arrive_through_a_link_twice(invitee):
+    """Otherwise signing up, deleting the company and signing up again would
+    pay the referrer twice."""
+    referrer = seed_company(user_id="u-r3", slug="r3-co")
+    code = _link_code(referrer)
+
+    invitee.client.post("/v1/billing/referrals/claim", json={"code": code})
+    second = invitee.client.post("/v1/billing/referrals/claim", json={"code": code})
+
     assert second.json()["claimed"] is False
+    assert len(referrals.list_for_company(referrer)) == 1
+
+
+def test_the_code_is_stable(invitee):
+    """One code, forever — a link already shared must not stop working."""
+    referrer = seed_company(user_id="u-r4", slug="r4-co")
+    assert _link_code(referrer) == _link_code(referrer)
+
+
+def test_your_own_link_does_not_pay_you(monkeypatch):
+    """Signing up again through your own link. The remaining hole is one person
+    running two companies under two addresses, which no in-app check can see —
+    but it is gated on a real card, so the worst case costs them a subscription
+    to earn $10 of credits."""
+    me = _client(monkeypatch, slug="r5-co")
+    code = _link_code(me.company_id)
+
+    res = me.client.post("/v1/billing/referrals/claim", json={"code": code})
+
+    assert res.json()["claimed"] is False
+    assert referrals.list_for_company(me.company_id) == []
 
 
 def test_only_the_owner_may_claim(invitee):
     referrer = seed_company(user_id="u-r3", slug="r3-co")
-    invite = _invite_from(referrer)
+    code = _link_code(referrer)
     require_client().table("company_members").update({"role": "member"}).eq(
         "company_id", invitee.company_id
     ).eq("user_id", invitee.user_id).execute()
 
     res = invitee.client.post(
-        "/v1/billing/referrals/claim", json={"code": invite["code"]}
+        "/v1/billing/referrals/claim", json={"code": code}
     )
 
     assert res.status_code == 403
@@ -119,11 +147,11 @@ def test_only_the_owner_may_claim(invitee):
 
 def test_claiming_is_origin_gated(invitee):
     referrer = seed_company(user_id="u-r4", slug="r4-co")
-    invite = _invite_from(referrer)
+    code = _link_code(referrer)
 
     res = invitee.client.post(
         "/v1/billing/referrals/claim",
-        json={"code": invite["code"]},
+        json={"code": code},
         headers={"origin": "https://evil.example"},
     )
 
@@ -182,7 +210,7 @@ def test_staff_sees_how_much_was_consumed_before_deciding(staff):
     body = staff.client.get(f"/v1/staff/companies/{staff.company_id}/billing").json()
 
     assert body["credits_used"] == plans.CREDIT_COSTS["prd"]
-    assert body["monthly_credits"] == 500
+    assert body["monthly_credits"] == plans.PLAN_CREDITS[plans.STARTER]
     assert len(body["ledger"]) == 2
 
 
@@ -289,3 +317,53 @@ def test_unknown_company_is_404(staff):
     assert (
         staff.client.get("/v1/staff/companies/no-such-id/billing").status_code == 404
     )
+
+
+def test_end_to_end_a_shared_link_pays_the_referrer(invitee, monkeypatch):
+    """THE WHOLE CHAIN, in one test: a link is shared, someone signs up through
+    it, they subscribe, and the referrer is paid.
+
+    The pieces are covered individually elsewhere; this is the one that would
+    catch them being wired together wrongly.
+    """
+    from app.billing import webhooks as billing_webhooks
+
+    referrer = seed_company(user_id="u-e2e", slug="e2e-co")
+    code = referrals.code_for_company(referrer)
+
+    # 1. The URL the referrer shares carries this code; the web client stashes
+    #    it and posts it once the invitee's company exists.
+    claimed = invitee.client.post(
+        "/v1/billing/referrals/claim", json={"code": code}
+    )
+    assert claimed.json()["claimed"] is True
+    assert credits.balance(referrer) == 0, "arriving alone must pay nothing"
+
+    # 2. The invitee subscribes. A trial counts — the card is on file.
+    monkeypatch.setattr(
+        billing_webhooks.stripe_client,
+        "get_subscription",
+        lambda _id: {
+            "id": "sub_e2e",
+            "status": "trialing",
+            "customer": "cus_e2e",
+            "metadata": {"company_id": invitee.company_id, "plan": plans.STARTER},
+            "current_period_start": 1_789_000_000,
+            "current_period_end": 1_790_000_000,
+            "items": {"data": [{"price": {"id": "price_starter_monthly"}}]},
+        },
+    )
+    billing_webhooks.handle_event(
+        {
+            "id": "evt_e2e",
+            "type": "customer.subscription.created",
+            "data": {"object": {"id": "sub_e2e", "customer": "cus_e2e",
+                                "metadata": {"company_id": invitee.company_id}}},
+        }
+    )
+
+    # 3. The referrer is paid, and the ledger says what for.
+    assert credits.balance(referrer) == plans.REFERRAL_REWARD_CREDITS
+    row = [r for r in credits.history(referrer) if r["reason"] == "referral"][0]
+    assert row["delta"] == plans.REFERRAL_REWARD_CREDITS
+    assert referrals.list_for_company(referrer)[0]["status"] == referrals.REWARDED

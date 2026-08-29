@@ -46,6 +46,29 @@ from app.db import billing as billing_db
 logger = logging.getLogger(__name__)
 
 
+# THE ONE THING A LAPSED CUSTOMER KEEPS (owner decision, 2026-08-28).
+#
+# When `subscription_lock_mode` is "read_only", chat stays open after the
+# subscription ends — with or without a credit balance. Everything else stops.
+#
+# It is a retention allowance, paid out of our own margin, and it is cheap
+# enough to be one: measured against real usage, a chat turn costs about
+# $0.004, roughly a hundredth of a PRD. Someone who can still talk to the
+# product while they sort their card out is a customer who might come back;
+# someone who hits a wall on every screen has already left.
+#
+# Deliberately NOT extended to "hard" mode, where the whole app routes to
+# Billing and an open chat box would contradict the lock.
+_LOCK_EXEMPT_FEATURES = frozenset({"chat"})
+
+
+def _is_retention_exempt(feature: str) -> bool:
+    return (
+        settings.subscription_lock_mode == "read_only"
+        and feature in _LOCK_EXEMPT_FEATURES
+    )
+
+
 def require_credits(company_id: str, feature: str) -> None:
     """Refuse the action if the company cannot pay for it.
 
@@ -59,6 +82,14 @@ def require_credits(company_id: str, feature: str) -> None:
     generating.
     """
     if not settings.billing_enforced:
+        return
+
+    # Chat is exempt under read_only, and exempt from BOTH gates below: the
+    # subscription check (which is what strands a cancelled company's leftover
+    # credits) and the affordability check (so it keeps working at a zero
+    # balance). `charge` below still debits whatever balance exists, so a
+    # customer spends what they bought first and only then chats on us.
+    if _is_retention_exempt(feature):
         return
 
     row = billing_db.get_billing(company_id) or {}

@@ -109,9 +109,92 @@ def _iso_or_none(epoch) -> str | None:
     return datetime.fromtimestamp(int(epoch), tz=timezone.utc).isoformat()
 
 
-def _return_url(status: str) -> str:
-    sep = "&" if "?" in settings.billing_return_url else "?"
-    return f"{settings.billing_return_url}{sep}checkout={status}"
+def _safe_return_path(path: str | None) -> str | None:
+    """Validate a caller-supplied post-Checkout landing path.
+
+    THIS IS AN OPEN-REDIRECT BOUNDARY. The value ends up as Stripe's
+    `success_url`, so an unchecked one sends a user who just typed their card
+    number to whatever host the request asked for — on a link that legitimately
+    came from us, right after a payment, which is the most credible phishing
+    moment this product has.
+
+    So: a path, and only a path. Must start with a single "/", must not start
+    with "//" (protocol-relative, "//evil.com" is an absolute URL to a browser),
+    and must carry no scheme, no host, no backslash (some parsers fold "\" to
+    "/"), and no control characters. Anything else is not rejected loudly — it
+    falls back to the configured default, because a bad return path is a bug in
+    our own caller, not something to fail a purchase over.
+    """
+    if not path:
+        return None
+    if not path.startswith("/") or path.startswith("//"):
+        return None
+    if "\\" in path or ":" in path.split("?", 1)[0]:
+        return None
+    if any(ord(c) < 0x20 or ord(c) == 0x7F for c in path):
+        return None
+    return path
+
+
+def _return_url(status: str, return_path: str | None = None) -> str:
+    """Where Stripe sends the browser back to, with the outcome appended.
+
+    `return_path` lets a caller land somewhere other than Settings → Billing —
+    the onboarding gate needs the user returned to the step they left, not
+    dropped into settings mid-signup. It is joined to the SAME origin the
+    configured default uses; the caller supplies a path, never a URL.
+    """
+    base = settings.billing_return_url
+    safe = _safe_return_path(return_path)
+    if safe:
+        origin = base.split("://", 1)
+        host = origin[1].split("/", 1)[0] if len(origin) == 2 else base.split("/", 1)[0]
+        scheme = origin[0] if len(origin) == 2 else "https"
+        base = f"{scheme}://{host}{safe}"
+    sep = "&" if "?" in base else "?"
+    return f"{base}{sep}checkout={status}"
+
+
+def _referral_url(code: str) -> str:
+    """The link a customer actually shares.
+
+    Built from `billing_return_url`'s origin rather than a second setting: that
+    value already names where this app lives, and two settings that must agree
+    about the same host is one of them being wrong after the next deploy.
+    """
+    base = settings.billing_return_url
+    parts = base.split("://", 1)
+    if len(parts) == 2:
+        origin = f"{parts[0]}://{parts[1].split('/', 1)[0]}"
+    else:
+        origin = base.split("/", 1)[0]
+    return f"{origin}/sign-up?ref={code}"
+
+
+def _trial_days(company: CompanyContext) -> int | None:
+    """The trial this checkout gets, or None to bill immediately.
+
+    Keyed on whether the company has EVER paid, not on which screen started the
+    checkout: a client flag saying "this is onboarding" would be a free trial
+    for anyone who could spell it. A company that cancelled and came back has
+    already seen the product, so it pays on day one.
+    """
+    row = billing_db.get_billing(company.company_id) or {}
+    # A cancel-and-resubscribe has already seen the product; no second trial.
+    if row.get("first_paid_at"):
+        return None
+    # THE TRIAL IS AN ONBOARDING OFFER, and only that (owner decision
+    # 2026-08-29). It exists so a stranger is not asked for money at step one
+    # of signup, before they have seen a single brief. Someone buying from
+    # Settings has already used the product and is not taking anything on
+    # faith, so they pay on the day they buy.
+    #
+    # Keyed on a SERVER fact rather than on which screen started the checkout:
+    # a flag in the body, or trusting `return_path` to point at the onboarding
+    # gate, would hand a free week to anyone who could spell the field name.
+    if row.get("onboarding_completed_at"):
+        return None
+    return plans.TRIAL_DAYS
 
 
 # ---------------------------------------------------------------------------
@@ -129,11 +212,29 @@ def get_summary(company: CompanyContext = Depends(require_company)) -> dict:
     """
     _require_admin(company)
     row = billing_db.get_billing(company.company_id) or {}
+
+    # UNSETTLED: we know this company as a Stripe CUSTOMER but hold no
+    # subscription for them. That is what a paid checkout looks like before its
+    # webhook lands — and what it looks like forever if webhooks are not
+    # configured, are firewalled, or cannot reach this host at all.
+    #
+    # So ask Stripe rather than wait to be told. Narrow on purpose: it costs one
+    # API call only in the window between paying and being recorded, and never
+    # once a subscription is on file. The onboarding gate polls this endpoint,
+    # which is how the gate's answer comes from Stripe's records instead of from
+    # a `?checkout=success` query parameter anyone could type.
+    if row.get("stripe_customer_id") and not row.get("stripe_subscription_id"):
+        if billing_webhooks.reconcile_from_stripe(company.company_id):
+            row = billing_db.get_billing(company.company_id) or row
+
     plan = plans.resolve_plan(row.get("plan"))
     allowance = plans.monthly_credits(plan)
     unlimited = allowance == plans.UNLIMITED
 
     invites = referrals.list_for_company(company.company_id)
+    # Minted on first read — a company that has never opened this screen
+    # does not need a code for a link nobody has asked for.
+    referral_code = referrals.code_for_company(company.company_id)
 
     # Pending cancellation is read LIVE rather than stored. It changes rarely
     # and only from this screen, so a column plus a sync path would be three
@@ -178,23 +279,45 @@ def get_summary(company: CompanyContext = Depends(require_company)) -> dict:
         "refund_window_days": plans.REFUND_WINDOW_DAYS,
         "billing_configured": stripe_client.configured(),
         "has_subscription": bool(row.get("stripe_subscription_id")),
-        "action_costs": dict(plans.CREDIT_COSTS),
+        # `action_costs` (the per-action price list) was removed with the
+        # "What things cost" view, owner decision 2026-08-28: a customer is
+        # shown what they HAVE used, in Credit history, and not what any
+        # action would cost before they take it. Dropped from the payload
+        # rather than merely unrendered — a price list sitting in the
+        # network tab is still a price list we published.
         "topup_presets": list(plans.TOPUP_PRESET_USD),
         "topup_min_usd": plans.TOPUP_MIN_USD,
         "topup_max_usd": plans.TOPUP_MAX_USD,
         "credits_per_topup_usd": plans.CREDITS_PER_TOPUP_USD,
         "history": credits.history(company.company_id),
+        # THE MONEY RECORD: one row per payment, with the amount in currency.
+        # This is what a customer opens billing to see — what they have been
+        # charged, when, and for what — and what a generated invoice document
+        # will read from rather than re-deriving amounts from prices that may
+        # since have changed.
+        "invoices": billing_db.list_invoices(company.company_id, limit=50),
+        # Plan changes. Kept on the API because it answers a real support
+        # question ("when did they move to this tier"), but NOT rendered: the
+        # customer-facing history is payments and credits, not tier moves.
+        "subscription_history": billing_db.list_subscription_events(
+            company.company_id, limit=25
+        ),
+        # ONE PERMANENT LINK, and the people who have arrived through it.
+        # `invitee_email` is gone: nobody types an address any more, so a
+        # referral has no email to show until the invitee's own company exists.
         "referrals": [
             {
                 "id": r.get("id"),
-                "invitee_email": r.get("invitee_email"),
                 "status": r.get("status"),
-                "code": r.get("code"),
                 "reward_credits": r.get("reward_credits"),
                 "created_at": r.get("created_at"),
+                "signed_up_at": r.get("signed_up_at"),
+                "rewarded_at": r.get("rewarded_at"),
             }
             for r in invites
         ],
+        "referral_code": referral_code,
+        "referral_url": _referral_url(referral_code),
         "referral_invites_remaining": referrals.remaining_invites(company.company_id),
         "referral_reward_credits": plans.REFERRAL_REWARD_CREDITS,
     }
@@ -208,6 +331,10 @@ def get_summary(company: CompanyContext = Depends(require_company)) -> dict:
 class CheckoutRequest(BaseModel):
     plan: str
     interval: str = stripe_client.MONTHLY
+    # A PATH on this app, not a URL — see `_safe_return_path`. Onboarding sends
+    # its own step so a user mid-signup is returned to where they left off
+    # rather than dropped into Settings.
+    return_path: str | None = None
 
 
 @router.post("/checkout", dependencies=[Depends(require_same_origin)])
@@ -221,6 +348,32 @@ def start_checkout(
         # Team is invoiced and Enterprise goes through sales. Refusing loudly
         # beats silently selling someone a Starter plan they did not pick.
         raise HTTPException(400, f"{body.plan} is not available for self-serve checkout")
+
+    # ALREADY PAYING? THEN THIS IS A SWITCH, NOT A PURCHASE.
+    #
+    # Checkout always creates a NEW subscription — it cannot replace one — so
+    # letting an active customer through here leaves them paying for two plans
+    # at once, and nothing downstream would have noticed. `/change-plan`
+    # modifies the subscription they already have.
+    #
+    # Enforced at the server rather than trusted to the button: the screen that
+    # calls this today is correct, and the fourth screen that calls it will not
+    # be.
+    existing = billing_db.get_billing(company.company_id) or {}
+    if existing.get("stripe_subscription_id") and plans.subscription_grants_access(
+        plans.resolve_plan(existing.get("plan")), existing.get("subscription_status")
+    ):
+        raise HTTPException(
+            409,
+            detail={
+                "error": "already_subscribed",
+                "message": (
+                    "This company already has an active subscription. "
+                    "Change the plan instead of buying a second one."
+                ),
+                "plan": plans.resolve_plan(existing.get("plan")),
+            },
+        )
     if body.interval not in (stripe_client.MONTHLY, stripe_client.ANNUAL):
         raise HTTPException(400, "interval must be 'monthly' or 'annual'")
     if not stripe_client.price_id(body.plan, body.interval):
@@ -243,11 +396,77 @@ def start_checkout(
             company_id=company.company_id,
             plan=body.plan,
             interval=body.interval,
-            success_url=_return_url("success"),
-            cancel_url=_return_url("cancelled"),
+            success_url=_return_url("success", body.return_path),
+            cancel_url=_return_url("cancelled", body.return_path),
+            trial_days=_trial_days(company),
         ),
     )
     return {"url": url}
+
+
+class ChangePlanRequest(BaseModel):
+    plan: str
+    interval: str = stripe_client.MONTHLY
+
+
+@router.post("/change-plan", dependencies=[Depends(require_same_origin)])
+def change_plan(
+    body: ChangePlanRequest, company: CompanyContext = Depends(require_company)
+) -> dict:
+    """Move a LIVE subscription onto a different plan.
+
+    One subscription, one price swapped — the old plan stops billing the moment
+    the new one starts, because they are the same subscription. The alternative,
+    sending an existing customer back through Checkout, creates a second
+    subscription and bills them twice.
+    """
+    _require_admin(company)
+    _require_stripe()
+
+    if body.plan not in plans.SELF_SERVE_PLANS:
+        raise HTTPException(400, f"{body.plan} is not available for self-serve checkout")
+    if body.interval not in (stripe_client.MONTHLY, stripe_client.ANNUAL):
+        raise HTTPException(400, "interval must be 'monthly' or 'annual'")
+
+    row = billing_db.get_billing(company.company_id) or {}
+    subscription_id = row.get("stripe_subscription_id")
+    if not subscription_id:
+        # Nothing to change. Say which door to use rather than failing vaguely.
+        raise HTTPException(
+            409,
+            detail={
+                "error": "no_subscription",
+                "message": "There is no subscription to change. Choose a plan to start one.",
+            },
+        )
+    if plans.resolve_plan(row.get("plan")) == body.plan:
+        raise HTTPException(
+            400,
+            detail={"error": "same_plan", "message": "You are already on that plan."},
+        )
+
+    _stripe_call(
+        "change_plan",
+        lambda: stripe_client.change_subscription_plan(
+            subscription_id=subscription_id, plan=body.plan, interval=body.interval
+        ),
+    )
+    # Re-read from Stripe rather than assuming the write landed as asked — the
+    # same reason every webhook re-fetches instead of trusting its payload.
+    #
+    # Syncing the subscription we ALREADY KNOW rather than reconciling by
+    # listing the customer's subscriptions: we are holding its id, so asking
+    # "what does this customer have?" would be one more API call to rediscover
+    # a fact we were just given. `_sync_subscription` is the same writer the
+    # webhook path uses, so a switch and a pushed event cannot disagree.
+    billing_webhooks._sync_subscription(
+        company.company_id, subscription_id, source="change_plan"
+    )
+    fresh = billing_db.get_billing(company.company_id) or {}
+    return {
+        "plan": plans.resolve_plan(fresh.get("plan")),
+        "subscription_status": fresh.get("subscription_status"),
+    }
 
 
 @router.post("/portal", dependencies=[Depends(require_same_origin)])
@@ -382,34 +601,15 @@ class ReferralRequest(BaseModel):
     email: str
 
 
-@router.post("/referrals", dependencies=[Depends(require_same_origin)])
-def invite_friend(
-    body: ReferralRequest, company: CompanyContext = Depends(require_company)
-) -> dict:
-    _require_admin(company)
-    try:
-        referral = referrals.create_invite(
-            referrer_company_id=company.company_id,
-            referrer_user_id=company.user_id,
-            invitee_email=body.email,
-        )
-    except referrals.ReferralLimitReached:
-        raise HTTPException(
-            400, f"You have used all {plans.MAX_REFERRAL_INVITES} invites"
-        ) from None
-    except referrals.AlreadyInvited:
-        raise HTTPException(400, "You have already invited that address") from None
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from None
-
-    return {
-        "id": referral["id"],
-        "invitee_email": referral["invitee_email"],
-        "code": referral["code"],
-        "status": referral["status"],
-        "reward_credits": plans.REFERRAL_REWARD_CREDITS,
-        "invites_remaining": referrals.remaining_invites(company.company_id),
-    }
+# THE EMAIL INVITE ENDPOINT IS GONE (owner decision, 2026-08-29).
+#
+# It took an address, minted a code for that one person, and created a referral
+# row before anybody had done anything. A company now has ONE permanent code —
+# served on the billing summary as `referral_code` / `referral_url` — and the
+# referral row is created when somebody actually ARRIVES through the link
+# (`referrals.claim_on_signup`), not when somebody types an address.
+#
+# Nothing replaces it: there is no call to make. The link already exists.
 
 
 class ReferralClaim(BaseModel):
@@ -428,9 +628,10 @@ def claim_referral(
     a new tenant exists.
 
     NO CREDIT IS GRANTED HERE. This only records who to pay; the reward fires
-    on this company's first paid invoice, in the `invoice.paid` webhook. That
-    ordering is the anti-abuse story: signing up is free and infinitely
-    repeatable, paying is not.
+    when THIS company subscribes — the transition into `active` or `trialing`,
+    handled in `_sync_subscription`. That ordering is the anti-abuse story:
+    signing up is free and infinitely repeatable, putting a real card on file
+    is not.
 
     Owner-only, and a bad or spent code is a quiet `{claimed: false}` rather
     than an error — the caller runs this best-effort inside onboarding, and a

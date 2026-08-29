@@ -4,6 +4,8 @@ import { useEffect, useRef, useState } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { useWorkspace } from "../context/WorkspaceContext"
 import { slugForStep } from "../lib/onboarding/types"
+import { companyHasPaid, lockModeFor } from "../lib/billingAccess"
+import { ONBOARDING_PLAN_PATH } from "../lib/billingPlans"
 import { postLoginPath } from "../lib/supabase/client"
 import { AppLoading } from "./AppLoading"
 
@@ -33,7 +35,7 @@ import { AppLoading } from "./AppLoading"
 // defer entirely to the onboarding layout's own guards and never interfere with
 // step navigation (including going back a step).
 function OnboardingRequiredGuard({ children }: { children: React.ReactNode }) {
-  const { loading, workspace, refresh } = useWorkspace()
+  const { loading, workspace, refresh, subscriptionLockMode } = useWorkspace()
   const router = useRouter()
   const pathname = usePathname()
   const onOnboardingRoute = pathname?.startsWith("/onboarding") ?? false
@@ -106,12 +108,54 @@ function OnboardingRequiredGuard({ children }: { children: React.ReactNode }) {
     }
     if (resolvePhase === "refreshed" && !redirectedRef.current) {
       redirectedRef.current = true
+      // THE PAYMENT GATE, and this is the second door into it. postLoginPath
+      // covers a fresh sign-in; this covers everyone who arrives at the app
+      // some other way — a reload, a bookmark, a deep link — with onboarding
+      // unfinished. Gating only the sign-in path left this one wide open, so
+      // anyone already signed in resumed at their numbered step and never saw
+      // the gate at all.
+      //
+      // Same rule as postLoginPath, deliberately: company-level (which is what
+      // stops an invited teammate paying for a company that already has), and
+      // the persisted step is NOT rewound, so they resume exactly where they
+      // left off once the card is down.
+      if (!companyHasPaid(workspace)) {
+        router.replace(ONBOARDING_PLAN_PATH)
+        return
+      }
       router.replace(`/onboarding/${slugForStep(workspace.onboarding_step)}`)
     }
   }, [shouldResolve, workspace, resolvePhase, router, refresh])
 
+  // THE SUBSCRIPTION LOCK. Separate from the resume logic above: that one is
+  // about finishing signup, this one is about a company that finished long ago
+  // and has since stopped paying.
+  //
+  // `enforce.bill` already refuses their work at the server, so without this
+  // the app renders completely normally and every single action fails with a
+  // generic error — a working-looking product where nothing works, which is
+  // worse than an honest wall.
+  //
+  // "hard" only. Under "read_only" nothing is redirected: reading what they
+  // already paid to produce is not held hostage to an expired card, and the
+  // 402 surfaces as a billing prompt instead (see api.ts). Billing itself is
+  // always reachable — it is the destination, and locking someone away from
+  // the one screen that fixes the lock would be a trap.
+  const lockMode = lockModeFor(workspace, subscriptionLockMode)
+  const onBilling = pathname?.startsWith("/settings") ?? false
+  const lockedOut =
+    !loading && !onOnboardingRoute && !onBilling && lockMode === "hard"
+
+  useEffect(() => {
+    if (lockedOut) router.replace("/settings?section=billing")
+  }, [lockedOut, router])
+
   // On an onboarding route, defer to the onboarding layout entirely.
   if (onOnboardingRoute) return <>{children}</>
+
+  // Locked and not yet moved: show nothing rather than a frame of an app the
+  // customer cannot use.
+  if (lockedOut) return <div className="ob-shell">Loading…</div>
 
   // The app proper renders ONLY for a fully-onboarded user. Everyone else holds
   // on the loading shell while the effect routes them away — so a workspace-less

@@ -87,17 +87,25 @@ def _plan_from_subscription(sub: dict) -> str:
     return plans.resolve_plan(meta_plan)
 
 
-def _sync_subscription(company_id: str, subscription_id: str) -> str:
+def _sync_subscription(
+    company_id: str, subscription_id: str, *, source: str | None = None
+) -> str:
     """Write a subscription's current truth onto the company. See invariant 2."""
     sub = stripe_client.get_subscription(subscription_id)
     plan = _plan_from_subscription(sub)
     status = sub.get("status")
 
+    # What it was, read BEFORE the write, so the history row can say what
+    # actually changed rather than just what it now is.
+    before = billing_db.get_billing(company_id) or {}
+    prev_plan = before.get("plan")
+    prev_status = before.get("subscription_status")
+
     # `current_period_end` moved onto the item in recent API versions; read
     # both so this keeps working across the pin.
+    items = ((sub.get("items") or {}).get("data")) or []
     period_end = sub.get("current_period_end")
     if not period_end:
-        items = ((sub.get("items") or {}).get("data")) or []
         period_end = items[0].get("current_period_end") if items else None
 
     billing_db.set_billing(
@@ -109,6 +117,128 @@ def _sync_subscription(company_id: str, subscription_id: str) -> str:
             "current_period_end": _iso(period_end),
         },
     )
+
+    # A TRIAL NEVER PAYS AN INVOICE, so the period grant cannot hang off
+    # `invoice.paid` alone. Stripe's trial docs are explicit: a free trial puts
+    # the subscription in `trialing` and the events it emits are
+    # `customer.subscription.*` — the real invoice, and `invoice.paid` with it,
+    # arrives only when the trial ENDS. Granting on the invoice alone gave a
+    # trialling company a plan, a countdown, and a balance of zero: seven days
+    # of a product that refuses every generation, which is worse than no trial.
+    #
+    # So the grant follows the SUBSCRIPTION PERIOD rather than the payment.
+    # `grant_monthly` is idempotent on `period_start`, and `credits_granted_for`
+    # is checked first, so this and `invoice.paid` cannot double-grant: whichever
+    # arrives first for a given period does the work and the other is a no-op.
+    # At trial end the period rolls over, `credits_granted_for` no longer
+    # matches, and the first paid month grants again — which is correct.
+    # A REFERRAL CONVERTS WHEN THE INVITEE SUBSCRIBES, not when they are first
+    # charged. `trialing` counts: the card is on file and Stripe has accepted
+    # it. Waiting for `invoice.paid` meant a referrer waited out the invitee's
+    # whole trial with no signal that anything had worked.
+    #
+    # Only on the TRANSITION into a live status, so re-syncing an already-live
+    # subscription does not re-run it. The reward is keyed on the referral id
+    # besides, so both the status transition and the ledger index stop a repeat.
+    if (
+        status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        and prev_status not in plans.ACTIVE_SUBSCRIPTION_STATUSES
+    ):
+        if referrals.reward_for_subscription(company_id):
+            logger.info("referral_converted_on_subscribe company=%s", company_id)
+
+    granted_period = False
+    if status in plans.ACTIVE_SUBSCRIPTION_STATUSES:
+        period_start = sub.get("current_period_start") or (
+            items[0].get("current_period_start") if items else None
+        )
+        period = _iso(period_start) or _iso(period_end)
+        fresh = billing_db.get_billing(company_id) or {}
+        if period and fresh.get("credits_granted_for") != period:
+            credits.grant_monthly(company_id, plan, period_start=period)
+            billing_db.set_billing(company_id, {"credits_granted_for": period})
+            granted_period = True
+            logger.info(
+                "billing_period_credits_granted company=%s plan=%s status=%s period=%s",
+                company_id,
+                plan,
+                status,
+                period,
+            )
+
+    # AN UPGRADE MID-PERIOD PAYS THE DIFFERENCE IN CREDITS TOO.
+    #
+    # Credits are granted per BILLING PERIOD, and a plan change does not start
+    # one: same subscription, same `current_period_end`, so `credits_granted_for`
+    # still matches and the grant above is skipped. The customer was charged a
+    # prorated difference by Stripe and kept the smaller allowance until the
+    # next renewal — paying Product Builder money to hold a Starter balance.
+    #
+    # So top up by the DIFFERENCE, not to the new figure: adding
+    # (new allowance - old allowance) preserves whatever they have already
+    # spent this month, where setting the balance to the new allowance would
+    # quietly refund it.
+    #
+    # A DOWNGRADE takes nothing back. They have already paid for this month and
+    # may have spent it; the smaller allowance applies from the next period,
+    # which is what the ordinary grant does anyway. Clawing back credits
+    # someone has bought is the kind of thing that ends up in a chargeback.
+    if (
+        # Not on a first purchase. `companies.plan` defaults to 'starter' for
+        # every company, so a brand-new Product Builder subscription LOOKS like
+        # an upgrade from Starter — and got the full allowance plus the uplift,
+        # 1,876 instead of 1,316. A previous plan only counts if there was a
+        # live subscription behind it.
+        prev_status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        # Not when the period grant just ran: that already handed over the new
+        # plan's full allowance, and adding an uplift on top double-counts.
+        and not granted_period
+        and prev_plan
+        and plan != prev_plan
+        and status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        and not plans.is_unlimited(plan)
+        and not plans.is_unlimited(prev_plan)
+    ):
+        uplift = plans.monthly_credits(plan) - plans.monthly_credits(prev_plan)
+        if uplift > 0:
+            credits.grant(
+                company_id,
+                uplift,
+                reason="plan_upgrade",
+                # Idempotent on the period and the plan moved to, so a
+                # redelivered event — or the webhook arriving after the in-app
+                # switch already synced — cannot grant the uplift twice.
+                # `before` is the pre-write read and is always in scope; `fresh` is
+                # local to the period-grant branch above and may not be.
+                ref_id=f"{subscription_id}:{before.get('credits_granted_for')}:{plan}",
+            )
+            logger.info(
+                "billing_upgrade_credits_granted company=%s %s->%s uplift=%s",
+                company_id,
+                prev_plan,
+                plan,
+                uplift,
+            )
+
+    # HISTORY, written only on a real transition.
+    #
+    # One purchase produces three webhooks — invoice.paid,
+    # customer.subscription.created, checkout.session.completed — and each
+    # re-syncs the subscription. Logging every sync would bury one real change
+    # under two identical rows and make the table useless for the questions it
+    # exists to answer.
+    if (plan, status) != (prev_plan, prev_status):
+        billing_db.record_subscription_event(
+            company_id,
+            plan=plan,
+            status=status,
+            previous_plan=prev_plan,
+            previous_status=prev_status,
+            stripe_subscription_id=subscription_id,
+            current_period_end=_iso(period_end),
+            source=source,
+        )
+
     logger.info(
         "billing_subscription_synced company=%s plan=%s status=%s",
         company_id,
@@ -155,11 +285,15 @@ def _on_checkout_completed(session: dict) -> str:
 
     subscription_id = session.get("subscription")
     if subscription_id:
-        return _sync_subscription(company_id, subscription_id)
+        return _sync_subscription(
+            company_id, subscription_id, source="checkout.session.completed"
+        )
     return "checkout recorded"
 
 
-def _on_subscription_event(sub: dict, *, deleted: bool) -> str:
+def _on_subscription_event(
+    sub: dict, *, deleted: bool, event_type: str = "customer.subscription"
+) -> str:
     company_id = _company_for(sub)
     if not company_id:
         logger.warning("billing_webhook_no_company event=customer.subscription")
@@ -194,10 +328,70 @@ def _on_subscription_event(sub: dict, *, deleted: bool) -> str:
         # Plan is left alone on purpose: it is the record of what they had, and
         # access is gated on status.
         billing_db.set_billing(company_id, {"subscription_status": "canceled"})
+
+        # HISTORY. This path returns before `_sync_subscription`, which is where
+        # every other transition is recorded — so cancellations were invisible
+        # in the history, and a cancellation is precisely the event a support
+        # question is about. A deleted subscription cannot be re-fetched from
+        # Stripe, so the row is written from what we already hold.
+        prev_plan = plans.resolve_plan(row.get("plan"))
+        prev_status = row.get("subscription_status")
+        if prev_status != "canceled":
+            billing_db.record_subscription_event(
+                company_id,
+                plan=prev_plan,
+                status="canceled",
+                previous_plan=prev_plan,
+                previous_status=prev_status,
+                stripe_subscription_id=sub.get("id"),
+                current_period_end=row.get("current_period_end"),
+                source="customer.subscription.deleted",
+            )
+
         logger.info("billing_subscription_canceled company=%s", company_id)
         return "subscription canceled"
 
-    return _sync_subscription(company_id, sub["id"])
+    return _sync_subscription(company_id, sub["id"], source=event_type)
+
+
+def reconcile_from_stripe(company_id: str) -> bool:
+    """Ask Stripe what this company's subscription actually is, and record it.
+
+    The PULL half of the webhook, and the reason the payment gate does not have
+    to trust a query parameter. `?checkout=success` is a string in a URL that
+    anyone can type; a subscription on the customer in Stripe's own records is
+    not. Reconciling makes the gate's answer come from Stripe rather than from
+    the browser that claims to have come back from it.
+
+    It also makes webhooks a latency optimisation rather than a hard dependency:
+    an unconfigured, blocked, or merely slow webhook no longer strands a paying
+    customer outside the product.
+
+    Returns True when a subscription was found and written. Never raises — a
+    Stripe outage must not turn into a 500 on a screen someone is waiting on.
+    """
+    row = billing_db.get_billing(company_id) or {}
+    customer_id = row.get("stripe_customer_id")
+    if not customer_id or not stripe_client.configured():
+        return False
+    try:
+        sub = stripe_client.latest_subscription_for_customer(customer_id)
+    except Exception:
+        logger.warning("billing_reconcile_failed company=%s", company_id, exc_info=True)
+        return False
+    if not sub or not sub.get("id"):
+        return False
+    # Same writer as the webhook path, so a reconciled subscription and a
+    # pushed one cannot end up meaning different things — and the period grant
+    # (which a trial has no invoice for) happens here too.
+    _sync_subscription(company_id, sub["id"], source="reconcile")
+    logger.info(
+        "billing_reconciled company=%s subscription=%s status=%s",
+        company_id,
+        sub.get("id"),
+        sub.get("status"),
+    )
+    return True
 
 
 def _subscription_id_from_invoice(invoice: dict) -> str | None:
@@ -228,8 +422,6 @@ def _on_invoice_paid(invoice: dict) -> str:
     # referral converts.
     if not row.get("first_paid_at"):
         billing_db.set_billing(company_id, {"first_paid_at": _iso(invoice.get("created"))})
-        if referrals.reward_for_first_payment(company_id):
-            outcome.append("referral rewarded")
 
     subscription_id = _subscription_id_from_invoice(invoice)
     if not subscription_id:
@@ -237,17 +429,43 @@ def _on_invoice_paid(invoice: dict) -> str:
         # above). Nothing to grant on a plan basis.
         return ", ".join(outcome) or "invoice recorded"
 
-    outcome.append(_sync_subscription(company_id, subscription_id))
+    # THE GRANT LIVES IN `_sync_subscription`, and only there. It used to be
+    # duplicated here, keyed on the INVOICE's `period_start` while the sync
+    # keyed on the SUBSCRIPTION's — two keys for one period, so an invoice
+    # granted a second time over a period the sync had already granted, wiping
+    # whatever the customer had spent. One key, one place: the subscription's
+    # own period, which is also the only key a trial has (a trial pays no
+    # invoice, so there is no invoice period to read).
+    outcome.append(_sync_subscription(company_id, subscription_id, source="invoice.paid"))
 
-    # The period grant. Keyed on the period start so a redelivered invoice does
-    # not hand out a second month — `grant_monthly` is idempotent on it, and
-    # storing it makes the state visible rather than implicit.
-    fresh = billing_db.get_billing(company_id) or {}
-    period_start = _iso(invoice.get("period_start")) or fresh.get("current_period_end")
-    if period_start and fresh.get("credits_granted_for") != period_start:
-        credits.grant_monthly(company_id, fresh.get("plan"), period_start=period_start)
-        billing_db.set_billing(company_id, {"credits_granted_for": period_start})
-        outcome.append("credits granted")
+    # THE MONEY RECORD. `invoice.paid` is the only event that means a payment
+    # actually happened, so it is the only place this is written. Plan is read
+    # AFTER the sync above so the row names the plan the invoice was for rather
+    # than whatever we believed before the event arrived.
+    fresh_row = billing_db.get_billing(company_id) or {}
+    billing_db.record_invoice(
+        company_id,
+        {
+            "company_id": company_id,
+            "stripe_invoice_id": invoice.get("id"),
+            "stripe_subscription_id": subscription_id,
+            "plan": plans.resolve_plan(fresh_row.get("plan")),
+            # Minor units, exactly as Stripe reports them. `amount_paid` is the
+            # figure that actually cleared — `total` can differ once credits or
+            # proration are applied, and a receipt must show what was taken.
+            "amount_paid_cents": int(invoice.get("amount_paid") or 0),
+            "currency": (invoice.get("currency") or "usd").lower(),
+            "status": invoice.get("status"),
+            "period_start": _iso(invoice.get("period_start")),
+            "period_end": _iso(invoice.get("period_end")),
+            "paid_at": _iso(invoice.get("status_transitions", {}).get("paid_at"))
+            or _iso(invoice.get("created")),
+            "invoice_number": invoice.get("number"),
+            "hosted_invoice_url": invoice.get("hosted_invoice_url"),
+            "invoice_pdf_url": invoice.get("invoice_pdf"),
+        },
+    )
+    outcome.append("invoice recorded")
 
     return ", ".join(outcome)
 
@@ -262,7 +480,9 @@ def _on_invoice_failed(invoice: dict) -> str:
         # Re-fetch rather than assuming past_due: Stripe decides the next
         # status from the dashboard's retry settings, and it may already have
         # moved to canceled or unpaid.
-        return _sync_subscription(company_id, subscription_id)
+        return _sync_subscription(
+            company_id, subscription_id, source="invoice.payment_failed"
+        )
 
     billing_db.set_billing(company_id, {"subscription_status": "past_due"})
     return "payment failed"
@@ -288,9 +508,9 @@ def handle_event(event: dict) -> str:
     if event_type == "checkout.session.completed":
         return _on_checkout_completed(obj)
     if event_type == "customer.subscription.deleted":
-        return _on_subscription_event(obj, deleted=True)
+        return _on_subscription_event(obj, deleted=True, event_type=event_type)
     if event_type.startswith("customer.subscription."):
-        return _on_subscription_event(obj, deleted=False)
+        return _on_subscription_event(obj, deleted=False, event_type=event_type)
     if event_type == "invoice.paid":
         return _on_invoice_paid(obj)
     if event_type == "invoice.payment_failed":

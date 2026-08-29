@@ -149,6 +149,7 @@ def create_subscription_checkout(
     interval: str,
     success_url: str,
     cancel_url: str,
+    trial_days: int | None = None,
 ) -> str:
     """A hosted Checkout session for a subscription. Returns its URL.
 
@@ -157,10 +158,24 @@ def create_subscription_checkout(
     Stripe Coupon with promotion codes generated off it in the dashboard — no
     code generator here, no codes table, and staff can mint them without a
     deploy.
+
+    `trial_days` delays the first invoice without changing anything else: in
+    subscription mode Checkout still collects a payment method up front, so a
+    trialling subscription is a card on file, not an unpaid stranger. Stripe
+    emits `trialing` for it, which `plans.ACTIVE_SUBSCRIPTION_STATUSES` already
+    treats as live — nothing downstream needs to learn a new state. Omitted
+    (the default) means bill immediately, which is what a repeat subscriber
+    gets.
     """
     price = price_id(plan, interval)
     if not price:
         raise BillingNotConfigured(f"no Stripe price configured for {plan}/{interval}")
+
+    subscription_data: dict = {"metadata": {"company_id": company_id, "plan": plan}}
+    # Sent only when there IS a trial. Stripe rejects `trial_period_days: 0`,
+    # and a key set to None is not the same as an absent key to its validator.
+    if trial_days:
+        subscription_data["trial_period_days"] = trial_days
 
     stripe = _stripe()
     session = stripe.checkout.Session.create(
@@ -173,7 +188,7 @@ def create_subscription_checkout(
         # Echoed back on every event for this session and its subscription, so
         # the webhook can resolve the tenant without a database round trip.
         metadata={"company_id": company_id, "plan": plan, "interval": interval},
-        subscription_data={"metadata": {"company_id": company_id, "plan": plan}},
+        subscription_data=subscription_data,
     )
     return session["url"]
 
@@ -275,6 +290,69 @@ def get_subscription(subscription_id: str) -> dict[str, Any]:
     event timestamps.
     """
     return _as_dict(_stripe().Subscription.retrieve(subscription_id))
+
+
+def latest_subscription_for_customer(customer_id: str) -> dict[str, Any] | None:
+    """This customer's most recent subscription, or None if they have none.
+
+    The PULL half of the webhook. Webhooks are a push we do not control: they
+    can be unconfigured, blocked by a firewall, undeliverable to a local
+    machine, or simply late — and until one lands, a customer who has genuinely
+    paid looks to us exactly like one who has not. Asking Stripe directly is
+    authoritative and needs no delivery guarantee.
+
+    `status="all"` on purpose: a subscription that is `trialing`, `past_due` or
+    `canceled` all matter to the caller, and filtering to `active` here would
+    hide a trial — which is precisely the state this exists to catch.
+    """
+    subs = _as_dict(
+        _stripe().Subscription.list(customer=customer_id, status="all", limit=1)
+    )
+    data = subs.get("data") or []
+    return _as_dict(data[0]) if data else None
+
+
+def change_subscription_plan(
+    *, subscription_id: str, plan: str, interval: str
+) -> dict[str, Any]:
+    """Swap the price on an EXISTING subscription. Returns the updated object.
+
+    THE ALTERNATIVE IS DOUBLE BILLING. Checkout always creates a NEW
+    subscription — it has no concept of replacing one — so sending an existing
+    customer through it to "switch plans" leaves them paying for both, with
+    nothing on either side to notice. This modifies the subscription they
+    already have: the old price comes off the item, the new one goes on, and
+    there is only ever one subscription on the customer.
+
+    `create_prorations` is the industry default and the honest one for an
+    upgrade: the unused part of the month they already paid for is credited,
+    the difference on the new plan is charged, and neither side is out of
+    pocket. A downgrade produces a credit against the next invoice rather than
+    a refund, which is Stripe's own behaviour and what the customer portal
+    would have done.
+    """
+    price = price_id(plan, interval)
+    if not price:
+        raise BillingNotConfigured(f"no Stripe price configured for {plan}/{interval}")
+
+    stripe = _stripe()
+    sub = _as_dict(stripe.Subscription.retrieve(subscription_id))
+    items = (sub.get("items") or {}).get("data") or []
+    if not items:
+        raise BillingNotConfigured(f"subscription {subscription_id} has no items to swap")
+
+    updated = stripe.Subscription.modify(
+        subscription_id,
+        items=[{"id": items[0]["id"], "price": price}],
+        proration_behavior="create_prorations",
+        # Keep the tenant resolvable from any event this produces, exactly as
+        # a fresh checkout would.
+        metadata={"company_id": sub.get("metadata", {}).get("company_id", ""), "plan": plan},
+        # A switch must not silently resurrect a cancellation the customer
+        # asked for; if they are changing plan they are staying.
+        cancel_at_period_end=False,
+    )
+    return _as_dict(updated)
 
 
 def schedule_cancellation(subscription_id: str) -> dict[str, Any]:

@@ -279,14 +279,17 @@ def test_monthly_grant_sets_the_balance_rather_than_accumulating():
     after = credits.grant_monthly(cid, plans.PRODUCT_BUILDER, period_start="2026-09-01")
 
     assert after == plans.PLAN_CREDITS[plans.PRODUCT_BUILDER]
-    assert credits.balance(cid) == 2_500
+    assert credits.balance(cid) == plans.PLAN_CREDITS[plans.PRODUCT_BUILDER]
 
 
 def test_monthly_grant_tops_a_depleted_balance_back_up():
     cid = seed_company(user_id="u-m2", slug="m2-co")
     _set_plan(cid, plans.STARTER, balance=12)
 
-    assert credits.grant_monthly(cid, plans.STARTER, period_start="2026-09-01") == 500
+    assert (
+        credits.grant_monthly(cid, plans.STARTER, period_start="2026-09-01")
+        == plans.PLAN_CREDITS[plans.STARTER]
+    )
 
 
 def test_monthly_grant_is_idempotent_within_one_period():
@@ -312,7 +315,7 @@ def test_a_new_period_grants_again():
     credits.spend(cid, "prd", ref_id="job-m4")
     credits.grant_monthly(cid, plans.STARTER, period_start="2026-10-01")
 
-    assert credits.balance(cid) == 500
+    assert credits.balance(cid) == plans.PLAN_CREDITS[plans.STARTER]
 
 
 def test_monthly_grant_on_unlimited_plan_is_a_no_op():
@@ -342,3 +345,118 @@ def test_history_returns_newest_first_and_scopes_to_the_company():
     rows = credits.history(mine)
     assert len(rows) == 1
     assert rows[0]["feature"] == "chat"
+
+
+# ---------------------------------------------------------------------------
+# The allowance is DERIVED (owner decision, 2026-08-28)
+# ---------------------------------------------------------------------------
+#
+#     credits = (monthly list price - PLATFORM_FEE_USD) x CREDITS_PER_TOPUP_USD
+#
+# These exist because the previous numbers were chosen rather than derived, and
+# had drifted badly against the prices they were meant to reflect: Starter
+# under-granted while Product Builder granted almost double what its price
+# supported. A hand-edited allowance would silently reintroduce exactly that.
+
+
+def test_every_metered_plan_matches_the_formula():
+    for plan, price in plans.PLAN_LIST_PRICE_USD.items():
+        expected = int((price - plans.PLATFORM_FEE_USD) * plans.CREDITS_PER_TOPUP_USD)
+        assert plans.PLAN_CREDITS[plan] == expected, plan
+
+
+def test_the_platform_fee_is_actually_withheld():
+    """$5 of every month is ours before a single credit is granted. If this
+    ever passes with a fee of 0, the deduction has been edited away."""
+    assert plans.PLATFORM_FEE_USD == 5
+    for plan, price in plans.PLAN_LIST_PRICE_USD.items():
+        granted_value = plans.PLAN_CREDITS[plan] / plans.CREDITS_PER_TOPUP_USD
+        assert price - granted_value >= plans.PLATFORM_FEE_USD, plan
+
+
+def test_the_allowance_is_floored_never_rounded_up():
+    """The formula is a ceiling on what we owe, so a fractional credit is ours.
+    Team is the case that proves it — $1,661.67 x 14 is 23,263.33."""
+    team_exact = (plans.PLAN_LIST_PRICE_USD[plans.TEAM] - plans.PLATFORM_FEE_USD) * plans.CREDITS_PER_TOPUP_USD
+    assert plans.PLAN_CREDITS[plans.TEAM] <= team_exact
+    assert team_exact - plans.PLAN_CREDITS[plans.TEAM] < 1
+
+
+def test_the_unmetered_plans_are_left_alone():
+    """LEGACY and ENTERPRISE were never sold on a credit basis. The formula
+    must not reach them — metering either one would invent a limit nobody
+    agreed to."""
+    assert plans.PLAN_CREDITS[plans.ENTERPRISE] == plans.UNLIMITED
+    assert plans.PLAN_CREDITS[plans.LEGACY] == plans.UNLIMITED
+    assert plans.ENTERPRISE not in plans.PLAN_LIST_PRICE_USD
+    assert plans.LEGACY not in plans.PLAN_LIST_PRICE_USD
+
+
+def test_a_price_change_moves_the_allowance_with_it(monkeypatch):
+    """The whole reason the formula is in code rather than in a spreadsheet:
+    changing a price must not leave the allowance behind."""
+    monkeypatch.setitem(plans.PLAN_LIST_PRICE_USD, plans.STARTER, 79.0)
+    assert plans._allowance(plans.STARTER) == int((79.0 - 5) * plans.CREDITS_PER_TOPUP_USD)
+
+
+def test_the_referral_reward_still_rides_the_same_rate():
+    """One dollar-price for a credit, used by the allowance, the top-up and the
+    referral alike. Two rates would be two truths."""
+    assert plans.REFERRAL_REWARD_CREDITS == 10 * plans.CREDITS_PER_TOPUP_USD
+    assert plans.topup_credits_for_usd(10) == plans.REFERRAL_REWARD_CREDITS
+
+
+# ---------------------------------------------------------------------------
+# Consumption is read off the LEDGER, not inferred from the balance
+# ---------------------------------------------------------------------------
+#
+# The staff refund screen computed `allowance - balance`. A person approves or
+# refuses a refund on that number, and it was wrong in three ways that all
+# happen in production.
+
+
+def test_spent_since_counts_only_spends(_db):
+    cid = seed_company(user_id="u-spent", slug="spent-co")
+    credits.grant_monthly(cid, plans.STARTER, period_start="2026-09-01")
+    credits.spend(cid, "prd", ref_id="j1")      # 25
+    credits.spend(cid, "chat", ref_id="j2")     # 1
+
+    assert credits.spent_since(cid) == (
+        plans.CREDIT_COSTS["prd"] + plans.CREDIT_COSTS["chat"]
+    )
+
+
+def test_a_grant_that_never_landed_is_not_reported_as_consumption(_db):
+    """THE BUG THAT PROMPTED THIS. A company whose grant never arrived sits at
+    a zero balance, and `allowance - balance` therefore claimed it had consumed
+    its ENTIRE allowance — on the screen where a refund is decided."""
+    cid = seed_company(user_id="u-nogrant", slug="nogrant-co")
+
+    assert credits.balance(cid) == 0
+    assert credits.spent_since(cid) == 0
+
+
+def test_a_topped_up_company_does_not_report_zero_consumption(_db):
+    """The mirror image: a top-up puts the balance ABOVE the allowance, so the
+    subtraction went negative and clamped to zero — reporting nothing consumed
+    by someone who had spent plenty."""
+    cid = seed_company(user_id="u-topup", slug="topup-co")
+    credits.grant_monthly(cid, plans.STARTER, period_start="2026-09-01")
+    credits.grant(cid, 1_000, reason="topup", ref_id="t1")
+    credits.spend(cid, "prototype", ref_id="j3")   # 50
+
+    assert credits.balance(cid) > plans.PLAN_CREDITS[plans.STARTER]
+    assert credits.spent_since(cid) == plans.CREDIT_COSTS["prototype"]
+
+
+def test_repricing_a_plan_does_not_rewrite_past_consumption(_db, monkeypatch):
+    """The allowance is derived from price now, so a price change used to move
+    every past customer's apparent usage. The ledger is immune."""
+    cid = seed_company(user_id="u-reprice", slug="reprice-co")
+    credits.grant_monthly(cid, plans.STARTER, period_start="2026-09-01")
+    credits.spend(cid, "prd", ref_id="j4")
+    before = credits.spent_since(cid)
+
+    monkeypatch.setitem(plans.PLAN_CREDITS, plans.STARTER, 9_999)
+
+    assert credits.spent_since(cid) == before

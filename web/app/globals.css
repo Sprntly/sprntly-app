@@ -2481,6 +2481,79 @@
     margin: 4px 0;
   }
 
+  /* The trial countdown, carried on every screen. It sits above the identity
+     row and renders only while trialling, so a paid workspace loses no rail
+     space to it. */
+  .sb-trial {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .sb-trial:hover {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  /* The number keeps a fixed square so a two-digit count does not resize the
+     row, and so it still lines up with the avatar below when the rail is
+     collapsed to icons. */
+  .sb-trial-num {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--ink);
+    color: var(--surface-2, #fff);
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sb-trial-copy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  .sb-trial-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .sb-trial-days {
+    font-size: 10.5px;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* Collapsed to icons: the words go, the number stays — it is the only part
+     that still says anything at 56px wide. */
+  .sidebar--collapsed .sb-trial {
+    justify-content: center;
+    padding: 7px 0;
+  }
+
+  .sidebar--collapsed .sb-trial-copy {
+    display: none;
+  }
+
   .sb-rail-user {
     display: flex;
     flex-direction: column;
@@ -19828,6 +19901,150 @@
     margin-bottom: 16px;
   }
 
+  /* Onboarding payment gate (`/onboarding/plan`) — the unnumbered step between
+     creating a company and the rest of the flow. Two self-serve plans, an
+     interval toggle, and a sales line for the tiers that carry no self-serve
+     price. */
+  .onb-form-notice {
+    color: var(--ink-2);
+    font-size: 13px;
+    padding: 8px 12px;
+    background: var(--surface-3);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+  }
+
+  .onb-plan-toggle {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    margin: 4px 0 18px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+  }
+
+  .onb-plan-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .onb-plan-toggle-btn.active {
+    background: var(--surface-2);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .onb-plan-save {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-ink);
+  }
+
+  /* Two cards, side by side where there is room. `auto-fit` rather than a
+     fixed two-column grid so a third self-serve plan would not need a CSS
+     change to sit correctly. */
+  .onb-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .onb-plan-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+
+  .onb-plan-card:hover {
+    border-color: var(--line-strong);
+  }
+
+  /* The chosen plan carries a 2px ring drawn with box-shadow rather than a
+     thicker border, so selecting one does not resize the card and nudge its
+     neighbour. */
+  .onb-plan-card.active {
+    border-color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--ink);
+  }
+
+  .onb-plan-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-plan-price {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .onb-plan-per {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+
+  .onb-plan-credits {
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+
+  .onb-plan-blurb {
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  .onb-plan-continue {
+    width: 100%;
+  }
+
+  .onb-plan-sales {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .onb-plan-sales a {
+    color: var(--ink-2);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* Waiting on the webhook after a successful Checkout. Deliberately calm:
+     the money has already moved, so this must not read as an error state. */
+  .onb-plan-spinner {
+    margin-top: 18px;
+    font-size: 13px;
+    color: var(--ink-3);
+  }
+
   /* Import-context step (onboarding 02) — bring existing AI-assistant
      context in. One option card (copy the prompt / upload the .md) plus a
      manual-entry escape hatch beneath it. The card is a <div>, not a
@@ -25947,6 +26164,44 @@
   margin-bottom: 14px;
 }
 
+/* ON TRIAL. The plan name alone is a half-truth while a trial runs — it says
+   Starter and says nothing about nobody having been charged yet, or when that
+   changes. Deliberately NOT a warning colour: a trial is the good state, and
+   painting it amber makes a working account look broken. */
+.bill-trial {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}
+
+.bill-trial-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--surface-2, #fff);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.bill-trial-copy {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.bill-trial-copy strong {
+  color: var(--ink);
+}
+
 .bill-hero {
   display: flex;
   flex-wrap: wrap;
@@ -26279,16 +26534,14 @@
   font-weight: 500;
 }
 
-/* ── Costs + history ── */
+/* ── History ── */
 
-.bill-costs,
 .bill-history {
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
-.bill-cost,
 .bill-history-row {
   display: flex;
   align-items: center;
@@ -26299,27 +26552,12 @@
   color: var(--ink-2);
 }
 
-.bill-cost:last-child,
 .bill-history-row:last-child {
   border-bottom: none;
 }
 
-.bill-cost span:first-child,
 .bill-history-what {
   flex: 1;
-}
-
-.bill-cost-n {
-  font-variant-numeric: tabular-nums;
-  color: var(--ink);
-  font-weight: 500;
-}
-
-.bill-costs-note {
-  font-size: 12px;
-  color: var(--ink-3);
-  margin-top: 12px;
-  line-height: 1.5;
 }
 
 .bill-history-when {
@@ -26540,4 +26778,222 @@
 .bill-cancel-link:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* ── Payment required (402) ───────────────────────────────────────────────
+   Every billable route can return one, and until now none of them said so:
+   the structured body the backend sends was thrown away and each surface
+   rendered its own generic failure. Deliberately a modal — a lapsed
+   subscription is not a toast you scroll past, it is the reason the thing you
+   just clicked did nothing. */
+.pay-req-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(18, 32, 26, 0.32);
+}
+
+.pay-req {
+  width: min(420px, 100%);
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-lg, 0 12px 40px rgba(18, 32, 26, 0.18));
+}
+
+.pay-req-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 8px;
+}
+
+.pay-req-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+.pay-req-nums {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: 10px 0 0;
+}
+
+.pay-req-nums strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fix is the primary action and sits last, where the eye lands. */
+.pay-req-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* The action inside a status banner. A link, not a button-shaped control: it
+   sits mid-sentence and a filled button there would out-shout the sentence
+   explaining why it is needed. */
+.bill-subscribe-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.bill-subscribe-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ── Subscriptions (the money record) ────────────────────────────────────
+   One row per payment. Four columns that stay aligned down the list: what it
+   was for, the period it covers, the amount, and the PDF. Grid rather than
+   flex so the amounts line up in a column the eye can scan. */
+.bill-invoices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bill-invoice {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-invoice:last-child {
+  border-bottom: none;
+}
+
+.bill-invoice-plan {
+  color: var(--ink);
+  font-weight: 500;
+  min-width: 0;
+}
+
+/* The invoice number is reference data, not the headline. */
+.bill-invoice-num {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-invoice-period {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.bill-invoice-amount {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.bill-invoice-pdf {
+  min-width: 30px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bill-invoice-pdf:hover {
+  color: var(--ink);
+}
+
+@media (max-width: 620px) {
+  /* Amount and PDF stay on the first line with the plan; the period drops
+     under them rather than squeezing every column to nothing. */
+  .bill-invoice {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .bill-invoice-period {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── The referral link ────────────────────────────────────────────────────
+   One permanent link, not a form. The input is readonly and selects on focus
+   so it stays copyable when the clipboard API is blocked — which it is in
+   plenty of browsers and contexts, and a Copy button that silently does
+   nothing is worse than no button. */
+.bill-reflink {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0 18px;
+}
+
+.bill-reflink-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+}
+
+.bill-reflink-input:focus {
+  outline: 2px solid var(--line-strong);
+  outline-offset: -1px;
+}
+
+/* Who has arrived. No email column — nobody types an address any more, so a
+   row carries a date and whether it converted. */
+.bill-referral {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-referral:last-child {
+  border-bottom: none;
+}
+
+.bill-referral-when {
+  color: var(--ink-2);
+}
+
+.bill-referral-status {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* The converted state is the only one worth colouring — it is the one the
+   reader is looking for. */
+.bill-referral-status.s-rewarded {
+  color: var(--accent-ink, var(--ink));
+  font-weight: 600;
 }

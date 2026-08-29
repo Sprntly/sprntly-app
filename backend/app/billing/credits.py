@@ -369,6 +369,42 @@ def history(company_id: str, *, limit: int = 50) -> list[dict]:
     )
 
 
+def spent_since(company_id: str, since: str | None = None) -> int:
+    """Credits actually SPENT, read off the ledger.
+
+    The staff refund screen used to compute this as `allowance - balance`, which
+    is wrong in three separate ways and wrong on a screen where a person decides
+    whether to hand money back:
+
+      - a company whose grant never landed shows a zero balance, and therefore
+        reports the ENTIRE allowance as consumed when it has consumed nothing;
+      - a company that topped up sits above its allowance, so the subtraction
+        goes negative and clamps to 0 — reporting nothing consumed by someone
+        who may have spent thousands;
+      - the allowance itself is derived from price (see plans.PLAN_CREDITS), so
+        any repricing silently rewrites how much every past customer appears to
+        have used.
+
+    The ledger has no such problem: a spend is a row with a negative delta, and
+    it stays true whatever the balance or the price does afterwards.
+
+    `since` scopes it to the current billing period — pass the company's
+    `credits_granted_for`. Omitted, it is all time.
+    """
+    q = (
+        require_client()
+        .table("credit_ledger")
+        .select("delta")
+        .eq("company_id", company_id)
+        .eq("reason", "spend")
+    )
+    if since:
+        q = q.gte("created_at", since)
+    rows = q.limit(10_000).execute().data or []
+    # Deltas for a spend are negative; report consumption as a positive number.
+    return sum(-int(r.get("delta") or 0) for r in rows)
+
+
 def new_ref() -> str:
     """A ref_id for a caller that has no natural one (a manual adjustment)."""
     return uuid.uuid4().hex

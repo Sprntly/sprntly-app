@@ -10,6 +10,7 @@ production database.
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 
 from app.billing import credits, enforce, plans
 from app.config import settings
@@ -181,3 +182,81 @@ def test_every_wired_surface_has_a_price():
         "prototype_iterate",
     }
     assert wired <= set(plans.CREDIT_COSTS)
+
+
+# ---------------------------------------------------------------------------
+# Chat survives a lapsed subscription (owner decision, 2026-08-28)
+# ---------------------------------------------------------------------------
+#
+# Under `subscription_lock_mode = "read_only"`, chat keeps working after the
+# subscription ends — with or without a credit balance. Everything else stops.
+# It is a retention allowance out of our own margin: a chat turn costs about
+# $0.004 against real usage, and someone who can still talk to the product
+# while sorting their card out is a customer who might come back.
+
+
+@pytest.fixture
+def read_only(monkeypatch, isolated_settings):
+    monkeypatch.setattr(settings, "billing_enforced", True)
+    monkeypatch.setattr(settings, "subscription_lock_mode", "read_only")
+
+
+def test_chat_survives_a_cancelled_subscription(read_only):
+    cid = seed_company(user_id="u-ro", slug="ro-co")
+    billing_db.set_billing(cid, {"subscription_status": "canceled"})
+
+    enforce.require_credits(cid, "chat")   # must not raise
+
+
+def test_chat_survives_a_zero_balance(read_only):
+    """`whether you have token credit or not` — the affordability check is
+    waived too, not just the subscription check."""
+    cid = seed_company(user_id="u-ro2", slug="ro-co2")
+    billing_db.set_billing(cid, {"subscription_status": "active"})
+
+    enforce.require_credits(cid, "chat")
+
+
+def test_a_customer_spends_what_they_BOUGHT_before_chatting_on_us(read_only):
+    """Exempt from the gate, not from the meter. `charge` still debits, so a
+    leftover balance is consumed first and only then is chat on our margin."""
+    cid = seed_company(user_id="u-ro3", slug="ro-co3")
+    billing_db.set_billing(cid, {"subscription_status": "canceled"})
+    credits.grant(cid, 40, reason="topup", ref_id="seed")
+
+    enforce.bill(cid, "chat")
+
+    assert credits.balance(cid) == 40 - plans.CREDIT_COSTS["chat"]
+
+
+def test_nothing_ELSE_survives_a_cancelled_subscription(read_only):
+    cid = seed_company(user_id="u-ro4", slug="ro-co4")
+    billing_db.set_billing(cid, {"subscription_status": "canceled"})
+    credits.grant(cid, 5_000, reason="topup", ref_id="seed4")
+
+    for feature in ("prd", "ask", "evidence", "prototype", "multi_agent"):
+        with pytest.raises(HTTPException) as exc:
+            enforce.require_credits(cid, feature)
+        assert exc.value.status_code == 402, feature
+
+
+def test_the_exemption_does_not_apply_in_hard_mode(monkeypatch, isolated_settings):
+    """`hard` routes the whole app to Billing; an open chat box would
+    contradict the lock."""
+    monkeypatch.setattr(settings, "billing_enforced", True)
+    monkeypatch.setattr(settings, "subscription_lock_mode", "hard")
+    cid = seed_company(user_id="u-hard", slug="hard-co")
+    billing_db.set_billing(cid, {"subscription_status": "canceled"})
+
+    with pytest.raises(HTTPException):
+        enforce.require_credits(cid, "chat")
+
+
+def test_the_exemption_does_not_apply_when_the_lock_is_off(monkeypatch, isolated_settings):
+    monkeypatch.setattr(settings, "billing_enforced", True)
+    monkeypatch.setattr(settings, "subscription_lock_mode", "off")
+    cid = seed_company(user_id="u-off", slug="off-co")
+    billing_db.set_billing(cid, {"subscription_status": "canceled"})
+
+    with pytest.raises(HTTPException):
+        enforce.require_credits(cid, "chat")

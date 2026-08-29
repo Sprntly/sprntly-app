@@ -23,6 +23,11 @@ const openPalette = vi.fn()
 const toggleSidebar = vi.fn()
 let sidebarCollapsed = true
 
+// The rail carries a trial countdown that links to billing, so it now uses the
+// router directly — `goTo` takes a screen id and the settings SECTION rides
+// the query string.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
+
 vi.mock("../../../context/NavigationContext", () => ({
   useNavigation: () => ({
     currentScreen: "brief",

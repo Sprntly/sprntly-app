@@ -24,6 +24,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from app.config import settings
 from app.auth import CompanyContext, require_company
 from app.db.authcache import invalidate_workspace_caches
 from app.db.companies import slug_for_company_id
@@ -116,7 +117,16 @@ def get_workspaces(company: CompanyContext = Depends(require_company)):
     # workspace effective roles above — workspace creation is org-admin
     # gated, and the frontend needs this to show/hide create affordances
     # (a workspace-level admin who is a plain org member must not see them).
-    return {"workspaces": out, "org_role": company.role}
+    # `subscription_lock_mode` rides this response because the web app already
+    # fetches it at start-up and the shell needs the mode before it can decide
+    # where to send a lapsed customer. A NEXT_PUBLIC_ env var would have been
+    # simpler and wrong: `web/` is a static export, so those are inlined at
+    # BUILD time and changing the mode would mean a rebuild and redeploy.
+    return {
+        "workspaces": out,
+        "org_role": company.role,
+        "subscription_lock_mode": settings.subscription_lock_mode,
+    }
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

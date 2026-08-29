@@ -15,6 +15,13 @@ import {
   type BillingSummary,
 } from "../../../../lib/api"
 import {
+  SALES_CONTACT,
+  SELF_SERVE_PLANS,
+  TEAM_MONTHLY_CREDITS,
+  TRIAL_DAYS,
+} from "../../../../lib/billingPlans"
+import { trialDaysLeft, trialLabel } from "../../../../lib/billingAccess"
+import {
   SettingsSection,
   SettingsMessage,
   SettingsPaneNav,
@@ -43,29 +50,6 @@ import {
  * same split UsageSettings uses.
  */
 
-/** Plans a customer can buy here. Team is invoiced and Enterprise goes through
- *  sales, so both are shown as a contact card rather than a checkout button —
- *  the backend rejects a checkout naming either. */
-const SELF_SERVE = [
-  {
-    id: "starter",
-    label: "Starter",
-    monthly: 59,
-    annual: 590,
-    credits: 500,
-    blurb: "For one person shipping their first products.",
-  },
-  {
-    id: "product_builder",
-    label: "Product Builder",
-    monthly: 99,
-    annual: 990,
-    credits: 2500,
-    blurb: "For a product manager running a full portfolio.",
-    featured: true,
-  },
-]
-
 /** Plans sold by conversation rather than by checkout.
  *
  *  Team is ANNUAL-ONLY. $20,000/yr is not a monthly product, and putting it
@@ -92,7 +76,7 @@ const CONTACT_PLANS: {
     price: "$20,000",
     per: "/yr",
     blurb: "For a whole product org sharing one pool of credits.",
-    credits: "15,000 credits/mo, pooled",
+    credits: `${TEAM_MONTHLY_CREDITS.toLocaleString()} credits/mo, pooled`,
     annualOnly: true,
   },
   {
@@ -140,6 +124,68 @@ const REASON_LABELS: Record<string, string> = {
   topup: "Credits purchased",
   refund: "Refund",
   adjustment: "Adjustment",
+}
+
+/** One plan change, said in a sentence.
+ *
+ *  The row has to read on its own: "Product Builder" alone does not tell you
+ *  whether they arrived, upgraded or lapsed, and that is the whole question a
+ *  history is opened to answer. */
+/** Minor units to something a person reads. Stripe reports cents; dividing
+ *  here rather than storing dollars keeps the stored figure exact. */
+/** A rewarded row should carry its own credit figure; fall back to the
+ *  current reward so an older row never renders a blank. */
+function plans_reward(d: { referral_reward_credits: number }): number {
+  return d.referral_reward_credits
+}
+
+export function formatMoney(cents: number, currency = "usd"): string {
+  const amount = (Number(cents) || 0) / 100
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: (currency || "usd").toUpperCase(),
+    }).format(amount)
+  } catch {
+    // An unknown currency code must not blank out an invoice row.
+    return `${amount.toFixed(2)} ${(currency || "").toUpperCase()}`.trim()
+  }
+}
+
+export function planChangeLabel(e: {
+  plan: string
+  status: string | null
+  previous_plan: string | null
+  previous_status: string | null
+}): string {
+  const to = PLAN_LABELS[e.plan] ?? e.plan
+  const from = e.previous_plan ? (PLAN_LABELS[e.previous_plan] ?? e.previous_plan) : null
+
+  // Status moved, plan did not — a lapse, a recovery, a trial converting.
+  if (from && from === to) {
+    if (e.status === "canceled") return `${to} ended`
+    if (e.status === "past_due") return `${to} payment failed`
+    if (e.status === "unpaid") return `${to} unpaid`
+    if (e.previous_status === "trialing" && e.status === "active") {
+      return `${to} trial converted`
+    }
+    return `${to} — ${e.status ?? "updated"}`
+  }
+  // No previous status at all: this is where their billing history begins.
+  if (!e.previous_status) {
+    return e.status === "trialing" ? `Started ${to} trial` : `Subscribed to ${to}`
+  }
+  return `${from} → ${to}`
+}
+
+/** Plan keys are stored, not labels — so the history reads in the same words
+ *  the plan cards use rather than in database values. */
+const PLAN_LABELS: Record<string, string> = {
+  starter: "Starter",
+  product_builder: "Product Builder",
+  team: "Team",
+  enterprise: "Enterprise",
+  legacy: "Legacy",
 }
 
 export function entryLabel(entry: BillingLedgerEntry): string {
@@ -196,9 +242,13 @@ export function refundWindowRemaining(
  *  banner; the rest each need a different next action from the user. */
 export function statusNotice(
   status: string | null,
-): { kind: "error" | "success"; text: string } | null {
+  hasSubscription = true,
+): { kind: "error" | "success"; text: string; subscribe?: boolean } | null {
   switch (status) {
     case "past_due":
+      // Retries are still running and the plan is already chosen — the fix is
+      // a working card, not a different plan. So no Subscribe link here; the
+      // portal button above it is the right door.
       return {
         kind: "error",
         text:
@@ -207,19 +257,37 @@ export function statusNotice(
     case "canceled":
       return {
         kind: "error",
-        text: "Your subscription has ended. Choose a plan to keep generating.",
+        text: "Your subscription has ended.",
+        subscribe: true,
       }
     case "unpaid":
+      // Retries are exhausted. Stripe will not resurrect this subscription, so
+      // "settle the invoice" was advice with nowhere to act on it — buying
+      // again is what actually restores access.
       return {
         kind: "error",
-        text: "Your subscription is unpaid. Settle the outstanding invoice to restore access.",
+        text: "Your subscription is unpaid and access has stopped.",
+        subscribe: true,
       }
     case "incomplete":
       return {
         kind: "error",
         text: "Your payment needs confirming. Reopen checkout to finish it.",
+        subscribe: true,
       }
     default:
+      // NEVER SUBSCRIBED — the case that showed nothing at all. A company that
+      // finished onboarding without a plan (or had one cleared) landed on a
+      // billing screen with no banner, no explanation, and a credits meter
+      // reading zero. Silence is the worst answer here: it is the one state
+      // where the user has to do something and no other screen will tell them.
+      if (!hasSubscription) {
+        return {
+          kind: "error",
+          text: "You have not subscribed yet.",
+          subscribe: true,
+        }
+      }
       return null
   }
 }
@@ -230,18 +298,14 @@ export function statusNotice(
 export type BillingTab =
   | "billing"
   | "plans"
-  | "topup"
   | "referrals"
-  | "costs"
   | "history"
 
 export const BILLING_TAB_LABELS: Record<BillingTab, string> = {
   billing: "Billing",
   plans: "Plans",
-  topup: "Buy more credits",
   referrals: "Invite a friend",
-  costs: "What things cost",
-  history: "Credit history",
+  history: "History",
 }
 
 /** Nav items for a given account state.
@@ -260,18 +324,15 @@ export function billingTabs(d: BillingSummary): SettingsPaneNavItem[] {
     },
     { id: "plans", label: BILLING_TAB_LABELS.plans, hint: d.plan_label },
   ]
-  if (!d.unlimited) {
-    items.push({ id: "topup", label: BILLING_TAB_LABELS.topup })
-  }
   items.push(
     {
       id: "referrals",
       label: BILLING_TAB_LABELS.referrals,
+      // Uncapped shows no hint at all — "∞ left" is noise on a nav pill.
       hint: d.referral_invites_remaining
         ? `${d.referral_invites_remaining} left`
         : undefined,
     },
-    { id: "costs", label: BILLING_TAB_LABELS.costs },
     {
       id: "history",
       label: BILLING_TAB_LABELS.history,
@@ -349,8 +410,7 @@ export function BillingSettingsView(p: BillingView) {
   }
 
   const d = p.data
-  const notice = statusNotice(d.subscription_status)
-  const refundDays = refundWindowRemaining(d.first_paid_at, d.refund_window_days)
+  const notice = statusNotice(d.subscription_status, d.has_subscription)
   const used =
     d.monthly_credits && d.credit_balance !== null
       ? Math.max(0, d.monthly_credits - d.credit_balance)
@@ -360,6 +420,7 @@ export function BillingSettingsView(p: BillingView) {
       ? Math.max(0, Math.min(100, (d.credit_balance / d.monthly_credits) * 100))
       : 100
 
+  const trialDays = trialDaysLeft(d)
   const items = billingTabs(d)
   // Guarded rather than trusted: switching to an unlimited plan removes the
   // top-up view while you are standing on it.
@@ -376,13 +437,54 @@ export function BillingSettingsView(p: BillingView) {
       <SettingsSection title="Billing" sub="Plan, credits, and invoices.">
         {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
         {p.notice && <SettingsMessage kind="success">{p.notice}</SettingsMessage>}
-        {notice && <SettingsMessage kind={notice.kind}>{notice.text}</SettingsMessage>}
+        {notice && (
+          <SettingsMessage kind={notice.kind}>
+            {notice.text}
+            {notice.subscribe && (
+              <>
+                {" "}
+                {/* The fix, one click from the sentence that describes the
+                    problem. It opens the Plans view rather than starting a
+                    checkout: which plan is still the user's choice, and a
+                    banner that silently began buying something would be
+                    worse than no banner at all. */}
+                <button
+                  type="button"
+                  className="bill-subscribe-link"
+                  data-testid="billing-subscribe-now"
+                  onClick={() => p.onTab("plans")}
+                >
+                  Pay now
+                </button>
+              </>
+            )}
+          </SettingsMessage>
+        )}
 
         {!d.billing_configured && (
           <p className="settings-placeholder bill-inert">
             Payments are not enabled in this environment, so your plan is shown
             read-only.
           </p>
+        )}
+
+        {/* ON TRIAL. The plan name alone is a half-truth during a trial — it
+            says Starter and says nothing about the fact that nobody has been
+            charged yet, or when that changes. Both facts belong together, and
+            the DATE matters as much as the countdown: "6 days left" tells you
+            how long, "then $59 on 7 Sep" tells you what actually happens. */}
+        {trialDays != null && (
+          <div className="bill-trial" data-testid="billing-trial">
+            <span className="bill-trial-chip">Free trial</span>
+            <span className="bill-trial-copy">
+              <strong>{trialLabel(trialDays)}</strong> on {d.plan_label}. Your
+              card is saved and nothing has been charged
+              {d.current_period_end
+                ? ` — the first payment is on ${formatDate(d.current_period_end)}.`
+                : "."}{" "}
+              Cancel before then and you pay nothing.
+            </span>
+          </div>
         )}
 
         <div className="bill-hero">
@@ -393,7 +495,9 @@ export function BillingSettingsView(p: BillingView) {
               <span className="bill-hero-meta">
                 {d.cancel_at_period_end
                   ? `Ends ${formatDate(d.cancels_at ?? d.current_period_end)}`
-                  : `Renews ${formatDate(d.current_period_end)}`}
+                  : trialDays != null
+                    ? `First payment ${formatDate(d.current_period_end)}`
+                    : `Renews ${formatDate(d.current_period_end)}`}
               </span>
             )}
           </div>
@@ -513,110 +617,31 @@ export function BillingSettingsView(p: BillingView) {
           </>
         )}
 
-        {refundDays !== null && (
+        {/* THE SEVEN DAYS ARE THE TRIAL, and nothing else.
+            This used to say "you are within your 7-day refund window — cancel
+            and contact us and we will refund your first payment". That was the
+            PRE-TRIAL design (owner decision 2026-08-21: no free trial, pay and
+            we refund inside a week). A trial replaced it, and during a trial
+            nothing is deducted — so there is no payment to undo, and offering
+            to refund one reads as though we are holding money we never took.
+
+            The refund WINDOW is therefore gone from this screen entirely, not
+            merely hidden while trialling: a customer who has converted has
+            paid for a month they are using, and dangling a refund at them is
+            an offer we did not intend to make. Staff can still issue one by
+            hand from the admin panel — that path is unchanged; we just no
+            longer advertise it as a window. */}
+        {trialDays !== null && (
           <p className="bill-refund">
-            You are within your {d.refund_window_days}-day refund window —{" "}
-            {refundDays} {refundDays === 1 ? "day" : "days"} left. Cancel in the
-            portal above and contact us and we will refund your first payment.
+            You are within your {TRIAL_DAYS}-day trial — {trialDays}{" "}
+            {trialDays === 1 ? "day" : "days"} left. Cancel any time before it
+            ends and you pay nothing.
           </p>
         )}
       </SettingsSection>
       )}
 
-      {tab === "plans" && (
-      <SettingsSection
-        title="Plans"
-        sub="Change plan at any time — Stripe prorates the difference."
-      >
-        <div className="bill-interval" role="group" aria-label="Billing interval">
-          {(["monthly", "annual"] as BillingInterval[]).map((i) => (
-            <button
-              key={i}
-              type="button"
-              className={`bill-interval-tab${p.interval === i ? " on" : ""}`}
-              aria-pressed={p.interval === i}
-              onClick={() => p.onInterval(i)}
-            >
-              {i === "monthly" ? "Monthly" : "Annual"}
-              {i === "annual" && <span className="bill-save">2 months free</span>}
-            </button>
-          ))}
-        </div>
-
-        <div className="bill-plans">
-          {SELF_SERVE.map((plan) => {
-            const current = d.plan === plan.id
-            const price = p.interval === "annual" ? plan.annual : plan.monthly
-            return (
-              <div
-                key={plan.id}
-                className={`bill-plan${plan.featured ? " featured" : ""}${
-                  current ? " current" : ""
-                }`}
-              >
-                {plan.featured && <span className="bill-plan-tag">Most popular</span>}
-                <h4 className="bill-plan-name">{plan.label}</h4>
-                <div className="bill-plan-price">
-                  <span className="amt">${price}</span>
-                  <span className="per">/{p.interval === "annual" ? "yr" : "mo"}</span>
-                </div>
-                <p className="bill-plan-blurb">{plan.blurb}</p>
-                <p className="bill-plan-credits">
-                  {plan.credits.toLocaleString()} credits/mo
-                </p>
-                <button
-                  type="button"
-                  className={`btn ${plan.featured ? "btn-primary" : "btn-secondary"}`}
-                  disabled={current || p.busy !== null || !d.billing_configured}
-                  onClick={() => p.onSubscribe(plan.id)}
-                >
-                  {current
-                    ? "Current plan"
-                    : p.busy === plan.id
-                      ? "Opening…"
-                      : d.has_subscription
-                        ? "Switch"
-                        : "Choose"}
-                </button>
-              </div>
-            )
-          })}
-
-          {contactPlansFor(p.interval).map((plan) => (
-            <div
-              key={plan.id}
-              className={`bill-plan bill-plan-contact${
-                d.plan === plan.id ? " current" : ""
-              }`}
-            >
-              <h4 className="bill-plan-name">{plan.label}</h4>
-              <div className="bill-plan-price">
-                <span className="amt">{plan.price}</span>
-                {plan.per && <span className="per">{plan.per}</span>}
-              </div>
-              <p className="bill-plan-blurb">{plan.blurb}</p>
-              <p className="bill-plan-credits">{plan.credits}</p>
-              <a
-                className="btn btn-secondary"
-                href={`mailto:sales@sprntly.ai?subject=${encodeURIComponent(
-                  `${plan.label} plan enquiry`,
-                )}`}
-              >
-                {d.plan === plan.id ? "Contact us" : "Talk to sales"}
-              </a>
-            </div>
-          ))}
-        </div>
-
-        {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
-
-        <p className="bill-code-hint">
-          Have a discount code? Enter it at checkout.
-        </p>
-      </SettingsSection>
-      )}
-
-      {tab === "topup" && !d.unlimited && (
+      {tab === "billing" && !d.unlimited && (
         <SettingsSection
           title="Buy more credits"
           sub="Purchased credits are added on top of your monthly allowance."
@@ -664,98 +689,253 @@ export function BillingSettingsView(p: BillingView) {
         </SettingsSection>
       )}
 
+      {tab === "plans" && (
+      <SettingsSection
+        title="Plans"
+        sub="Change plan at any time — Stripe prorates the difference."
+      >
+        <div className="bill-interval" role="group" aria-label="Billing interval">
+          {(["monthly", "annual"] as BillingInterval[]).map((i) => (
+            <button
+              key={i}
+              type="button"
+              className={`bill-interval-tab${p.interval === i ? " on" : ""}`}
+              aria-pressed={p.interval === i}
+              onClick={() => p.onInterval(i)}
+            >
+              {i === "monthly" ? "Monthly" : "Annual"}
+              {i === "annual" && <span className="bill-save">2 months free</span>}
+            </button>
+          ))}
+        </div>
+
+        <div className="bill-plans">
+          {SELF_SERVE_PLANS.map((plan) => {
+            // A LIVE SUBSCRIPTION ON THIS PLAN, not merely the plan column.
+            //
+            // `companies.plan` defaults to 'starter' for every company,
+            // subscribed or not — it is a column default, not evidence of
+            // anything. Comparing against it alone told a never-subscribed
+            // company that Starter was its "current plan" and disabled the
+            // button, so the one plan they wanted was the one plan they could
+            // not buy. The banner sent them to Plans and Plans refused them.
+            const current =
+              d.plan === plan.id && d.has_subscription && d.has_access
+            // THE PLAN YOU ARE ON, paid or not. `companies.plan` names it even
+            // before a subscription exists, so an unpaid company on Starter
+            // sees "Pay now" against Starter — settle the plan you already
+            // have — and a move to anything else reads as a change.
+            const onThisPlan = d.plan === plan.id
+            const currentMonthly =
+              SELF_SERVE_PLANS.find((x) => x.id === d.plan)?.monthly ?? 0
+            // Labelled by PRICE, not by position. With two self-serve tiers the
+            // "other" plan is an upgrade from Starter and a downgrade from
+            // Product Builder, and calling both "Upgrade" would be plainly
+            // wrong on screen half the time.
+            const dearerThanCurrent = plan.monthly > currentMonthly
+            const price = p.interval === "annual" ? plan.annual : plan.monthly
+            return (
+              <div
+                key={plan.id}
+                className={`bill-plan${plan.featured ? " featured" : ""}${
+                  current ? " current" : ""
+                }`}
+              >
+                {plan.featured && <span className="bill-plan-tag">Most popular</span>}
+                <h4 className="bill-plan-name">{plan.label}</h4>
+                <div className="bill-plan-price">
+                  <span className="amt">${price}</span>
+                  <span className="per">/{p.interval === "annual" ? "yr" : "mo"}</span>
+                </div>
+                <p className="bill-plan-blurb">{plan.blurb}</p>
+                <p className="bill-plan-credits">
+                  {plan.credits.toLocaleString()} credits/mo
+                </p>
+                <button
+                  type="button"
+                  className={`btn ${plan.featured ? "btn-primary" : "btn-secondary"}`}
+                  disabled={current || p.busy !== null || !d.billing_configured}
+                  onClick={() => p.onSubscribe(plan.id)}
+                >
+                  {current
+                    ? "Current plan"
+                    : p.busy === plan.id
+                      ? "Opening…"
+                      : onThisPlan
+                        ? "Pay now"
+                        : dearerThanCurrent
+                          ? "Upgrade"
+                          : "Downgrade"}
+                </button>
+              </div>
+            )
+          })}
+
+          {contactPlansFor(p.interval).map((plan) => (
+            <div
+              key={plan.id}
+              className={`bill-plan bill-plan-contact${
+                d.plan === plan.id ? " current" : ""
+              }`}
+            >
+              <h4 className="bill-plan-name">{plan.label}</h4>
+              <div className="bill-plan-price">
+                <span className="amt">{plan.price}</span>
+                {plan.per && <span className="per">{plan.per}</span>}
+              </div>
+              <p className="bill-plan-blurb">{plan.blurb}</p>
+              <p className="bill-plan-credits">{plan.credits}</p>
+              <a
+                className="btn btn-secondary"
+                href={`mailto:${SALES_CONTACT}?subject=${encodeURIComponent(
+                  `${plan.label} plan enquiry`,
+                )}`}
+              >
+                {d.plan === plan.id ? "Contact us" : "Talk to sales"}
+              </a>
+            </div>
+          ))}
+        </div>
+
+        {p.error && <SettingsMessage kind="error">{p.error}</SettingsMessage>}
+
+        <p className="bill-code-hint">
+          Have a discount code? Enter it at checkout.
+        </p>
+      </SettingsSection>
+      )}
+
       {tab === "referrals" && (
       <SettingsSection
         title="Invite a friend"
         sub={`Earn ${d.referral_reward_credits.toLocaleString()} credits when they subscribe.`}
       >
+        {/* ONE LINK, no form. It used to take an address and mint a code for
+            that one person, which put a form between someone and sharing a
+            link and capped how many people they could tell. The link is
+            permanent: share it anywhere, and whoever signs up through it is
+            attributed.
+
+            The reward lands when they SUBSCRIBE, not when their first payment
+            clears — with a trial in between, the old copy promised a referrer a
+            week of silence. */}
         <p className="bill-referral-copy">
-          Invite up to {d.referrals.length + d.referral_invites_remaining} people.
-          Each invite gives you a link to send them yourself. When one of them
-          starts a paid plan, we add{" "}
-          {d.referral_reward_credits.toLocaleString()} credits to your balance —
-          once their first payment goes through.
+          Share this link with anyone. When someone signs up through it and
+          starts a subscription, we add{" "}
+          {d.referral_reward_credits.toLocaleString()} credits to your balance
+          straight away — they do not have to wait out their trial first.
         </p>
 
-        {d.referral_invites_remaining > 0 ? (
-          <div className="bill-invite">
-            <input
-              type="email"
-              placeholder="friend@company.com"
-              aria-label="Friend's email address"
-              value={p.inviteEmail}
-              onChange={(e) => p.onInviteEmail(e.target.value)}
-            />
-            <button
-              type="button"
-              className="btn btn-primary"
-              disabled={p.busy !== null || !p.inviteEmail.trim()}
-              onClick={p.onInvite}
-            >
-              {p.busy === "invite" ? "Creating…" : "Create invite link"}
-            </button>
-            <span className="bill-invite-left">
-              {d.referral_invites_remaining} left
-            </span>
-          </div>
-        ) : (
-          <p className="settings-placeholder">
-            You have used all your invites.
-          </p>
-        )}
+        <div className="bill-reflink">
+          <input
+            className="bill-reflink-input"
+            readOnly
+            value={d.referral_url ?? ""}
+            aria-label="Your referral link"
+            data-testid="referral-link"
+            /* Select-on-focus so it is copyable without the button too —
+               clipboard access is blocked in some browsers and contexts. */
+            onFocus={(e) => e.currentTarget.select()}
+          />
+          <button
+            type="button"
+            className="btn btn-secondary"
+            data-testid="referral-copy"
+            disabled={!d.referral_url}
+            onClick={() => {
+              if (!d.referral_url) return
+              void navigator.clipboard?.writeText(d.referral_url).catch(() => {
+                /* Blocked clipboard: the input is still selectable, so this is
+                   a convenience failing, not the feature failing. */
+              })
+            }}
+          >
+            Copy
+          </button>
+        </div>
 
-        {d.referrals.length > 0 && (
+        {/* WHO HAS ARRIVED. No email column: nobody types an address any more,
+            so a referral has no address to show — what it has is a date and
+            whether it converted. */}
+        {d.referrals.length > 0 ? (
           <ul className="bill-referrals">
             {d.referrals.map((r) => (
-              <li key={r.id} className="bill-referral">
-                <span className="bill-referral-email">{r.invitee_email}</span>
-                {r.status === "pending" && (
-                  <input
-                    className="bill-referral-link"
-                    readOnly
-                    value={referralLink(r.code)}
-                    aria-label={`Invite link for ${r.invitee_email}`}
-                    onFocus={(e) => e.currentTarget.select()}
-                  />
-                )}
+              <li key={r.id} className="bill-referral" data-testid="referral-row">
+                <span className="bill-referral-when">
+                  {formatDate(r.signed_up_at ?? r.created_at)}
+                </span>
                 <span className={`bill-referral-status s-${r.status}`}>
                   {r.status === "rewarded"
-                    ? `+${(r.reward_credits ?? 0).toLocaleString()} credits`
+                    ? `+${(r.reward_credits ?? plans_reward(d)).toLocaleString()} credits`
                     : r.status === "signed_up"
-                      ? "Signed up"
+                      ? "Signed up — no subscription yet"
                       : r.status === "void"
                         ? "Not eligible"
-                        : "Invited"}
+                        : "Signed up"}
                 </span>
+              </li>
+            ))}
+          </ul>
+        ) : (
+          <p className="settings-placeholder">
+            Nobody has signed up through your link yet.
+          </p>
+        )}
+      </SettingsSection>
+      )}
+
+      {tab === "history" && (
+      <>
+      {/* SUBSCRIPTIONS first, then credits. What a customer opens billing to
+          see is what they were charged, when, and for what — the credit ledger
+          answers a different, finer question underneath it.
+
+          Plan history (`subscription_history`) is deliberately NOT rendered.
+          It is still served, because "when did they move tier" is a real
+          support question, but it is not what a customer came here to read. */}
+      <SettingsSection title="Subscriptions" sub="Every payment, most recent first.">
+        {!d.invoices?.length ? (
+          <p className="settings-placeholder">
+            No payments yet. Each month's charge will appear here.
+          </p>
+        ) : (
+          <ul className="bill-invoices">
+            {d.invoices.map((inv) => (
+              <li key={inv.id} className="bill-invoice" data-testid="invoice-row">
+                <span className="bill-invoice-plan">
+                  {PLAN_LABELS[inv.plan ?? ""] ?? inv.plan ?? "Subscription"}
+                  {inv.invoice_number && (
+                    <span className="bill-invoice-num">{inv.invoice_number}</span>
+                  )}
+                </span>
+                <span className="bill-invoice-period">
+                  {inv.period_start && inv.period_end
+                    ? `${formatDate(inv.period_start)} — ${formatDate(inv.period_end)}`
+                    : formatDate(inv.paid_at)}
+                </span>
+                <span className="bill-invoice-amount">
+                  {formatMoney(inv.amount_paid_cents, inv.currency)}
+                </span>
+                {/* Stripe already renders the PDF, so "download invoice" needs
+                    no document generator of ours. */}
+                {inv.invoice_pdf_url ? (
+                  <a
+                    className="bill-invoice-pdf"
+                    href={inv.invoice_pdf_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    PDF
+                  </a>
+                ) : (
+                  <span className="bill-invoice-pdf" aria-hidden />
+                )}
               </li>
             ))}
           </ul>
         )}
       </SettingsSection>
-      )}
 
-      {tab === "costs" && (
-      <SettingsSection title="What things cost" sub="In credits, per action.">
-        <ul className="bill-costs">
-          {Object.entries(d.action_costs)
-            .sort((a, b) => a[1] - b[1])
-            .map(([slug, cost]) => (
-              <li key={slug} className="bill-cost">
-                <span>{featureLabel(slug)}</span>
-                <span className="bill-cost-n">
-                  {cost} {cost === 1 ? "credit" : "credits"}
-                </span>
-              </li>
-            ))}
-        </ul>
-        <p className="bill-costs-note">
-          Scheduled work — your Top Insights brief, connector syncs, and keeping
-          the knowledge graph current — does not use credits.
-        </p>
-      </SettingsSection>
-      )}
-
-      {tab === "history" && (
       <SettingsSection title="Credit history" sub="Most recent first.">
         {d.history.length === 0 ? (
           <p className="settings-placeholder">Nothing yet.</p>
@@ -778,6 +958,7 @@ export function BillingSettingsView(p: BillingView) {
           </ul>
         )}
       </SettingsSection>
+      </>
       )}
     </SettingsPaneNav>
   )
@@ -880,44 +1061,10 @@ export function BillingSettings() {
     }
   }
 
-  const onInvite = async () => {
-    const email = inviteEmail.trim()
-    if (!email) return
-    setBusy("invite")
-    setError(null)
-    try {
-      const created = await billingApi.invite(email)
-      setInviteEmail("")
-      setNotice(`Invite link ready for ${created.invitee_email} — copy it below.`)
-      setData((prev) =>
-        prev
-          ? {
-              ...prev,
-              referrals: [
-                {
-                  id: created.id,
-                  invitee_email: created.invitee_email,
-                  status: created.status,
-                  code: created.code,
-                  reward_credits: created.reward_credits,
-                  created_at: new Date().toISOString(),
-                },
-                ...prev.referrals,
-              ],
-              referral_invites_remaining: created.invites_remaining,
-            }
-          : prev,
-      )
-    } catch (e) {
-      setError(
-        e instanceof ApiError
-          ? apiErrorMessage(e.status, e.body)
-          : "Could not send that invite.",
-      )
-    } finally {
-      setBusy(null)
-    }
-  }
+  // The email invite handler is gone with its endpoint. A referral row is
+  // created when someone ARRIVES through the link, so there is nothing for
+  // this screen to POST — the link already exists.
+  const onInvite = () => {}
 
   return (
     <BillingSettingsView
@@ -949,7 +1096,24 @@ export function BillingSettings() {
         }))
       }
       onInterval={setInterval}
-      onSubscribe={(plan) => go(plan, () => billingApi.checkout(plan, interval))}
+      // TWO DIFFERENT OPERATIONS BEHIND ONE BUTTON, and they have to stay
+      // different. Checkout always creates a NEW subscription — it cannot
+      // replace one — so an existing customer sent through it ends up paying
+      // for both plans. A switch modifies the subscription they already have:
+      // the old price comes off, the new one goes on, and there is only ever
+      // one subscription on the customer.
+      //
+      // The backend refuses the wrong one either way (409), so this decides
+      // which door to knock on, not whether the door is locked.
+      onSubscribe={(plan) => {
+        const live = Boolean(data?.has_subscription && data?.has_access)
+        if (!live) return go(plan, () => billingApi.checkout(plan, interval))
+        return mutate(
+          plan,
+          () => billingApi.changePlan(plan, interval),
+          (s) => ({ ...s, plan, plan_label: s.plan_label }),
+        )
+      }}
       onPortal={() => go("portal", () => billingApi.portal())}
       onTopup={(amount) => go("topup", () => billingApi.topup(amount))}
       onInviteEmail={setInviteEmail}

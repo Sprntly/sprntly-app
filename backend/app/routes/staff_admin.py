@@ -230,8 +230,15 @@ def staff_get_billing(company_id: str, _: dict = Depends(require_staff)):
         "plan": plan,
         "plan_label": plans.plan_label(plan),
         "monthly_credits": None if allowance == plans.UNLIMITED else allowance,
+        # READ OFF THE LEDGER, not inferred from the balance. `allowance -
+        # balance` reported a full allowance as consumed whenever a grant had
+        # not landed, reported zero for anyone who had topped up, and moved
+        # under every past customer whenever a plan was repriced. A refund
+        # decision turns on this number, so it has to be the real one.
         "credits_used": (
-            None if allowance == plans.UNLIMITED else max(0, allowance - balance)
+            None
+            if allowance == plans.UNLIMITED
+            else credits.spent_since(company_id, row.get("credits_granted_for"))
         ),
         "within_refund_window": within_window,
         "refund_window_days": plans.REFUND_WINDOW_DAYS,

@@ -82,6 +82,9 @@ function rowToCompany(
     ws.is_default === true && ws.slug === "default" && wsName === "Default"
   return {
     id: String(row.id),
+    plan: (row.plan as string | null) ?? null,
+    subscription_status: (row.subscription_status as string | null) ?? null,
+    current_period_end: (row.current_period_end as string | null) ?? null,
     slug: String(row.slug),
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
@@ -472,9 +475,9 @@ export async function createWorkspace(input: {
       }
       // Referral attribution: if this person arrived on a friend's `?ref=`
       // link, record who to pay. Nothing is granted here — the referrer is
-      // credited on THIS company's first paid invoice, so signing up (free and
+      // credited when THIS company subscribes, so signing up (free and
       // repeatable) never pays out. Best-effort for the same reason as the
-      // org-invite claim above: a stale or spent code must not block someone
+      // org-invite claim above: an unknown code must not block someone
       // creating their workspace.
       const referralCode = takeReferralCode()
       if (referralCode) {

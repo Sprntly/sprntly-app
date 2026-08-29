@@ -2,6 +2,8 @@ import { createClient, type SupabaseClient } from "@supabase/supabase-js"
 import { fetchWorkspaceForUser } from "../onboarding/store"
 import { slugForStep, ONBOARDING_STEP_SLUGS } from "../onboarding/types"
 import { projectPath } from "../routes"
+import { companyHasPaid } from "../billingAccess"
+import { ONBOARDING_PLAN_PATH } from "../billingPlans"
 
 let browserClient: SupabaseClient | null = null
 
@@ -412,6 +414,24 @@ export async function postLoginPath(): Promise<string> {
       return projectPath(accept.projectId, { chat: "individual" })
     }
     return "/"
+  }
+  // THE PAYMENT GATE. Onboarding is unfinished, so before resuming the
+  // numbered flow, has this company put a card down?
+  //
+  // Company-level, not user-level, and that is the whole reason an invited
+  // teammate is never asked to pay: they join a company that already has a
+  // live subscription, so this reads true for them on their first sign-in.
+  //
+  // It is also what makes an abandoned checkout resumable. Someone who bails
+  // on Stripe has a company row, a verified email and a persisted
+  // `onboarding_step` naming where they will carry on — they just come back
+  // here until they finish. The step marker is deliberately NOT rewound.
+  //
+  // This is the ROUTING gate, not the enforcement. `enforce.bill` on the
+  // backend is what actually refuses work, and nothing here can grant access
+  // the server will not honour — see lib/billingAccess.
+  if (!companyHasPaid(workspace)) {
+    return ONBOARDING_PLAN_PATH
   }
   return `/onboarding/${slugForStep(workspace.onboarding_step)}`
 }

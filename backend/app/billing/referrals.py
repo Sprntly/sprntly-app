@@ -61,10 +61,12 @@ def list_for_company(company_id: str) -> list[dict]:
     )
 
 
-def remaining_invites(company_id: str) -> int:
+def remaining_invites(company_id: str) -> int | None:
     """Invites left. VOID rows do not count against the cap — a self-referral
     we rejected should not cost the user one of their three."""
     live = [r for r in list_for_company(company_id) if r.get("status") != VOID]
+    if plans.MAX_REFERRAL_INVITES is None:
+        return None
     return max(0, plans.MAX_REFERRAL_INVITES - len(live))
 
 
@@ -80,7 +82,11 @@ def create_invite(
     existing = list_for_company(referrer_company_id)
     if any(r.get("invitee_email") == email and r.get("status") != VOID for r in existing):
         raise AlreadyInvited(email)
-    if len([r for r in existing if r.get("status") != VOID]) >= plans.MAX_REFERRAL_INVITES:
+    if (
+        plans.MAX_REFERRAL_INVITES is not None
+        and len([r for r in existing if r.get("status") != VOID])
+        >= plans.MAX_REFERRAL_INVITES
+    ):
         raise ReferralLimitReached()
 
     row = {
@@ -99,6 +105,70 @@ def create_invite(
 
 
 @retry_on_disconnect
+def code_for_company(company_id: str) -> str:
+    """This company's permanent referral code, minted on first read.
+
+    ONE CODE, FOREVER, rather than one per invited email address. The old model
+    put a form between someone and sharing a link, capped how many people they
+    could tell, and produced codes that were useless to anyone but the address
+    they were cut for.
+
+    Lazy rather than backfilled: a company that has never opened the referrals
+    screen does not need a code minted for a link nobody has asked for.
+
+    The alphabet excludes look-alikes (0/O, 1/I/l) because this is read aloud
+    and retyped from screenshots, and a code that cannot survive that is a
+    support ticket.
+    """
+    client = require_client()
+    rows = (
+        client.table("companies")
+        .select("referral_code")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    existing = (rows[0] or {}).get("referral_code") if rows else None
+    if existing:
+        return existing
+
+    alphabet = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+    for _ in range(5):
+        code = "".join(secrets.choice(alphabet) for _ in range(10))
+        try:
+            client.table("companies").update({"referral_code": code}).eq(
+                "id", company_id
+            ).execute()
+            return code
+        except Exception as exc:
+            # The unique index rejected a collision. Astronomically unlikely at
+            # 31^10, but retrying is cheaper than reasoning about it.
+            text = f"{type(exc).__name__} {exc}".lower()
+            if not ("unique" in text or "duplicate" in text or "23505" in text):
+                raise
+    raise RuntimeError("could not mint a referral code")
+
+
+def company_for_code(code: str) -> str | None:
+    """The company a referral code belongs to, or None."""
+    clean = (code or "").strip().upper()
+    if not clean:
+        return None
+    rows = (
+        require_client()
+        .table("companies")
+        .select("id")
+        .eq("referral_code", clean)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0]["id"] if rows else None
+
+
 def get_by_code(code: str) -> dict | None:
     rows = (
         require_client()
@@ -119,36 +189,57 @@ def _update(referral_id: str, patch: dict) -> None:
 
 
 def claim_on_signup(*, code: str, invitee_company_id: str) -> dict | None:
-    """Attach a freshly created company to the referral that brought it.
+    """Record that a new company arrived through someone's referral link.
 
-    Returns the updated referral, or None if the code is unknown or spent. NO
-    CREDIT IS GRANTED HERE — this only records who to pay when the invoice
-    lands.
+    CREATES the referral row rather than updating a pre-minted one. With a
+    single permanent code per company there is nothing to pre-mint: the row is
+    the arrival, one per person who actually came, instead of one per address
+    somebody typed into a form.
+
+    Returns the new referral, or None if the code is unknown, self-referring, or
+    this company already arrived through one. NO CREDIT IS GRANTED HERE — this
+    records who to pay when the invitee subscribes.
     """
-    referral = get_by_code(code)
-    if not referral or referral.get("status") != PENDING:
+    referrer_id = company_for_code(code)
+    if not referrer_id:
         return None
 
-    # Self-referral: inviting yourself back into your own company. The
-    # remaining hole is one person running two companies under two addresses,
-    # which no in-app check can see; it is bounded at three invites and gated
-    # on a real payment, so the worst case costs a real subscription.
-    if referral.get("referrer_company_id") == invitee_company_id:
-        _update(referral["id"], {"status": VOID})
-        logger.warning(
-            "referral_self_void referral=%s company=%s",
-            referral["id"],
-            invitee_company_id,
-        )
+    # Self-referral: signing up again through your own link. The remaining hole
+    # is one person running two companies under two addresses, which no in-app
+    # check can see — but it is gated on a real card and a real subscription, so
+    # the worst case costs them a subscription to earn $10 of credits.
+    if referrer_id == invitee_company_id:
+        logger.warning("referral_self_ignored company=%s", invitee_company_id)
         return None
 
-    patch = {
+    # One referral per invitee, ever. Without this, signing up, deleting the
+    # company and signing up again would pay the referrer twice.
+    existing = (
+        require_client()
+        .table("referrals")
+        .select("id")
+        .eq("invitee_company_id", invitee_company_id)
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    if existing:
+        return None
+
+    row = {
+        "id": str(uuid.uuid4()),
+        "referrer_company_id": referrer_id,
+        "code": (code or "").strip().upper(),
         "status": SIGNED_UP,
         "invitee_company_id": invitee_company_id,
         "signed_up_at": _now(),
     }
-    _update(referral["id"], patch)
-    return {**referral, **patch}
+    require_client().table("referrals").insert(row).execute()
+    logger.info(
+        "referral_claimed referrer=%s invitee=%s", referrer_id, invitee_company_id
+    )
+    return row
 
 
 @retry_on_disconnect
@@ -167,13 +258,22 @@ def _pending_reward_for_invitee(invitee_company_id: str) -> dict | None:
     return rows[0] if rows else None
 
 
-def reward_for_first_payment(invitee_company_id: str) -> dict | None:
-    """Pay the referrer, if this company's payment converts a referral.
+def reward_for_subscription(invitee_company_id: str) -> dict | None:
+    """Pay the referrer, if this company SUBSCRIBING converts a referral.
 
-    Called from the `invoice.paid` webhook. Safe to call on every invoice: only
-    a referral still in SIGNED_UP is eligible, and the grant is keyed on the
-    referral id, so both the status transition and the ledger's idempotency
-    index stop a repeat.
+    Called when the invitee's subscription goes live — `active` or `trialing`,
+    which both mean a card is on file and Stripe has accepted it. It used to be
+    called from `invoice.paid` instead, and that stopped making sense when the
+    trial arrived: the invitee's first charge is seven days after they
+    subscribe, so a referrer who did everything right waited a week with no
+    signal that it had worked.
+
+    Deliberately NOT on signup. An account with no card is not a conversion,
+    and paying for one would make the programme free to farm.
+
+    Safe to call on every sync: only a referral still in SIGNED_UP is eligible,
+    and the grant is keyed on the referral id, so the status transition and the
+    ledger's idempotency index each stop a repeat independently.
 
     Returns the rewarded referral, or None when there was nothing to pay.
     """
@@ -199,3 +299,8 @@ def reward_for_first_payment(invitee_company_id: str) -> dict | None:
         reward,
     )
     return referral
+
+
+# The pre-trial name. Kept so nothing silently stops paying referrers if a
+# caller elsewhere still uses it; the behaviour is identical.
+reward_for_first_payment = reward_for_subscription
