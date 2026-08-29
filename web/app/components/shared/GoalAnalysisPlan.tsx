@@ -40,6 +40,14 @@ export type PlanDecision = {
    *  stored — so an untouched approve cannot round-trip the definition through
    *  the client, where a stale card could overwrite it with old words. */
   definition_text?: string
+  /** ── ANSWERS TO WHAT THE RUN CANNOT KNOW. ────────────────────────────
+   *  All optional. Skipping them yields exactly the document you got before,
+   *  with the affected sections stating what is missing rather than guessing.
+   *  A value given here is an ASSUMPTION, not evidence, and the document says
+   *  so where it uses it. */
+  account_value?: number
+  decision_owner?: string
+  needed_by?: string
 }
 
 /** Mirrors the API's per-hypothesis cap. One place it can drift, stated here
@@ -78,6 +86,9 @@ export function GoalAnalysisPlan({
   // approve body. A reader who selects the text, retypes it identically and
   // approves has still adopted it; they just have not changed it.
   const [definitionEdit, setDefinitionEdit] = useState<string | null>(null)
+  const [accountValue, setAccountValue] = useState("")
+  const [decisionOwner, setDecisionOwner] = useState("")
+  const [neededBy, setNeededBy] = useState("")
 
   // A settled record reads its exclusions from what was actually posted, not
   // from local state a re-mount would have thrown away.
@@ -115,7 +126,14 @@ export function GoalAnalysisPlan({
       definitionEdit.trim() !== (plan.definition_text || "").trim()
         ? definitionEdit.trim()
         : undefined
+    // EMPTY MEANS UNANSWERED, never zero. A blank account value must not
+    // reach the arithmetic as 0 — that would render a stake of nothing and
+    // read as a measurement.
+    const value = Number.parseFloat(accountValue.replace(/[^0-9.]/g, ""))
     onApprove({
+      ...(Number.isFinite(value) && value > 0 ? { account_value: value } : {}),
+      ...(decisionOwner.trim() ? { decision_owner: decisionOwner.trim() } : {}),
+      ...(neededBy.trim() ? { needed_by: neededBy.trim() } : {}),
       ...(editedDefinition ? { definition_text: editedDefinition } : {}),
       excluded_sources: [...excluded],
       // One per line. Blank lines are dropped rather than sent as empty
@@ -319,6 +337,53 @@ export function GoalAnalysisPlan({
           The narrative is the summary AND the only statement of them now. The
           gap list below stays, because it carries `because` and `remedy` —
           detail the one-line summary of it genuinely does not have. */}
+
+
+      {/* ── WHAT I CANNOT KNOW. ─────────────────────────────────────────
+          Apurva: "the plan gate can start asking questions it doesn't know
+          answers to." Until now the gate asked one thing — what the metric
+          means — and everything else it lacked was reported afterwards as a
+          limit. These three are the difference between a document that says
+          "no revenue is mapped to accounts" and one that sizes the work.
+          OPTIONAL, AND SAID TO BE. A reader who skips them gets the document
+          they got before; nothing here is required to run. */}
+      <section className="ga-plan-section" data-testid="goal-plan-unknowns">
+        <h2 className="ga-doc-h3">What I cannot know</h2>
+        <p className="ga-doc-note">
+          None of this is in your connected sources, and I will not guess at
+          it. Answer what you can — anything you leave blank stays stated as
+          missing rather than filled in.
+        </p>
+        <label className="ga-plan-ask">
+          <span>What is one account worth to you, per year?</span>
+          <input
+            type="text" inputMode="decimal" placeholder="e.g. 12000"
+            aria-label="What is one account worth to you, per year?"
+            value={accountValue}
+            onChange={(e) => setAccountValue(e.target.value)}
+          />
+          <em>Lets the findings be sized in money instead of account counts.
+            Used as your estimate, and labelled as one.</em>
+        </label>
+        <label className="ga-plan-ask">
+          <span>Who decides this?</span>
+          <input
+            type="text" placeholder="e.g. VP Product"
+            aria-label="Who decides this?"
+            value={decisionOwner}
+            onChange={(e) => setDecisionOwner(e.target.value)}
+          />
+        </label>
+        <label className="ga-plan-ask">
+          <span>When do you need the decision?</span>
+          <input
+            type="text" placeholder="e.g. before the Q3 review"
+            aria-label="When do you need the decision?"
+            value={neededBy}
+            onChange={(e) => setNeededBy(e.target.value)}
+          />
+        </label>
+      </section>
 
       {settled ? (
         settled.hypotheses.length ? (
