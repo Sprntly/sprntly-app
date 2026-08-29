@@ -38,7 +38,8 @@ Everything below is Stripe dashboard work. None of it can be done from a PR.
 
 Create the Stripe account and note the **country the Sprntly entity is
 incorporated in**. It decides which payment methods are available (notably
-whether PayPal can ride on Stripe at all), tax handling, and payouts.
+whether the wallet-based ones can ride on Stripe at all), tax handling, and
+payouts.
 
 ### 2. Products and prices
 
@@ -234,6 +235,7 @@ gated on a real payment, so the worst case costs a real subscription.
 - **Top-ups do not survive the next monthly grant.** The balance is one number
   with no per-bucket expiry, and `grant_monthly` sets rather than adds. Splitting
   into granted-vs-purchased buckets is the fix if anyone complains.
-- **PayPal is not supported.** Whether it can ride on Stripe at all depends on
-  the merchant entity's country; where it cannot, it means a second processor
-  with its own subscription state machine and webhook set.
+- **Wallet-based payment methods are not supported.** Whether they can ride on
+  Stripe at all depends on the merchant entity's country; where they cannot, it
+  means a second processor with its own subscription state machine and webhook
+  set.
