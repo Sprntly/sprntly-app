@@ -118,14 +118,21 @@ def _billing_allows_scheduled_work(company: dict) -> bool:
     return allowed
 
 
-def _billable_companies() -> list[dict]:
-    """`list_companies()`, minus the tenants we should not be spending on.
+def _billable(companies: list[dict] | None) -> list[dict]:
+    """Drop the tenants we should not be spending on. One filter, four callers.
 
-    Filtered HERE rather than at each of the scheduler's four per-company loops:
-    a guard that has to be remembered in four places is a guard that will be
-    missing from the fifth.
+    TAKES THE ROWS, rather than fetching them. Fetching here looked tidier and
+    was wrong: this module reaches `list_companies` two different ways — a
+    module-level import at the top of the file, and a function-local import
+    inside the synthesis cycle — and the suite patches BOTH targets depending
+    on the test. Centralising the fetch picked one of them and silently broke
+    every test that patches the other, in a scheduler where "returned nothing"
+    is a log line rather than an error.
+
+    So each loop keeps whatever it already resolved, and only the decision is
+    shared. Slightly less tidy, and it cannot go quietly wrong.
     """
-    return [c for c in (list_companies() or []) if _billing_allows_scheduled_work(c)]
+    return [c for c in (companies or []) if _billing_allows_scheduled_work(c)]
 
 def _company_workspace_slugs(company_id: str | None, company_slug: str) -> list[tuple[str, str]]:
     """(ledger_key, dataset_slug) pairs to generate briefs for — one per
@@ -180,7 +187,7 @@ def _refresh_all_company_connectors() -> None:
     # exhausted LLM credit balance and an expired Zoom refresh token.
     logger.info("refresh-connectors: cycle START")
     try:
-        companies = _billable_companies()
+        companies = _billable(list_companies())
     except Exception:
         logger.exception("refresh-connectors: failed to list companies")
         return
@@ -307,7 +314,7 @@ async def _run_synthesis_for_all_companies() -> None:
     from app.synthesis_brief import generate_brief_for
 
     try:
-        companies = _billable_companies()
+        companies = _billable(list_companies())
     except Exception as exc:
         logger.error("Scheduler: failed to list companies: %s", exc)
         return
@@ -400,7 +407,7 @@ async def _run_brief_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = _billable_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Top Insights tick: failed to list companies: %s", exc)
         return
@@ -628,7 +635,7 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = _billable_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Monthly reports tick: failed to list companies: %s", exc)
         return

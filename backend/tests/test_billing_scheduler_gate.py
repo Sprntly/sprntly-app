@@ -74,14 +74,19 @@ def test_an_absent_signal_fails_OPEN(gate):
     assert gate._billing_allows_scheduled_work({"id": "c1", "slug": "acme"}) is True
 
 
-def test_the_filter_is_applied_at_the_source(gate, monkeypatch):
-    """One filter, not four call sites. A guard that has to be remembered in
-    four loops is a guard that will be missing from the fifth."""
-    monkeypatch.setattr(
-        gate, "list_companies",
-        lambda: [_co(id="live"), _co(id="dead", subscription_status="canceled")],
-    )
-    assert [c["id"] for c in gate._billable_companies()] == ["live"]
+def test_one_filter_serves_every_loop(gate):
+    """One shared decision, applied by each of the scheduler's four per-company
+    loops. It takes the ROWS rather than fetching them: this module reaches
+    `list_companies` two different ways — a module-level import and a
+    function-local one — and the suite patches both depending on the test, so a
+    filter that fetched would pick one and silently break the other."""
+    rows = [_co(id="live"), _co(id="dead", subscription_status="canceled")]
+    assert [c["id"] for c in gate._billable(rows)] == ["live"]
+
+
+def test_the_filter_survives_an_empty_or_missing_list(gate):
+    assert gate._billable([]) == []
+    assert gate._billable(None) == []
 
 
 # ---------------------------------------------------------------------------
