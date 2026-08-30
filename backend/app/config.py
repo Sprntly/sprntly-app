@@ -263,7 +263,19 @@ class Settings(BaseSettings):
     # Where Checkout and the customer portal send the browser back to. The web
     # app is a static export, so these are plain page URLs with no server-side
     # callback handler behind them.
-    billing_return_url: str = "http://localhost:3000/settings?section=billing"
+    # WHERE STRIPE SENDS THE BROWSER BACK. Empty by default and composed from
+    # `frontend_url` — see `billing_return`.
+    #
+    # It used to default to a literal localhost URL, and nothing set it on any
+    # deployed environment: `sync-backend-env.yml` writes GOOGLE_*,
+    # TOKEN_ENCRYPTION_KEY, FRONTEND_URL and INTERNAL_API_KEY, and not this. So
+    # staging quietly served `http://localhost:3000/...` as a customer's
+    # referral link, and would have returned a paying customer from Stripe
+    # Checkout to a machine that is not theirs.
+    #
+    # A localhost default is only ever right on localhost; anywhere else it is
+    # a silent misconfiguration that looks like a working setting.
+    billing_return_url: str = ""
 
     demo_password: str = ""
     jwt_secret: str = "dev-only-change-me"
@@ -923,6 +935,35 @@ class Settings(BaseSettings):
         if prefix == "/":
             prefix = ""
         return f"{origin}{prefix}/v1/design-agent"
+
+
+    @property
+    def app_origin(self) -> str:
+        """Scheme + host this app is served from, with no path.
+
+        `frontend_url` is the one setting that already names it AND is actually
+        written to every deployed box by `sync-backend-env.yml`. Anything that
+        needs to build a customer-visible URL should come through here rather
+        than inventing a second source that nobody remembers to set.
+        """
+        raw = (self.frontend_url or "http://localhost:3000").strip().rstrip("/")
+        parts = raw.split("://", 1)
+        if len(parts) == 2:
+            return f"{parts[0]}://{parts[1].split('/', 1)[0]}"
+        return raw.split("/", 1)[0]
+
+    @property
+    def billing_return(self) -> str:
+        """Where Stripe returns the browser after Checkout or the portal.
+
+        An explicit `BILLING_RETURN_URL` wins, for an environment that genuinely
+        needs a different destination. Otherwise it is composed from the origin
+        this app is actually served from, so it cannot be left pointing at
+        somebody's laptop.
+        """
+        if self.billing_return_url.strip():
+            return self.billing_return_url.strip()
+        return f"{self.app_origin}/settings?section=billing"
 
     @property
     def data_path(self) -> Path:

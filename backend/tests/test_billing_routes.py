@@ -719,7 +719,7 @@ def test_checkout_defaults_to_the_configured_return_url(ctx, monkeypatch):
 
     ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
 
-    assert seen["success_url"].startswith(settings.billing_return_url)
+    assert seen["success_url"].startswith(settings.billing_return)
     assert seen["success_url"].endswith("checkout=success")
 
 
@@ -750,7 +750,7 @@ def test_checkout_refuses_to_return_the_browser_off_site(ctx, monkeypatch, hosti
         json={"plan": plans.STARTER, "return_path": hostile},
     )
 
-    assert seen["success_url"].startswith(settings.billing_return_url)
+    assert seen["success_url"].startswith(settings.billing_return)
     assert "evil.example" not in seen["success_url"]
     assert "javascript" not in seen["success_url"]
 
@@ -1013,3 +1013,92 @@ def test_the_email_invite_endpoint_is_gone(ctx):
     """Nothing replaces it. There is no call to make — the link already exists."""
     res = ctx.client.post("/v1/billing/referrals", json={"email": "f@example.com"})
     assert res.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Customer-visible URLs come from where the app actually lives
+# ---------------------------------------------------------------------------
+#
+# `billing_return_url` defaulted to a literal localhost URL and nothing sets it
+# on any deployed environment — `sync-backend-env.yml` writes GOOGLE_*,
+# TOKEN_ENCRYPTION_KEY, FRONTEND_URL and INTERNAL_API_KEY, and not this. So
+# staging served customers a referral link to `http://localhost:3000`, and
+# would have returned a PAYING customer from Stripe Checkout to a machine that
+# is not theirs.
+
+
+def _settings(frontend: str, explicit: str = ""):
+    from app.config import Settings
+
+    return Settings(frontend_url=frontend, billing_return_url=explicit)
+
+
+def test_the_return_url_follows_the_frontend_when_nothing_sets_it():
+    s = _settings("https://staging.sprntly.ai")
+    assert s.billing_return == "https://staging.sprntly.ai/settings?section=billing"
+
+
+def test_an_explicit_return_url_still_wins():
+    """For an environment that genuinely needs a different destination."""
+    s = _settings("https://app.sprntly.ai", "https://somewhere.else/billing")
+    assert s.billing_return == "https://somewhere.else/billing"
+
+
+def test_a_trailing_slash_does_not_produce_a_double_slash():
+    assert _settings("https://staging.sprntly.ai/").app_origin == "https://staging.sprntly.ai"
+
+
+def test_the_origin_drops_any_path_the_setting_carries():
+    """`frontend_url` is an origin by contract, but a stray path must not end
+    up inside a customer's referral link."""
+    assert _settings("https://app.sprntly.ai/app/").app_origin == "https://app.sprntly.ai"
+
+
+def test_localhost_is_still_localhost_locally():
+    assert _settings("http://localhost:3000").app_origin == "http://localhost:3000"
+
+
+def test_the_referral_link_is_not_localhost_on_a_deployed_host(ctx, monkeypatch):
+    """The reported bug, end to end: a staging customer was shown
+    `http://localhost:3000/sign-up?ref=...` as their link to share."""
+    import app.routes.billing as billing_routes
+
+    monkeypatch.setattr(billing_routes.settings, "frontend_url", "https://staging.sprntly.ai")
+    monkeypatch.setattr(billing_routes.settings, "billing_return_url", "")
+
+    body = ctx.client.get("/v1/billing/summary").json()
+
+    assert body["referral_url"].startswith("https://staging.sprntly.ai/sign-up?ref=")
+    assert "localhost" not in body["referral_url"]
+
+
+def test_checkout_returns_to_the_deployed_host_too(ctx, monkeypatch):
+    """The same misconfiguration would have sent someone who had just paid back
+    to a laptop. Worth its own assertion — it is the more expensive half."""
+    import app.routes.billing as billing_routes
+
+    monkeypatch.setattr(billing_routes.settings, "frontend_url", "https://staging.sprntly.ai")
+    monkeypatch.setattr(billing_routes.settings, "billing_return_url", "")
+    seen = _capture_checkout(monkeypatch)
+
+    ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+
+    assert seen["success_url"].startswith("https://staging.sprntly.ai/")
+    assert "localhost" not in seen["success_url"]
+
+
+def test_an_onboarding_return_path_also_lands_on_the_deployed_host(ctx, monkeypatch):
+    import app.routes.billing as billing_routes
+
+    monkeypatch.setattr(billing_routes.settings, "frontend_url", "https://staging.sprntly.ai")
+    monkeypatch.setattr(billing_routes.settings, "billing_return_url", "")
+    seen = _capture_checkout(monkeypatch)
+
+    ctx.client.post(
+        "/v1/billing/checkout",
+        json={"plan": plans.STARTER, "return_path": "/onboarding/plan"},
+    )
+
+    assert seen["success_url"] == (
+        "https://staging.sprntly.ai/onboarding/plan?checkout=success"
+    )

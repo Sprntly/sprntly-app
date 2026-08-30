@@ -144,13 +144,10 @@ def _return_url(status: str, return_path: str | None = None) -> str:
     dropped into settings mid-signup. It is joined to the SAME origin the
     configured default uses; the caller supplies a path, never a URL.
     """
-    base = settings.billing_return_url
+    base = settings.billing_return
     safe = _safe_return_path(return_path)
     if safe:
-        origin = base.split("://", 1)
-        host = origin[1].split("/", 1)[0] if len(origin) == 2 else base.split("/", 1)[0]
-        scheme = origin[0] if len(origin) == 2 else "https"
-        base = f"{scheme}://{host}{safe}"
+        base = f"{settings.app_origin}{safe}"
     sep = "&" if "?" in base else "?"
     return f"{base}{sep}checkout={status}"
 
@@ -158,17 +155,13 @@ def _return_url(status: str, return_path: str | None = None) -> str:
 def _referral_url(code: str) -> str:
     """The link a customer actually shares.
 
-    Built from `billing_return_url`'s origin rather than a second setting: that
-    value already names where this app lives, and two settings that must agree
-    about the same host is one of them being wrong after the next deploy.
+    Built from `settings.app_origin` — i.e. `frontend_url`, the one setting that
+    both names where this app lives and is actually written to every deployed
+    box. It was previously derived from `billing_return_url`, which nothing
+    sets outside local dev, so staging served customers a link to
+    `http://localhost:3000`.
     """
-    base = settings.billing_return_url
-    parts = base.split("://", 1)
-    if len(parts) == 2:
-        origin = f"{parts[0]}://{parts[1].split('/', 1)[0]}"
-    else:
-        origin = base.split("/", 1)[0]
-    return f"{origin}/sign-up?ref={code}"
+    return f"{settings.app_origin}/sign-up?ref={code}"
 
 
 def _trial_days(company: CompanyContext) -> int | None:
@@ -487,7 +480,7 @@ def open_portal(company: CompanyContext = Depends(require_company)) -> dict:
         "portal",
         lambda: stripe_client.create_portal_session(
             customer_id=row["stripe_customer_id"],
-            return_url=settings.billing_return_url,
+            return_url=settings.billing_return,
         ),
     )
     return {"url": url}
