@@ -783,6 +783,12 @@ export type GoalRunPlan = {
    *  plan so it is a choice the reader can override rather than a convention
    *  they discover in the output. */
   framework?: string
+  /** Answers the reader gave at the gate to things the run cannot know. Each
+   *  is an ASSUMPTION when present, and the document labels it as one where it
+   *  is used. */
+  account_value?: number
+  decision_owner?: string
+  needed_by?: string
 }
 
 /** What the run has decided so far, written as it goes.

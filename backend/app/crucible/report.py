@@ -232,6 +232,59 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
 MAX_RICE_ROWS = 10
 
 
+def _stat_strip(
+    plan: dict, considered: list[dict], kept: list[dict],
+) -> str:
+    """The headline numbers, on one line, before the prose.
+
+    Memo p1 closes its cover with a strip: CURRENT ARR · 2% TARGET ·
+    INITIATIVES FOUND · HIGH CONFIDENCE · RECOMMENDED · DATA WINDOW. Every
+    number in it exists somewhere in this document already and is currently
+    spread across four paragraphs, which is the difference between a reader
+    knowing the shape of the answer in one glance and assembling it themselves.
+
+    ONLY WHAT IS COUNTED. The memo's ARR and target are money; this corpus has
+    neither unless the reader supplied a per-account figure at the gate, so the
+    money cell appears only then and says whose number it is. There is
+    deliberately no DATA WINDOW cell: claim dates are the INGEST clock on this
+    substrate — `call_digest` and the coverage notes both say so — and a window
+    printed from them would be the date we read the evidence, presented as the
+    period it covers.
+    """
+    if not considered:
+        return ""
+    sized = [f for f in kept if f.get("impact_value") is not None]
+    high = [f for f in kept if (f.get("confidence_band") or "") == "high"]
+    recommended = [f for f in kept if _as_dict(f.get("recommendation")).get("action")]
+    reach = sum(float(f.get("impact_value") or 0) for f in sized)
+
+    cells: list[tuple[str, str]] = [
+        ("Signals read", f"{int(plan.get('total_signals') or 0):,}"),
+        ("Themes found", f"{len(considered):,}"),
+        ("Bear on this goal", f"{len(kept):,}"),
+        ("Sized", f"{len(sized):,}"),
+        ("High confidence", f"{len(high):,}"),
+    ]
+    if recommended:
+        cells.append(("With a recommendation", f"{len(recommended):,}"))
+    value = plan.get("account_value")
+    if sized and isinstance(value, (int, float)) and value > 0:
+        # LABELLED IN THE CELL ITSELF. A number in a strip is read as a fact,
+        # and this one is the reader's own estimate multiplied out — so the
+        # label carries "your estimate" rather than leaving it to a footnote
+        # three sections down.
+        cells.append(("Reach × your estimate", f"{reach * float(value):,.0f}"))
+
+    body = "".join(
+        f"<td><strong>{_esc(v)}</strong><br><span>{_esc(k)}</span></td>"
+        for k, v in cells
+    )
+    # NO `class`. The document sanitizer strips attributes — a styling hook
+    # here would be silently removed from the saved artifact, so the strip is
+    # built from tags the sanitizer keeps and reads as a row either way.
+    return f"<table><tbody><tr>{body}</tr></tbody></table>"
+
+
 def _decision_section(plan: dict, findings: list[dict]) -> str:
     """The memo's decision box: who signs off, by when, and what is at stake.
 
@@ -407,6 +460,23 @@ def _funnel_section(considered: int, kept: int) -> str:
     ])
 
 
+def _worth(finding: dict) -> str:
+    """What a set-aside theme is worth, in the memo's own vocabulary.
+
+    §06's REVENUE THIS CYCLE column never prints a misleading zero: it prints
+    `Unsized`, `Not attributable`, `Unquantified`, `Direction unknown`. This
+    corpus needs exactly two of those words, and which one applies is a fact
+    about the finding rather than a judgement about it.
+    """
+    value = finding.get("impact_value")
+    if value is None:
+        # I3: not measured is not nothing, and the whole reason this column can
+        # exist without money in the corpus.
+        return "Unsized"
+    currency = (finding.get("currency") or "accounts").strip()
+    return f"{value:g} {currency}"
+
+
 def _set_aside_section(pairs: list) -> str:
     """The themes that did not bear on the goal, and why — the memo's appendix.
 
@@ -427,11 +497,33 @@ def _set_aside_section(pairs: list) -> str:
         ),
     ]
     shown = pairs[:MAX_OVERFLOW_ROWS]
-    out.append(_ul(
-        f"<strong>{_esc_clipped((f.get('label') or '').strip() or _statement_text(f), MAX_PARAM_NAME_CHARS)}</strong>"
-        f" — {_esc_clipped(reason, MAX_PARAM_BASIS_CHARS)}"
+    # ── THE MEMO'S FOUR COLUMNS. ───────────────────────────────────────
+    #
+    # §06 is a TABLE: INITIATIVE | WHAT IT IS | REVENUE THIS CYCLE | WHY NOT
+    # PRIORITISED, and its third column is the most instructive thing in the
+    # document — `~$0`, `Not attributable`, `Unquantified`, `Direction
+    # unknown`, `Unsized`. That is I3's discipline expressed as a vocabulary,
+    # and it is why this column can exist at all on a corpus with no money in
+    # it: the honest answer to "what is this worth" is usually a word.
+    #
+    # A BULLET LIST CANNOT CARRY FOUR COLUMNS. It carried two — the label and
+    # the reason — so what the theme actually SAID and what it was worth were
+    # dropped, which are the two a reader needs to disagree with the verdict.
+    rows = "".join(
+        "<tr>"
+        f"<td><strong>{_esc_clipped((f.get('label') or '').strip() or _statement_text(f), MAX_PARAM_NAME_CHARS)}</strong></td>"
+        f"<td>{_esc_clipped((f.get('example') or '').strip() or _statement_text(f), MAX_PARAM_BASIS_CHARS)}</td>"
+        f"<td>{_esc(_worth(f))}</td>"
+        f"<td>{_esc_clipped(reason, MAX_PARAM_BASIS_CHARS)}</td>"
+        "</tr>"
         for f, reason in shown
-    ))
+    )
+    out.append(
+        "<table><thead><tr>"
+        "<th>Theme</th><th>What it is</th><th>Worth this cycle</th>"
+        "<th>Why it was set aside</th>"
+        "</tr></thead><tbody>" + rows + "</tbody></table>"
+    )
     if len(pairs) > len(shown):
         # NO SILENT CAPS. A list that stops without saying so reads as the
         # whole set.
@@ -1349,6 +1441,7 @@ def render_report_html(
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
             _definition_section(run, plan),
             _what_was_read_section(run, plan),
+            _stat_strip(plan, findings, kept),
             _decision_section(plan, kept),
             _funnel_section(len(findings), len(kept)),
             _rice_section(kept, str(plan.get("framework") or "")),

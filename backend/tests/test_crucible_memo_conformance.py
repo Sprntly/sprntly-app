@@ -110,13 +110,33 @@ def test_a_missing_number_is_named_not_zeroed():
 
 # ─── BUILDABLE: the memo has it, the corpus can support it, we have not ─────
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Memo p1 stat strip: CURRENT ARR / 2% TARGET / INITIATIVES FOUND / HIGH "
-    "CONFIDENCE / RECOMMENDED / DATA WINDOW. Every count exists (signals, "
-    "themes, sized, high-confidence, date range) and is currently spread "
-    "through prose instead of a strip."))
 def test_a_stat_strip_of_the_headline_numbers():
-    assert "data window" in _text(_doc()).lower()
+    """Memo p1: the cover closes with a strip of the numbers that shape the
+    answer, so a reader knows it at a glance rather than assembling it from
+    four paragraphs."""
+    t = _text(_doc())
+    for label in ("Signals read", "Themes found", "Bear on this goal",
+                  "Sized", "High confidence"):
+        assert label in t
+
+
+def test_the_strip_has_no_data_window_because_the_dates_are_the_ingest_clock():
+    """The memo's DATA WINDOW is the period the evidence covers. On this
+    substrate claim dates are when we READ the evidence — `call_digest` and the
+    coverage notes both say so — so a window printed from them would be the
+    ingest clock wearing the corpus's clothes."""
+    assert "data window" not in _text(_doc()).lower()
+
+
+def test_money_reaches_the_strip_only_as_the_readers_own_estimate():
+    """A number in a strip is read as a fact. This one is the reader's estimate
+    multiplied out, so the LABEL carries that rather than a footnote three
+    sections down."""
+    run = _run_dict()
+    run["prioritisation"]["plan"]["account_value"] = 12000
+    t = _text(render_report_html(run, _findings(), []))
+    assert "Reach × your estimate" in t
+    assert "48,000" in t
 
 
 @pytest.mark.xfail(strict=True, reason=(
@@ -135,13 +155,41 @@ def test_section_headings_are_claims_not_labels():
     )
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Memo §06 is a TABLE — INITIATIVE | WHAT IT IS | REVENUE THIS CYCLE | WHY "
-    "NOT PRIORITISED. Ours is a bullet list. All four columns exist already."))
 def test_the_appendix_is_a_table_with_a_value_column():
+    """Memo §06: INITIATIVE | WHAT IT IS | REVENUE THIS CYCLE | WHY NOT
+    PRIORITISED.
+
+    A bullet list carried two of those — the label and the reason — so what the
+    theme actually SAID and what it was worth were dropped, which are the two a
+    reader needs in order to disagree with the verdict."""
     doc = _doc()
     i = doc.find("Considered and set aside")
-    assert "<table>" in doc[i:]
+    tail = doc[i:]
+    assert "<table>" in tail
+    for col in ("Theme", "What it is", "Worth this cycle", "Why it was set aside"):
+        assert col in tail
+    # The value column carries the theme's actual worth. THIS fixture's
+    # set-aside finding is sized, so it reads as a reach; the unsized case is
+    # its own test below, because the two say different things.
+    assert "2 accounts" in tail
+
+
+def test_an_unsized_set_aside_theme_reads_Unsized_not_zero():
+    """Memo §06's REVENUE THIS CYCLE column never prints a misleading zero: it
+    prints `Unsized`, `Not attributable`, `Unquantified`. That is I3 expressed
+    as a vocabulary, and it is why the column can exist at all on a corpus with
+    no money in it — the honest answer to "what is this worth" is usually a
+    word."""
+    run = _run_dict()
+    findings = _findings()
+    import copy
+    findings = copy.deepcopy(findings)
+    findings[1]["impact_value"] = None
+    findings[1]["impact"] = {"value": None, "affected_population": None}
+    tail = render_report_html(run, findings, [])
+    tail = tail[tail.find("Considered and set aside"):]
+    assert "Unsized" in tail
+    assert "<td>0</td>" not in tail
 
 
 @pytest.mark.xfail(strict=True, reason=(
