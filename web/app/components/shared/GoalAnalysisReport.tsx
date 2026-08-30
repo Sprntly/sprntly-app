@@ -237,6 +237,7 @@ export function GoalAnalysisReport({
   // same sequence, and setting aside the WRONG finding is far worse than
   // setting none aside.
   const framework = (run.prioritisation?.plan?.framework || "").trim()
+  const accountValue = Number(run.prioritisation?.plan?.account_value ?? 0) || 0
   const asideRaw = run.prioritisation?.set_aside_by_rank
   const findingsExtra = run.prioritisation?.findings_extra_by_rank
   const allFindings = (() => {
@@ -579,6 +580,45 @@ export function GoalAnalysisReport({
         </section>
       ) : null}
 
+      {/* ── THE HEADLINE NUMBERS, ON ONE LINE. ────────────────────────────
+          Memo p1 closes its cover with a strip. Every number in it already
+          exists in this document, spread across four paragraphs — the strip is
+          the difference between knowing the shape of the answer at a glance
+          and assembling it yourself.
+          NO DATA WINDOW cell: claim dates on this substrate are the INGEST
+          clock, so a window printed from them would be when we read the
+          evidence wearing the clothes of the period it covers. */}
+      {allFindings.length ? (
+        <section className="ga-doc-section" data-testid="goal-strip">
+          <div className="ga-strip">
+            {([
+              ["Signals read", (plan?.total_signals ?? 0).toLocaleString()],
+              ["Themes found", allFindings.length.toLocaleString()],
+              ["Bear on this goal", findings.length.toLocaleString()],
+              ["Sized", findings.filter((f) => f.impact_value != null).length.toLocaleString()],
+              ["High confidence",
+               findings.filter((f) => f.confidence_band === "high").length.toLocaleString()],
+              ...(findings.some((f) => f.recommendation?.action)
+                ? [["With a recommendation",
+                    findings.filter((f) => f.recommendation?.action).length.toLocaleString()]]
+                : []),
+              // LABELLED IN THE CELL. A number in a strip reads as a fact, and
+              // this one is the reader's own estimate multiplied out.
+              ...(accountValue > 0 && findings.some((f) => f.impact_value != null)
+                ? [["Reach × your estimate",
+                    Math.round(findings.reduce((n, f) => n + (f.impact_value ?? 0), 0)
+                      * accountValue).toLocaleString()]]
+                : []),
+            ] as [string, string][]).map(([label, value]) => (
+              <div key={label} className="ga-strip-cell">
+                <strong>{value}</strong>
+                <span>{label}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      ) : null}
+
       {/* ── THE FUNNEL, BEFORE ANYTHING IS SHOWN. ─────────────────────────
           The first thing a filtered list owes its reader. A filtered list that
           does not say it was filtered is the more confident-looking of the two,
@@ -785,14 +825,33 @@ export function GoalAnalysisReport({
                 are here because they do not bear on the goal as you defined it,
                 not because the evidence was weak.
               </p>
-              <ul className="ga-doc-aside-list">
-                {setAside.map(([f, reason]) => (
-                  <li key={f.id}>
-                    <strong>{(f.label || "").trim() || f.statement}</strong>
-                    {" — "}{reason}
-                  </li>
-                ))}
-              </ul>
+              {/* THE MEMO'S FOUR COLUMNS. A bullet list carried two of them — the
+                  label and the reason — so what the theme actually SAID and what it
+                  was worth were dropped, which are the two a reader needs in order to
+                  disagree with the verdict. */}
+              <div className="ga-rice-scroll">
+                <table className="ga-rice">
+                  <thead>
+                    <tr>
+                      <th>Theme</th><th>What it is</th>
+                      <th>Worth this cycle</th><th>Why it was set aside</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {setAside.map(([f, reason]) => (
+                      <tr key={f.id}>
+                        <td><strong>{(f.label || "").trim() || f.statement}</strong></td>
+                        <td>{(f.example || "").trim() || f.statement}</td>
+                        {/* I3 as a vocabulary: never a misleading zero. */}
+                        <td>{f.impact_value == null
+                          ? "Unsized"
+                          : `${f.impact_value} ${f.currency || "accounts"}`}</td>
+                        <td>{reason}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           ) : null}
         </section>

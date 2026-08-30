@@ -25974,6 +25974,14 @@
   background: var(--surface, transparent); color: inherit;
 }
 .ga-plan-ask > em { display: block; margin-top: 3px; opacity: 0.7; font-size: 12.5px; }
+/* The headline numbers, on one line. Wraps rather than scrolls — a strip that
+   scrolls hides the cells at its end, which are the ones a reader least
+   expects to be missing. */
+.ga-strip { display: flex; flex-wrap: wrap; gap: 18px 26px; padding: 10px 0;
+  border-top: 1px solid var(--border, #e5e5e5); border-bottom: 1px solid var(--border, #e5e5e5); }
+.ga-strip-cell { display: flex; flex-direction: column; min-width: 88px; }
+.ga-strip-cell > strong { font-size: 19px; line-height: 1.2; }
+.ga-strip-cell > span { font-size: 11.5px; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.6; margin-top: 2px; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated

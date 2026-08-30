@@ -973,3 +973,65 @@ describe("the RICE table in the panel", () => {
     expect(screen.queryByTestId("goal-rice")).toBeNull()
   })
 })
+
+describe("the memo's cover strip and appendix table, in the panel", () => {
+  const withPlan = (extra: Record<string, unknown>, findings: unknown[], aside: (string|null)[]) => ({
+    ...RUN, findings,
+    prioritisation: {
+      ...(RUN.prioritisation ?? {}),
+      plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), total_signals: 1200, ...extra },
+      set_aside_by_rank: aside,
+    },
+  })
+  const A = { ...SIZED, id: 1, label: "kept", statement: "kept stmt", impact_value: 4 }
+  const B = { ...SIZED, id: 2, label: "ours", statement: "ours stmt",
+              example: "the platform supports X", impact_value: 2 }
+
+  it("shows the headline numbers on one line", () => {
+    render(<GoalAnalysisReport run={withPlan({}, [A, B], [null, "our own product"]) as never} />)
+    const t = screen.getByTestId("goal-strip").textContent ?? ""
+    expect(t).toContain("Signals read")
+    expect(t).toContain("Themes found")
+    expect(t).toContain("Bear on this goal")
+    // Counted AFTER the gate: two themes found, one bears on the goal.
+    expect(t).toMatch(/2\s*Themes found/)
+    expect(t).toMatch(/1\s*Bear on this goal/)
+  })
+
+  it("has no data-window cell, because those dates are the ingest clock", () => {
+    render(<GoalAnalysisReport run={withPlan({}, [A], [null]) as never} />)
+    expect((screen.getByTestId("goal-strip").textContent ?? "").toLowerCase())
+      .not.toContain("data window")
+  })
+
+  it("shows money only as the reader's own estimate", () => {
+    render(<GoalAnalysisReport run={withPlan({ account_value: 12000 }, [A], [null]) as never} />)
+    const t = screen.getByTestId("goal-strip").textContent ?? ""
+    expect(t).toContain("Reach × your estimate")
+    expect(t).toContain("48,000")
+  })
+
+  it("shows no money cell when the reader gave no figure", () => {
+    render(<GoalAnalysisReport run={withPlan({}, [A], [null]) as never} />)
+    expect(screen.getByTestId("goal-strip").textContent).not.toContain("your estimate")
+  })
+
+  it("renders the appendix as the memo's four columns", () => {
+    render(<GoalAnalysisReport run={withPlan({}, [A, B], [null, "describes our own product"]) as never} />)
+    const t = screen.getByTestId("goal-set-aside").textContent ?? ""
+    for (const col of ["Theme", "What it is", "Worth this cycle", "Why it was set aside"]) {
+      expect(t).toContain(col)
+    }
+    expect(t).toContain("the platform supports X")
+    expect(t).toContain("2 accounts")
+    expect(t).toContain("describes our own product")
+  })
+
+  it("reads an unsized set-aside theme as Unsized, never zero", () => {
+    const U = { ...B, impact_value: null }
+    render(<GoalAnalysisReport run={withPlan({}, [A, U], [null, "off-topic"]) as never} />)
+    const t = screen.getByTestId("goal-set-aside").textContent ?? ""
+    expect(t).toContain("Unsized")
+    expect(t).not.toContain("0 accounts")
+  })
+})

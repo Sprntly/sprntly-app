@@ -9,7 +9,7 @@
 //      the goal means; that question is the product, not an interruption.
 //   3. Coverage notes buried under the findings they qualify.
 //   4. The considered list dropped, leaving a ranking to be taken on faith.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -57,7 +57,16 @@ describe("sizing", () => {
     render(<GoalAnalysisTab runId={7} />)
     const el = await screen.findByTestId("goal-unsized")
     expect(el.textContent).toBe("Could not be sized")
-    expect(screen.queryByText("0")).toBeNull()
+    // SCOPED TO THE FINDINGS, not the page. This used to be a document-wide
+    // `queryByText("0")`, which was a fair proxy while the panel showed no
+    // other numbers — the cover strip now reports counts, and "0 high
+    // confidence" is a true zero that the page SHOULD print. The property was
+    // never "the digit 0 may not appear"; it is that an unsized finding is not
+    // rendered as one, so the assertion moves to the findings themselves and
+    // keeps its bite there.
+    const list = document.querySelector(".ga-doc-findings") ?? document.body
+    expect(within(list as HTMLElement).queryByText("0")).toBeNull()
+    // Unambiguous anywhere: nothing legitimately renders "0 accounts".
     expect(screen.queryByText("0 accounts")).toBeNull()
   })
 
