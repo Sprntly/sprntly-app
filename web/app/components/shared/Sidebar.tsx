@@ -103,6 +103,10 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
       title={label}
       onClick={() => goTo(screen)}
       aria-label={label}
+      /* Anchor for the first-run product tour (components/tour). Derived from
+         the screen id rather than listed separately, so a new rail item is
+         spotlightable without touching the tour. */
+      data-tour={`nav-${screen === "ideation" ? "backlog" : screen}`}
     >
       {icon}
       <span className="sb-rail-label">{label}</span>
@@ -233,6 +237,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           aria-label="Search (Ctrl+K)"
           onClick={openPalette}
           data-testid="palette-trigger"
+          data-tour="rail-search"
         >
           <IconSearch size={18} />
           <span className="sb-rail-label">Search</span>
@@ -328,6 +333,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           type="button"
           className="sb-trial"
           data-testid="sidebar-trial"
+          data-tour="sidebar-trial"
           title={`Free trial — ${trialLabel(trialDays)}`}
           aria-label={`Free trial, ${trialLabel(trialDays)}. Open billing.`}
           onClick={() => router.push("/settings?section=billing")}
@@ -375,6 +381,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           aria-busy={syncRunning || undefined}
           disabled={!activeCompany}
           data-testid="sidebar-sync"
+          data-tour="rail-sync"
           onClick={() => {
             if (!syncRunning) void triggerRun()
           }}
@@ -392,6 +399,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           title="Feedback"
           aria-label="Feedback"
           data-testid="sidebar-feedback"
+          data-tour="rail-feedback"
           onClick={() => setFeedbackOpen(true)}
         >
           <IconMessagePlus size={15} />
@@ -403,6 +411,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           title="Settings"
           aria-label="Settings"
           data-testid="sidebar-settings"
+          data-tour="rail-settings"
           onClick={() => goTo("settings")}
         >
           <IconSettings size={15} />

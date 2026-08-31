@@ -188,6 +188,12 @@ export type UserProfile = {
   onboarding_step: number
   onboarding_completed_at: string | null
   skipped_fields: string[]
+  /** When this user finished OR skipped the first-run product tour; null until
+   *  they have. Deliberately per-USER and not per-workspace: an invited member
+   *  joins a workspace whose `onboarding_completed_at` was set long before they
+   *  existed, so a workspace-level marker would show the tour to the owner and
+   *  silently skip it for everyone they invite. */
+  product_tour_completed_at: string | null
 }
 
 export const INDUSTRIES = [

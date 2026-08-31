@@ -253,7 +253,11 @@ export function ChatComposer({
   const handleMicToggle = voiceOverridden ? (onToggleVoice ?? (() => {})) : handleInternalToggleVoice
 
   return (
-    <div className={`cx${home ? " cx--home" : ""}${busy ? " cx--busy" : ""}`}>
+    <div
+      className={`cx${home ? " cx--home" : ""}${busy ? " cx--busy" : ""}`}
+      /* Anchor for the first-run product tour's "start by asking" step. */
+      data-tour="composer"
+    >
       {slashMenu}
       {/* The quoted passage sits ABOVE the chips and the input — it is context
           for what you are about to type, so it reads first, in the reading

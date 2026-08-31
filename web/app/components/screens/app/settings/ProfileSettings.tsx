@@ -170,7 +170,7 @@ export function ProfileSettings() {
             timezone: metaTz,
           })
           .select(
-            "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields",
+            "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields, product_tour_completed_at",
           )
           .single()
         if (!error && data) {
@@ -189,6 +189,11 @@ export function ProfileSettings() {
             onboarding_step: data.onboarding_step ?? 0,
             onboarding_completed_at: data.onboarding_completed_at,
             skipped_fields: Array.isArray(data.skipped_fields) ? data.skipped_fields : [],
+            // A row inserted HERE is a profile that went missing and is being
+            // rebuilt, not a fresh signup — but it is still someone who has
+            // never been shown the product tour, so this reads null and they
+            // are offered it once.
+            product_tour_completed_at: data.product_tour_completed_at ?? null,
           }
         }
       }

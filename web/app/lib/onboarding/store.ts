@@ -143,7 +143,7 @@ function rowToCompany(
 }
 
 const PROFILE_COLUMNS =
-  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields"
+  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields, product_tour_completed_at"
 
 function rowToProfile(row: Record<string, unknown>): UserProfile {
   return {
@@ -158,6 +158,32 @@ function rowToProfile(row: Record<string, unknown>): UserProfile {
     onboarding_step: Number(row.onboarding_step) || 0,
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
     skipped_fields: Array.isArray(row.skipped_fields) ? (row.skipped_fields as string[]) : [],
+    product_tour_completed_at:
+      (row.product_tour_completed_at as string | null) ?? null,
+  }
+}
+
+/**
+ * Mark the first-run product tour as done for this user.
+ *
+ * Called for a FINISH and for a SKIP alike — a skip is a decision, and
+ * re-showing something someone dismissed is how a welcome mat becomes a
+ * nuisance. Writes `now()` client-side rather than reading it back, because
+ * the only thing any caller asks of this column is "is it null".
+ *
+ * Best-effort by design: the worst case of a failed write is that the tour
+ * offers itself once more on the next visit, which is not worth blocking the
+ * UI or surfacing an error for. The caller closes the tour either way.
+ */
+export async function markProductTourSeen(userId: string): Promise<void> {
+  try {
+    const supabase = getSupabase()
+    await supabase
+      .from("profiles")
+      .update({ product_tour_completed_at: new Date().toISOString() })
+      .eq("id", userId)
+  } catch {
+    /* see the docstring: a lost write costs one extra showing, nothing more */
   }
 }
 
