@@ -150,10 +150,15 @@ export const TOUR_STEPS: TourStep[] = [
     id: "search",
     anchor: "rail-search",
     title: "Find anything",
+    // DELIBERATELY DOES NOT CLAIM "every screen". On main the rail carries no
+    // visible search button at all (`SHOW_SIDEBAR_SEARCH = false`) and the
+    // palette does not yet index every surface — both are fixed by a separate
+    // change. The hotkey works either way, which is what this promises, and
+    // the step degrades to a centred card while the button is absent.
     body:
-      "Search reaches every screen, chat, document and method by name — and "
-      + "Ctrl+K (⌘K on a Mac) opens it from wherever you are. It is the "
-      + "fastest way around the product once you know what you are after.",
+      "Search finds screens, chats, documents and methods by name, and Ctrl+K "
+      + "(⌘K on a Mac) opens it from wherever you are. It is the fastest way "
+      + "around the product once you know what you are after.",
   },
   {
     id: "credits",

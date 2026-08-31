@@ -5,6 +5,10 @@
 // pane their role cannot open, a trial counter that is not on screen. These
 // assert the filtering that prevents that, plus the copy invariants that keep
 // a step honest.
+import { readFileSync, readdirSync } from "node:fs"
+import { dirname, join } from "node:path"
+import { fileURLToPath } from "node:url"
+
 import { describe, expect, it } from "vitest"
 
 import { DEFAULT_FEATURE_FLAGS } from "../../../lib/onboarding/types"
@@ -123,27 +127,70 @@ describe("the step list itself", () => {
     }
   })
 
-  it("names an anchor that the app actually renders", () => {
-    // Every `data-tour` value written into the app, by hand. A step naming an
-    // anchor nobody renders is a step that silently centres itself forever —
-    // it still "works", which is exactly why it needs catching here.
-    const RENDERED = new Set([
-      "composer",
-      "nav-brief",
-      "nav-artifacts",
-      "nav-projects",
-      "nav-backlog",
-      "rail-sync",
-      "rail-feedback",
-      "rail-search",
-      "rail-settings",
-      "sidebar-trial",
-    ])
+  it("names an anchor that the app actually writes", () => {
+    // DERIVED from the source, not a hand-kept list — a hardcoded set passes
+    // happily while the attribute it names has been renamed or deleted, which
+    // is the failure it was supposed to catch.
+    //
+    // WHAT THIS STILL CANNOT SEE: whether the element RENDERS. `rail-search`
+    // lives inside `{SHOW_SIDEBAR_SEARCH && …}`, false on main, so the
+    // attribute is in the file and never reaches the DOM. That is survivable
+    // by design — a missing anchor centres the step rather than breaking it —
+    // but it is the reason this asserts "written", not "rendered".
+    const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..")
+    const written = new Set<string>()
+    const walk = (dir: string) => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        if (e.name === "node_modules" || e.name === "__tests__") continue
+        const full = join(dir, e.name)
+        if (e.isDirectory()) walk(full)
+        else if (e.name.endsWith(".tsx")) {
+          const src = readFileSync(full, "utf8")
+          for (const m of src.matchAll(/data-tour=\{?["'`]([^"'`{}$]+)["'`]/g)) {
+            written.add(m[1])
+          }
+          // The rail derives its anchors from the screen id in a template
+          // literal, so they are matched by shape rather than by text.
+          if (/data-tour=\{`nav-\$\{/.test(src)) {
+            for (const nav of ["brief", "artifacts", "projects", "backlog"]) {
+              written.add(`nav-${nav}`)
+            }
+          }
+        }
+      }
+    }
+    walk(root)
+
     for (const s of TOUR_STEPS) {
       if (!s.anchor) continue
-      expect(RENDERED.has(s.anchor), `${s.id} points at unknown anchor "${s.anchor}"`).toBe(
-        true,
-      )
+      expect(
+        written.has(s.anchor),
+        `step "${s.id}" points at data-tour="${s.anchor}", which nothing writes`,
+      ).toBe(true)
     }
+  })
+})
+
+describe("the tour is actually mounted", () => {
+  // THE BUG THIS GUARDS, and it shipped once. Every other test here renders
+  // <ProductTour /> directly, so the component was green while nothing in the
+  // app rendered it — the edit that was supposed to mount it anchored on a
+  // line that exists on a different branch, matched nothing, and said nothing.
+  // tsc and the build both passed, because an unmounted module is merely
+  // unused. Only opening the app would have caught it, and that is not a test.
+  //
+  // Asserted against the SOURCE rather than by rendering AppShell, which would
+  // need six providers stood up to prove one line.
+  it("AppShell imports and renders <ProductTour />", () => {
+    const shell = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "(app)", "AppShell.tsx"),
+      "utf8",
+    )
+    expect(shell, "AppShell does not import ProductTour").toMatch(
+      /import\(\s*["'][^"']*components\/tour\/ProductTour["']\s*\)/,
+    )
+    expect(shell, "AppShell imports ProductTour but never renders it").toMatch(
+      /<ProductTour\s*\/>/,
+    )
   })
 })
