@@ -87,14 +87,17 @@ export const TRIAL_DAYS = 7
 /**
  * What the trial itself grants — NOT the plan's monthly allowance.
  *
- * Mirrors `plans.TRIAL_CREDITS`. A trial is a flat figure whichever plan is
- * being trialled: enough for one complete pass through the product (a few
- * chats, an ask, an evidence brief, a PRD, a prototype) and not a free month
- * of whatever tier was picked.
+ * Mirrors `plans.TRIAL_CREDITS`, which is the authority and carries the full
+ * reasoning. A trial is a flat figure whichever plan is being trialled: enough
+ * for one pass through the DOCUMENT loop (a few chats, an ask, an evidence
+ * brief, a PRD ≈ 48) and not a free month of whatever tier was picked.
+ *
+ * A prototype costs 50 on its own and is deliberately out of reach on a trial
+ * — that is the intended shape, so copy near this number must not promise one.
  *
  * The plan cards go on quoting their own monthly credits, because that is what
  * the customer gets from day eight — but a card promising "756 credits a month"
  * with no mention of this reads as a promise about the free week, which it is
  * not.
  */
-export const TRIAL_CREDITS = 100
+export const TRIAL_CREDITS = 50
