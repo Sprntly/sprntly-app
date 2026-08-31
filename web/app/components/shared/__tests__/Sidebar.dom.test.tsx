@@ -178,14 +178,26 @@ describe("Sidebar — Workbench (hidden)", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  // The rail's Search trigger is hidden for now (product call, 2026-07-31). The
-  // palette is NOT removed: AppShell still renders it and owns ⌘K, so this only
-  // asserts the button is absent — never that search stopped working.
-  it("no longer renders the Search trigger (palette + ⌘K are untouched)", () => {
-    render(React.createElement(Sidebar))
-    expect(screen.queryByTestId("palette-trigger")).toBeNull()
-    expect(screen.queryByLabelText("Search (Ctrl+K)")).toBeNull()
-    expect(openPalette).not.toHaveBeenCalled()
+  // The Search trigger is back (2026-08-31) — but in the identity ACTIONS row,
+  // between Feedback and Settings, not in the nav where it used to live. The
+  // order there is load-bearing: sync, feedback, search, settings.
+  it("renders the Search trigger in the actions row, between Feedback and Settings", () => {
+    const { container } = render(React.createElement(Sidebar))
+    const trigger = screen.getByTestId("palette-trigger")
+    expect(trigger).not.toBeNull()
+
+    const ids = Array.from(
+      container.querySelectorAll(".sb-rail-actions button"),
+    ).map((el) => el.getAttribute("data-testid"))
+    expect(ids).toEqual([
+      "sidebar-sync",
+      "sidebar-feedback",
+      "palette-trigger",
+      "sidebar-settings",
+    ])
+
+    fireEvent.click(trigger)
+    expect(openPalette).toHaveBeenCalled()
   })
 
   // Workbench is deliberately absent from this list — it is hidden on a product

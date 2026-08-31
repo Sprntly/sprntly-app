@@ -77,28 +77,11 @@ export const STATIC_PAGE_ITEMS: SearchItem[] = [
     iconId: "artifact",
     action: { kind: "screen", screen: "artifacts" },
   },
-  {
-    id: "page:/templates",
-    group: "pages",
-    title: "Templates",
-    subtitle: "Gold-standard examples",
-    breadcrumb: ["Pages"],
-    url: "/templates",
-    keywords: ["gold standard", "examples", "prd template"],
-    iconId: "template",
-    action: { kind: "screen", screen: "templates" },
-  },
-  {
-    id: "page:/skills",
-    group: "pages",
-    title: "Skills",
-    subtitle: "PM workflows the chat can run",
-    breadcrumb: ["Pages"],
-    url: "/skills",
-    keywords: ["workflows", "commands", "abilities"],
-    iconId: "skill",
-    action: { kind: "screen", screen: "skills" },
-  },
+  // NO "page:" ENTRIES FOR TEMPLATES OR SKILLS. Both moved into Settings, and
+  // `buildSettingsItems()` already emits them from SETTINGS_NAV — as
+  // `settings:templates` / `settings:skills`, at `/settings?section=…`, with a
+  // breadcrumb that says where they actually live. Listing them here too put
+  // the same screen in the palette twice under two different paths.
   {
     id: "page:/sources",
     group: "pages",

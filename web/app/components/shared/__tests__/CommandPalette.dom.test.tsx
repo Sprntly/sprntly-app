@@ -159,12 +159,13 @@ describe("CommandPalette", () => {
     expect(onCloseMock).toHaveBeenCalled()
   })
 
-  it("surfaces dynamic skills by label and deep-links /skills?q=", async () => {
+  it("surfaces dynamic skills by label and deep-links the Skills pane, pre-filtered", async () => {
     await openPalette()
     fireEvent.change(input(), { target: { value: "journey" } })
     const row = (await findRowByTitle("Journey map")).closest("button")!
     fireEvent.click(row)
-    expect(routerMock.push).toHaveBeenCalledWith("/skills?q=Journey%20map")
+    // Skills moved into Settings — `?q=` now rides the pane link, not `/skills`.
+    expect(routerMock.push).toHaveBeenCalledWith("/settings?section=skills&q=Journey%20map")
   })
 
   it("resumes a chat via the sprntly_resume_conv handoff", async () => {
