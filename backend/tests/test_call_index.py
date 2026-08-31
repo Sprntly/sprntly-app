@@ -584,6 +584,130 @@ def test_resolution_returns_nothing_when_no_call_matches(monkeypatch):
     assert ci.resolve_calls("ent-A", "summarize the Initech call") == []
 
 
+# ── a named call must resolve regardless of recency ──────────────────────────
+#
+# Reported live: on a large catalogue, a named account+demo call sat well past
+# the newest 200 rows by `call_date DESC`. `resolve_calls` handed `list_calls`
+# nothing but `limit=200` — the newest 200 rows — so a call outside that fixed
+# recency window could never be found however exactly it was named. A NAMED
+# ask carries no recency bias: the call could be the company's very first one.
+
+def test_resolve_calls_asks_list_calls_to_filter_by_name_not_by_recency(monkeypatch):
+    """The regression this closes, pinned on the CONTRACT between the two
+    functions rather than on scoring: `resolve_calls` must hand `list_calls`
+    the naming terms so the DATABASE can filter across the full catalogue,
+    not just take the newest `limit` rows and hope the named call is among
+    them.
+
+    The fake below only returns the named call when `name_terms` is actually
+    passed — exactly mirroring what a server-side ilike filter buys over a
+    plain recency-ordered read — so this fails on the unfixed code path
+    (which calls `list_calls(company_id, limit=200)` with no name filter at
+    all) and passes once `resolve_calls` asks for a name-filtered read."""
+    seen: dict = {}
+    named = _indexed("Acmecorp", "Acme Corp + Northwind Demo")
+
+    def _list_calls(company_id, **kwargs):
+        seen.update(kwargs)
+        if kwargs.get("name_terms"):
+            return [named]
+        return []  # the old recency-only read: the named call never arrives
+
+    monkeypatch.setattr(ci, "list_calls", _list_calls)
+    got = ci.resolve_calls("ent-A", "summarize the Acme call")
+
+    assert seen.get("name_terms") == ["Acme"], seen
+    assert got and got[0] is named
+
+
+def test_a_bare_date_reference_still_reads_a_scoped_window_not_all_calls(monkeypatch):
+    """A question naming no term at all — only a date — has nothing for a
+    server-side name filter to match on, so it must still scope the read (by
+    date, not by an arbitrary recency cap) rather than asking for name_terms
+    it cannot supply."""
+    seen: dict = {}
+    older = ci.IndexedCall(
+        "id-old", "Initech Discovery", "2026-07-22T10:00:00+00:00", 30.0, [],
+        "Initech", "",
+    )
+
+    def _list_calls(company_id, **kwargs):
+        seen.update(kwargs)
+        return [older]
+
+    monkeypatch.setattr(ci, "list_calls", _list_calls)
+    got = ci.resolve_calls("ent-A", "summarize the call on 2026-07-22")
+
+    assert seen.get("name_terms") is None
+    assert seen.get("since") is not None and seen.get("until") is not None
+    assert got == [older]
+
+
+# ── deterministic KG fallback when no call resolves ───────────────────────────
+#
+# `resolve_calls` finding nothing does not mean the entity is unknown — the KG
+# extractor pulls signals from every synced source, so a genuinely absent call
+# can still have real distilled context. Deliberately NOT gated on the turn's
+# `include_knowledge_graph` flag (see the ticket this closes): this runs on
+# every single-call decline, execution-side, so a resolvable entity never
+# answers with a bare "no summary available" while the graph already has
+# something.
+
+def test_single_call_decline_falls_back_to_kg_signals_for_a_resolvable_entity(
+    monkeypatch,
+):
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: [])
+    import app.graph.facade as facade_mod
+    import app.graph.retrieval as retrieval_mod
+
+    monkeypatch.setattr(facade_mod, "GraphFacade", lambda: object())
+    monkeypatch.setattr(
+        retrieval_mod, "retrieve_context",
+        lambda *a, **k: {"empty": False, "signals": [{"content": "irrelevant"}]},
+    )
+    monkeypatch.setattr(
+        retrieval_mod, "render_context_section",
+        lambda bundle: "Initrode asked about SSO during onboarding.",
+    )
+
+    out = ci.answer_single_call(
+        "ent-A", "summarize the Initrode call", fresh=_fresh()
+    )
+
+    assert out is not None
+    assert out["_skill_source"] == "call-index-kg-fallback"
+    assert "Initrode asked about SSO during onboarding." in out["answer"]
+
+
+def test_single_call_decline_stays_a_bare_decline_when_the_kg_also_has_nothing(
+    monkeypatch,
+):
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: [])
+    import app.graph.retrieval as retrieval_mod
+
+    monkeypatch.setattr(
+        retrieval_mod, "retrieve_context", lambda *a, **k: {"empty": True}
+    )
+    assert ci.answer_single_call(
+        "ent-A", "summarize the Zzyzx call", fresh=_fresh()
+    ) is None
+
+
+def test_kg_fallback_degrades_to_none_on_any_failure(monkeypatch):
+    """Best-effort like every other KG read in this codebase: no pgvector, no
+    DB, an unavailable client — none of it may raise past a decline."""
+    monkeypatch.setattr(ci, "list_calls", lambda *a, **k: [])
+    import app.graph.facade as facade_mod
+
+    def _boom():
+        raise RuntimeError("Supabase client unavailable")
+
+    monkeypatch.setattr(facade_mod, "GraphFacade", _boom)
+    assert ci.answer_single_call(
+        "ent-A", "summarize the Zzyzx call", fresh=_fresh()
+    ) is None
+
+
 def test_single_call_falls_through_when_transcript_is_empty(monkeypatch):
     """A resolved call with no transcript must fall through rather than
     summarizing nothing."""
