@@ -157,6 +157,11 @@ class Settings(BaseSettings):
     # someone out mid-retry is how a bounced card becomes a cancellation.
     subscription_lock_mode: str = "off"
 
+    # From: header for billing mail. The Resend API key is scoped to the
+    # verified `mail.sprntly.ai` domain, so a bare `@sprntly.ai` sender is
+    # rejected with a 403 — see app/mailer.py.
+    billing_from_email: str = ""
+
     @field_validator("subscription_lock_mode", mode="before")
     @classmethod
     def _clean_lock_mode(cls, v: object) -> str:

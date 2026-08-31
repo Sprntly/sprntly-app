@@ -52,6 +52,7 @@ vi.mock("../../../../context/WorkspaceContext", () => ({
   useWorkspace: () => ({ workspace, orgRole, refresh }),
 }))
 
+import { TRIAL_CREDITS } from "../../../../lib/billingPlans"
 import { PlanStep } from "../PlanStep"
 
 beforeEach(() => {
@@ -86,6 +87,17 @@ describe("choosing a plan", () => {
   it("promises the trial in the words the backend will honour", () => {
     render(<PlanStep />)
     expect(screen.getByText(/nothing is charged/i).textContent).toContain("7 days")
+  })
+
+  it("says what the TRIAL grants, not just what the plan grants", () => {
+    // The cards quote each plan's monthly credits, which is what a customer
+    // gets from day eight. The trial itself is a flat, much smaller figure, so
+    // a card reading "756 credits a month" beside "nothing is charged for 7
+    // days" is a promise about the free week that we do not keep.
+    render(<PlanStep />)
+    expect(screen.getByText(/nothing is charged/i).textContent).toContain(
+      `${TRIAL_CREDITS} credits`,
+    )
   })
 
   it("sends the chosen plan, interval and its own return path to checkout", async () => {

@@ -771,6 +771,68 @@ async def _run_task_followup_cycle() -> None:
         logger.error("Scheduler: task followup cycle failed: %s", exc)
 
 
+async def _run_trial_ending_cycle() -> None:
+    """Warn every company whose trial ends soon.
+
+    THE ONLY EMAIL NOTHING PUSHES AT US. Every other one rides a webhook or an
+    action; "your trial ends in two days" is a date arriving, so somebody has
+    to look.
+
+    Two days, not Stripe's seven. Stripe's own trial reminder is hard-wired to
+    seven days before the end and `plans.TRIAL_DAYS` is seven — so it would
+    land at signup, telling a customer who has just arrived that their trial is
+    ending. Turn Stripe's off and let this one do the job.
+
+    Idempotent by the send log, not by the tick: this runs hourly, and every
+    tick inside the window would otherwise mail the same person again.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.billing import emails as billing_emails
+    from app.db.companies import list_companies
+
+    try:
+        companies = list_companies() or []
+    except Exception:
+        logger.exception("trial-ending: failed to list companies")
+        return
+
+    now = datetime.now(timezone.utc)
+    warned = 0
+    for company in companies:
+        if (company.get("subscription_status") or "") != "trialing":
+            continue
+        end_raw = company.get("current_period_end")
+        sub_id = company.get("stripe_subscription_id") or ""
+        if not end_raw or not sub_id:
+            continue
+        try:
+            ends = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        remaining = ends - now
+        # Inside the window and not already past. The lower bound matters: a
+        # trial that ended an hour ago should not be warned about, and a
+        # negative "ends in -1 days" is worse than silence.
+        if not timedelta(0) < remaining <= timedelta(days=billing_emails.TRIAL_ENDING_LEAD_DAYS):
+            continue
+
+        # Round UP: at 23 hours left a reader has one more day, and "0 days"
+        # beside a subscription nobody has charged reads as a fault.
+        days_left = max(1, -(-remaining.days * 24 + remaining.seconds // 3600) // 24)
+        try:
+            warned += billing_emails.trial_ending(
+                str(company["id"]), subscription_id=sub_id, days_left=days_left
+            )
+        except Exception:
+            logger.warning(
+                "trial-ending: send failed for %s", company.get("slug"), exc_info=True
+            )
+    if warned:
+        logger.info("trial-ending: warned %s recipient(s)", warned)
+
+
 async def _run_scheduled_cycle() -> None:
     """Run the scheduled KG-synthesis cycle: seed + run_synthesis per company."""
     await _run_synthesis_for_all_companies()
@@ -1049,6 +1111,17 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(minutes=skill_sync_minutes),
         id="skill_source_sync",
         name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
+        replace_existing=True,
+    )
+    # Trial-ending reminders. Hourly is finer than it needs to be for a
+    # two-day window, and that is the point: the send log makes an extra tick
+    # free, while a coarse cadence risks stepping over the window entirely if a
+    # deploy happens to land inside it.
+    _scheduler.add_job(
+        _run_trial_ending_cycle,
+        trigger=IntervalTrigger(minutes=60),
+        id="trial_ending_reminders",
+        name="Warn companies whose trial ends soon (hourly)",
         replace_existing=True,
     )
     # Monthly intelligence reports: once a month per company, run each

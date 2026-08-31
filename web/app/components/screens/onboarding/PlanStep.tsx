@@ -10,6 +10,7 @@ import {
   ONBOARDING_PLAN_PATH,
   SALES_CONTACT,
   SELF_SERVE_PLANS,
+  TRIAL_CREDITS,
   TRIAL_DAYS,
 } from "../../../lib/billingPlans"
 import { companyHasPaid, subscriptionGrantsAccess } from "../../../lib/billingAccess"
@@ -239,7 +240,9 @@ export function PlanStep() {
           {workspace?.display_name ? `${workspace.display_name} is set up. ` : ""}
           Pick a plan to carry on. Your card is saved now, but nothing is charged
           for {TRIAL_DAYS} days — cancel any time before then and
-          you pay nothing.
+          you pay nothing. Your trial comes with{" "}
+          {TRIAL_CREDITS.toLocaleString()} credits; the plan's own monthly
+          credits start when the trial ends.
         </div>
 
         {cancelled && (

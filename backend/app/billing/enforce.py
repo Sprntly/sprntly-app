@@ -39,7 +39,7 @@ import logging
 
 from fastapi import HTTPException
 
-from app.billing import credits, plans
+from app.billing import credits, emails, plans
 from app.config import settings
 from app.db import billing as billing_db
 
@@ -109,6 +109,19 @@ def require_credits(company_id: str, feature: str) -> None:
     try:
         credits.check_affordable(company_id, feature)
     except credits.InsufficientCredits as exc:
+        # THEY HAVE JUST HIT A WALL MID-WORK. Nothing else in the product will
+        # explain it: the 402 shows a message on whatever screen they were on,
+        # and if they were mid-generation they may not see it at all.
+        #
+        # Sent from the refusal rather than from the spend that emptied the
+        # balance, because "you are out" is only true once something has
+        # actually been refused — a balance of 3 is not out of credits until a
+        # 25-credit action arrives.
+        _notify(
+            lambda: emails.credits_exhausted(
+                company_id, period=_period_of(row), feature=feature
+            )
+        )
         raise HTTPException(
             402,
             detail={
@@ -122,6 +135,55 @@ def require_credits(company_id: str, feature: str) -> None:
                 "plan": plan,
             },
         ) from None
+
+
+def _notify(fn) -> None:
+    """Run an email without letting it near the caller's outcome.
+
+    A generation must not fail because a mailbox bounced, and `require_credits`
+    is on the hot path of every billable action.
+    """
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — an email never breaks a generation
+        logger.warning("billing_email: send raised, ignoring", exc_info=True)
+
+
+def _period_of(row: dict) -> str:
+    """The billing period a credit email belongs to.
+
+    Used as the de-dup key, so "you are running low" can fire again next month
+    without firing twice this month. Falls back to the plan so a company with
+    no recorded period still gets exactly one.
+    """
+    return str(row.get("credits_granted_for") or row.get("plan") or "unknown")
+
+
+def _maybe_warn_low(company_id: str) -> None:
+    """Warn once per period when the balance drops under the threshold.
+
+    Checked AFTER the debit, since the crossing is what matters, and only on
+    the way down — every subsequent spend is also under the threshold, and the
+    de-dup key is the period rather than the balance so they are told once.
+    """
+    row = billing_db.get_billing(company_id) or {}
+    plan = plans.resolve_plan(row.get("plan"))
+    # The TRIAL allowance while trialling, or the warning fires at a fifth of a
+    # month's credits against a balance that was never a month's worth.
+    allowance = plans.period_credits(plan, row.get("subscription_status"))
+    if allowance == plans.UNLIMITED or allowance <= 0:
+        return
+    balance = int(row.get("credit_balance") or 0)
+    # Zero is not "running low", it is exhausted — and that email is sent from
+    # the refusal, not from here. Warning as well would be two emails about the
+    # same wall.
+    if balance <= 0 or balance > allowance * emails.LOW_CREDIT_FRACTION:
+        return
+    _notify(
+        lambda: emails.credits_low(
+            company_id, period=_period_of(row), balance=balance, allowance=allowance
+        )
+    )
 
 
 def charge(
@@ -161,6 +223,10 @@ def charge(
             feature,
             ref_id,
         )
+
+    # AFTER the debit, because the crossing is what matters. Only fires on the
+    # way down and only once per period — see `_maybe_warn_low`.
+    _maybe_warn_low(company_id)
 
 
 def bill(

@@ -1815,6 +1815,24 @@ CREATE INDEX idx_referrals_referrer ON referrals (referrer_company_id, created_a
 -- the REFERRER'S single permanent code, so uniqueness on code would reject the
 -- second person to use a link — which is the whole feature.
 
+-- Billing email de-dup guard (mirrors 20260831120000_billing_email_sends.sql).
+-- Every trigger for these fires more than once — Stripe redelivers for days,
+-- the trial reminder is an hourly tick — so the OCCASION is recorded, not the
+-- moment. UNIQUE is what stops eleven copies of "your trial has started".
+CREATE TABLE billing_email_sends (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    company_id  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    ref_id      TEXT NOT NULL,
+    email       TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'sent'
+                  CHECK (status IN ('sent', 'skipped')),
+    sent_at     TEXT NOT NULL DEFAULT (datetime('now')),
+    UNIQUE (company_id, kind, ref_id, email)
+);
+CREATE INDEX billing_email_sends_company_kind_idx
+    ON billing_email_sends (company_id, kind, sent_at DESC);
+
 CREATE TABLE stripe_events (
     id           TEXT PRIMARY KEY,
     type         TEXT NOT NULL,

@@ -83,3 +83,18 @@ export const ONBOARDING_PLAN_PATH = "/onboarding/plan"
  *  `plans.TRIAL_DAYS`; the backend decides whether a given checkout actually
  *  gets one (on `first_paid_at`), this is only what we promise on screen. */
 export const TRIAL_DAYS = 7
+
+/**
+ * What the trial itself grants — NOT the plan's monthly allowance.
+ *
+ * Mirrors `plans.TRIAL_CREDITS`. A trial is a flat figure whichever plan is
+ * being trialled: enough for one complete pass through the product (a few
+ * chats, an ask, an evidence brief, a PRD, a prototype) and not a free month
+ * of whatever tier was picked.
+ *
+ * The plan cards go on quoting their own monthly credits, because that is what
+ * the customer gets from day eight — but a card promising "756 credits a month"
+ * with no mention of this reads as a promise about the free week, which it is
+ * not.
+ */
+export const TRIAL_CREDITS = 100
