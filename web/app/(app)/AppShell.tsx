@@ -28,6 +28,12 @@ const CommandPalette = dynamic(() =>
 const FeedbackModal = dynamic(() =>
   import("../components/shared/FeedbackModal").then((m) => m.FeedbackModal)
 )
+// First-run product tour. Dynamic because the overwhelming majority of loads
+// are by someone who has already seen it — it decides that from the profile and
+// renders null, so it should not sit in the main bundle to do so.
+const ProductTour = dynamic(() =>
+  import("../components/tour/ProductTour").then((m) => m.ProductTour)
+)
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
 import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
@@ -225,6 +231,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ClaudeDrawer />
       <TicketDrawer />
       <ContentPanel />
+      {/* Last, so the spotlight sits over everything else the shell renders. */}
+      <ProductTour />
     </>
   )
 }
