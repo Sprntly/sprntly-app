@@ -20,7 +20,9 @@ from __future__ import annotations
 import re
 
 from app.crucible.report import (
+    MAX_DETAILED_FINDINGS,
     MAX_LEDGER_REASON_CHARS,
+    MAX_RICE_ROWS,
     body_fingerprint,
     render_report_html,
     report_title,
@@ -368,9 +370,9 @@ def test_the_findings_beyond_the_cap_are_listed_and_counted_not_dropped():
     """A document that stopped at the cap without a word would read as "these
     are all the findings" — the quiet degradation this whole feature exists to
     avoid."""
-    from app.crucible.report import MAX_FULL_FINDING_BLOCKS
+    from app.crucible.report import MAX_DETAILED_FINDINGS
 
-    n = MAX_FULL_FINDING_BLOCKS + 40
+    n = MAX_DETAILED_FINDINGS + 40
     html = render_report_html(
         {"id": 1, "goal_text": "g", "coverage_notes": []},
         _many_findings(n), [], {},
@@ -384,9 +386,9 @@ def test_a_small_run_is_not_truncated_at_all():
     """The control: the cap must not touch an ordinary run."""
     html = render_report_html(
         {"id": 1, "goal_text": "g", "coverage_notes": []},
-        _many_findings(12), [], {},
+        _many_findings(4), [], {},
     )
-    assert "The remaining" not in html
+    assert "listed below in rank order" not in html
 
 
 def test_a_pathologically_long_statement_cannot_blow_the_budget():
@@ -1359,3 +1361,76 @@ def test_the_table_says_when_it_stopped_short():
                          claim_types=["mechanism"]) for i in range(14)]
     body = _rice_html(render_report_html(_rice_run(), findings))
     assert "4 findings below these" in body
+
+
+# ─── The body is a memo, not a dump ─────────────────────────────────────────
+#
+# A real run produced 549 findings that bore on the goal and rendered 150 of
+# them in full — inside every size budget, and far past what anyone reads.
+
+
+def _many(n: int) -> list[dict]:
+    """n findings, descending reach, so rank order is unambiguous."""
+    return [
+        _finding(statement=f"Theme {i} stalls the renewal",
+                 label=f"Theme {i}", impact_value=n - i)
+        for i in range(n)
+    ]
+
+
+def _full_blocks(html: str) -> int:
+    """Full write-ups are the numbered <h3> cards `_finding_block` emits."""
+    return len(re.findall(r"<h3>\d+\.\s", html))
+
+
+def test_only_the_ranked_findings_get_a_full_write_up():
+    html = render_report_html(_run(), _many(60), [])
+    assert _full_blocks(html) == MAX_DETAILED_FINDINGS
+
+
+def test_the_detailed_cap_agrees_with_the_table_that_ranked_them():
+    # If these two drift, the document shows ten rows in RICE and a different
+    # number of write-ups, and the reader cannot tell which set "mattered".
+    assert MAX_DETAILED_FINDINGS == MAX_RICE_ROWS
+
+
+def test_the_findings_past_the_cap_are_still_listed_and_counted():
+    html = render_report_html(_run(), _many(60), [])
+    # every one of the 50 beyond the cap is present as a one-line row
+    assert html.count("<li>") >= 60 - MAX_DETAILED_FINDINGS
+    assert "The next 50 findings are listed below" in html
+    # and the heading still tells the truth about the total
+    assert "What the evidence says (60)" in html
+
+
+def test_the_overflow_does_not_blame_a_size_limit_it_did_not_hit():
+    # 60 findings fits every budget: the reason the rest are one-liners is the
+    # editorial cap, not size. Saying "size limit" here would be a lie.
+    html = render_report_html(_run(), _many(60), [])
+    para = html[html.find("The next 50 findings"):][:240]
+    assert "size limit" not in para
+    assert "the ranking put first" in para
+
+
+def test_no_shed_rung_can_raise_the_number_of_write_ups():
+    """A document big enough to MISS rung 0 must not come back with more
+    write-ups than it started with.
+
+    The ladder raises full_cap again on its lower rungs (100, 50, 20) so that
+    overflow rows are shed before detail is. Passing a rung straight through
+    would take a run capped at ten and re-render it with a hundred. Rendered,
+    not reasoned about: an assertion on the constants alone is true by
+    arithmetic and would pass against the bug."""
+    findings = [
+        _finding(statement="renewals stall on the parts flow " * 60,
+                 label=f"Theme {i} " * 12, impact_value=2_000 - i)
+        for i in range(2_000)
+    ]
+    html = render_report_html(_run(), findings, [])
+    assert _full_blocks(html) <= MAX_DETAILED_FINDINGS
+
+
+def test_a_run_smaller_than_the_cap_is_untouched():
+    html = render_report_html(_run(), _many(3), [])
+    assert _full_blocks(html) == 3
+    assert "listed below in rank order" not in html
