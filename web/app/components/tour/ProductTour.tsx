@@ -40,6 +40,8 @@ const HALO = 8
 const BUBBLE_GAP = 14
 /** Bubble width; the CSS caps it against small viewports too. */
 const BUBBLE_W = 340
+/** Keep this much clear of the viewport edge on every side. */
+const EDGE = 16
 /** Below this, the rail is display:none — every rail anchor is absent. */
 const RAIL_BREAKPOINT = 900
 
@@ -62,36 +64,52 @@ function rectOf(anchor: string | undefined): Rect | null {
  *
  * Right of the element normally — the anchors are nearly all in the left rail,
  * so the text reads outward into the empty page rather than off-screen. Falls
- * back to below, then to centred, so a bubble can never be placed where it
- * cannot be read.
+ * back to below, then above, then to centred, so a bubble can never be placed
+ * where it cannot be read.
+ *
+ * `h` IS THE BUBBLE'S MEASURED HEIGHT, and it has to be. This clamped against a
+ * hardcoded guess at first, which held until a step with a longer body was
+ * anchored near the bottom of the rail: the guess said the bubble ended 220px
+ * below its top, the real one ran past that, and the buttons were cut off by
+ * the viewport. A card whose Next button is off-screen is a stuck tour, so the
+ * height is read from the DOM rather than assumed.
  */
-function bubblePosition(rect: Rect | null, vw: number, vh: number) {
+function bubblePosition(rect: Rect | null, vw: number, vh: number, h: number) {
   if (!rect) return null
-  const rightEdge = rect.left + rect.width + HALO + BUBBLE_GAP
-  if (rightEdge + BUBBLE_W + 16 <= vw) {
-    return {
-      left: rightEdge,
-      // Vertically centred on the element, then clamped into the viewport so a
-      // step anchored near the top or bottom never hangs off the edge.
-      top: Math.min(Math.max(16, rect.top + rect.height / 2 - 90), vh - 220),
-    }
+  // Clamp a preferred top into the viewport, given the real height.
+  const clampTop = (preferred: number) =>
+    Math.max(EDGE, Math.min(preferred, vh - h - EDGE))
+
+  const right = rect.left + rect.width + HALO + BUBBLE_GAP
+  if (right + BUBBLE_W + EDGE <= vw) {
+    // Vertically centred on the element, then clamped so it cannot hang off
+    // either edge.
+    return { left: right, top: clampTop(rect.top + rect.height / 2 - h / 2) }
   }
+
+  const left = Math.max(EDGE, Math.min(rect.left, vw - BUBBLE_W - EDGE))
   const below = rect.top + rect.height + HALO + BUBBLE_GAP
-  if (below + 200 <= vh) {
-    return { left: Math.min(Math.max(16, rect.left), vw - BUBBLE_W - 16), top: below }
-  }
+  if (below + h + EDGE <= vh) return { left, top: below }
+
+  const above = rect.top - HALO - BUBBLE_GAP - h
+  if (above >= EDGE) return { left, top: above }
+
   return null
 }
 
 export function ProductTour() {
   const auth = useAuth()
-  const { profile, workspace, orgRole, refresh } = useWorkspace()
+  const { profile, workspace, workspaces = [], orgRole, refresh } = useWorkspace()
 
   const [open, setOpen] = useState(false)
   const [index, setIndex] = useState(0)
   const [steps, setSteps] = useState<TourStep[]>([])
   const [rect, setRect] = useState<Rect | null>(null)
   const [viewport, setViewport] = useState({ w: 0, h: 0 })
+  /** The bubble's REAL rendered height, fed back into the placement maths.
+   *  Starts at a sane guess so the first paint is not wildly wrong; the layout
+   *  effect below corrects it before the browser paints. */
+  const [bubbleH, setBubbleH] = useState(220)
   const bubbleRef = useRef<HTMLDivElement | null>(null)
   /** Guards the one-shot open: without it a context refresh re-opens a tour
    *  the user just closed, because `product_tour_completed_at` is only null
@@ -116,6 +134,7 @@ export function ProductTour() {
       orgRole,
       firstName: profile.first_name,
       onTrial: workspace.subscription_status === "trialing",
+      workspaceCount: workspaces.length,
     }
     const resolved = stepsFor(audience)
     // Defensive: a company with everything switched off could filter the list
@@ -129,7 +148,7 @@ export function ProductTour() {
     setSteps(resolved)
     setIndex(0)
     setOpen(true)
-  }, [userId, profile, workspace, orgRole])
+  }, [userId, profile, workspace, workspaces, orgRole])
 
   const step = open ? steps[index] : undefined
 
@@ -153,6 +172,14 @@ export function ProductTour() {
       window.removeEventListener("scroll", measure, true)
     }
   }, [open, step?.anchor, index])
+
+  // Measure AFTER the step's copy has rendered, and before paint — the height
+  // changes with every step because the bodies differ in length.
+  useLayoutEffect(() => {
+    if (!open) return
+    const h = bubbleRef.current?.offsetHeight
+    if (h && Math.abs(h - bubbleH) > 1) setBubbleH(h)
+  })
 
   const close = useCallback(async () => {
     setOpen(false)
@@ -203,7 +230,7 @@ export function ProductTour() {
 
   if (!open || !step) return null
 
-  const placed = bubblePosition(rect, viewport.w, viewport.h)
+  const placed = bubblePosition(rect, viewport.w, viewport.h, bubbleH)
   const isLast = index === steps.length - 1
 
   return (

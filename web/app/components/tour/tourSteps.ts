@@ -33,6 +33,11 @@ export type TourAudience = {
   /** True while `subscription_status` is "trialing" — the credits step only
    *  earns its place when there is a trial balance to talk about. */
   onTrial: boolean
+  /** How many workspaces this person can enter. With one, and no right to
+   *  create another, the rail's switcher renders STATIC and unclickable
+   *  (`wsInteractive` in Sidebar) — so the step that explains it is withheld
+   *  rather than spotlighting a control that does not open. */
+  workspaceCount: number
 }
 
 export type TourStep = {
@@ -124,6 +129,21 @@ export const TOUR_STEPS: TourStep[] = [
       "Ideas ranked by impact, with the finished ones kept alongside. You can "
       + "generate a full PRD straight from an idea rather than starting from "
       + "a blank page.",
+  },
+  {
+    id: "workspaces",
+    anchor: "workspace-switcher",
+    title: "Switching workspaces",
+    body:
+      "The name at the top of the rail is also the workspace switcher. Each "
+      + "workspace keeps its own connected data, chats and documents, so "
+      + "switching changes everything below it. Owners and admins can start "
+      + "another from the same menu.",
+    // Only when it actually opens. With a single workspace and no right to
+    // create one the trigger is rendered static (Sidebar's `wsInteractive`),
+    // and spotlighting a control that does nothing when clicked teaches the
+    // wrong thing about the product.
+    when: (a) => a.workspaceCount > 1 || isAdmin(a),
   },
   {
     id: "sync",

@@ -20,6 +20,7 @@ function audience(over: Partial<TourAudience> = {}): TourAudience {
     orgRole: "owner",
     firstName: "Ada",
     onTrial: true,
+    workspaceCount: 1,
     ...over,
   }
 }
@@ -191,6 +192,25 @@ describe("the tour is actually mounted", () => {
     )
     expect(shell, "AppShell imports ProductTour but never renders it").toMatch(
       /<ProductTour\s*\/>/,
+    )
+  })
+})
+
+describe("stepsFor — the workspace switcher", () => {
+  it("only explains it when the switcher actually opens", () => {
+    // With ONE workspace and no right to create another, Sidebar renders the
+    // trigger static and unclickable. Spotlighting a control that does nothing
+    // when clicked teaches the wrong thing about the product.
+    expect(idsFor(audience({ workspaceCount: 1, orgRole: "member" }))).not.toContain(
+      "workspaces",
+    )
+    // Two workspaces: it opens for anyone who can reach both.
+    expect(idsFor(audience({ workspaceCount: 2, orgRole: "member" }))).toContain(
+      "workspaces",
+    )
+    // One workspace but an admin: the menu still opens, to create another.
+    expect(idsFor(audience({ workspaceCount: 1, orgRole: "admin" }))).toContain(
+      "workspaces",
     )
   })
 })

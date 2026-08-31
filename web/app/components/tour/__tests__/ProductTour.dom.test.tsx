@@ -187,6 +187,47 @@ describe("ProductTour — it only offers itself once", () => {
   })
 })
 
+describe("ProductTour — the card always fits on screen", () => {
+  // THE BUG THIS GUARDS, reported from a screenshot: on the search step — a
+  // long body, anchored at the BOTTOM of the rail — the card ran off the
+  // bottom of the window and took Back/Next with it. A tour whose Next button
+  // is off-screen is a stuck tour.
+  //
+  // The cause was a hardcoded guess at the card's height in the clamp. jsdom
+  // computes no layout, so the height is stubbed here to stand in for a step
+  // whose copy is taller than any guess would be.
+  it("clamps a tall card anchored near the bottom back into the viewport", () => {
+    const H = 300
+    const spy = vi
+      .spyOn(HTMLElement.prototype, "offsetHeight", "get")
+      .mockReturnValue(H)
+    try {
+      Object.defineProperty(window, "innerWidth", { value: 1024, configurable: true })
+      Object.defineProperty(window, "innerHeight", { value: 500, configurable: true })
+
+      const el = document.createElement("button")
+      el.setAttribute("data-tour", "composer")
+      // Near the bottom: centring a 300px card on it would place its top at
+      // 270 and its bottom at 570, well past a 500px window.
+      el.getBoundingClientRect = () =>
+        ({ top: 400, left: 20, width: 40, height: 40 }) as DOMRect
+      document.body.appendChild(el)
+
+      render(<ProductTour />)
+      fireEvent.click(screen.getByTestId("product-tour-next")) // -> the anchored step
+
+      const bubble = screen.getByTestId("product-tour-bubble")
+      const top = parseFloat(bubble.style.top)
+      expect(Number.isFinite(top)).toBe(true)
+      expect(top).toBeGreaterThanOrEqual(0)
+      // The whole card, buttons included, is inside the window.
+      expect(top + H).toBeLessThanOrEqual(500)
+    } finally {
+      spy.mockRestore()
+    }
+  })
+})
+
 describe("ProductTour — anchors", () => {
   it("spotlights a real element when its anchor is on the page", () => {
     anchorAt("composer")

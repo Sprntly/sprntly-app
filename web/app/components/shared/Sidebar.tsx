@@ -160,6 +160,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
             aria-expanded={wsMenuOpen}
             title={brandName}
             data-testid="workspace-switcher"
+            data-tour="workspace-switcher"
           >
             <span className="sb-ws-name">{brandName}</span>
             {wsInteractive && (
