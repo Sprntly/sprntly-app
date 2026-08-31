@@ -273,23 +273,33 @@ TRIAL_DAYS = 7
 # is charged. That is a month of product for free, and the customers who cost
 # the most are exactly the ones who would take it and cancel on day six.
 #
-# 100 is not a round number picked for looks; it is one complete pass through
-# the core loop, measured against `CREDIT_COSTS` above:
+# 50 buys the DOCUMENT loop, and deliberately not a prototype. Measured against
+# `CREDIT_COSTS` above:
 #
-#     a few chats (10) + an ask (3) + evidence (10) + a PRD (25)
-#       + a prototype (50)  =  98
+#     a few chats (10) + an ask (3) + evidence (10) + a PRD (25)  =  48
 #
-# So a trialist can go from question to shipped prototype ONCE, with a little
-# slack. Below about 85 they cannot: a PRD and a prototype alone are 75, and a
-# trial that cannot reach the thing being trialled does not convert. Above it,
-# we are giving away a second lap nobody needs to make up their mind.
+# A trialist can go from question to a finished PRD, which is the thing most of
+# them came to see, with a little slack. A prototype costs 50 on its own — the
+# single most expensive action in the table — so at this allowance it is out of
+# reach even before the PRD that would feed it (25 + 50 = 75). That is the
+# intended shape, not an accident of the arithmetic: the free week proves the
+# writing, and the prototype is what a plan is for.
 #
-# The cost to us is bounded and small — measured from `llm_usage_events`, a
-# typical 100-credit trial is ~$1.30 of tokens and the worst case (all 100 spent
-# on `ask`, the priciest action per credit) is ~$4.60, against the $5/month
-# platform fee. Cheap enough that the number can move on evidence rather than
-# nerves.
-TRIAL_CREDITS = 100
+# THIS REPLACES A 100-CREDIT TRIAL (owner decision 2026-08-31, reversed the
+# same day) which was sized at exactly one full pass INCLUDING a prototype.
+# The note it carried is worth keeping, because it is the argument against
+# going lower still: below about 85 the full loop cannot complete, and 50 is
+# well below that. The trade is accepted knowingly — a trialist who wants a
+# prototype now has to subscribe, which is the point.
+#
+# WHAT TO WATCH. This is a conversion bet, not a cost saving. The cost was
+# never the problem: measured from `llm_usage_events`, a typical 100-credit
+# trial was ~$1.30 of tokens and the worst case (all of it spent on `ask`, the
+# priciest action per credit) ~$4.60, against the $5/month platform fee.
+# Halving it saves under a dollar a trial. If trial-to-paid conversion drops,
+# this number is the first thing to put back — it moves on evidence, and the
+# evidence is conversion, not spend.
+TRIAL_CREDITS = 50
 
 # Matches REFUND_WINDOW_DAYS on purpose: a first-time buyer gets seven days
 # before any money moves, and a repeat buyer gets seven days to ask for it
