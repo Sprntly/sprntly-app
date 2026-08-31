@@ -392,10 +392,15 @@ function SettingsContent() {
   // defaults to the one you are inside.
   //
   // `section` comes from the URL, and the URL changes without remounting this
-  // component - a command-palette jump to `?section=mcp` has to open
-  // Integrations on the way in. So the open row FOLLOWS the active pane
-  // (React's documented adjust-state-during-render pattern), while still
-  // being a drawer you can shut by hand.
+  // component - a command-palette jump to `?section=metrics` has to open
+  // Company on the way in. So the open row FOLLOWS the active pane (React's
+  // documented adjust-state-during-render pattern), while still being a drawer
+  // you can shut by hand.
+  //
+  // `?section=mcp` used to be the example here. It is no longer: MCP Access is
+  // a row of its own since the Integrations pane was dissolved, so it opens no
+  // drawer at all and `paneFor` returns null for it — which this handles as
+  // "close whatever was open", exactly right for landing on a standalone row.
   const activePaneId = paneFor(section)?.id ?? null
   const [openId, setOpenId] = useState<SettingsSectionId | null>(activePaneId)
   const [lastPaneId, setLastPaneId] = useState<SettingsSectionId | null>(activePaneId)

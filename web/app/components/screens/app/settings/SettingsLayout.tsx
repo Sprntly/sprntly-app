@@ -95,7 +95,12 @@ export const SETTINGS_PANES: { id: SettingsSectionId; label: string; leaves: Set
   },
   // How the team WORKS — who is in it, and how it decides.
   { id: "team", label: "Team & process", leaves: ["team", "process"] },
-  { id: "connectors", label: "Integrations", leaves: ["connectors", "mcp"] },
+  // NO "Integrations" PANE. Connectors and MCP Access were its two leaves, and
+  // a drawer holding two things you reach for separately is a click in front
+  // of both. They are top-level rows now (see SETTINGS_NAV) — which also means
+  // `paneFor("connectors")` and `paneFor("mcp")` return null, and each renders
+  // without a sub-nav beside it. Their `?section=` links are unchanged, which
+  // matters: six places in the app deep-link to `?section=connectors`.
   { id: "billing", label: "Account", leaves: ["billing", "security", "admin"] },
 ]
 
@@ -150,7 +155,13 @@ export const SETTINGS_NAV: SettingsNavGroup[] = [
   },
   {
     groupLabel: "Data & Integrations",
-    items: [{ id: "connectors", label: "Integrations", available: true }],
+    items: [
+      // Two rows, not one "Integrations" drawer. Connecting a source and
+      // copying an MCP token are unrelated errands done by different people at
+      // different times, and neither was ever found by opening the other.
+      { id: "connectors", label: "Connectors", available: true },
+      { id: "mcp", label: "MCP Access", available: true },
+    ],
   },
   {
     groupLabel: "Help",

@@ -133,7 +133,10 @@ describe("SETTINGS_NAV — design-3 grouped structure (commit B)", () => {
       team: "Team & process",
       templates: "Templates",
       skills: "Skills",
-      connectors: "Integrations",
+      // Two rows since the Integrations pane was dissolved — each is its own
+      // errand, and neither was ever found by opening the other.
+      connectors: "Connectors",
+      mcp: "MCP Access",
       billing: "Account",
       guide: "Guide",
     })
