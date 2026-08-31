@@ -63,7 +63,12 @@ const isAdmin = (a: TourAudience) => a.orgRole === "owner" || a.orgRole === "adm
 export const TOUR_STEPS: TourStep[] = [
   {
     id: "welcome",
-    title: "Welcome to Sprntly",
+    // NOT "Welcome to Sprntly". This runs for every user who has never been
+    // shown it, which on the day it ships is EVERYONE — including people who
+    // have been using the product for months. Welcoming them to software they
+    // already use reads as a system that does not know who it is talking to.
+    // "A quick tour" is true for a first-timer and a veteran alike.
+    title: "A quick tour of Sprntly",
     body:
       "Sprntly reads the tools your team already works in and turns what it "
       + "finds into product decisions — answers, briefs, PRDs and prototypes. "
@@ -166,10 +171,16 @@ export const TOUR_STEPS: TourStep[] = [
   {
     id: "done",
     title: "That's the tour",
+    // Deliberately does not tell anyone to go and connect something: this also
+    // runs for established users who connected their tools months ago, and an
+    // instruction they have already followed makes the whole tour look like it
+    // is reading from a script rather than at their workspace. The connector
+    // point is made once, in its own step, to the admins who can act on it.
     body:
-      "The most useful next step is connecting a tool or two, then asking "
-      + "something you would normally go digging for. If anything looks wrong, "
-      + "the feedback button in the bottom-left goes straight to us.",
+      "Ask it something you would normally go digging for — that is the "
+      + "fastest way to see what it already knows. The more of your tools it "
+      + "can read, the more it can answer. If anything looks wrong, the "
+      + "feedback button in the bottom-left goes straight to us.",
   },
 ]
 

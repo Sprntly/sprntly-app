@@ -84,7 +84,7 @@ describe("ProductTour — whether it runs at all", () => {
   it("runs for a signed-in user who has never seen it", () => {
     render(<ProductTour />)
     expect(screen.getByTestId("product-tour-bubble")).toBeTruthy()
-    expect(screen.getByText("Welcome to Sprntly")).toBeTruthy()
+    expect(screen.getByText("A quick tour of Sprntly")).toBeTruthy()
   })
 
   it("does NOT run for someone who already finished or skipped it", () => {
@@ -123,23 +123,23 @@ describe("ProductTour — whether it runs at all", () => {
 describe("ProductTour — moving through it", () => {
   it("Next advances and Back returns", () => {
     render(<ProductTour />)
-    expect(screen.getByText("Welcome to Sprntly")).toBeTruthy()
+    expect(screen.getByText("A quick tour of Sprntly")).toBeTruthy()
     // Back is deliberately absent on the first step — there is nowhere back to.
     expect(screen.queryByTestId("product-tour-back")).toBeNull()
 
     fireEvent.click(screen.getByTestId("product-tour-next"))
-    expect(screen.queryByText("Welcome to Sprntly")).toBeNull()
+    expect(screen.queryByText("A quick tour of Sprntly")).toBeNull()
 
     fireEvent.click(screen.getByTestId("product-tour-back"))
-    expect(screen.getByText("Welcome to Sprntly")).toBeTruthy()
+    expect(screen.getByText("A quick tour of Sprntly")).toBeTruthy()
   })
 
   it("arrow keys move, and Escape closes", async () => {
     render(<ProductTour />)
     fireEvent.keyDown(document, { key: "ArrowRight" })
-    expect(screen.queryByText("Welcome to Sprntly")).toBeNull()
+    expect(screen.queryByText("A quick tour of Sprntly")).toBeNull()
     fireEvent.keyDown(document, { key: "ArrowLeft" })
-    expect(screen.getByText("Welcome to Sprntly")).toBeTruthy()
+    expect(screen.getByText("A quick tour of Sprntly")).toBeTruthy()
 
     fireEvent.keyDown(document, { key: "Escape" })
     await waitFor(() => expect(screen.queryByTestId("product-tour-bubble")).toBeNull())
