@@ -317,7 +317,9 @@ def grant(
     )
 
 
-def grant_monthly(company_id: str, plan: str, *, period_start: str) -> int:
+def grant_monthly(
+    company_id: str, plan: str, *, period_start: str, status: str | None = None
+) -> int:
     """The billing-period credit grant.
 
     SET, not add: a plan's monthly credits do not roll over, so the balance is
@@ -332,7 +334,9 @@ def grant_monthly(company_id: str, plan: str, *, period_start: str) -> int:
     Idempotent on `period_start`: Stripe delivers `invoice.paid` at least once
     and a replay must not hand out a second month of credits.
     """
-    monthly = plans.monthly_credits(plan)
+    # `status` decides the size of the grant, not just the plan: a trial gets
+    # `plans.TRIAL_CREDITS`, not a free month of the plan they are trialling.
+    monthly = plans.period_credits(plan, status)
     if monthly == plans.UNLIMITED:
         return plans.UNLIMITED
 

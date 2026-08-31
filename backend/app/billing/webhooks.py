@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timezone
 
-from app.billing import credits, plans, referrals, stripe_client
+from app.billing import credits, emails, plans, referrals, stripe_client
 from app.db import billing as billing_db
 
 logger = logging.getLogger(__name__)
@@ -144,8 +144,19 @@ def _sync_subscription(
         status in plans.ACTIVE_SUBSCRIPTION_STATUSES
         and prev_status not in plans.ACTIVE_SUBSCRIPTION_STATUSES
     ):
-        if referrals.reward_for_subscription(company_id):
+        rewarded = referrals.reward_for_subscription(company_id)
+        if rewarded:
             logger.info("referral_converted_on_subscribe company=%s", company_id)
+            # The REFERRER is mailed, not the company that just subscribed.
+            # This is the one email with no other surface: without it they only
+            # find out by opening billing and noticing a bigger number.
+            _safe_email(
+                lambda: emails.referral_converted(
+                    rewarded["referrer_company_id"],
+                    referral_id=rewarded["id"],
+                    credits_awarded=plans.REFERRAL_REWARD_CREDITS,
+                )
+            )
 
     granted_period = False
     if status in plans.ACTIVE_SUBSCRIPTION_STATUSES:
@@ -155,7 +166,7 @@ def _sync_subscription(
         period = _iso(period_start) or _iso(period_end)
         fresh = billing_db.get_billing(company_id) or {}
         if period and fresh.get("credits_granted_for") != period:
-            credits.grant_monthly(company_id, plan, period_start=period)
+            credits.grant_monthly(company_id, plan, period_start=period, status=status)
             billing_db.set_billing(company_id, {"credits_granted_for": period})
             granted_period = True
             logger.info(
@@ -196,6 +207,12 @@ def _sync_subscription(
         and prev_plan
         and plan != prev_plan
         and status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        # NOT DURING A TRIAL. The trial allowance is flat — `plans.TRIAL_CREDITS`
+        # regardless of which plan is being trialled — so there is no difference
+        # between two plans to top up. Without this, switching plan mid-trial
+        # added the Starter-to-Product-Builder uplift (560) to a 100-credit
+        # trial balance, and switching back and forth farmed it.
+        and status != "trialing"
         and not plans.is_unlimited(plan)
         and not plans.is_unlimited(prev_plan)
     ):
@@ -219,6 +236,22 @@ def _sync_subscription(
                 plan,
                 uplift,
             )
+
+    # EMAIL, on the same transitions the history records — and only on a
+    # transition, so a redelivered webhook re-syncing an unchanged
+    # subscription does not mail anybody. `emails` de-dups on its own besides;
+    # this is the cheap guard, that is the correct one.
+    if (plan, status) != (prev_plan, prev_status):
+        _safe_email(
+            lambda: _email_for_transition(
+                company_id,
+                subscription_id=subscription_id,
+                plan=plan,
+                status=status,
+                prev_plan=prev_plan,
+                prev_status=prev_status,
+            )
+        )
 
     # HISTORY, written only on a real transition.
     #
@@ -280,6 +313,13 @@ def _on_checkout_completed(session: dict) -> str:
             reason="topup",
             # The session id, so a redelivered event grants once.
             ref_id=session.get("id"),
+        )
+        _safe_email(
+            lambda: emails.topup_purchased(
+                company_id,
+                ref_id=session.get("id") or "",
+                credits_purchased=purchased,
+            )
         )
         return f"granted {purchased} top-up credits"
 
@@ -348,6 +388,12 @@ def _on_subscription_event(
                 source="customer.subscription.deleted",
             )
 
+        _safe_email(
+            lambda: emails.subscription_cancelled(
+                company_id, subscription_id=sub.get("id") or ""
+            )
+        )
+
         logger.info("billing_subscription_canceled company=%s", company_id)
         return "subscription canceled"
 
@@ -392,6 +438,58 @@ def reconcile_from_stripe(company_id: str) -> bool:
         sub.get("status"),
     )
     return True
+
+
+def _safe_email(fn) -> None:
+    """Run an email send without letting it near the caller's outcome.
+
+    A webhook that 500s because a mailbox bounced gets retried by Stripe, and
+    the retry re-runs the subscription sync. Billing state must never depend on
+    whether an email went out.
+    """
+    try:
+        fn()
+    except Exception:  # noqa: BLE001 — an email is never worth failing a webhook
+        logger.warning("billing_email: send raised, ignoring", exc_info=True)
+
+
+def _email_for_transition(
+    company_id: str,
+    *,
+    subscription_id: str,
+    plan: str,
+    status: str | None,
+    prev_plan: str | None,
+    prev_status: str | None,
+) -> None:
+    """Pick the one email a subscription transition deserves, if any.
+
+    Deliberately at most ONE per transition. A trial converting to active
+    changes both status and (arguably) nothing else; a customer does not want
+    "your trial started" and "you are now on Starter" in the same minute.
+    """
+    became_live = (
+        status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        and prev_status not in plans.ACTIVE_SUBSCRIPTION_STATUSES
+    )
+
+    if became_live and status == "trialing":
+        emails.trial_started(company_id, subscription_id=subscription_id)
+        return
+
+    # A plan MOVE on an already-live subscription. Not on the first
+    # subscription: `companies.plan` defaults to 'starter', so a brand-new
+    # Product Builder subscription looks like a move from Starter and would
+    # mail "you are now on Product Builder" to somebody who has just chosen it.
+    if (
+        prev_plan
+        and plan != prev_plan
+        and prev_status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+        and status in plans.ACTIVE_SUBSCRIPTION_STATUSES
+    ):
+        emails.plan_changed(
+            company_id, subscription_id=subscription_id, previous_plan=prev_plan
+        )
 
 
 def _subscription_id_from_invoice(invoice: dict) -> str | None:

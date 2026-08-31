@@ -475,7 +475,11 @@ def test_a_trialing_subscription_is_granted_its_credits(company):
 
     row = _row(company.id)
     assert row["subscription_status"] == "trialing"
-    assert row["credit_balance"] == plans.PLAN_CREDITS[plans.PRODUCT_BUILDER]
+    # The TRIAL allowance, not the plan's. Seven days that hand over a full
+    # month of Product Builder credits is a month of product for free, and
+    # the ones who cost the most are the ones who would take it and cancel
+    # on day six — see plans.TRIAL_CREDITS.
+    assert row["credit_balance"] == plans.TRIAL_CREDITS
 
 
 def test_the_trial_grant_does_not_pretend_the_company_has_paid(company):
@@ -504,7 +508,7 @@ def test_a_replayed_subscription_event_does_not_grant_twice(company):
             )
         )
 
-    assert _row(company.id)["credit_balance"] == plans.PLAN_CREDITS[plans.PRODUCT_BUILDER]
+    assert _row(company.id)["credit_balance"] == plans.TRIAL_CREDITS
 
 
 def test_the_invoice_does_not_re_grant_the_period_the_subscription_already_did(company):
@@ -603,7 +607,7 @@ def test_the_period_is_read_off_the_item_when_stripe_moved_it(company):
         _event("customer.subscription.created", {"id": "sub_1", "customer": "cus_live"})
     )
 
-    assert _row(company.id)["credit_balance"] == plans.PLAN_CREDITS[plans.PRODUCT_BUILDER]
+    assert _row(company.id)["credit_balance"] == plans.TRIAL_CREDITS
 
 
 # ---------------------------------------------------------------------------

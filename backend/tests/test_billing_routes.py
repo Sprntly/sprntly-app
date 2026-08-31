@@ -803,8 +803,9 @@ def test_summary_asks_stripe_when_it_holds_a_customer_but_no_subscription(
     assert body["subscription_status"] == "trialing"
     assert body["has_access"] is True
     # And the trial's credits landed — a trial pays no invoice, so nothing else
-    # would ever have granted them.
-    assert body["credit_balance"] == plans.PLAN_CREDITS[plans.STARTER]
+    # would ever have granted them. The TRIAL allowance, flat across plans,
+    # rather than a free month of Starter.
+    assert body["credit_balance"] == plans.TRIAL_CREDITS
 
 
 def test_reconcile_does_not_invent_a_subscription_that_is_not_there(ctx, monkeypatch):

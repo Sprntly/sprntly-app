@@ -187,6 +187,20 @@ def monthly_credits(plan: str | None) -> int:
     return PLAN_CREDITS[resolve_plan(plan)]
 
 
+def period_credits(plan: str | None, status: str | None) -> int:
+    """What THIS period is worth, which a trial's is not the plan's.
+
+    One helper rather than a `status == "trialing"` check at each site, because
+    there are three that must agree: the grant, the low-balance warning that
+    divides by the allowance, and the email that tells a customer the number.
+    Two of them agreeing and one not is how somebody gets warned they are
+    "running low" at 140 of 756 while actually holding 140 of 100.
+    """
+    if (status or "") == "trialing":
+        return TRIAL_CREDITS
+    return monthly_credits(plan)
+
+
 def is_unlimited(plan: str | None) -> bool:
     return monthly_credits(plan) == UNLIMITED
 
@@ -251,6 +265,31 @@ REFUND_WINDOW_DAYS = 7
 # back to resubscribe after cancelling has already seen the product — the trial
 # is not for them.
 TRIAL_DAYS = 7
+
+# WHAT A TRIAL IS WORTH, and why it is not the plan's allowance.
+#
+# Owner decision, 2026-08-31. A trialling company used to be granted the full
+# monthly allowance — 756 credits on Starter — for seven days in which nothing
+# is charged. That is a month of product for free, and the customers who cost
+# the most are exactly the ones who would take it and cancel on day six.
+#
+# 100 is not a round number picked for looks; it is one complete pass through
+# the core loop, measured against `CREDIT_COSTS` above:
+#
+#     a few chats (10) + an ask (3) + evidence (10) + a PRD (25)
+#       + a prototype (50)  =  98
+#
+# So a trialist can go from question to shipped prototype ONCE, with a little
+# slack. Below about 85 they cannot: a PRD and a prototype alone are 75, and a
+# trial that cannot reach the thing being trialled does not convert. Above it,
+# we are giving away a second lap nobody needs to make up their mind.
+#
+# The cost to us is bounded and small — measured from `llm_usage_events`, a
+# typical 100-credit trial is ~$1.30 of tokens and the worst case (all 100 spent
+# on `ask`, the priciest action per credit) is ~$4.60, against the $5/month
+# platform fee. Cheap enough that the number can move on evidence rather than
+# nerves.
+TRIAL_CREDITS = 100
 
 # Matches REFUND_WINDOW_DAYS on purpose: a first-time buyer gets seven days
 # before any money moves, and a repeat buyer gets seven days to ask for it
