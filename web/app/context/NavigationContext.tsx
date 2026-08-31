@@ -268,6 +268,15 @@ interface NavigationContextType {
   closePalette: () => void
   togglePalette: () => void
 
+  /** The feedback modal. Lifted out of Sidebar's local state (2026-08-31) for
+   *  the same reason the palette lives here: two triggers now open it — the
+   *  rail button and the command palette's "Send feedback" action — and the
+   *  palette cannot reach a sibling component's useState. Rendered once by
+   *  AppShell, so it also survives the rail being hidden below 900px. */
+  feedbackOpen: boolean
+  openFeedback: () => void
+  closeFeedback: () => void
+
   /** Narrow icon-only rail vs full labels */
   sidebarCollapsed: boolean
   toggleSidebar: () => void
@@ -314,6 +323,7 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const [pendingTicketSetFocus, setPendingTicketSetFocus] = useState<TicketSetFocusRequest | null>(null)
   const [pendingDocumentFocus, setPendingDocumentFocus] = useState<DocumentFocusRequest | null>(null)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [feedbackOpen, setFeedbackOpen] = useState(false)
   // Default to the collapsed icon rail; a saved "0" preference (see the init
   // effect) expands it on load. Users toggle via the sidebar chevron.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(true)
@@ -553,6 +563,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
   const closePalette = useCallback(() => setPaletteOpen(false), [])
   const togglePalette = useCallback(() => setPaletteOpen((v) => !v), [])
 
+  const openFeedback = useCallback(() => setFeedbackOpen(true), [])
+  const closeFeedback = useCallback(() => setFeedbackOpen(false), [])
+
   const openDrawer = useCallback((drawer: "claude" | "ticket" | "design-agent") => {
     setActiveDrawer(drawer)
   }, [])
@@ -637,6 +650,9 @@ export function NavigationProvider({ children }: { children: ReactNode }) {
         openPalette,
         closePalette,
         togglePalette,
+        feedbackOpen,
+        openFeedback,
+        closeFeedback,
         sidebarCollapsed,
         toggleSidebar,
         aiPanelWidth,

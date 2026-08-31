@@ -23,6 +23,11 @@ const TicketDrawer = dynamic(() =>
 const CommandPalette = dynamic(() =>
   import("../components/shared/CommandPalette").then((m) => m.CommandPalette)
 )
+// Mounted here, not in Sidebar, since the palette can open it too — and the
+// rail is display:none below 900px, which would otherwise take the modal with it.
+const FeedbackModal = dynamic(() =>
+  import("../components/shared/FeedbackModal").then((m) => m.FeedbackModal)
+)
 import { useCompany } from "../context/CompanyContext"
 import { useContent } from "../context/ContentContext"
 import { profileDisplayName, useWorkspace } from "../context/WorkspaceContext"
@@ -165,6 +170,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     setReviewPastOpen,
     paletteOpen,
     closePalette,
+    feedbackOpen,
+    closeFeedback,
     togglePalette,
   } = useNavigation()
 
@@ -214,6 +221,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <ApproveModal />
       <InviteModal />
       <CommandPalette open={paletteOpen} onClose={closePalette} />
+      <FeedbackModal open={feedbackOpen} onClose={closeFeedback} />
       <ClaudeDrawer />
       <TicketDrawer />
       <ContentPanel />

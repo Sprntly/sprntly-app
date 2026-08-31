@@ -27,7 +27,6 @@ import {
 } from "../../lib/recentChats"
 import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
-import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
 interface SidebarProps {
@@ -36,7 +35,7 @@ interface SidebarProps {
 }
 
 export function Sidebar({ activeCompany }: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette, openFeedback } = useNavigation()
   const { content } = useContent()
   const router = useRouter()
   const auth = useAuth()
@@ -49,7 +48,6 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
     setActiveWorkspace,
   } = useWorkspace()
   const trialDays = trialDaysLeft(workspace)
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
   // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
   // active dataset — the same run the scheduler triggers, not a bespoke
   // sync-all. The backend collapses repeat clicks onto the in-flight run
@@ -367,7 +365,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           title="Feedback"
           aria-label="Feedback"
           data-testid="sidebar-feedback"
-          onClick={() => setFeedbackOpen(true)}
+          onClick={openFeedback}
         >
           <IconMessagePlus size={15} />
           <span className="nav-tooltip">Feedback</span>
@@ -403,7 +401,9 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         </div>
       </div>
 
-      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      {/* NO <FeedbackModal/> HERE. It moved to AppShell when the palette gained
+          a "Send feedback" action: two triggers, one modal, and the palette
+          cannot reach this component's state. */}
       <CreateWorkspaceModal open={createWsOpen} onClose={() => setCreateWsOpen(false)} />
     </aside>
   )
