@@ -1866,7 +1866,7 @@ def test_runner_batches_and_aggregates(isolated_settings):
     seen_docs = []
     def fake_extract(f, eid, *, doc_name, text, agent, source_hint=None,
                      origin=None, provenance_extra=None, skill_id=None,
-                     source_ref=None, triage=None):
+                     source_ref=None, triage=None, valid_at=None):
         seen_docs.append((doc_name, len(text), source_hint, origin,
                           provenance_extra, skill_id, source_ref))
         return {"signals": 2, "themes": 1, "skipped": 0}

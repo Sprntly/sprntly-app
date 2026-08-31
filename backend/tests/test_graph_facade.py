@@ -1114,6 +1114,144 @@ def test_find_candidates_is_tenant_scoped(facade, kg_candidates):
     assert facade.find_candidates("ent-A", "theme", [0.1] * 1536, k=1) == []
 
 
+# ---------- Leg C: content / entity search — hydration + rpc wiring ------
+#
+# The RPC's own SQL (word-boundary tsquery, cosine kNN, stale_after filter)
+# is exercised by the migration's real-DB round-trip, not here — the fake
+# has no pgvector/tsvector. What IS unit-testable, and had no coverage
+# before this: hydration order, tenant scoping, and the `k`/param wiring —
+# mirroring `find_candidates`'s own tests above exactly.
+
+_KG_SIGNAL_SEARCH_FN = "kg_signal_search_by_content"
+_KG_SIGNAL_EMBED_FN = "kg_find_signal_candidates"
+
+
+@pytest.fixture
+def kg_signal_search(request):
+    """Register rows for the `kg_signal_search_by_content` RPC."""
+    from tests._fake_supabase import FakeSupabaseClient
+
+    FakeSupabaseClient.rpc_returns.pop(_KG_SIGNAL_SEARCH_FN, None)
+
+    def _set(rows):
+        FakeSupabaseClient.rpc_returns[_KG_SIGNAL_SEARCH_FN] = rows
+
+    yield _set
+    FakeSupabaseClient.rpc_returns.pop(_KG_SIGNAL_SEARCH_FN, None)
+
+
+@pytest.fixture
+def kg_signal_embed(request):
+    """Register rows for the `kg_find_signal_candidates` RPC."""
+    from tests._fake_supabase import FakeSupabaseClient
+
+    FakeSupabaseClient.rpc_returns.pop(_KG_SIGNAL_EMBED_FN, None)
+
+    def _set(rows):
+        FakeSupabaseClient.rpc_returns[_KG_SIGNAL_EMBED_FN] = rows
+
+    yield _set
+    FakeSupabaseClient.rpc_returns.pop(_KG_SIGNAL_EMBED_FN, None)
+
+
+def _sig(facade, ent, content):
+    from app.graph.types import Signal
+
+    s = Signal(enterprise_id=ent, source_type="customer_voice",
+              kind="feature_request", content=content)
+    facade.write_signal(ent, s)
+    return s
+
+
+def test_search_signals_by_content_preserves_rpc_order_and_score(facade, kg_signal_search):
+    sigs = [_sig(facade, "ent-A", f"AIG fact {i}") for i in range(3)]
+    # Deliberately anti-insertion-order rows, so a re-sort would be caught.
+    kg_signal_search([
+        {"id": sigs[2].id, "score": 0.9},
+        {"id": sigs[0].id, "score": 0.5},
+        {"id": sigs[1].id, "score": 0.1},
+    ])
+
+    got = facade.search_signals_by_content("ent-A", "AIG", k=3)
+    assert [s.id for s, _ in got] == [sigs[2].id, sigs[0].id, sigs[1].id]
+    assert [round(score, 2) for _, score in got] == [0.9, 0.5, 0.1]
+
+
+def test_search_signals_by_content_passes_question_and_k_verbatim(facade, kg_signal_search, monkeypatch):
+    seen = {}
+    orig_rpc = facade._client.rpc
+
+    def _capturing_rpc(fn, params):
+        if fn == _KG_SIGNAL_SEARCH_FN:
+            seen.update(params)
+        return orig_rpc(fn, params)
+
+    monkeypatch.setattr(facade._client, "rpc", _capturing_rpc)
+    kg_signal_search([])
+    facade.search_signals_by_content("ent-A", "what's the latest on AIG", k=17)
+
+    assert seen == {
+        "p_enterprise_id": "ent-A",
+        "p_query": "what's the latest on AIG",
+        "p_k": 17,
+    }
+
+
+def test_search_signals_by_content_skips_a_row_deleted_after_the_search(facade, kg_signal_search):
+    live = _sig(facade, "ent-A", "still here")
+    kg_signal_search([
+        {"id": "vanished-between-search-and-fetch", "score": 0.9},
+        {"id": live.id, "score": 0.4},
+    ])
+    got = facade.search_signals_by_content("ent-A", "q", k=2)
+    assert [s.id for s, _ in got] == [live.id]
+
+
+def test_search_signals_by_content_is_tenant_scoped(facade, kg_signal_search):
+    """A row belonging to another tenant hydrates to nothing, so it cannot
+    cross the boundary even if the RPC handed it back."""
+    other = _sig(facade, "ent-B", "theirs")
+    kg_signal_search([{"id": other.id, "score": 0.99}])
+    assert facade.search_signals_by_content("ent-A", "q", k=1) == []
+
+
+def test_signal_candidates_by_embedding_preserves_rpc_order_and_score(facade, kg_signal_embed):
+    sigs = [_sig(facade, "ent-A", f"fact {i}") for i in range(3)]
+    kg_signal_embed([
+        {"id": sigs[1].id, "score": 0.95},
+        {"id": sigs[2].id, "score": 0.5},
+        {"id": sigs[0].id, "score": 0.2},
+    ])
+
+    got = facade.signal_candidates_by_embedding("ent-A", [0.1] * 1536, k=3)
+    assert [s.id for s, _ in got] == [sigs[1].id, sigs[2].id, sigs[0].id]
+
+
+def test_signal_candidates_by_embedding_passes_embedding_and_k_verbatim(facade, kg_signal_embed, monkeypatch):
+    seen = {}
+    orig_rpc = facade._client.rpc
+
+    def _capturing_rpc(fn, params):
+        if fn == _KG_SIGNAL_EMBED_FN:
+            seen.update(params)
+        return orig_rpc(fn, params)
+
+    monkeypatch.setattr(facade._client, "rpc", _capturing_rpc)
+    kg_signal_embed([])
+    vec = [0.2] * 1536
+    facade.signal_candidates_by_embedding("ent-A", vec, k=9)
+
+    assert seen["p_enterprise_id"] == "ent-A"
+    assert seen["p_embedding"] == vec
+    assert seen["p_k"] == 9
+
+
+def test_signal_candidates_by_embedding_is_tenant_scoped(facade, kg_signal_embed):
+    other = _sig(facade, "ent-B", "theirs")
+    kg_signal_embed([{"id": other.id, "score": 0.99}])
+    assert facade.signal_candidates_by_embedding("ent-A", [0.1] * 1536, k=1) == []
+
+
 # ---------- decision log ----------
 
 def test_log_agent_decision_round_trip(isolated_settings):

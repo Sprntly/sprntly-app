@@ -33,12 +33,13 @@ def mod(isolated_settings):
     return _load_module()
 
 
-def _rec(external_id: str, title: str = "t"):
+def _rec(external_id: str, title: str = "t", *, timestamp: str | None = None):
     from app.kg_ingest.types import RawRecord
     return RawRecord(
         provider="fireflies", kind="meeting", external_id=external_id, title=title,
         text=f"summary: digest for {external_id}",
         checklist_text=f"summary: digest for {external_id}\ntranscript:\nfull text {external_id}",
+        timestamp=timestamp,
     )
 
 
@@ -326,6 +327,88 @@ def test_batched_results_route_through_parse_not_sync(mod, monkeypatch):
     assert sync_calls == [], "the sync fallback must not run when run_batch succeeds"
     assert set(parse_calls) == {"extract", "checklist"}
     assert len(recorded) == 1
+
+
+# ── valid_at: the call's own date, sync-fallback AND batched-parse paths ──
+
+
+def test_sync_fallback_threads_the_call_own_date_as_valid_at(mod, monkeypatch):
+    """A backfilled call's OWN date (RawRecord.timestamp) reaches BOTH the
+    main and checklist passes as `valid_at` on the sync-fallback path — a
+    backfill re-extracts calls that already happened, sometimes months ago,
+    and must not re-date them to today (#Part 2)."""
+    from datetime import datetime, timezone
+
+    records = [_rec("FF1", timestamp="2025-02-10T09:00:00Z")]
+    monkeypatch.setattr(mod, "_fetch_api_key", lambda *_a, **_k: "api-key")
+    monkeypatch.setattr(mod.fireflies, "pull", lambda *a, **k: iter(records))
+    monkeypatch.setattr(mod, "seen_hashes", lambda *_a, **_k: set())
+    monkeypatch.setattr(mod, "run_batch", lambda *a, **k: None)
+    monkeypatch.setattr(mod, "GraphFacade", lambda *a, **k: object())
+
+    seen = {}
+
+    def fake_extract_document(facade, enterprise_id, *, doc_name, text,
+                              valid_at=None, **kw):
+        seen["extract"] = valid_at
+        return {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    def fake_run_checklist_pass(facade, enterprise_id, *, doc_name, text,
+                                valid_at=None, **kw):
+        seen["checklist"] = valid_at
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    monkeypatch.setattr(mod, "extract_document", fake_extract_document)
+    monkeypatch.setattr(mod, "run_checklist_pass", fake_run_checklist_pass)
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+
+    rc = mod.main(["--company", "ent-x", "--run"])
+
+    assert rc == 0
+    expected = datetime(2025, 2, 10, 9, 0, tzinfo=timezone.utc)
+    assert seen["extract"] == expected
+    assert seen["checklist"] == expected, "both passes must share the same call date"
+
+
+def test_batched_parse_threads_the_call_own_date_as_valid_at(mod, monkeypatch):
+    """The SAME `valid_at` contract holds on the batched-results parse path
+    (`run_batch` succeeded) — the call's date must not depend on which of
+    the two extraction paths actually ran."""
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    records = [_rec("FF1", timestamp="2025-02-10T09:00:00Z")]
+    monkeypatch.setattr(mod, "_fetch_api_key", lambda *_a, **_k: "api-key")
+    monkeypatch.setattr(mod.fireflies, "pull", lambda *a, **k: iter(records))
+    monkeypatch.setattr(mod, "seen_hashes", lambda *_a, **_k: set())
+    monkeypatch.setattr(mod, "GraphFacade", lambda *a, **k: object())
+
+    fake_message = SimpleNamespace(content=[])
+    monkeypatch.setattr(
+        mod, "run_batch",
+        lambda requests, **kw: {r.custom_id: fake_message for r in requests},
+    )
+
+    seen = {}
+
+    def fake_parse_extract_response(*a, valid_at=None, **k):
+        seen["extract"] = valid_at
+        return {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    def fake_parse_checklist_response(*a, valid_at=None, **k):
+        seen["checklist"] = valid_at
+        return {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    monkeypatch.setattr(mod, "parse_extract_response", fake_parse_extract_response)
+    monkeypatch.setattr(mod, "parse_checklist_response", fake_parse_checklist_response)
+    monkeypatch.setattr(mod, "record_hashes", lambda *a, **k: None)
+
+    rc = mod.main(["--company", "ent-x", "--run"])
+
+    assert rc == 0
+    expected = datetime(2025, 2, 10, 9, 0, tzinfo=timezone.utc)
+    assert seen["extract"] == expected
+    assert seen["checklist"] == expected
 
 
 # ── batch deadline: generous, not the 900s single-request default ────────

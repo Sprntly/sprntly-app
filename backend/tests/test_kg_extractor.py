@@ -628,6 +628,38 @@ def test_no_source_ref_leaves_source_call_id_null_and_provenance_clean(facade):
     assert "external_id" not in sig.provenance
 
 
+# ── valid_at: a real-world date, not ingest time (#Part 2) ────────────────────
+
+
+def test_valid_at_stamps_the_written_signal_and_derives_stale_after(facade):
+    """A caller-supplied `valid_at` (a historical call date) lands on the
+    written Signal verbatim, and `stale_after` derives from THAT date — not
+    from ingest time — exactly like `Signal.__post_init__` already does for
+    any explicit `valid_at` kwarg."""
+    from datetime import datetime, timedelta, timezone
+
+    call_date = datetime(2025, 3, 1, 12, 0, tzinfo=timezone.utc)
+    _extract(facade, [_item("historical fact", "customer_voice")],
+             valid_at=call_date)
+    sig = _sig(facade, "historical fact")
+    assert sig.valid_at == call_date
+    # customer_voice's staleness window (types.SOURCE_STALE_WINDOW_DAYS) is
+    # 30 days — derived from call_date, not from "now".
+    assert sig.stale_after == call_date + timedelta(days=30)
+
+
+def test_no_valid_at_keeps_the_ingest_time_default(facade):
+    """Every pre-existing caller passes no `valid_at` — a written Signal's
+    `valid_at` stays close to "now" (the dataclass's own default_factory),
+    unaffected by this parameter's addition."""
+    from datetime import datetime, timezone
+
+    before = datetime.now(timezone.utc)
+    _extract(facade, [_item("undated fact", "customer_voice")])
+    sig = _sig(facade, "undated fact")
+    assert sig.valid_at >= before
+
+
 # ── write-swallow narrowing (silent-drop hardening) ──────────────────────────
 #
 # The per-signal write used to swallow EVERY exception as a benign "duplicate

@@ -1142,7 +1142,12 @@ def _answer_voc_report(
     # pair, so the two cannot drift", and a pinned `/voice-of-customer-report`
     # returning less feedback than the unpinned question would be exactly that
     # drift — in the direction the explicit request least expects.
-    bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
+    # content_leg=False: same rationale as `call_digest.build_kg_context` — a
+    # pinned voice-of-customer report's answer IS the widened Leg A+B count,
+    # and Leg C must not silently change what that count includes.
+    bundle = _retrieve_kg_bundle(
+        enterprise_id, question, scale=VOC_SCALE, content_leg=False,
+    )
     if not bundle:
         return None
     corpus_text = render_context_section(bundle)

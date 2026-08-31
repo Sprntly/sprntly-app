@@ -1082,7 +1082,14 @@ def build_kg_context(
         # most 80 candidate signals, cut to 2,200 tokens, with no count of the
         # remainder. "Show me all the customer feedback" was answered from
         # whatever fit in ~9k characters, and nothing downstream could tell.
-        bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
+        #
+        # content_leg=False: this widened retrieval's whole point is Legs A+B's
+        # exhaustive breadth for a calibrated feedback count — Leg C injecting
+        # content-matched signals would change what "all of it" means here. See
+        # `_retrieve_kg_bundle`'s docstring.
+        bundle = _retrieve_kg_bundle(
+            enterprise_id, question, scale=VOC_SCALE, content_leg=False,
+        )
         if not bundle:
             return KgContext()
 

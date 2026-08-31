@@ -914,6 +914,79 @@ class GraphFacade:
                 out.append((ent, float(row["score"])))  # exactly as before
         return out
 
+    # ---- Leg C: content / entity search ----------------------------------
+    #
+    # Legs A (theme kNN) and B (recent-signals window) never reach
+    # `kg_signal.content` itself, so a question that names an entity/account
+    # ("what's the latest on AIG") that matches no topic-theme cannot surface
+    # that entity's freshly-dated, theme-wired signals. These two primitives
+    # back the hybrid content leg `graph.retrieval` composes on top of the
+    # SAME by_id dedupe + rank + budget path Legs A/B already feed:
+    #   * `search_signals_by_content` — word-boundary keyword/full-text
+    #     match (Postgres tsvector/tsquery via the migration's GIN index —
+    #     NOT ILIKE, which also matches "campAIGn" on a search for "AIG").
+    #   * `signal_candidates_by_embedding` — semantic kNN over the SAME
+    #     text-embedding-3-small vectors the extractor already stores,
+    #     mirroring `find_candidates`'s shape but over `kg_signal`.
+    # Both RPCs filter `stale_after` server-side; "retired" (superseded_by/
+    # expired_at) is deliberately left to the caller's `signal_is_retired`
+    # check post-hydration — see the migration's module note on why that
+    # rule has exactly one implementation.
+
+    def search_signals_by_content(
+        self, enterprise_id: str, question: str, *, k: int = 30,
+    ) -> list[tuple[Signal, float]]:
+        """Leg C (keyword): top-k tenant signals whose `content` matches
+        `question` by Postgres full-text search, highest `ts_rank_cd` first.
+        Calls the `kg_signal_search_by_content` RPC (migration), backed by
+        the `kg_signal_content_gin` expression index.
+
+        [] when `question` has no searchable terms (an all-stopword/empty
+        tsquery) or `rpc` is unavailable (the in-memory test fake with no
+        registered return — see `find_candidates`'s docstring for the same
+        contract)."""
+        if not hasattr(self._client, "rpc"):
+            return []
+        r = self._client.rpc("kg_signal_search_by_content", {
+            "p_enterprise_id": enterprise_id,
+            "p_query": question,
+            "p_k": k,
+        }).execute()
+        rows = r.data or []
+        hydrated = self.get_signals(enterprise_id, [row["id"] for row in rows])
+        out: list[tuple[Signal, float]] = []
+        for row in rows:
+            sig = hydrated.get(row["id"])
+            if sig:
+                out.append((sig, float(row["score"])))
+        return out
+
+    def signal_candidates_by_embedding(
+        self, enterprise_id: str, embedding: list[float], k: int = 30,
+    ) -> list[tuple[Signal, float]]:
+        """Leg C (semantic): top-k tenant signals by cosine similarity to
+        `embedding`, highest first. Calls the `kg_find_signal_candidates` RPC
+        (migration), reusing the already-present `kg_signal_embed_ivfflat`
+        index — mirrors `find_candidates` exactly, just over `kg_signal`
+        rather than `kg_entity`.
+
+        [] when `rpc` is unavailable (in-memory test fake, no pgvector)."""
+        if not hasattr(self._client, "rpc"):
+            return []
+        r = self._client.rpc("kg_find_signal_candidates", {
+            "p_enterprise_id": enterprise_id,
+            "p_embedding": embedding,
+            "p_k": k,
+        }).execute()
+        rows = r.data or []
+        hydrated = self.get_signals(enterprise_id, [row["id"] for row in rows])
+        out: list[tuple[Signal, float]] = []
+        for row in rows:
+            sig = hydrated.get(row["id"])
+            if sig:
+                out.append((sig, float(row["score"])))
+        return out
+
     # ---- row mappers ----------------------------------------------------
     def _row_to_source(self, r: dict) -> Source:
         return Source(
