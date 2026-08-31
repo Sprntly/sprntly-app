@@ -73,6 +73,31 @@ NAV: list[tuple[str, str, str]] = [
     ("Team", "/team",
      "the people in this workspace (reached from the Ctrl+K / Cmd+K command "
      "palette; Settings -> Team & roles is the pane that edits them)"),
+    ("Project Management", "/tickets",
+     "every ticket across this workspace's PRDs and their sync state with "
+     "Jira / Linear / ClickUp (reached from the Ctrl+K / Cmd+K command "
+     "palette, not the left rail)"),
+    ("Roadmap", "/roadmap",
+     "the roadmap document this workspace uploaded, rendered read-only. "
+     "Uploading a new one is Settings -> Business Context; this is the view "
+     "(command palette, not the left rail)"),
+    ("Shipped", "/shipped",
+     "work already delivered (command palette, not the left rail)"),
+    ("Past briefs", "/past",
+     "earlier weeks of Top Insights, for comparing a finding against how it "
+     "looked before (command palette, not the left rail)"),
+    # THE NEXT TWO NEED A SUBJECT, AND SAYING SO IS THE POINT. Both are real
+    # screens the palette lists, but each renders ONE thing and shows an empty
+    # state when opened bare. Handing a customer the naked path is handing
+    # them a blank pane, so the entry names what to open it FROM.
+    ("Evidence", "/evidence",
+     "the research behind ONE Top Insights finding — sources, quotes and "
+     "reasoning. Opened from the finding itself (or /artifacts -> Evidence); "
+     "the bare path has no finding to show and lands on an empty state"),
+    ("Prototype", "/prototype",
+     "the interactive design a PRD generated, at /prototype?prd=<id>. Opened "
+     "from that PRD (or /artifacts -> Prototypes); the bare path has no PRD "
+     "to render and asks you to pick one"),
 ]
 
 # Settings panes, addressed by their real `?section=` deep link. Every one of
