@@ -507,6 +507,25 @@ def _subscription_id_from_invoice(invoice: dict) -> str | None:
     return sub
 
 
+def _service_period(invoice: dict, edge: str) -> int | None:
+    """The period an invoice's SUBSCRIPTION line actually covers.
+
+    Prefers a recurring subscription line over a proration line: a plan change
+    produces both, and the proration covers only the remaining days, so taking
+    `lines.data[0]` blindly would report a fortnight where a month was bought.
+    """
+    lines = ((invoice.get("lines") or {}).get("data")) or []
+    if not lines:
+        return None
+    subscription_lines = [
+        ln for ln in lines
+        if isinstance(ln, dict) and not ln.get("proration")
+    ]
+    line = (subscription_lines or lines)[0]
+    period = line.get("period") or {}
+    return period.get(edge)
+
+
 def _on_invoice_paid(invoice: dict) -> str:
     company_id = _company_for(invoice)
     if not company_id:
@@ -554,8 +573,24 @@ def _on_invoice_paid(invoice: dict) -> str:
             "amount_paid_cents": int(invoice.get("amount_paid") or 0),
             "currency": (invoice.get("currency") or "usd").lower(),
             "status": invoice.get("status"),
-            "period_start": _iso(invoice.get("period_start")),
-            "period_end": _iso(invoice.get("period_end")),
+            # THE SERVICE PERIOD IS ON THE LINE ITEM, not on the invoice.
+            #
+            # Stripe's own reference says so of `invoice.period_start` /
+            # `period_end`: "the earliest/latest timestamp at which invoice
+            # items can be associated with this invoice. Use the line item
+            # period to get the service period for each price." They describe
+            # a window for ATTACHING items, and on a subscription's first
+            # invoice — created at the instant of signup — both collapse to
+            # that instant. Reading them rendered "Aug 29, 2026 — Aug 29,
+            # 2026" on a month of service.
+            #
+            # The invoice-level pair stays as the fallback: better a
+            # degenerate date than none if a payload ever arrives without
+            # lines.
+            "period_start": _iso(_service_period(invoice, "start"))
+            or _iso(invoice.get("period_start")),
+            "period_end": _iso(_service_period(invoice, "end"))
+            or _iso(invoice.get("period_end")),
             "paid_at": _iso(invoice.get("status_transitions", {}).get("paid_at"))
             or _iso(invoice.get("created")),
             "invoice_number": invoice.get("number"),

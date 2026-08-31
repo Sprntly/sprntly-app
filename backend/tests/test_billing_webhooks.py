@@ -864,8 +864,10 @@ def _paid_invoice(**over) -> dict:
         "id": "in_paid_1",
         "customer": "cus_live",
         "created": 1_787_000_000,
+        # Degenerate on purpose: this is what Stripe actually sends on a
+        # subscription's first invoice, and reading it was the bug.
         "period_start": 1_787_000_000,
-        "period_end": 1_789_600_000,
+        "period_end": 1_787_000_000,
         "amount_paid": 5900,
         "total": 5900,
         "currency": "USD",
@@ -874,6 +876,18 @@ def _paid_invoice(**over) -> dict:
         "hosted_invoice_url": "https://invoice.stripe.test/i/abc",
         "invoice_pdf": "https://invoice.stripe.test/i/abc.pdf",
         "status_transitions": {"paid_at": 1_787_000_050},
+        # A real subscription invoice carries the SERVICE period on its line,
+        # not on the invoice. The invoice-level pair below is deliberately
+        # degenerate — both the same instant — exactly as Stripe sends it on a
+        # first invoice.
+        "lines": {
+            "data": [
+                {
+                    "proration": False,
+                    "period": {"start": 1_787_000_000, "end": 1_789_600_000},
+                }
+            ]
+        },
         "parent": {"subscription_details": {"subscription": "sub_1"}},
     }
     inv.update(over)
@@ -1179,3 +1193,55 @@ def test_the_reward_is_tied_to_the_referral_row(company):
     assert rows[0]["delta"] == plans.REFERRAL_REWARD_CREDITS
     assert referrals.list_for_company(referrer)[0]["status"] == referrals.REWARDED
     assert ref["id"]
+
+
+def test_the_invoice_records_the_period_it_actually_COVERS(company):
+    """REPORTED BUG: the billing screen showed "Aug 29, 2026 — Aug 29, 2026"
+    against a month of service.
+
+    `invoice.period_start` / `period_end` are not the service period. Stripe's
+    reference says so plainly — they are the window in which invoice items may
+    be ASSOCIATED with the invoice, and on a subscription's first invoice, made
+    at the instant of signup, both collapse to that instant. The service period
+    lives on the line item.
+    """
+    billing_webhooks.handle_event(_event("invoice.paid", _paid_invoice()))
+
+    row = billing_db.list_invoices(company.id)[0]
+    assert row["period_start"] != row["period_end"], "a month of service is not one instant"
+    assert row["period_start"] < row["period_end"]
+
+
+def test_a_plan_change_reports_the_SUBSCRIPTION_line_not_the_proration(company):
+    """A switch produces both a proration line (the days remaining) and a
+    recurring line (the month bought). Taking lines[0] blindly would report a
+    fortnight where a month was paid for."""
+    inv = _paid_invoice(
+        id="in_switch",
+        lines={
+            "data": [
+                {"proration": True, "period": {"start": 1_788_000_000, "end": 1_789_000_000}},
+                {"proration": False, "period": {"start": 1_789_000_000, "end": 1_791_600_000}},
+            ]
+        },
+    )
+
+    billing_webhooks.handle_event(_event("invoice.paid", inv, event_id="evt_switch"))
+
+    row = billing_db.list_invoices(company.id)[0]
+    assert row["period_start"].startswith("2026-")
+    # The recurring line's window, not the proration's.
+    from datetime import datetime, timezone
+    expected = datetime.fromtimestamp(1_789_000_000, timezone.utc).isoformat()
+    assert row["period_start"] == expected
+
+
+def test_an_invoice_with_no_lines_still_records_something(company):
+    """Better a degenerate date than none, if a payload ever arrives without
+    lines — the amount and the receipt still matter."""
+    inv = _paid_invoice(id="in_nolines", lines={"data": []})
+
+    billing_webhooks.handle_event(_event("invoice.paid", inv, event_id="evt_nolines"))
+
+    row = billing_db.list_invoices(company.id)[0]
+    assert row["period_start"] is not None
