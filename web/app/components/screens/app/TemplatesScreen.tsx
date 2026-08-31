@@ -355,11 +355,14 @@ export function TemplatesScreen({ embedded = false }: { embedded?: boolean } = {
 /**
  * The page chrome, or none.
  *
- * This screen has two homes: its own route (`/templates`, reached from the
- * command palette) and a pane inside Settings, where it moved when Templates
- * and Skills left the main nav. Embedded it must NOT bring an `AppLayout` —
- * that would put a second sidebar and a second chrome strip inside the one
- * Settings already draws, and the settings nav would disappear behind it.
+ * ONE home: the `templates` pane inside Settings, where this screen moved when
+ * Templates and Skills left the main nav. `/templates` is a redirect stub now, not a
+ * second route — so `embedded` is true at every real call site, and the
+ * standalone branch below is only the bare-render fallback.
+ *
+ * Embedded it must NOT bring an `AppLayout` — that would put a second sidebar
+ * and a second chrome strip inside the one Settings already draws, and the
+ * settings nav would disappear behind it.
  */
 function Shell({ embedded, children }: { embedded: boolean; children: ReactNode }) {
   if (embedded) return <div className="settings-embedded">{children}</div>

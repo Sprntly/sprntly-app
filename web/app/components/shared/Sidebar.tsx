@@ -27,7 +27,6 @@ import {
 } from "../../lib/recentChats"
 import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
-import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
 interface SidebarProps {
@@ -35,14 +34,8 @@ interface SidebarProps {
   onSwitchCompany?: (slug: string) => void
 }
 
-// The rail's Search button is HIDDEN for now (product call, 2026-07-31) — the
-// search itself is untouched: AppShell still renders <CommandPalette/> and owns
-// the ⌘K/Ctrl+K hotkey, so the palette and every result it can reach still work.
-// Only this one trigger is withheld. Flip to true to put the button back.
-const SHOW_SIDEBAR_SEARCH = false
-
 export function Sidebar({ activeCompany }: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette, openFeedback } = useNavigation()
   const { content } = useContent()
   const router = useRouter()
   const auth = useAuth()
@@ -55,7 +48,6 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
     setActiveWorkspace,
   } = useWorkspace()
   const trialDays = trialDaysLeft(workspace)
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
   // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
   // active dataset — the same run the scheduler triggers, not a bespoke
   // sync-all. The backend collapses repeat clicks onto the in-flight run
@@ -222,25 +214,6 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         </button>
       </div>
 
-      {/* Global search (⌘K) — the modal itself is rendered by AppShell so the
-          hotkey works even when the sidebar is collapsed or hidden, which is why
-          hiding this trigger (SHOW_SIDEBAR_SEARCH) costs no functionality. */}
-      {SHOW_SIDEBAR_SEARCH && (
-        <button
-          type="button"
-          className="sb-rail-search"
-          title="Search"
-          aria-label="Search (Ctrl+K)"
-          onClick={openPalette}
-          data-testid="palette-trigger"
-        >
-          <IconSearch size={18} />
-          <span className="sb-rail-label">Search</span>
-          <kbd className="sb-rail-search-kbd">⌘K</kbd>
-          <span className="nav-tooltip">Search</span>
-        </button>
-      )}
-
       {/* New chat */}
       <button
         type="button"
@@ -347,11 +320,11 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
       {/* User identity row — the avatar/name are display only (signing out
           moved to Settings → Account; no sign-out affordance on icon or
           avatar click). The sync button is the one interactive element. */}
-      {/* ONE ROW: avatar, name, then sync / feedback / settings.
+      {/* ONE ROW: avatar, name, then sync / feedback / search / settings.
 
           WHAT GIVES WAY IS THE NAME. The initials chip is a fixed 32px circle
           (`flex: none` — without it the row squashed it into an oval when
-          space ran out), and the three actions keep their size too. The name
+          space ran out), and the four actions keep their size too. The name
           takes whatever is left and ellipsizes into it, so dragging the rail
           wider reveals more of it and narrower reveals less. Its full value is
           on the hover title of both the chip and the name. */}
@@ -361,12 +334,12 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         </span>
         <span className="sb-rail-username" title={displayName}>{displayName}</span>
         <div className="sb-rail-actions">
-        {/* Sync, feedback, settings — reachable from EVERY screen in both rail
-            modes, which is why they live here rather than in the scrolling nav
-            above (product call 2026-08-13: identity chrome earns no rail slot,
-            an action does). Collapsed, the avatar and name are CSS-hidden and
-            these three are the whole footer. The row's identity half stays
-            display-only: none of these is the avatar or the name. */}
+        {/* Sync, feedback, search, settings — reachable from EVERY screen in
+            both rail modes, which is why they live here rather than in the
+            scrolling nav above (product call 2026-08-13: identity chrome earns
+            no rail slot, an action does). Collapsed, the avatar and name are
+            CSS-hidden and these four are the whole footer. The row's identity
+            half stays display-only: none of these is the avatar or the name. */}
         <button
           type="button"
           className={`sb-sync-btn${syncRunning ? " sb-sync-btn--running" : ""}${showCompleted ? " sb-sync-btn--done" : ""}${syncFailed ? " sb-sync-btn--failed" : ""}`}
@@ -382,20 +355,37 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           {showCompleted ? <IconCheck size={15} /> : <IconRefresh size={15} />}
           <span className="nav-tooltip">{syncTitle}</span>
         </button>
-        {/* Feedback, then Settings — left to right: sync, feedback, settings.
-            Settings sits last because it is the one you reach for on purpose;
-            sync leads because it is the one that reports a state you might
-            need to act on. */}
+        {/* Feedback, then Search, then Settings — left to right: sync,
+            feedback, search, settings. Settings sits last because it is the one
+            you reach for on purpose; sync leads because it is the one that
+            reports a state you might need to act on. */}
         <button
           type="button"
           className="sb-rail-action"
           title="Feedback"
           aria-label="Feedback"
           data-testid="sidebar-feedback"
-          onClick={() => setFeedbackOpen(true)}
+          onClick={openFeedback}
         >
           <IconMessagePlus size={15} />
           <span className="nav-tooltip">Feedback</span>
+        </button>
+        {/* Search (⌘K) — the palette itself is rendered by AppShell, which also
+            owns the hotkey, so this is purely the visible door to it: the one
+            thing a user who doesn't know the shortcut had no way to find. It
+            sits here rather than up in the nav because it is an action, not a
+            screen, and the actions row is the part of the rail that survives
+            both collapsed and expanded. */}
+        <button
+          type="button"
+          className="sb-rail-action"
+          title="Search (⌘K)"
+          aria-label="Search (Ctrl+K)"
+          data-testid="palette-trigger"
+          onClick={openPalette}
+        >
+          <IconSearch size={15} />
+          <span className="nav-tooltip">Search</span>
         </button>
         <button
           type="button"
@@ -411,7 +401,9 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         </div>
       </div>
 
-      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      {/* NO <FeedbackModal/> HERE. It moved to AppShell when the palette gained
+          a "Send feedback" action: two triggers, one modal, and the palette
+          cannot reach this component's state. */}
       <CreateWorkspaceModal open={createWsOpen} onClose={() => setCreateWsOpen(false)} />
     </aside>
   )

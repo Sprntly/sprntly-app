@@ -17,6 +17,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const goToMock = vi.fn()
 const goToNewChatMock = vi.fn()
 const openPrdTabMock = vi.fn()
+const openFeedbackMock = vi.fn()
 const setActiveWorkspaceMock = vi.fn()
 const routerMock = { push: vi.fn() }
 const onCloseMock = vi.fn()
@@ -26,6 +27,7 @@ vi.mock("../../../context/NavigationContext", () => ({
     goTo: goToMock,
     goToNewChat: goToNewChatMock,
     openPrdTab: openPrdTabMock,
+    openFeedback: openFeedbackMock,
   }),
 }))
 vi.mock("../../../context/WorkspaceContext", () => ({
@@ -87,6 +89,7 @@ vi.mock("../../../lib/api", () => ({
 
 import { CommandPalette } from "../CommandPalette"
 import { invalidateSearchCache } from "../../../lib/search/providers"
+import { STATIC_PAGE_ITEMS } from "../../../lib/search/registry"
 
 function input(): HTMLInputElement {
   return screen.getByRole("combobox") as HTMLInputElement
@@ -159,12 +162,13 @@ describe("CommandPalette", () => {
     expect(onCloseMock).toHaveBeenCalled()
   })
 
-  it("surfaces dynamic skills by label and deep-links /skills?q=", async () => {
+  it("surfaces dynamic skills by label and deep-links the Skills pane, pre-filtered", async () => {
     await openPalette()
     fireEvent.change(input(), { target: { value: "journey" } })
     const row = (await findRowByTitle("Journey map")).closest("button")!
     fireEvent.click(row)
-    expect(routerMock.push).toHaveBeenCalledWith("/skills?q=Journey%20map")
+    // Skills moved into Settings — `?q=` now rides the pane link, not `/skills`.
+    expect(routerMock.push).toHaveBeenCalledWith("/settings?section=skills&q=Journey%20map")
   })
 
   it("resumes a chat via the sprntly_resume_conv handoff", async () => {
@@ -188,12 +192,39 @@ describe("CommandPalette", () => {
     expect(onCloseMock).toHaveBeenCalled()
   })
 
+  // POSITION-INDEPENDENT ON PURPOSE. This used to hardcode "the second row is
+  // Top Insights", and broke twice in one change as static items were added
+  // ahead of it — each time telling us nothing except that the list grew. What
+  // it actually guards is the mechanic: ArrowDown moves the active option, and
+  // Enter fires THAT one. So it reads which row is active and asserts against
+  // that row's own action.
   it("navigates with ArrowDown + Enter", async () => {
     await openPalette()
-    // Empty query: flat list starts [New chat, Top Insights, …].
     fireEvent.keyDown(input(), { key: "ArrowDown" })
+
+    const activeId = input().getAttribute("aria-activedescendant")
+    expect(activeId).toMatch(/^cmdp-opt-/)
+    const item = STATIC_PAGE_ITEMS.find(
+      (i) => `cmdp-opt-${i.id}` === activeId,
+    )!
+    expect(item, `no static item matches ${activeId}`).toBeDefined()
+    expect(item.action.kind).toBe("screen")
+
     fireEvent.keyDown(input(), { key: "Enter" })
-    expect(goToMock).toHaveBeenCalledWith("brief")
+    if (item.action.kind === "screen") {
+      expect(goToMock).toHaveBeenCalledWith(item.action.screen)
+    }
+    expect(onCloseMock).toHaveBeenCalled()
+  })
+
+  // Feedback is a MODAL, not a route — the palette reaches it through
+  // NavigationContext (AppShell owns the one instance) rather than a push.
+  it("opens the feedback modal from a search for it", async () => {
+    await openPalette()
+    fireEvent.change(input(), { target: { value: "feedback" } })
+    const row = (await findRowByTitle("Send feedback")).closest("button")!
+    fireEvent.click(row)
+    expect(openFeedbackMock).toHaveBeenCalled()
     expect(onCloseMock).toHaveBeenCalled()
   })
 

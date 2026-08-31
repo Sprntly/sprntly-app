@@ -96,8 +96,12 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
   ideation: "/backlog",
-  templates: "/templates",
-  skills: "/skills",
+  // Templates and Skills moved INTO Settings (2026-08-27), so their `?section=`
+  // link is the destination — same shape as `connectors` above. `/templates`
+  // and `/skills` still exist purely as redirects onto these (see each route's
+  // page.tsx); nothing in the app should route TO them.
+  templates: "/settings?section=templates",
+  skills: "/settings?section=skills",
   // Flat route + `?id=<id>` (AD-P14) — no per-id dynamic segment, exactly the
   // `/prototype?prd=<id>` pattern above. `ProjectsScreen` (list) renders when
   // there is no `id`; the `?id=<id>` → detail branch lands with a follow-up ticket.
@@ -127,8 +131,9 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // frame — and any code deriving the screen from the pathname must not read
   // an old link as "no screen".
   "/ideation": "ideation",
-  "/templates": "templates",
-  "/skills": "skills",
+  // NO "/templates" or "/skills" ENTRIES. Both are redirect stubs now, not
+  // screens: a pathname-derived screen id for them would highlight a rail item
+  // that no longer exists, for the one frame before the redirect fires.
   // The `?id=` query param rides on top of this same path — pathname-based
   // screen derivation ignores it, same as `/prototype`'s `?prd=`.
   "/projects": "projects",
