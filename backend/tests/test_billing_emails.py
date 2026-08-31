@@ -324,7 +324,7 @@ def test_the_shell_survives_an_email_with_no_facts_and_no_cta():
 def test_the_trial_email_quotes_the_trial_allowance_not_the_plan_allowance(sent):
     """The number in this email is the first one a customer is told, so it has
     to be the number they will actually have. Starter grants 756 a month; a
-    seven-day trial grants 100."""
+    seven-day trial grants `plans.TRIAL_CREDITS`, which is far less."""
     cid = _company_with()
     billing_db.set_billing(cid, {"plan": plans.STARTER})
 
@@ -361,8 +361,13 @@ def test_converting_off_the_trial_grants_the_real_allowance():
 
 
 def test_the_low_credit_warning_measures_against_the_trial_allowance(monkeypatch, sent):
-    """20% of 756 is 151, and a trialist holding 90 of 100 credits is not
-    running low. Warning off the plan's allowance would tell them they were."""
+    """20% of 756 is 151. A trialist holding nearly all of their (much
+    smaller) trial allowance is not running low — but measured against the
+    PLAN's allowance they would look it, and be told so. That is the bug this
+    guards, so the seeded balance is derived from TRIAL_CREDITS rather than
+    typed in: at 90-of-100 it read as a comfortable balance, and the same
+    literal against a 50-credit trial would have been more than the whole
+    allowance, passing for a degenerate reason."""
     from app.billing import enforce
 
     cid = _company_with()
@@ -371,7 +376,12 @@ def test_the_low_credit_warning_measures_against_the_trial_allowance(monkeypatch
     )
     from app.billing import credits
 
-    credits.grant(cid, 90, reason="manual_adjustment", ref_id="seed")
+    # Comfortably above the trial's own warning line, and comfortably BELOW
+    # the plan's — which is the crossing the assertion is about.
+    seeded = int(plans.TRIAL_CREDITS * 0.9)
+    assert seeded > plans.TRIAL_CREDITS * emails.LOW_CREDIT_FRACTION
+    assert seeded < plans.PLAN_CREDITS[plans.STARTER] * emails.LOW_CREDIT_FRACTION
+    credits.grant(cid, seeded, reason="manual_adjustment", ref_id="seed")
 
     enforce._maybe_warn_low(cid)
 

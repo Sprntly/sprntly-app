@@ -309,8 +309,14 @@ def trial_started(company_id: str, *, subscription_id: str) -> int:
         body=(
             f"You are on {_plan_label(c)} with {_fmt(allowance)} credits to "
             f"try it with, and nothing has been charged.\n\n"
-            f"That is enough to take one idea the whole way — a few questions, "
-            f"an evidence brief, a PRD and a prototype.\n\n"
+            # WHAT THE ALLOWANCE ACTUALLY BUYS, AND NOTHING MORE. This promised
+            # "a PRD and a prototype" while the trial was 100 credits, which
+            # covered exactly that. At `plans.TRIAL_CREDITS` = 50 a prototype
+            # costs the whole allowance on its own and is deliberately out of
+            # reach — so the FIRST email a customer gets must not promise one.
+            # If the constant moves back up, this sentence moves with it.
+            f"That is enough to take one idea from a question to a written "
+            f"PRD — a few questions, an evidence brief and a PRD.\n\n"
             f"Your card is saved. The first payment is on "
             f"{_date(c.get('current_period_end'))} — cancel any time before "
             f"then and you pay nothing."

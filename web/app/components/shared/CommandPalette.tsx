@@ -12,11 +12,17 @@ import { useRouter } from "next/navigation"
 import {
   IconBookmark,
   IconBuildings,
+  IconBulb,
+  IconCircleCheck,
   IconFiles,
+  IconFolder,
   IconFileText,
   IconHistory,
+  IconLayoutKanban,
+  IconMap2,
   IconMessage,
   IconMessageCircle,
+  IconMessagePlus,
   IconPlug,
   IconPrompt,
   IconSearch,
@@ -62,6 +68,14 @@ const ICONS: Record<string, React.ComponentType<{ size?: number }>> = {
   connector: IconPlug,
   prototype: IconPrompt,
   workspace: IconBuildings,
+  // Same glyphs the rail uses for these two, so a result is recognisable as
+  // the nav item it opens.
+  project: IconFolder,
+  backlog: IconBulb,
+  feedback: IconMessagePlus,
+  tickets: IconLayoutKanban,
+  roadmap: IconMap2,
+  shipped: IconCircleCheck,
 }
 
 function ItemIcon({ iconId }: { iconId: string }) {
@@ -101,7 +115,7 @@ export function CommandPalette({
   onClose: () => void
 }) {
   const router = useRouter()
-  const { goTo, goToNewChat, openPrdTab } = useNavigation()
+  const { goTo, goToNewChat, openPrdTab, openFeedback } = useNavigation()
   const { workspaces = [], activeWorkspace, setActiveWorkspace } = useWorkspace()
   const { activeCompany } = useCompany()
 
@@ -220,6 +234,9 @@ export function CommandPalette({
         case "new-chat":
           goToNewChat()
           break
+        case "feedback":
+          openFeedback()
+          break
         case "resume-chat":
           // The ChatsScreen resume handoff: ChatScreen hydrates the turns.
           try {
@@ -256,7 +273,7 @@ export function CommandPalette({
       }
       onClose()
     },
-    [workspaceId, router, goTo, goToNewChat, openPrdTab, setActiveWorkspace, onClose],
+    [workspaceId, router, goTo, goToNewChat, openPrdTab, openFeedback, setActiveWorkspace, onClose],
   )
 
   const onKeyDown = useCallback(

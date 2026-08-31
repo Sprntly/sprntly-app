@@ -175,27 +175,28 @@ describe("Sidebar — sync-your-data button", () => {
     expect(container.querySelector(".sb-rail-user .sb-sync-btn")).toBeTruthy()
   })
 
-  it("the row's interactive elements are its three ACTIONS, and nothing else", () => {
+  it("the row's interactive elements are its four ACTIONS, and nothing else", () => {
     // This used to assert exactly one — the sync button — and the intent it
     // protects is that the IDENTITY chrome stays display-only: the avatar and
     // name were once a sign-out target, and clicking your own face to sign out
     // is how people sign out by accident.
     //
     // Feedback and Settings joined the row deliberately (they came off the
-    // bottom rail block), so the count moved. The invariant did not: name the
-    // three, and prove the avatar and username are still inert.
+    // bottom rail block), and Search joined them when it came back from the
+    // nav (2026-08-31), so the count moved twice. The invariant did not: name
+    // the four, and prove the avatar and username are still inert.
     const { container } = render(React.createElement(Sidebar, { activeCompany: "acme" }))
     const row = container.querySelector(".sb-rail-user")!
     const actions = row.querySelector(".sb-rail-actions")!
 
-    // Three actions, in the order they read left to right.
+    // Four actions, in the order they read left to right.
     expect(Array.from(actions.querySelectorAll("button, a")).map(
       (el) => el.getAttribute("aria-label"),
-    )).toEqual(["Sync your data", "Feedback", "Settings"])
+    )).toEqual(["Sync your data", "Feedback", "Search (Ctrl+K)", "Settings"])
 
     // And they are ALL of the row's interactive elements — nothing has been
     // added beside them.
-    expect(row.querySelectorAll("button, a").length).toBe(3)
+    expect(row.querySelectorAll("button, a").length).toBe(4)
 
     for (const selector of [".sb-rail-avatar", ".sb-rail-username"]) {
       const el = row.querySelector(selector)!

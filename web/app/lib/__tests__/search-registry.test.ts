@@ -65,6 +65,67 @@ describe("STATIC_PAGE_ITEMS", () => {
       }
     }
   })
+
+  // Feedback had no palette entry either, for a different reason: it is a
+  // MODAL, not a route, so it fell outside a list built from pages. It is the
+  // one thing a stuck user most wants to find by typing what they want.
+  it("can find Send feedback, which has no route of its own", () => {
+    const item = STATIC_PAGE_ITEMS.find((i) => i.id === "action:feedback")!
+    expect(item).toBeDefined()
+    expect(item.action).toEqual({ kind: "feedback" })
+    // No url: a modal has nowhere to point, and the row must not render one.
+    expect(item.url).toBeUndefined()
+  })
+
+  // EVERY PART OF THE APP IS SEARCHABLE, AND THIS IS WHAT KEEPS IT THAT WAY.
+  //
+  // Projects and Backlog were live rail items the palette could not find, and
+  // Tickets, Roadmap, Shipped, Past, Evidence and Prototype had no door at all
+  // — no rail item, no in-app link, and no search result. STATIC_PAGE_ITEMS is
+  // hand-maintained while SCREEN_PATH is the real route table, so the two
+  // drifted silently and a whole screen could go unreachable indefinitely.
+  //
+  // So this asserts COVERAGE, derived: every screen in SCREEN_PATH is either
+  // searchable or listed below with a reason. Adding a screen and forgetting
+  // the palette now fails here — the exclusion list is the only way past, and
+  // it costs a sentence explaining why.
+  it("makes every screen in SCREEN_PATH reachable from search", () => {
+    /** Screens that legitimately have no page entry of their own. */
+    const EXEMPT = new Map<string, string>([
+      ["ondemand", "an alias of `chat` — same path, and Chat already lists it"],
+      ["connectors", "an alias of the settings pane, searchable as settings:connectors"],
+      ["templates", "searchable as settings:templates (it moved into Settings)"],
+      ["skills", "searchable as settings:skills (it moved into Settings)"],
+    ])
+
+    const searchable = new Set(
+      STATIC_PAGE_ITEMS.flatMap((i) =>
+        i.action.kind === "screen" ? [i.action.screen as string] : [],
+      ),
+    )
+
+    const missing = Object.keys(SCREEN_PATH).filter((screen) => {
+      // Onboarding steps are a linear flow you are placed into, not a
+      // destination you navigate to.
+      if (screen.startsWith("ob-")) return false
+      if (searchable.has(screen)) return false
+      return !EXEMPT.has(screen)
+    })
+
+    expect(
+      missing,
+      `these screens exist but nothing in the palette reaches them: ${missing.join(", ")}`,
+    ).toEqual([])
+  })
+
+  // /roadmap has no ScreenId at all — it is a route-only artifact view, so its
+  // entry is a `path` action. The coverage test above cannot see it; this does.
+  it("reaches the route-only surfaces that have no ScreenId", () => {
+    const paths = new Set(
+      STATIC_PAGE_ITEMS.flatMap((i) => (i.action.kind === "path" ? [i.action.path] : [])),
+    )
+    expect(paths.has("/roadmap")).toBe(true)
+  })
 })
 
 describe("buildStaticItems", () => {

@@ -8,8 +8,12 @@
 //   2. Clicking it opens the lightweight form; filling the message + submitting
 //      calls feedbackApi.submit with the message + selected type.
 //
-// We mount the REAL Sidebar (and its embedded FeedbackModal), mocking only the
-// context boundaries + the api module so no network is hit.
+// The modal itself is no longer embedded in the Sidebar: it moved to AppShell
+// when the command palette gained a "Send feedback" action, so two triggers
+// share one instance through NavigationContext (`openFeedback`). The wiring
+// and the form are therefore tested apart — the rail button is asserted to
+// ASK the shell to open it, and the form is mounted directly. Mocks cover only
+// the context boundaries + the api module, so no network is hit.
 import * as React from "react"
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -21,8 +25,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 // the query string.
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
 
+const openFeedback = vi.fn()
 vi.mock("../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ currentScreen: "brief", goTo: vi.fn(), goToNewChat: vi.fn() }),
+  useNavigation: () => ({
+    currentScreen: "brief",
+    goTo: vi.fn(),
+    goToNewChat: vi.fn(),
+    openFeedback,
+  }),
 }))
 vi.mock("../../../context/ContentContext", () => ({
   useContent: () => ({ content: {} }),
@@ -45,8 +55,12 @@ vi.mock("../../../lib/api", () => ({
 }))
 
 import { Sidebar } from "../Sidebar"
+import { FeedbackModal } from "../FeedbackModal"
 
-beforeEach(() => submit.mockClear())
+beforeEach(() => {
+  submit.mockClear()
+  openFeedback.mockClear()
+})
 afterEach(() => cleanup())
 
 describe("Sidebar — Feedback entry", () => {
@@ -63,15 +77,23 @@ describe("Sidebar — Feedback entry", () => {
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("clicking Feedback opens the form; submit calls feedbackApi.submit", async () => {
-    render(React.createElement(Sidebar))
-
-    // Form not open yet.
+  // The rail button no longer owns the modal — it asks the shell for it, which
+  // is what lets the command palette open the same one.
+  it("clicking Feedback asks the shell to open the modal, and renders none itself", () => {
+    const { container } = render(React.createElement(Sidebar))
     expect(screen.queryByLabelText("Send feedback")).toBeNull()
 
     fireEvent.click(screen.getByLabelText("Feedback"))
+    expect(openFeedback).toHaveBeenCalledTimes(1)
+    // Still none: AppShell renders the one instance, not this component.
+    expect(container.querySelector('[aria-label="Send feedback"]')).toBeNull()
+  })
+})
+
+describe("FeedbackModal — the form", () => {
+  it("submit calls feedbackApi.submit with the message and type", async () => {
+    render(React.createElement(FeedbackModal, { open: true, onClose: vi.fn() }))
     const dialog = screen.getByLabelText("Send feedback")
-    expect(dialog).toBeTruthy()
 
     const textarea = within(dialog).getByPlaceholderText(/Tell us what you'd like to see/i)
     fireEvent.change(textarea, { target: { value: "Add a Notion connector" } })
@@ -89,8 +111,7 @@ describe("Sidebar — Feedback entry", () => {
   })
 
   it("does not submit an empty message", () => {
-    render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Feedback"))
+    render(React.createElement(FeedbackModal, { open: true, onClose: vi.fn() }))
     const dialog = screen.getByLabelText("Send feedback")
     fireEvent.click(within(dialog).getByRole("button", { name: "Send feedback" }))
     expect(submit).not.toHaveBeenCalled()
