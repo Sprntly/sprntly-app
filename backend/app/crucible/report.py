@@ -943,6 +943,19 @@ def _finding_block(
 #: exists to avoid.
 MAX_FULL_FINDING_BLOCKS = 150
 
+#: How many findings get a FULL write-up. EDITORIAL, not a size guard — that
+#: is what `MAX_FULL_FINDING_BLOCKS` and the shed ladder are for.
+#:
+#: A run on a real corpus produced 549 findings that bore on the goal, and the
+#: document rendered 150 of them in full: 162,000 characters, inside every size
+#: budget and read by nobody. The report is a decision memo, so a full block is
+#: reserved for the themes the ranking actually put first — the same ten the
+#: RICE table shows, so the two sections cannot disagree about what mattered.
+#:
+#: The rest are NOT dropped: they are listed one line each in rank order and
+#: anything past that is counted, exactly as before.
+MAX_DETAILED_FINDINGS = MAX_RICE_ROWS
+
 #: An assumed parameter, as rendered. I8 wants it disclosed, not quoted whole.
 MAX_ASSUMED_PARAMS = 8
 MAX_PARAM_NAME_CHARS = 120
@@ -1007,7 +1020,9 @@ _SHED_LADDER = (
 
 def _findings_section(
     findings: list[dict],
-    full_cap: int = MAX_FULL_FINDING_BLOCKS,
+    # The EDITORIAL cap is the default, so a future caller that forgets to pass
+    # one gets a memo rather than the 150-block dump this replaced.
+    full_cap: int = MAX_DETAILED_FINDINGS,
     overflow_cap: int = MAX_OVERFLOW_ROWS,
 ) -> str:
     if not findings:
@@ -1156,7 +1171,8 @@ def _findings_section(
         # paragraphs, on the very run cited as evidence that it was fine.
         out.append(_p(
             f"The next {len(listed)} findings are listed below in rank order "
-            f"rather than in full, because the document has a size limit"
+            f"rather than in full — a full write-up is reserved for the "
+            f"{len(full)} the ranking put first"
             + (
                 " and they rank lower by reach" if anything_sized
                 else " — they rank lower by confidence, not by size, which "
@@ -1459,7 +1475,11 @@ def render_report_html(
     # `body_fingerprint` depends on.
     html = ""
     for full_cap, overflow_cap in _SHED_LADDER:
-        html = _assemble(full_cap, overflow_cap)
+        # `min`, NOT a smaller ladder. The rungs below rung 0 raise the full
+        # cap back up (100, 50, 20) to shed overflow rows first, so passing the
+        # rung straight through would let a document that missed the size limit
+        # come back with TEN TIMES the write-ups it started with.
+        html = _assemble(min(MAX_DETAILED_FINDINGS, full_cap), overflow_cap)
         if len(html) <= _BODY_LIMIT:
             return html
     return html
