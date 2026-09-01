@@ -78,7 +78,11 @@ class SurfaceScope:
         the private scope leaves this "" (nothing to duplicate).
       - `system_addendum` — the surface's own system-prompt text (private:
         the relocated individual-chat instructions + roster), appended ahead
-        of `context_payload`.
+        of `context_payload`. Consumed ONLY by the tool loop.
+      - `composer_fold_addendum` — the SEPARATE, tool-guidance-free text
+        folded into the gate-decline / composer fall-through path instead
+        (falls back to `system_addendum` when empty, for pre-existing
+        callers).
       - `extra_tools` — exactly the 4 project read tools + `delegate_task` +
         `execute_task` (6 total) for the project surface; empty for main.
       - `roster` — `list_members(project_id)`, fetched once per turn.
@@ -99,6 +103,16 @@ class SurfaceScope:
     project_id: Optional[int] = None
     context_payload: str = ""
     system_addendum: str = ""
+    #: The gate-decline / composer fall-through's OWN addendum — deliberately
+    #: a SEPARATE field from `system_addendum`, not the same string reused.
+    #: `system_addendum` is the tool-loop's system prompt and may describe
+    #: tools (e.g. `delegate_task`, with its verbatim handoff-confirmation
+    #: template) that are only real on that path; folding that same text into
+    #: a turn with no tools available turns a tool-description into a
+    #: fabricated claim of having used it. When empty (every caller that
+    #: predates this field), `qa_agent._fold_project_context` falls back to
+    #: `system_addendum` — so this is purely additive, not a required field.
+    composer_fold_addendum: str = ""
     extra_tools: tuple[dict, ...] = ()
     roster: tuple[dict, ...] = ()
     assigner_identity: Optional[dict] = None

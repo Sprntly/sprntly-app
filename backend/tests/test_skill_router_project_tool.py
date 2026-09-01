@@ -56,6 +56,57 @@ def test_empty_and_none_question_decline():
     assert is_project_tool_request(None) is False
 
 
+# ── Imperative "tell/get/have <member> to <verb>" (delegation-confabulation
+# fix, part 1) ───────────────────────────────────────────────────────────
+
+
+def test_tell_get_have_imperative_delegation_phrasings_match():
+    """The gate gap this fix closes: "tell David to review the prd" fell
+    through to the tool-less composer (no `delegate_task`), which is how the
+    confabulated "I've asked David…" handoff got composed with no
+    `project_delegations` row ever written. "ask X to Y" already matched —
+    "tell/get X to Y" and "have X <verb>" (bare infinitive) did not."""
+    for q in (
+        "tell David to review the prd",
+        "tell David to look at which requirements are important",
+        "get David to look at the export review",
+        "get Ada to take a pass on the pricing page",
+        "have David draft the export section",
+    ):
+        assert is_project_tool_request(q) is True, q
+
+
+def test_tell_get_have_do_not_match_pronoun_objects():
+    """Same negative-lookahead guard the "ask" branch already carries: "tell
+    me/us/him/her/them ..." must NEVER become a delegation — it is the
+    speaker asking the AGENT (or asking about someone else), not handing a
+    task to a named teammate."""
+    for q in (
+        "tell me the tasks",
+        "tell me about the prd",
+        "tell us what's open",
+        "tell him about the export review",
+        "tell them the status",
+        "get me the report",
+        "get us up to speed",
+    ):
+        assert is_project_tool_request(q) is False, q
+
+
+def test_tell_does_not_overbroaden_plain_reads():
+    """"show me tasks assigned to David" names David but is a plain read
+    ("show me"), not an imperative hand-off — must not become a
+    delegation. ("tasks assigned to David" also must not trip the
+    assign-shaped branch: "assigned" is past tense, not the imperative verb
+    "assign".)"""
+    for q in (
+        "show me tasks assigned to David",
+        "who is assigned to the export review",
+        "what has David been assigned",
+    ):
+        assert is_project_tool_request(q) is False, q
+
+
 def test_history_param_accepted_but_not_required():
     # Signature parity with `is_jira_lookup`/`is_connector_lookup` — accepts
     # `history` without requiring it; a positional/keyword-free call and a

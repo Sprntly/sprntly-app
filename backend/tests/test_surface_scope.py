@@ -31,6 +31,7 @@ def test_surface_scope_frozen_and_defaulted():
     assert scope.project_id is None
     assert scope.context_payload == ""
     assert scope.system_addendum == ""
+    assert scope.composer_fold_addendum == ""
     assert scope.extra_tools == ()
     assert scope.roster == ()
     assert scope.assigner_identity is None
@@ -48,6 +49,7 @@ def test_surface_scope_main_is_noop():
     assert scope.is_noop is True
     assert scope.extra_tools == ()
     assert scope.system_addendum == ""
+    assert scope.composer_fold_addendum == ""
 
 
 def test_surface_scope_project_private_is_not_noop():
@@ -113,6 +115,26 @@ def test_private_system_addendum_byte_identical(monkeypatch):
     # empty-roster block.
     expected = f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block([])}"
     assert scope.system_addendum == expected
+
+
+def test_private_composer_fold_addendum_byte_identical_and_delegate_free(monkeypatch):
+    """Delegation-confabulation fix (part 2): the assembled `composer_fold_
+    addendum` is byte-identical to `_PRIVATE_SCOPE_COMPOSER_FOLD` + the same
+    roster block `system_addendum` uses — but, unlike `system_addendum`,
+    contains none of the delegate_task-specific guidance (in particular the
+    verbatim handoff-confirmation template), since this addendum is what
+    reaches a turn with no `delegate_task` tool available."""
+    from app.ask_job_runner import (
+        _PRIVATE_SCOPE_COMPOSER_FOLD,
+        _PRIVATE_SCOPE_DELEGATE_GUIDANCE,
+        _private_roster_block,
+    )
+
+    scope = _assemble_private_scope_unit(monkeypatch)
+    expected = f"{_PRIVATE_SCOPE_COMPOSER_FOLD}\n\n{_private_roster_block([])}"
+    assert scope.composer_fold_addendum == expected
+    assert _PRIVATE_SCOPE_DELEGATE_GUIDANCE not in scope.composer_fold_addendum
+    assert "I've asked <name> to <task>" not in scope.composer_fold_addendum
 
 
 # ── byte-identity: scope=None vs SurfaceScope(main) vs omitted (AC1) ───────
