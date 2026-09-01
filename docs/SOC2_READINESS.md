@@ -1,7 +1,9 @@
 # SOC 2 Readiness — Engineering Gap Analysis
 
 **Status:** open · **Owner:** CTO · **Opened:** 2026-09-01
-**Driver:** SOC 2 readiness against the Zee Labs policy set (v1.0, effective 2026-08-31 / 2026-09-01).
+**Driver:** SOC 2 readiness against the company policy set (v1.0, effective 2026-08-31 / 2026-09-01).
+The policy owner is named in the policies themselves, not here — this repo is
+public, and `repo-hygiene` fails the build on a real company name.
 
 Work the items in order. Tick a box only when the control is *evidenceable* — a
 config an auditor can screenshot, a document in the repo, or a dated record —
@@ -310,7 +312,7 @@ matrix to reality or ship the log shipping that makes the matrix true.
 |---|---|---|---|
 | [ ] P2-1 | `CONTRIBUTING.md` | Secure Development Policy | empty + untracked (see P0-3) |
 | [ ] P2-2 | Release Checklist | Secure Development — *"Prior to deploying code, a Release Checklist MUST be completed"* | missing |
-| [ ] P2-3 | Coding standards | Secure Development — *"adhere to Zee Labs's coding standards ... quality, commenting, and security"* | missing; `CLAUDE.md` is agent guidance, not a standard |
+| [ ] P2-3 | Coding standards | Secure Development — *"adhere to [Company]'s coding standards ... quality, commenting, and security"* | missing; `CLAUDE.md` is agent guidance, not a standard |
 | [ ] P2-4 | Engineering wiki | Secure Development — *"Internal GitHub repository wiki"* | missing; docs scattered across `/docs` and `backend/docs` |
 | [ ] P2-5 | `SECURITY.md` | Incident Response Plan reporting channels | missing |
 | [ ] P2-6 | `CODEOWNERS` | implied by "senior engineer approval" | missing |
@@ -336,9 +338,10 @@ exist yet.
   contacts: in the #security Slack channel canvas."*
   It must contain the escalation contact list and the on-call schedule.
 
-- [ ] **P3-3 · `security@zeelabs.ai` and `support@zeelabs.ai`.** Both are named
-  in the Incident Response Plan as reporting addresses. They must exist, route
-  to a human, and be monitored.
+- [ ] **P3-3 · The `security@` and `support@` reporting addresses.** Both are
+  named in the Incident Response Plan as the addresses reports go to. They must
+  exist, route to a human, and be monitored. (Addresses deliberately not written
+  out here — this repo is public.)
 
 - [ ] **P3-4 · Anonymous whistleblower submission form.** The Information
   Security Policy says reports *"may be submitted via an anonymous online
@@ -371,7 +374,7 @@ policy set.
 
 **Third-Party Management Policy** requires, before sharing Confidential data:
 
-> "Zee Labs shall not share or transmit Confidential data to a third-party
+> "[Company] shall not share or transmit Confidential data to a third-party
 > without first performing a third-party risk assessment and fully executing a
 > written contract, statement of work or service agreement"
 
