@@ -684,6 +684,12 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # projects, replies that it made one and nothing exists.
     "create_project",
 }
+#: `delegate` is DELIBERATELY ABSENT from the set above, unlike every other
+#: action this module's comments warn about. It is not a missed wire — see
+#: `_plan_to_envelope`'s `intent in ("update_ticket", "delegate")` rewrite:
+#: both actions execute entirely server-side off the plain `answer` path, so
+#: adding `delegate` here would only let a stale `intent == "delegate"` reach
+#: a client that has never had — and does not need — a case for it.
 
 
 def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
@@ -760,6 +766,21 @@ def _plan_to_envelope(
     ticket-update executor runs server-side off the answer path — so the client
     has nothing to do with it beyond showing the reply.
 
+    `delegate` maps to `answer` for the same reason, and deliberately, not as
+    an oversight: the actual hand-off is server-side too — the project chat's
+    scoped tool loop (`skill_router.is_project_tool_request` → `delegate_task`
+    → `project_delegation.handle_delegate_task`), reached off the SAME
+    grounded-ask path every plain answer already takes once the client falls
+    through to it. Rewriting `delegate` to `answer` here is what MAKES that
+    reuse work: the client resends the user's ORIGINAL message unparaphrased,
+    which is exactly what the tool loop's own regex gate and the delegating
+    model read — a client-side executor synthesizing a second call from
+    `instruction` would risk drifting from the sentence the tool loop actually
+    sees, and would duplicate `handle_delegate_task`'s resolve/gate/deliver
+    path for no reason. See `ask_planner`'s `delegate` entry in `_ACTIONS` for
+    why the action exists as its own explicit, gated planner decision even
+    though it is invisible to the client.
+
     Every OTHER action passes straight through, including ones only some
     surfaces can act on. `multi_agent` is the case that makes this the right
     shape: the AI bar runs it, ChatScreen does not, and a surface that cannot
@@ -768,7 +789,7 @@ def _plan_to_envelope(
     protect one that never asked.
     """
     intent = plan.action
-    if intent == "update_ticket":
+    if intent in ("update_ticket", "delegate"):
         intent = "answer"
     # A document with no brief is a blank page with a title on it. The planner
     # already degrades this (`_NEEDS_TASK`), and it is re-applied here for the

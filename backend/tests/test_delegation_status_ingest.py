@@ -24,6 +24,7 @@ import pytest
 
 from app import ask_job_runner as ajr
 from app import delegation_status_ingest as ingest
+from app import project_delegation
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import delegation_followups as delegation_followups_db
@@ -349,6 +350,170 @@ def test_ingest_cant_do_routes_to_requester(isolated_settings, monkeypatch):
     turns = conversations_db.list_individual_turns(requester_conv["id"], ctx.user_id)
     assert len(turns) == 1
     assert "can't take this on" in turns[0]["content"]
+
+
+# ── Realtime publish on lifecycle change (part 2, spec 3a) ────────────────
+#
+# The creation path already publishes `delegation.event` + `brief.delivered`
+# (`project_delegation.handle_delegate_task`, proven in
+# `test_project_delegation.py::test_delegation_create_publishes_event_to_both_parties`).
+# This module's own writes — a reply moving the derived status, or routing a
+# note back to the requester — published NOTHING before this change, so the
+# Task ledger and the requester's own chat only ever moved on their next
+# reconcile/refetch. These tests prove the SAME wiring now fires here,
+# reusing the exact `project_delegation.publish_broadcast` interception
+# point the creation-path tests already use — no new channel, no new event
+# name.
+
+
+def _capture_broadcasts(monkeypatch) -> list[tuple[str, str, dict]]:
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+    return published
+
+
+def test_ingest_in_progress_publishes_delegation_event_to_both_parties(
+    isolated_settings, monkeypatch,
+):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="in_progress")
+    # `v_delegation_status` is a real Postgres view `FakeSupabaseClient` cannot
+    # evaluate (module docstring) — shape the DTO deterministically, the same
+    # way `test_project_delegation.py`'s own create-publish test does.
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "in_progress",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "started on it")
+
+    events = [p for p in published if p[1] == "delegation.event"]
+    assert len(events) == 2, published
+    topics = {t for t, _e, _p in events}
+    assert f"project:{project['id']}:user:{ctx.user_id}" in topics    # assigner
+    assert f"project:{project['id']}:user:{assignee_id}" in topics    # assignee
+    assert f"project:{project['id']}" not in topics                  # never the group channel
+    for _t, _e, payload in events:
+        assert payload["status"] == "in_progress"
+
+
+def test_ingest_done_explicit_publishes_delegation_event_and_brief_delivered(
+    isolated_settings, monkeypatch,
+):
+    """Completion is BOTH a status change (the ledger DTO) AND a completion
+    notice (the "✓ … finished" turn posted into the requester's own chat) —
+    both must go out live."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(
+        ctx, project["id"], assignee_id, task_summary="Draft the pricing page",
+    )
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "completed",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "all done")
+
+    status_events = [p for p in published if p[1] == "delegation.event"]
+    assert len(status_events) == 2, published
+    assert all(p[2]["status"] == "completed" for p in status_events)
+
+    # The completion NOTICE (the turn `notify_requester_task_completed` posts
+    # into the requester's own chat) live-appends too, reusing the exact
+    # `brief.delivered` mechanic a fresh brief delivery already uses.
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "finished" in notices[0][2]["content"]
+
+
+def test_ingest_blocked_publishes_brief_delivered_to_requester(isolated_settings, monkeypatch):
+    """No status transition on `blocked` (the row stays `assigned`/
+    `in_progress`) — only the route-back TURN needs to go out live, reusing
+    the same `brief.delivered` mechanic a fresh brief delivery uses."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="blocked")
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "I'm stuck on this")
+
+    assert [p[1] for p in published if p[1] == "delegation.event"] == []
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "blocked" in notices[0][2]["content"]
+
+
+def test_ingest_done_inferred_soft_confirm_publishes_to_the_replier(
+    isolated_settings, monkeypatch,
+):
+    """The soft-confirm turn lands in the REPLIER's own chat (not the
+    requester's) — the live-append must follow the same party."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_inferred")
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "shipped that")
+
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{assignee_id}"
+    assert notices[0][2]["content"] == ingest._SOFT_CONFIRM_TEXT
+
+
+def test_status_publish_failure_never_breaks_the_write(isolated_settings, monkeypatch, caplog):
+    """Best-effort (AD-P22), same posture as the creation path's own
+    `test_delegation_create_publish_failure_does_not_rollback`: a raising
+    `status_dto` must not stop the `delegation_events` write or the
+    `delegation_followups` upsert that follows it."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="in_progress")
+
+    def _boom(_did):
+        raise RuntimeError("simulated status_dto failure")
+
+    monkeypatch.setattr(delegation_events_db, "status_dto", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "started on it")
+
+    events = delegation_events_db.list_events(deleg_id)
+    assert [e["event"] for e in events] == ["in_progress"], (
+        "a publish hiccup must never roll back the already-committed event write"
+    )
+    followup = delegation_followups_db.get_followup(deleg_id)
+    assert followup is not None and followup["next_check_in"] is not None
 
 
 # ── none / unknown delegation_id (AC15) ──────────────────────────────────

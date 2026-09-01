@@ -628,7 +628,7 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     # could name. The version is pinned here rather than merely compared to
     # itself because pooling rows across versions would pool two different
     # menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v14"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v15"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -777,7 +777,7 @@ def test_generate_prd_survives_an_empty_task_on_purpose():
     assert "generate_prd" not in ap._NEEDS_TASK
 
 
-@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets"])
+@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets", "delegate"])
 def test_an_edit_without_an_instruction_degrades_to_answer(action):
     """`chat_intent` already applies this rule (`no_instruction` → answer);
     rewriting a document toward nothing is worse than not rewriting it — and
