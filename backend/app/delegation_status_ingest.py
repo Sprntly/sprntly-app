@@ -47,6 +47,13 @@ from app.delegation_cadence import (
 )
 from app.llm import DEFAULT_MODEL, call_json
 from app.llm_telemetry import RunUsage, log_llm_run
+# Reused, not reimplemented (AD-P21/AD-P22): the SAME best-effort publish
+# helpers `project_delegation.handle_delegate_task` already uses on the
+# creation path — see `_post_to_own_chat`/`_publish_status_change` below for
+# why the inbound reply path needs them too. No new realtime channel/event
+# name; both broadcast on the existing per-user `project:{id}:user:{uid}`
+# topics.
+from app.project_delegation import _publish_brief_delivered, _publish_delegation_event
 
 logger = logging.getLogger(__name__)
 
@@ -233,8 +240,49 @@ def _display_first_name(project_id: int, user_id: str) -> str:
 
 
 def _post_to_own_chat(project_id: int, user_id: str, text: str) -> None:
+    """Post one turn into `user_id`'s own individual project chat AND
+    broadcast it live, the same way a delivered brief already does
+    (`project_delegation._publish_brief_delivered`) — this is the SAME
+    mechanic (a one-way notification turn landing in someone's own chat),
+    just a different caller. Without this, every route-back this module
+    posts (a blocked/can't-do notice, the completion notice) sat in the
+    recipient's chat until their next reconcile/refetch; the ledger's own
+    creation-time publish had no counterpart here. Best-effort like the
+    publish helper itself — a broadcast hiccup never rolls back the write,
+    which has already committed by the time this is called."""
     conv = conversations_db.create_individual_project_chat(project_id, user_id)
-    conversations_db.post_individual_turn(conv["id"], "assistant", text)
+    turn = conversations_db.post_individual_turn(conv["id"], "assistant", text)
+    _publish_brief_delivered(project_id, user_id, conv["id"], turn)
+
+
+def _publish_status_change(
+    *, project_id: int, delegation_id: int, assigner_user_id: str | None, assignee_user_id: str,
+) -> None:
+    """Best-effort: broadcast the derived status DTO to both parties right
+    after a `record_event` write in this module, mirroring the creation-time
+    publish `project_delegation.handle_delegate_task` already does
+    (`_publish_delegation_event`) — so the assigner's Task ledger updates
+    LIVE on an INBOUND status change too (in_progress / done_explicit), not
+    only on the delegation's creation. Its own try/except (not just the
+    caller's outer one): a publish hiccup here must never stop the
+    `delegation_followups` row update that follows it in
+    `_apply_classification`."""
+    if not assigner_user_id:
+        return
+    try:
+        dto = delegation_events_db.status_dto(delegation_id)
+        if dto is not None:
+            _publish_delegation_event(
+                project_id=project_id,
+                assigner_user_id=assigner_user_id,
+                assignee_user_id=assignee_user_id,
+                dto=dto,
+            )
+    except Exception as exc:  # noqa: BLE001 — best-effort, mirrors project_delegation's own publish call sites
+        logger.warning(
+            "delegation_status_publish_failed delegation_id=%s error_class=%s",
+            delegation_id, type(exc).__name__,
+        )
 
 
 def _route_to_requester(project_id: int, delegation_id: int, text: str) -> None:
@@ -292,6 +340,13 @@ def _apply_classification(
             delegation_events_db.record_event(
                 delegation_id=delegation_id, event="in_progress", actor_user_id=replier_user_id
             )
+            # Ledger liveness (3a): the requester's Task ledger otherwise only
+            # ever moves on their next reconcile/refetch.
+            _publish_status_change(
+                project_id=project_id, delegation_id=delegation_id,
+                assigner_user_id=row.get("assigner_user_id"),
+                assignee_user_id=replier_user_id,
+            )
         delegation_followups_db.upsert_followup(
             delegation_id,
             next_check_in=clamp_next_check_in(proposed, last_checked_in=last_checked_in, now=now),
@@ -301,6 +356,12 @@ def _apply_classification(
         if delegation_events_db.is_legal_transition(row["status"], "completed"):
             delegation_events_db.record_event(
                 delegation_id=delegation_id, event="completed", actor_user_id=replier_user_id
+            )
+            # Ledger liveness (3a), same as the in_progress branch above.
+            _publish_status_change(
+                project_id=project_id, delegation_id=delegation_id,
+                assigner_user_id=row.get("assigner_user_id"),
+                assignee_user_id=replier_user_id,
             )
             notify_requester_task_completed(
                 project_id, delegation_id,

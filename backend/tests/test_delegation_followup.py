@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from app import delegation_followup as followup_mod
+from app import project_delegation
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import delegation_followup_sends as sends_db
@@ -282,6 +283,40 @@ def test_ping_posts_dm_records_and_reschedules(isolated_settings, monkeypatch):
     assert followup["next_check_in"] > prior_next.isoformat()  # floor-clamped, must lengthen
 
 
+def test_ping_publishes_brief_delivered_to_the_assignee(isolated_settings, monkeypatch):
+    """Check-in liveness (part 2, spec 3a): a scheduled ping is a turn posted
+    into the assignee's own individual chat, the same shape a fresh brief
+    delivery already is — it must live-append the same way, reusing the
+    exact `brief.delivered` mechanic (no new channel/event)."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    _bypass_cap(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Ping task")
+
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Ping task",
+        next_check_in=_FROZEN_NOW - timedelta(hours=1),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch, decision="ping", dm_text="Checking in on this — any update?")
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["pinged"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{assignee_id}"
+    assert notices[0][2]["content"] == "Checking in on this — any update?"
+
+
 def test_reschedule_sends_nothing(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     _freeze(monkeypatch)
@@ -416,6 +451,44 @@ def test_escalate_posts_to_requester_not_assignee(isolated_settings, monkeypatch
     assert len(sends_db.sends_for_delegation(deleg_id, channel="dm")) == 1
 
 
+def test_escalate_publishes_brief_delivered_to_the_requester(isolated_settings, monkeypatch):
+    """Same check-in liveness as the ping test above, on the requester's own
+    channel this time — the escalation notice is their version of a
+    check-in."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    _bypass_cap(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(
+        ctx, project["id"], assignee_id, task_summary="Escalate task",
+    )
+    sends_db.record_send(
+        delegation_id=deleg_id, company_id="co-1", assignee_user_id=assignee_id,
+        check_key="prior-1", channel="dm",
+    )
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Escalate task",
+        expected_completion=_FROZEN_NOW - timedelta(days=3),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch, decision="escalate")
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["escalated"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "Escalate task" in notices[0][2]["content"]
+
+
 # ── Step-0 soft-done short-circuit (AC13) ─────────────────────────────────
 
 
@@ -449,6 +522,41 @@ def test_soft_done_finalized_without_llm_or_ping(isolated_settings, monkeypatch)
     assert len(turns) == 1  # no ping turn posted
 
     assert sends_db.sends_for_delegation(deleg_id) == []
+
+
+def test_soft_done_finalize_publishes_the_completion_notice(isolated_settings, monkeypatch):
+    """The finalize step calls `notify_requester_task_completed`
+    (`delegation_status_ingest.py`) — the same helper the inbound
+    `done_explicit` reply path uses — so it inherits that path's own
+    completion-notice publish for free. This proves the wiring survives
+    reaching it from the OTHER caller (the outbound sweep, not an inbound
+    reply)."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Soft-done task")
+
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Soft-done task",
+        pending_done_since=_FROZEN_NOW - timedelta(hours=2),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch)
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["finalized"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "finished" in notices[0][2]["content"]
 
 
 # ── Idempotency (AC14) ─────────────────────────────────────────────────────
