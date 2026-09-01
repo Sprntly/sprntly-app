@@ -3,12 +3,16 @@ __pycache__/
 *.egg-info/
 .venv
 venv/
+# Every .env variant, ignored by shape rather than by name. The old list named
+# six specific suffixes, which meant a backup taken during an environment
+# repoint (`.env.bak-prod`, `.env.bak-repoint-*` — BRANCHING.md tells you to
+# make one) was NOT ignored and could be committed. This repo is public and
+# these files hold service-role keys and TOKEN_ENCRYPTION_KEY, so a name the
+# list happened not to anticipate is a world-readable credential leak.
 .env
-.env.local
-.env.personal
-.env.prod
-.env.personal.local
-.env.prod.local
+.env.*
+# ...except the tracked templates, which carry no values.
+!.env.example
 *.log
 .DS_Store
 .idea/
