@@ -34,9 +34,21 @@ def test_planner_prompt_distinguishes_a_named_person_from_a_slack_channel():
     # a worked example so the model has something concrete to pattern-match
     # against rather than only an abstract rule.
     assert "send this to fortune to prioritize" in system
-    # The rule must land on `answer`, never invent a `delegate` action here —
-    # delegation is resolved by the project agent itself, not this planner.
-    assert "delegation" in system
+    # UPDATED INVARIANT: this phrasing now names the planner's own first-class
+    # `delegate` action explicitly, rather than the bare `answer` label this
+    # assertion originally pinned. The confabulation fix this file's docstring
+    # describes made `answer` the correct landing because `delegate` did not
+    # exist yet — the project agent resolved delegation itself off THAT
+    # fallback. A later fix (the reported "assign David to review the
+    # evidence doc" dead-end on `assign_tickets`) gave the planner its own
+    # explicit, gated `delegate` action so the decision is no longer only
+    # reachable by accident of `answer`'s catch-all — see `ask_planner`'s
+    # `delegate` entry in `_ACTIONS`. The two fixes do not conflict: `delegate`
+    # still executes off the SAME `/v1/ask` path `answer` always has
+    # (`chat_intent._plan_to_envelope` rewrites it to `answer` before the
+    # client ever sees it), so root cause #1 here — a person misread as a
+    # Slack channel — is closed exactly the same way, just named honestly now.
+    assert "delegate" in system
 
     weak = ap._PLANNER_SYSTEM.replace(
         "A PERSON IS NOT A SLACK DESTINATION", "PERSONS AND CHANNELS ARE THE SAME"
