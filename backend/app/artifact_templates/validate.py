@@ -26,11 +26,14 @@ the two. That is why absence blocks activation rather than warning:
     (`web/app/lib/prdEvidenceTruncate.ts:38`) returns false and "View more
     evidence" simply disappears.
   - `ul.inputs` inside `.appendix`, but ONLY when the section map claims an
-    open-questions home — else `extract_input_questions`
-    (`backend/app/prd_questions.py`) finds nothing there and the PRD's chat
-    loses its answer buttons. Conditional since prd-author v4.8 retired the
-    house appendix: the built-in PRD itself no longer collects open questions,
-    so a format without such a section is exactly as complete as ours.
+    open-questions home. This is a FIDELITY check on the company's own
+    template: they declared a section, so the compiled document should have
+    one. It used to be justified by `extract_input_questions` needing the list
+    to read; that feature was removed on 2026-09-01 and the check survives it,
+    because a template that loses a section it declared is still a bad compile.
+    Conditional since prd-author v4.8 retired the house appendix: the built-in
+    PRD collects no open questions, so a format without such a section is
+    exactly as complete as ours.
   - `p.hyp`, but ONLY when the section map claims a hypothesis home — else
     `stripHypothesisSection` (`web/app/lib/htmlBrief.ts:67`) no-ops in the
     combined Evidence+PRD export and the hypothesis is duplicated.
@@ -209,8 +212,9 @@ class _SkeletonScanner(HTMLParser):
             self.has_page_canvas = True
         if tag == "ul" and "ev" in classes:
             self.has_evidence_list = True
-        # `ul.inputs` only counts INSIDE `.appendix` — prd_questions looks for
-        # it there, and an inputs list somewhere else is not what it reads.
+        # `ul.inputs` only counts INSIDE `.appendix` — that is where a
+        # declared open-items section belongs, and a list somewhere else is not
+        # the section the template's own section map promised.
         if tag == "ul" and "inputs" in classes and self._ancestor_has("appendix"):
             self.has_inputs_list = True
         if tag == "p" and "hyp" in classes:

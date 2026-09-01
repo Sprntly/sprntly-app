@@ -20,7 +20,7 @@ import type { ChatHomeCard, ConversationRow } from "../../../types/content"
 import { buildHomeChips, DEFAULT_HOME_CHIPS } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
-import { PrdInputQuestions, clearPrdDrafts, prdStateFromRecord } from "../../shared/PrdInputQuestions"
+import { clearPrdDrafts, prdStateFromRecord } from "../../../lib/prd-adapter"
 import {
   clarifyAnswersText,
   clarifyQuestionsText,
@@ -993,18 +993,6 @@ export function ChatScreen() {
 
   // A "User input needed" answer patched the PRD (scoped edit). Refresh the
   // active tab's cached PRD + the shared content panel so the change shows live.
-  const handleInputPrdUpdated = useCallback((prd: PrdState) => {
-    setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prd } : t))
-    setContent({ prd })
-  }, [activeTabId, setContent])
-  // Per-conversation composer (draft, attachments, slash palette + pinned skill,
-  // `+` menu, busy hint, dictation, optimistic pending-send) — extracted verbatim
-  // into the shared unit. The skill/slash-filter wiring, the submit/input/keydown
-  // handlers, and the composer effects at other positions stay in the host below
-  // and read this hook's state through the destructure.
-  // The whole composer is captured as one object so it can be handed to the
-  // engine (which drives the send handlers off it); the tab orchestrator still
-  // reads its state through this destructure.
   const composer = useComposer({ showToast })
   const {
     draft, setDraft,
@@ -5795,20 +5783,6 @@ export function ChatScreen() {
       }
     />
   ) : null
-  // "User input needed" items from the PRD, surfaced as chat messages with answer
-  // buttons. Answering patches only the affected PRD sections and refreshes the
-  // panel live.
-  const prdQuestionsNode = activeTab?.prd ? (
-    <PrdInputQuestions
-      prdId={activeTab.prd.prd_id}
-      onPrdUpdated={handleInputPrdUpdated}
-      // Popup mode: pending items step through the dock's QuestionPopup, the
-      // thread keeps the ✓ record. The clarify gate and an active assign batch
-      // outrank them for the dock, so while either is up this hands over
-      // `null` and the items hold.
-      popupHost={clarifyPopupOpen || assignPopupOpen ? null : questionDockEl}
-    />
-  ) : null
   // Command-opened PRD tab with at least one turn → render the card + questions
   // INLINE after the command turn; otherwise (header open, or an empty thread)
   // keep them at the TOP as before.
@@ -6367,7 +6341,7 @@ export function ChatScreen() {
               busy, activeTab, name, userInitials, skillForQuery,
               ticketSetActionState, showInsightMsg, chatEvidenceExists,
               chatPrdExists, chatPrdCtaWaiting, chatProtoPrdId, chatPrototypeReady,
-              inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode,
+              inlinePrdCards, inlinePrdAnchorIdx, insightCardNode, prdQuestionsNode: null,
               clarifyPopupOpen, pendingClarifyTurn,
               // WITHOUT THESE THE CARD IS DECORATION. They are optional on
               // `MapMainTurnsDeps` (the group surface has no Goal Analysis), so

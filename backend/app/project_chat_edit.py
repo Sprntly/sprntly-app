@@ -67,7 +67,7 @@ def apply_chat_edit_scoped(
     unchanged — callers that want a softer "no-edit" reply instead of a raw
     404/denial catch those themselves (see `routes/projects.py`'s new route).
     """
-    from app.prd_questions import apply_chat_edit  # local: mirrors routes/prd.py's own lazy import of the same call
+    from app.prd_edit import apply_chat_edit  # local: mirrors routes/prd.py's own lazy import of the same call
 
     if project_id is not None:
         # ★ cross-PROJECT gate — BEFORE any payload_md read or write.

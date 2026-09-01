@@ -24,7 +24,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import app.ask_job_runner as ajr
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace, upsert_workspace_member
 from tests import _fake_supabase
@@ -139,7 +139,7 @@ def test_prd_edit_route_persists_both_sides(tenant_client, isolated_settings, mo
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc v2</h1></body></html>",
         "sections_changed": ["Requirements"],
         "summary": "Tightened requirements.",
@@ -186,7 +186,7 @@ def test_prd_edit_route_persists_success_shape(tenant_client, isolated_settings,
     complete_prd(prd_id, title="Doc", md="<html><body><h1>Doc</h1></body></html>")
     projects_db.add_artifact(project_id, "prd", prd_id)
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc v2</h1></body></html>",
         "sections_changed": ["Requirements"],
         "summary": "Tightened requirements.",

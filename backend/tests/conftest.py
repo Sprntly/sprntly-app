@@ -118,7 +118,7 @@ _RELOAD_ORDER = [
     "app.ask_job_runner",
     "app.evidence_runner",
     "app.prd_runner",
-    "app.prd_questions",
+    "app.prd_edit",
     "app.brief_runner",
     "app.connectors.tokens",
     "app.connectors.google_oauth",

@@ -21,7 +21,7 @@
 
 import { useCallback } from "react"
 import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
-import { clearPrdDrafts } from "../../shared/PrdInputQuestions"
+import { clearPrdDrafts } from "../../../lib/prd-adapter"
 import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
 import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type OpenArtifactResult } from "../../../lib/api"
 import type { ChatPersistence } from "../../../lib/chatPersistence"

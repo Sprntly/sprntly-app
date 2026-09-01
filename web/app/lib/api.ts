@@ -3563,32 +3563,9 @@ export const prdApi = {
    *  scheduled the extraction for this PRD (a pre-feature PRD opened from
    *  Artifacts, or a just-generated one whose extraction is still running) —
    *  poll until it flips false and the questions arrive. */
-  listInputQuestions: (id: number) =>
-    api.get<PrdInputQuestionsList>(`/v1/prd/${id}/input-questions`),
-  /** Answer one "User input needed" question. The backend folds the answer into
-   *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
-   *  saves an undoable version, and returns the updated PRD + which sections
-   *  changed so the panel can refresh live and the chat can confirm. */
-  answerInputQuestion: (prdId: number, questionId: number, answer: string) =>
-    api.post<PrdInputAnswerResponse>(
-      `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
-      { answer },
-    ),
-  /** Answer SEVERAL input questions in ONE scoped edit — the question popup
-   *  collects its whole batch before submitting. All-or-nothing: a failed
-   *  edit leaves the PRD untouched and no question marked answered. */
-  answerInputQuestionsBatch: (
-    prdId: number,
-    answers: { question_id: number; answer: string }[],
-  ) =>
-    api.post<PrdInputAnswersBatchResponse>(
-      `/v1/prd/${prdId}/input-questions/answer-batch`,
-      { answers },
-    ),
   /** Apply a free-form chat edit instruction to the PRD ("make this PRD
-   *  shorter"). Same scoped-editor contract as answerInputQuestion — only the
-   *  affected sections change, saved as an undoable version — driven by the
-   *  user's own instruction. Empty `sections_changed` means the editor judged
+   *  shorter"). A scoped edit: only the affected sections change, saved as an
+   *  undoable version, driven by the user's own instruction. Empty `sections_changed` means the editor judged
    *  the message wasn't an edit and left the document untouched. */
   chatEdit: (prdId: number, instruction: string) =>
     api.post<{ prd: PrdRecord; sections_changed: string[]; summary: string }>(
@@ -3613,48 +3590,6 @@ export const prdApi = {
       artifact_template_id: string | null
       title?: string
     }>(`/v1/prd/${prdId}/change-template`, { artifact_template_id: artifactTemplateId }),
-}
-
-/** One structured "User input needed" item lifted out of the PRD document.
- *  `tag` is 'escalate' (a product decision → answered by picking an `options`
- *  button) or 'need' (missing data → answered as free text, `options` empty).
- *  `status` walks pending → answered (or dismissed). */
-export type PrdInputQuestion = {
-  id: number
-  prd_id: number
-  ordinal: number
-  tag: "escalate" | "need"
-  prompt: string
-  owner?: string | null
-  options: PendingQuestionChoice[]
-  status: "pending" | "answered" | "dismissed"
-  answer?: string | null
-}
-
-/** Response from GET /v1/prd/{id}/input-questions — the stored questions plus
- *  whether a background extraction is currently producing them (poll while
- *  true). */
-export type PrdInputQuestionsList = {
-  questions: PrdInputQuestion[]
-  extracting?: boolean
-}
-
-/** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
- *  (with the scoped edit folded in), the now-answered question, and the
- *  human-readable section names the edit touched (for the chat confirmation). */
-export type PrdInputAnswerResponse = {
-  prd: PrdRecord
-  question: PrdInputQuestion
-  sections_changed: string[]
-  summary: string
-}
-
-/** Response from the batch answer route — same contract, N answered rows. */
-export type PrdInputAnswersBatchResponse = {
-  prd: PrdRecord
-  questions: PrdInputQuestion[]
-  sections_changed: string[]
-  summary: string
 }
 
 // ---- Design Agent ---------------------------------------------------
