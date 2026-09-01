@@ -158,3 +158,57 @@ def test_evidence_markup_reference_is_injected_not_merely_shipped():
         "the reference lives in references/; an examples/ dir here means a "
         "split set, half of which the model never sees"
     )
+
+
+# ---------------------------------------------------------------------------
+# A retired section stays retired everywhere in the file, not just where the
+# retirement is announced
+# ---------------------------------------------------------------------------
+
+#: Sections prd-author has retired, and the words that mark a line as talking
+#: ABOUT the retirement rather than asking for the section.
+RETIRED_SECTION = "User input needed"
+PROHIBITIVE = (
+    "retired", "no open-questions", "no appendix", "no budget",
+    "there is no", "do not reintroduce", "company", "template",
+)
+
+
+def test_a_retired_section_is_never_also_instructed():
+    """THE BUG THIS GUARDS, and it shipped for two and a half weeks.
+
+    v4.8 retired the "User input needed" list (owner decision 2026-08-14) and
+    said so in three places — the section spine, the retired-sections note, and
+    the final checklist. Two OTHER lines went on asking for it:
+
+      * a HARD RULE in Input handling — "Anything unresolved goes to **User
+        input needed**, not into a guess" — and hard rules are the part of a
+        skill a model follows most literally, since the file itself says they
+        are "never overridden";
+      * the standard-length section budget, which allotted it ~90 words. A
+        budget for a section is an instruction to write one.
+
+    A prose note saying a section is retired does not beat a rule and a word
+    count asking for it, and it did not: 251 open-item rows were extracted from
+    PRDs generated AFTER the retirement, the newest the day before this fix.
+    The document had to stop contradicting itself, not argue harder.
+
+    So: the phrase may appear only in a line that is PROHIBITING it, or that is
+    about the one sanctioned exception (a company template whose own format
+    defines an open-items section — Template adoption governs, their format
+    wins). Any other mention is the regression coming back.
+    """
+    text = (SKILLS_ROOT / "prd-author" / "SKILL.md").read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in text.splitlines()
+        if RETIRED_SECTION.lower() in line.lower()
+        and not any(word in line.lower() for word in PROHIBITIVE)
+    ]
+    assert not offenders, (
+        "prd-author/SKILL.md asks for the retired "
+        f'"{RETIRED_SECTION}" section:\n  - '
+        + "\n  - ".join(offenders)
+        + "\nRetiring a section means removing every instruction that produces "
+        "it — a rule or a word budget beats a prose note saying it is gone."
+    )
