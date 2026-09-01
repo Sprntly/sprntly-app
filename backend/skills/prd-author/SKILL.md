@@ -9,7 +9,7 @@ description: >
   skill (`implementation-spec`), derived from a finished Part A.
 ---
 
-# prd-author (v4.8)
+# prd-author (v4.9)
 
 ## Purpose
 Turn a signal (or a one-line idea) into a decision-ready PRD a human can approve in minutes. This is **Part A — the PRD for people to approve.** Once Part A exists, the `implementation-spec` skill derives **Part B — the Implementation Spec your coding agent builds from.** This skill owns Part A only; it never emits Part B.
@@ -39,7 +39,7 @@ Part A renders the **author's name directly under the title**, labeled `Author`.
 ## Input handling
 - **Mine artifacts before asking.** Read everything provided and extract facts first.
 - **Clarify answers are stated facts.** When the task carries an “Additional details from the user” block (the pre-generation clarify gate’s answers), treat every line in it as an authoritative, stated decision: ground the relevant sections on it and NEVER re-raise it as a `[NEED]`/`[ESCALATE]` item — re-asking what the user just answered reads as not having listened.
-- **Ask at most 5 clarifying questions**, ranked by leverage. Anything unresolved goes to **User input needed**, not into a guess.
+- **Ask at most 5 clarifying questions**, ranked by leverage. Anything still unresolved becomes an inline `[NEED]`/`[ESCALATE]` marker in the section where the gap actually is — never a guess, and never collected into a list. There is no "User input needed" section to send it to: v4.8 retired it (see *Retired sections*), and this line said otherwise until 2026-09-01, which is why documents kept carrying one.
 - **Company template adaptation:** if a company PRD template is present, map content into *their* section structure — see **Template adoption** below. Template adaptation copies structure, not judgment.
 
 ## Groundedness (internal — never printed)
@@ -84,7 +84,7 @@ The spine reads: what world is this (Context) → what's wrong (Problem) → how
 9. **Requirements** — table by default: `# | Requirement | Description | Type`, Type ∈ Happy path / Edge case / Failure (never "Core"). Long mode adds Priority / Signal/Source / Acceptance. Prose only on request. These Type tags are load-bearing: `implementation-spec` inherits them (Happy path → happy-path EARS; Edge case → mandatory edge branch; Failure → mandatory failure branch).
 10. **Risks — in the body, closing the document (v4.4 moved it out of the appendix; v4.8 retired the appendix beneath it).** Sits after Requirements: the reader sees what we're building, then what could break it. Named risks in one paragraph, then **exactly one riskiest assumption in its boxed callout with a 3-line pre-mortem** inside it.
 
-*Retired sections — do not reintroduce them, in either length mode.* v4.8 retired the **Appendix and its "User input needed" list** (owner decision, 2026-08-14): the house document has no open-questions section of any name — "Still open", "Open questions", "User input needed" all read as the same regression. Unknowns render inline as `[NEED]`/`[ESCALATE]` markers where they occur, exactly as the hard rules already require. The ONE exception is a company-supplied template that defines its own open-items section — Template adoption governs, their format wins, and that section renders. v4.4 retired: Non-goals, Alignment, Rollout, Done-when.
+*Retired sections — do not reintroduce them, in either length mode.* v4.8 retired the **Appendix and its "User input needed" list** (owner decision, 2026-08-14): the house document has no open-questions section of any name — "Still open", "Open questions", "User input needed" all read as the same regression. Unknowns render inline as `[NEED]`/`[ESCALATE]` markers where they occur, exactly as the hard rules already require. The ONE exception is a company-supplied template that defines its own open-items section — Template adoption governs, their format wins, and that section renders. v4.4 retired: Non-goals, Alignment, Rollout, Done-when. **v4.9 (2026-09-01) made this stick:** v4.8 retired the section here and in the checklist, but two lines elsewhere still asked for it — a HARD RULE routing unresolved items to "User input needed", and a section budget allotting it ~90 words. A model reading a rule and a budget for a section will write that section whatever a prose note says, and it did: 251 open-item rows were extracted from PRDs generated after the retirement. Both lines now point at the inline markers instead.
 
 ## Template adoption (v4.5)
 When the caller supplies a template — a blank company PRD form, a filled PRD to match, an exported doc, or a named house format — **adopt it.** The supplied template governs the shape of the document; this skill governs whether the content in it is true.
@@ -124,7 +124,7 @@ Two lengths. **Standard is the default and is what ships unless the caller expli
 
 The Requirements table is outside both budgets and scales with scope — a 25-requirement product does not get a shorter Context to compensate.
 
-Standard-length section budget: Context ~70 · Problem ~60 · Evidence ~130 · Users ~60 · Goal ~70 · Hypothesis ~55 · Risks ~150 · User input needed ~90.
+Standard-length section budget: Context ~70 · Problem ~60 · Evidence ~130 · Users ~60 · Goal ~70 · Hypothesis ~55 · Risks ~150. (No budget for "User input needed" — v4.8 retired the section, and budgeting a section is an instruction to write one.)
 
 **Never infer detailed mode.** A rich input pile, a large codebase, a long evidence brief, or a complex product are not requests. Volume of input has no bearing on length of output; the caller asks, or it stays standard.
 
