@@ -193,6 +193,15 @@ class CallTranscript:
     #: explains. Empty for a call that needs no caveat — which is every
     #: Fireflies call, since Fireflies only returns transcribed meetings.
     note: str = ""
+    #: Full sentence-level transcript ([{"speaker_name", "text"}, ...]), as
+    #: `call_index.fetch_transcript` returns it — NOT the same material as
+    #: `quotes` above, which is a bounded sample. Empty for every call this
+    #: puller's own digest fetch produces (`fetch_calls` never sets it); only
+    #: `call_index`'s single-call read path populates it, so that path can
+    #: answer from the `call_transcripts` store at equivalent quality to a
+    #: live fetch instead of the thinner quote sample. Defaulted and placed
+    #: last so every existing construction site is untouched.
+    sentences: list[dict] = field(default_factory=list)
 
     def render(self, max_quotes: Optional[int] = None) -> str:
         """Render one call into the skill's input corpus — header, distilled
