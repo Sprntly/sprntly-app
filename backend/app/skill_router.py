@@ -1930,7 +1930,13 @@ _PROJECT_TOOL_DELEGATE_VERB = re.compile(
     r"\b(?:assign|hand(?:\s+off)?)\b[^.?!]{0,40}?\bto\b|"
     r"hand\s+off\b|"
     r"send\s+(?:this|that|it)\s+to|"
-    r"have\s+\w+\s+(?:do|handle|take|work\s+on|own)|"
+    # "have <someone-not-me> <verb>" — a causative hand-off with a bare
+    # infinitive, no "to" ("have David draft the export review"). Broadened
+    # past the original do/handle/take/work-on/own verb list to any verb, on
+    # the same reasoning as the "ask" branch below: a non-member destination
+    # ("have him do it") is re-resolved and declined gracefully downstream in
+    # `handle_delegate_task`, so admitting the shape is safe.
+    r"\bhave\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+\w+|"
     # "ask <someone-not-me> to <verb>" — a hand-off to a teammate ("ask Bob to
     # review the PRD by Friday"). Broadened past the original do/handle/take/own
     # verb list: any verb after "to" is a delegable action, and the assignee is
@@ -1939,6 +1945,13 @@ _PROJECT_TOOL_DELEGATE_VERB = re.compile(
     # and closes the gap where "ask <member> to <task>" fell through to an
     # out-of-scope refusal instead of delegating.
     r"ask\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+to\s+\w+|"
+    # "tell/get <someone-not-me> to <verb>" — the imperative hand-off shape
+    # this gate was missing entirely ("tell David to review the prd", "get
+    # David to look at the export"), same pronoun-object guard and downstream
+    # roster re-resolution as "ask" above — "tell me/us/him/her/them ..." is
+    # never a delegation (also already vetoed as a read by
+    # `_PROJECT_TOOL_MENTION_VETO`'s "tell me about" for the common case).
+    r"\b(?:tell|get)\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+to\s+\w+|"
     r"give\s+(?:this|that|it)\s+to",
     re.I,
 )
