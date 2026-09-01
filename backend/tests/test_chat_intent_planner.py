@@ -284,6 +284,51 @@ def test_update_ticket_maps_to_answer_for_now():
     assert envelope["intent"] == "answer"
 
 
+def test_delegate_maps_to_answer_so_the_client_resends_the_original_message():
+    """The client's union does not know `delegate` either, and — unlike
+    `update_ticket` — the reason is not just "the executor runs server-side":
+    it is that rewriting to `answer` is what MAKES the reuse work. The client
+    falls through to its grounded ask on `answer`, which resends the user's
+    ORIGINAL message, unparaphrased, to `/v1/ask` — exactly what
+    `skill_router.is_project_tool_request`'s regex gate and the delegating
+    model both need to see. A synthesized `instruction` never reaches the
+    tool loop at all; only `intent` does the work here."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "delegate", action_confidence=0.92,
+            instruction="ask David to review the evidence doc",
+        ),
+        prd_id=None,
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] == "planner"
+
+
+def test_delegate_with_no_instruction_is_downgraded_with_a_reason():
+    """Same rule as assign_tickets/edit_prd: a hand-off naming nobody and
+    nothing has nothing for the tool loop to act on."""
+    envelope = ci._plan_to_envelope(
+        _plan("delegate", action_confidence=0.9, instruction=""), prd_id=None
+    )
+    assert envelope["intent"] == "answer"
+
+
+def test_delegate_needs_no_target_prd_unlike_assign_tickets():
+    """Unlike `assign_tickets` (`_NEEDS_PRD`-gated — its universe is the
+    thread's generated tickets), a delegation needs no PRD at all: a
+    `prd_id=None` delegate plan must NOT be downgraded on `no_target_prd` —
+    that source is reserved for assign_tickets's own PRD-less case."""
+    envelope = ci._plan_to_envelope(
+        _plan(
+            "delegate", action_confidence=0.9,
+            instruction="tell David to figure out which requirements are important",
+        ),
+        prd_id=None,
+    )
+    assert envelope["intent"] == "answer"
+    assert envelope["source"] != "no_target_prd"
+
+
 def test_an_action_outside_the_client_vocabulary_falls_back():
     envelope = ci._plan_to_envelope(_plan("summon_dragon", confidence=0.99), prd_id=1)
     assert envelope["intent"] == "answer"

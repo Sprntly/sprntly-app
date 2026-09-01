@@ -315,6 +315,14 @@ describe("dispatchChatIntent — answer / low-confidence / unknown / generate_pr
     ["low confidence (still intent=answer per the 0.6-floor downgrade)", { intent: "answer" as const, confidence: 0.2, source: "low_confidence" }],
     ["generate_prototype (moot everywhere — no executor exists)", { intent: "generate_prototype" as const }],
     ["an unrecognized future intent string", { intent: "future_intent" as unknown as ChatIntentEnvelope["intent"] }],
+    // `delegate` is a real backend action (`ask_planner._ACTIONS`) but the
+    // server ALWAYS rewrites it to `answer` before the envelope reaches the
+    // client (`chat_intent._plan_to_envelope`) — it is not a client dispatch,
+    // the same way `update_ticket` is not. This case proves the client is
+    // still safe on the string ever reaching it (an older cached response, a
+    // future backend regression): it falls through to the grounded ask like
+    // any other unhandled intent, never throwing on a missing switch case.
+    ["delegate (never emitted by the server — server-side-only hand-off)", { intent: "delegate" as unknown as ChatIntentEnvelope["intent"] }],
   ])("%s → onAnswer, no structured executor", (_label, overrides) => {
     const ex = executors()
     const env = envelope(overrides)
