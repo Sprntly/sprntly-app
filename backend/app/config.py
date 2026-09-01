@@ -571,11 +571,15 @@ class Settings(BaseSettings):
     #
     # WHY THESE EXIST when the sweep already has a kill switch above: a sweep
     # leg is not only a read. `connector_lookup/sweep_persist.py` writes what a
-    # leg read into the tenant's KNOWLEDGE GRAPH, and merging to main deploys to
-    # staging, and STAGING WRITES LAND ON THE PROD SUPABASE. So merging these
-    # two brand-new adapters unflagged would start writing prod tenants' graphs
-    # from code that has never run against real data — an irreversible data
-    # action taken as a side effect of a merge.
+    # leg read into the tenant's KNOWLEDGE GRAPH, so an unflagged merge would
+    # start writing real tenants' graphs from code that has never run against
+    # real data — an irreversible data action taken as a side effect of a merge.
+    #
+    # Until 2026-09-01 that blast radius was PROD, because staging wrote to the
+    # prod Supabase project. The environments are separate now (see
+    # BRANCHING.md), so an unflagged merge to main would poison staging rather
+    # than prod. That is a smaller fire, not the absence of one, and it is why
+    # these flags survive the split rather than being deleted with it.
     #
     # A bad graph write is worse than a bad migration, and our safety apparatus
     # is pointed at the migration: that one gets a gate, a file, a version row
