@@ -1942,24 +1942,95 @@ def select_from_candidates(reply: str, candidates: list[IndexedCall]) -> list[In
     return []
 
 
+def _stored_transcript_raw(company_id: str, call: IndexedCall) -> Optional[dict]:
+    """A stored transcript for ONE call, reshaped for `render_transcript` — or
+    None when the store has nothing usable.
+
+    Only a payload carrying `sentences` counts as usable: `call_digest`'s own
+    writes to this same store predate this field and hold a bounded quote
+    SAMPLE, not the full transcript a single-call summary needs to match
+    live-fetch quality — reading that thinner shape here would silently
+    downgrade every cached single-call answer, so a row without it is treated
+    exactly like no row at all (falls through to the live fetch below)."""
+    from app.db.call_transcripts import load_call_transcript
+
+    payload = load_call_transcript(company_id, call.provider, call.external_id)
+    if not payload:
+        return None
+    sentences = payload.get("sentences") or []
+    if not sentences:
+        return None
+    return {
+        "title": payload.get("title") or call.title,
+        "summary": {"overview": payload.get("overview") or ""},
+        "sentences": sentences,
+    }
+
+
+def _warm_transcript_store(company_id: str, call: IndexedCall, raw: dict) -> None:
+    """Persist a live-fetched transcript so the NEXT ask for this call is
+    answered from the store (see `_stored_transcript_raw`) — mirrors
+    `call_digest.build_corpus`'s write-through. `store_call_transcripts`
+    itself is best-effort and never raises, so this never risks the answer
+    that triggered it.
+
+    Also derives `quotes` the same bounded way `fireflies.fetch_calls`
+    already does for the digest's own store writes, so a row this path warms
+    is never thinner than one the digest would have written for the same
+    call — a later digest run reusing this row loses nothing."""
+    from app.db.call_transcripts import store_call_transcripts
+    from app.kg_ingest.pullers.fireflies import CallTranscript, _QUOTES_PER_CALL
+
+    sentences = raw.get("sentences") or []
+    summary = raw.get("summary") or {}
+    quotes: list[dict] = []
+    for sent in sentences[:_QUOTES_PER_CALL]:
+        text = (sent.get("text") or "").strip()
+        if not text:
+            continue
+        quotes.append({"speaker": sent.get("speaker_name") or "?", "text": text})
+    store_call_transcripts(company_id, [CallTranscript(
+        external_id=call.external_id,
+        title=raw.get("title") or call.title,
+        date=call.call_date or "",
+        participants=call.participants or [],
+        overview=summary.get("overview") or "",
+        action_items=summary.get("action_items") or "",
+        keywords=summary.get("keywords") or [],
+        quotes=quotes,
+        provider=call.provider,
+        sentences=sentences,
+    )])
+
+
 def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -> Optional[dict]:
     """Fetch each named call's transcript and summarize. One model call over
-    however many transcripts were selected — still far below the whole window."""
+    however many transcripts were selected — still far below the whole window.
+
+    Stored-first (mirrors `call_digest.build_corpus`'s pattern): a transcript
+    already cached with full sentences answers without the live provider
+    round trip (the ~12s Fireflies leg this path used to pay on every ask);
+    a miss falls through to the live fetch and warms the cache with what it
+    returns, so the next ask for the same call is stored-fast too."""
     from app.graph.gateway import llm_call
 
     blocks: list[str] = []
     used: list[IndexedCall] = []
     for call in calls[:_MAX_CALLS_PER_ANSWER]:
-        # Frozen Fireflies call shape again (see _state_for): the existing
-        # single-call tests patch `fetch_transcript` with a two-argument
-        # stand-in, and those tests are the proof this path did not move.
-        raw = (
-            fetch_transcript(company_id, call.external_id)
-            if call.provider == PROVIDER_FIREFLIES
-            else fetch_transcript(
-                company_id, call.external_id, provider=call.provider
+        raw = _stored_transcript_raw(company_id, call)
+        if not (raw and (raw.get("sentences") or [])):
+            # Frozen Fireflies call shape again (see _state_for): the existing
+            # single-call tests patch `fetch_transcript` with a two-argument
+            # stand-in, and those tests are the proof this path did not move.
+            raw = (
+                fetch_transcript(company_id, call.external_id)
+                if call.provider == PROVIDER_FIREFLIES
+                else fetch_transcript(
+                    company_id, call.external_id, provider=call.provider
+                )
             )
-        )
+            if raw and (raw.get("sentences") or []):
+                _warm_transcript_store(company_id, call, raw)
         if raw and (raw.get("sentences") or []):
             blocks.append(render_transcript(raw))
             used.append(call)

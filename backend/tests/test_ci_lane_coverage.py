@@ -591,6 +591,22 @@ _KNOWN_UNRUNNABLE: dict[tuple[str, str], str] = {
         "both Fireflies' digest split and Zoom/Meet's Haiku condensation) "
         "run in the fast lane on every PR."
     ),
+    ("test_call_index_stored_transcript_live.py", "ANTHROPIC_API_KEY"): (
+        "Real local-Supabase + real-Anthropic smoke test for the single-call "
+        "stored-transcript read path (app.call_index._summarize_calls): "
+        "proves a REAL model's summary produced from a genuinely stored "
+        "transcript surfaces the same substantive facts a live-fetch "
+        "summary would — the fidelity bar a stubbed LLM/fake DB cannot "
+        "close. Deterministic backstop: test_call_index_stored_"
+        "transcript.py covers the store-hit skips-live-fetch latency win, "
+        "the miss-path live-fetch-and-warm, the digest-only-row (no "
+        "`sentences`) treated as a miss not a thin hit, byte-identical "
+        "prompt input across the live and stored paths, and the warm write "
+        "preserving the digest's own quote sample, all against "
+        "FakeSupabaseClient with a stubbed LLM in the fast lane; this "
+        "suite is the real-DB/real-LLM proof, run locally against the dev "
+        "rig when touching this path."
+    ),
 }
 
 
