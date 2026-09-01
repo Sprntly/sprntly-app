@@ -1,5 +1,5 @@
 """Tests for the targeted-edit output contract (`app.targeted_edit`) and its
-dispatch inside the PRD scoped editors (`app.prd_questions`).
+dispatch inside the PRD scoped editors (`app.prd_edit`).
 
 Two layers:
   - The pure splice engine + six validation gates + flag + prompt derivation,
@@ -7,7 +7,7 @@ Two layers:
     the module is stdlib-only by design). Each gate is proven to force a
     `FallbackNeeded`, and the happy paths prove the splice is byte-correct on the
     unchanged sections.
-  - The `apply_answers` / `apply_chat_edit` dispatch: flag OFF is the current
+  - The `apply_chat_edit` dispatch: flag OFF is the current
     full-emit path (unchanged return shape); flag ON with a good targeted
     response splices; flag ON with a bad targeted response transparently falls
     back to the full-emit call.
@@ -20,7 +20,7 @@ import re
 
 import pytest
 
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 import app.targeted_edit as te
 from app.graph.gateway import LLMResult
 from app.targeted_edit import PRD_SECTION_MODEL as M, FallbackNeeded
@@ -47,7 +47,7 @@ DOC = (
 # `<div class="appendix">` block (labelled "Appendix", holding an
 # `<h3>User input needed</h3>` + `<ul class="inputs">`) nested as the final block
 # INSIDE the last `Risks` eyebrow section, with no eyebrow delimiter of its own.
-# This is the real in-production shape that made `apply_answers` fall back on
+# This is the real in-production shape that made the editor fall back on
 # every such document before the secondary-delimiter fix. Synthetic content only.
 APPENDIX_DOC = (
     '<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><title>T</title>'
@@ -355,7 +355,7 @@ def test_v48_user_input_eyebrow_and_appendix_both_targetable_no_collision():
 
 
 def test_v48_edit_user_input_eyebrow_splices_not_appendix():
-    # Editing the inputs list (the apply_answers case) hits the eyebrow section,
+    # Editing the inputs list hits the eyebrow section,
     # leaving the appendix (Non-goals/Risks/Rollout) byte-identical.
     pre, secs, suf = te._tokenize(V48_DOC, M)
     d = dict(secs)
@@ -518,7 +518,7 @@ def test_normalize_count_heading_only_when_flagged():
     assert M.normalize("Goal (3)") != M.normalize("Goal")
 
 
-# ── dispatch inside prd_questions (flag off / on / fallback) ──────────────────
+# ── dispatch inside prd_edit (flag off / on / fallback) ──────────────────
 
 def test_apply_chat_edit_flag_off_is_full_emit(isolated_settings, monkeypatch):
     monkeypatch.delenv("TARGETED_EDIT_ENABLED", raising=False)
@@ -529,39 +529,15 @@ def test_apply_chat_edit_flag_off_is_full_emit(isolated_settings, monkeypatch):
         return _llm_result({"html": "<html><body>FULL EMIT</body></html>",
                             "sections_changed": ["Goal"], "summary": "did it"})
 
-    monkeypatch.setattr(prd_questions, "llm_call", _fake)
-    out = prd_questions.apply_chat_edit(DOC, "make the goal tighter", enterprise_id="co")
+    monkeypatch.setattr(prd_edit, "llm_call", _fake)
+    out = prd_edit.apply_chat_edit(DOC, "make the goal tighter", enterprise_id="co")
     assert out == {"html": "<html><body>FULL EMIT</body></html>",
                    "sections_changed": ["Goal"], "summary": "did it"}
     # full-emit path: the current schema + prompt version, NOT the targeted ones
-    assert seen["prompt_version"] == prd_questions.CHAT_EDIT_PROMPT_VERSION
-    assert seen["json_schema"] is prd_questions._EDIT_SCHEMA
+    assert seen["prompt_version"] == prd_edit.CHAT_EDIT_PROMPT_VERSION
+    assert seen["json_schema"] is prd_edit._EDIT_SCHEMA
     assert seen["max_tokens"] == 32000
-    assert seen["system"] is prd_questions._CHAT_EDIT_SYSTEM  # no targeted rewrite
-
-
-def test_apply_answers_flag_off_is_full_emit(isolated_settings, monkeypatch):
-    # Prod-safety invariant: with the flag unset, apply_answers takes its EXACT
-    # current full-emit path — same schema, prompt, purpose, max_tokens — and the
-    # targeted schema/prompt/splice are never constructed.
-    monkeypatch.delenv("TARGETED_EDIT_ENABLED", raising=False)
-    seen = {}
-
-    def _fake(**kw):
-        seen.update(kw)
-        return _llm_result({"html": "<html><body>FULL EMIT</body></html>",
-                            "sections_changed": ["Requirements"], "summary": "folded"})
-
-    monkeypatch.setattr(prd_questions, "llm_call", _fake)
-    out = prd_questions.apply_answers(DOC, [("Q?", "A")], enterprise_id="co")
-    assert out == {"html": "<html><body>FULL EMIT</body></html>",
-                   "sections_changed": ["Requirements"], "summary": "folded"}
-    assert seen["prompt_version"] == prd_questions.EDIT_PROMPT_VERSION  # no -targeted
-    assert seen["json_schema"] is prd_questions._EDIT_SCHEMA
-    assert seen["max_tokens"] == 32000
-    assert seen["system"] is prd_questions._EDIT_SYSTEM
-    assert seen["purpose"] == "apply_prd_input_answer"
-
+    assert seen["system"] is prd_edit._CHAT_EDIT_SYSTEM  # no targeted rewrite
 
 def test_apply_chat_edit_flag_on_targeted_splices(isolated_settings, monkeypatch):
     monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
@@ -572,62 +548,3 @@ def test_apply_chat_edit_flag_on_targeted_splices(isolated_settings, monkeypatch
             "ops": [{"op": "replace", "section": "Goal",
                      "new_html": _delim("Goal", '<div class="goal"><p>p95&lt;200ms</p></div>')}],
         })
-
-    monkeypatch.setattr(prd_questions, "llm_call", _fake)
-    out = prd_questions.apply_chat_edit(DOC, "tighten the goal", enterprise_id="co")
-    assert "p95&lt;200ms" in out["html"]
-    assert "<p>Problem body that is long enough here.</p>" in out["html"]  # untouched
-    assert out["sections_changed"] == ["Goal"]
-    assert out["summary"] == "tightened goal"
-
-
-def test_apply_answers_flag_on_bad_targeted_falls_back_to_full_emit(
-    isolated_settings, monkeypatch):
-    monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
-    calls = []
-
-    def _fake(**kw):
-        calls.append(kw["prompt_version"])
-        # First call = the targeted attempt with a BAD anchor (gate1 -> fallback).
-        if kw["json_schema"] is te.TARGETED_EDIT_SCHEMA:
-            return _llm_result({
-                "mode": "targeted", "summary": "x",
-                "ops": [{"op": "replace", "section": "DoesNotExist",
-                         "new_html": _delim("DoesNotExist", "<p>y</p>")}],
-            })
-        # Second call = the full-emit fallback (proven path).
-        return _llm_result({"html": "<html><body>FALLBACK</body></html>",
-                            "sections_changed": ["Goal"], "summary": "fell back"})
-
-    monkeypatch.setattr(prd_questions, "llm_call", _fake)
-    out = prd_questions.apply_answers(DOC, [("Ship gated?", "Yes")], enterprise_id="co")
-    assert "FALLBACK" in out["html"]
-    assert out["summary"] == "fell back"
-    # both lanes ran: the targeted attempt, then the full-emit fallback
-    assert calls == [f"{prd_questions.EDIT_PROMPT_VERSION}-targeted",
-                     prd_questions.EDIT_PROMPT_VERSION]
-
-
-def test_apply_answers_flag_on_appendix_splices_no_fallback(
-    isolated_settings, monkeypatch):
-    # the appendix case — apply_answers on a real appendix-bearing PRD, model
-    # names the op section:"Appendix". Must splice on the FIRST call only (no
-    # full-emit fallback).
-    monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
-    calls = []
-
-    def _fake(**kw):
-        calls.append(kw["prompt_version"])
-        return _llm_result({
-            "mode": "targeted", "summary": "resolved one open decision",
-            "ops": [{"op": "replace", "section": "Appendix",
-                     "new_html": _appendix("<li>Second open decision to resolve.</li>")}],
-        })
-
-    monkeypatch.setattr(prd_questions, "llm_call", _fake)
-    out = prd_questions.apply_answers(
-        APPENDIX_DOC, [("Which truncation contract?", "By sort order")],
-        enterprise_id="co")
-    assert out["html"].count("<li>") == 1  # one item removed, spliced
-    assert out["sections_changed"] == ["Appendix"]
-    assert calls == [f"{prd_questions.EDIT_PROMPT_VERSION}-targeted"]  # ONE call, no fallback

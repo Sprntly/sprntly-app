@@ -580,17 +580,16 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
 })
 
 // ── Chronological order of the in-chat command flow ─────────────────────────
-// The ordering bug: the PRD card + clarifying questions were pinned ABOVE the
-// whole thread, so a "generate prd" command showed the card + questions ABOVE the
-// user's own command message. The fix renders them INLINE, as the reply BELOW the
-// command turn (thread[0]), so the conversation reads top-to-bottom.
-describe("ChatScreen — command flow renders the PRD card + questions BELOW the command turn", () => {
-  it("orders: user command turn → insight/PRD card → clarifying questions", async () => {
-    // A pending clarifying question so PrdInputQuestions renders a real node to
-    // position-check (it renders nothing when there are no questions).
-    listInputQuestions.mockResolvedValue([
-      { id: 1, prd_id: 42, ordinal: 0, tag: "need", prompt: "What is the serial-number logic?", options: [], status: "pending", answer: null },
-    ])
+// The ordering bug: the PRD card was pinned ABOVE the whole thread, so a
+// "generate prd" command showed the card ABOVE the user's own command message.
+// The fix renders it INLINE, as the reply BELOW the command turn (thread[0]),
+// so the conversation reads top-to-bottom.
+//
+// This used to position-check the card against the post-PRD input-questions
+// node too. That feature was removed on 2026-09-01, so the card is now the last
+// thing in the chain — the ordering invariant it guards is unchanged.
+describe("ChatScreen — command flow renders the PRD card BELOW the command turn", () => {
+  it("orders: user command turn → insight/PRD card", async () => {
     renderChat()
     await attachDoc("spec.pptx")
     await typeAndSend("generate a PRD from this")
@@ -599,23 +598,14 @@ describe("ChatScreen — command flow renders the PRD card + questions BELOW the
     // (with a pending question) renders.
     await waitFor(() => expect(resumePrdGeneration).toHaveBeenCalled())
     await waitFor(() => expect(panelTab()).toBe("prd"))
-    const questions = await waitFor(() => {
-      const el = document.querySelector('[data-testid="prd-input-questions"]')
-      expect(el).toBeTruthy()
-      return el as Element
-    })
-    expect(document.body.textContent).toContain("What is the serial-number logic?")
-
     const bubble = Array.from(document.querySelectorAll(".bc-user-bubble"))
       .find((n) => n.textContent?.includes("generate a PRD from this")) as Element
     const card = document.querySelector('[data-testid="chat-insight-msg"]') as Element
     expect(bubble).toBeTruthy()
     expect(card).toBeTruthy()
 
-    // Document order: the user's command turn comes BEFORE the PRD card, which
-    // comes BEFORE the clarifying questions.
+    // Document order: the user's command turn comes BEFORE the PRD card.
     expect(bubble.compareDocumentPosition(card) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(card.compareDocumentPosition(questions) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     // The FIRST turn in the thread is the command turn, NOT the insight card.
     const firstTurn = document.querySelector(".bc-thread .bc-turn")
     expect(firstTurn?.getAttribute("data-testid")).not.toBe("chat-insight-msg")

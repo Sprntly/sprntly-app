@@ -16,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 import app.project_chat_edit as pce
 from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace
@@ -97,7 +97,7 @@ def test_edit_prd_cross_project_refused_zero_write(tenant_client, isolated_setti
         lambda **kw: (_ for _ in ()).throw(ProjectPrdWriteDenied("cross-project")),
     )
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     with pytest.raises(ProjectPrdWriteDenied):
         pce.apply_chat_edit_scoped(
@@ -123,7 +123,7 @@ def test_edit_prd_cross_tenant_refused_zero_write(tenant_client, isolated_settin
     # the two gates are independent, not one masking the other.
     monkeypatch.setattr(pce, "assert_prd_on_project", lambda **kw: None)
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     with pytest.raises(HTTPException) as exc:
         pce.apply_chat_edit_scoped(
@@ -145,7 +145,7 @@ def test_edit_prd_own_project_in_place_versioned(tenant_client, isolated_setting
 
     gate_calls = []
     monkeypatch.setattr(pce, "assert_prd_on_project", lambda **kw: gate_calls.append(kw))
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc v2</h1></body></html>",
         "sections_changed": ["Requirements"],
         "summary": "Tightened requirements.",

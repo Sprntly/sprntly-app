@@ -454,7 +454,7 @@ def _reserve(company_id: str, template_id: str) -> bool:
     anyway. This is a read-then-write, so two replicas can still both claim it
     in the same instant — accepted, and the reason it is safe is that a compile
     is idempotent and overwrites, so the cost of losing that race is one wasted
-    model call, not a corrupted row. Same posture `prd_questions` takes.
+    model call, not a corrupted row. Same posture `prd_edit` takes.
 
     Never passes `compiled`, so claiming a row leaves the last good skeleton
     standing for whatever is generating with it right now."""

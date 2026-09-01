@@ -29,6 +29,8 @@ import type {
   QaScenarioRow,
 } from "../types/content"
 import { decodeHtmlEntities, looksLikeHtmlBrief, stripHtmlCodeFence } from "./htmlBrief"
+import type { PrdRecord } from "./api"
+import type { PrdState } from "../types/content"
 
 /**
  * Pull a display title out of the v3 HTML PRD page: the document `<h1>` text
@@ -615,5 +617,46 @@ export function markdownToPrdState(markdown: string): PrdContent {
     metaLine: `Generated ${new Date().toLocaleDateString()}`,
     title: title || "PRD",
     sections,
+  }
+}
+
+
+/**
+ * Wipe a PRD's local edit drafts.
+ *
+ * MOVED HERE from PrdInputQuestions.tsx when the post-PRD input-questions
+ * feature was removed (2026-09-01). It never belonged to that feature — three
+ * unrelated callers already imported it (the chat's PRD update path, the
+ * generation hook and the panel), each for the same reason: a fresh server
+ * document must win over a stale in-progress draft. The drafts are keyed by
+ * prd_id in PrdPanelContent / PrdHtmlView.
+ *
+ * Best-effort: localStorage can be disabled, and a failure here only means a
+ * draft outlives the edit that replaced it.
+ */
+export function clearPrdDrafts(prdId: number) {
+  try {
+    localStorage.removeItem(`sprntly_prd_html_draft_${prdId}`)
+    localStorage.removeItem(`sprntly_prd_draft_${prdId}`)
+  } catch {
+    /* ignore — best-effort */
+  }
+}
+
+/** Build the ContentContext PrdState from the API's returned PRD record — same
+ *  shape PrdPanelContent uses on load, so the panel re-renders identically.
+ *  Moved here with `clearPrdDrafts`, and for the same reason. */
+export function prdStateFromRecord(rec: PrdRecord): PrdState {
+  return {
+    ...markdownToPrdState(rec.payload_md),
+    prd_id: rec.id,
+    public_id: rec.public_id,
+    figma_file_key: undefined,
+    llmPart: rec.llm_part,
+    briefId: rec.brief_id,
+    insightIndex: rec.insight_index,
+    source: rec.source,
+    artifactTemplateId: rec.artifact_template_id ?? null,
+    artifactTemplateName: rec.artifact_template_name ?? null,
   }
 }

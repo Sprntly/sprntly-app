@@ -13,7 +13,7 @@ text-only answer while the document never changed. Contract under test:
   - tenant isolation: a teammate/other company's PRD → 404
   - validation: instruction too short → 422, no editor call
 
-The editor is mocked at the module seam (app.prd_questions.apply_chat_edit —
+The editor is mocked at the module seam (app.prd_edit.apply_chat_edit —
 the route lazy-imports it per call, so patching the source module works).
 
 Also covers the §A extraction's byte-identical guard: the route delegates to
@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 import app.project_chat_edit as pce
 from app.db.client import require_client
 
@@ -70,7 +70,7 @@ def test_chat_edit_persists_and_snapshots(tenant_client, isolated_settings, monk
             "summary": "Tightened both sections.",
         }
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", _edit)
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", _edit)
     resp = t.client.post(
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "make this PRD shorter"}
     )
@@ -99,7 +99,7 @@ def test_chat_edit_noop_leaves_document_untouched(
     prd_id = _seed_prd(isolated_settings["db"])
     before = _payload(prd_id)
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": before, "sections_changed": [], "summary": "No change requested.",
     })
     resp = t.client.post(
@@ -121,7 +121,7 @@ def test_chat_edit_editor_failure_is_502_and_untouched(
     def _boom(*a, **kw):
         raise RuntimeError("scoped PRD edit returned no HTML")
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", _boom)
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", _boom)
     resp = t.client.post(
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "shorten the prd"}
     )
@@ -144,7 +144,7 @@ def test_chat_edit_conflicts_on_empty_prd(tenant_client, isolated_settings, monk
     )  # never completed → no payload_md
 
     called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: called.append(1))
     resp = t.client.post(
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "shorten the prd"}
     )
@@ -158,7 +158,7 @@ def test_chat_edit_is_tenant_scoped(tenant_client, isolated_settings, monkeypatc
     prd_id = _seed_prd(isolated_settings["db"], dataset="acme")
 
     called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a_, **kw: called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a_, **kw: called.append(1))
     resp = b.client.post(
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "shorten the prd"}
     )
@@ -171,7 +171,7 @@ def test_chat_edit_validates_instruction(tenant_client, isolated_settings, monke
     t = tenant_client.make(slug="acme")
     prd_id = _seed_prd(isolated_settings["db"])
     called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: called.append(1))
 
     assert t.client.post(
         f"/v1/prd/{prd_id}/chat-edit", json={"instruction": "ab"}
@@ -208,7 +208,7 @@ def test_scoped_edit_guard_off_never_calls_project_gate(tenant_client, isolated_
     prd_id = _seed_prd(isolated_settings["db"])
     gate_called = []
     monkeypatch.setattr(pce, "assert_prd_on_project", lambda **kw: gate_called.append(kw))
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc v2</h1></body></html>",
         "sections_changed": [], "summary": "no-op",
     })
