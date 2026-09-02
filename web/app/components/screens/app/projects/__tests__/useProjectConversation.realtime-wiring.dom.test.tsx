@@ -22,7 +22,7 @@ const h = vi.hoisted(() => ({
   handleStopAsk: vi.fn(),
   runActionTurnInTab: vi.fn(async () => {}),
   individualChat: vi.fn(async () => ({ id: 7 })),
-  listTurns: vi.fn(async () => ({ turns: [] })),
+  listTurns: vi.fn(async (): Promise<{ turns: Array<{ id: number; role: string; content: string; created_at?: string }> }> => ({ turns: [] })),
   individualTurns: vi.fn(async () => [] as unknown[]),
   channelCalls: [] as CapturedChannel[],
 }))
@@ -192,6 +192,54 @@ describe("useProjectConversation — realtime wiring (Gap 3/4)", () => {
     // gap always closes via an explicit bounded read.
     expect(h.individualTurns.mock.calls[0][0]).toBe(101)
     await waitFor(() => expect(bag!.thread.some((t) => t.reply?.answer === "Missed while you were away.")).toBe(true))
+  })
+
+  it("test_hydrated_paired_exchange_is_not_duplicated_by_a_reconcile_redelivery", async () => {
+    // THE observer/reload bug (live-reproduced): hydrate pairs a COMPLETED
+    // user+assistant exchange into ONE turn that carries the USER row's id
+    // (1960); the assistant row (1961) — written right after, so a HIGHER id —
+    // lives nowhere on the thread's dbTurnIds. Pre-fix the reconcile's
+    // since-cursor was seeded from the paired turn's dbTurnId (1960, the user
+    // row), so the FIRST reconcile refetched row 1961 and re-appended it as a
+    // second, standalone assistant bubble. Prior to this test the whole suite
+    // only ever exercised realtime IN ISOLATION (empty hydrate), so the
+    // hydrate↔realtime coexistence gap shipped green.
+    h.listTurns.mockResolvedValueOnce({ turns: [
+      { id: 1960, role: "user", content: "what changed since Friday?", created_at: "2026-09-02T00:00:00Z" },
+      { id: 1961, role: "assistant", content: "Three tickets moved to Done.", created_at: "2026-09-02T00:00:01Z" },
+    ] })
+    // A reconcile that still hands back the already-hydrated assistant row
+    // (models the pre-fix behind-cursor refetch, or a genuine redelivery).
+    h.individualTurns.mockResolvedValueOnce([
+      { id: 1961, role: "assistant", content: "Three tickets moved to Done.", created_at: "2026-09-02T00:00:01Z" },
+    ])
+    await mount(101, "user-1")
+    await waitFor(() => expect(bag!.thread.some((t) => t.reply?.answer === "Three tickets moved to Done.")).toBe(true))
+    const { onReconcile } = latestLiveChannel()
+    await act(async () => { onReconcile!() })
+    // Exactly ONE bubble carries the reply, paired with its question — no
+    // duplicate standalone assistant turn, and no reply-less (phantom) turn.
+    expect(bag!.thread.filter((t) => t.reply?.answer === "Three tickets moved to Done.").length).toBe(1)
+    const paired = bag!.thread.find((t) => t.query === "what changed since Friday?")
+    expect(paired?.reply?.answer).toBe("Three tickets moved to Done.")
+    // No orphaned turn: every turn is either a real question or carries a reply.
+    expect(bag!.thread.every((t) => t.query !== "" || t.reply != null)).toBe(true)
+  })
+
+  it("test_hydrated_paired_reply_is_not_duplicated_by_a_live_rebroadcast", async () => {
+    // Same coexistence gap via the LIVE path: a re-broadcast of a hydrated,
+    // already-paired assistant row bypasses the since-cursor entirely, so the
+    // fix also seeds `mergedReplyIds` from hydrate (the merged turn keeps the
+    // user row's id, so the plain dbTurnId dedupe alone can't catch it).
+    h.listTurns.mockResolvedValueOnce({ turns: [
+      { id: 1960, role: "user", content: "status?", created_at: "2026-09-02T00:00:00Z" },
+      { id: 1961, role: "assistant", content: "All green.", created_at: "2026-09-02T00:00:01Z" },
+    ] })
+    await mount(101, "user-1")
+    await waitFor(() => expect(bag!.thread.some((t) => t.reply?.answer === "All green.")).toBe(true))
+    const { onEvent } = latestLiveChannel()
+    act(() => { onEvent!("turn.created", { id: 1961, role: "assistant", content: "All green." }) })
+    expect(bag!.thread.filter((t) => t.reply?.answer === "All green.").length).toBe(1)
   })
 
   it("test_reconcile_failure_is_best_effort_and_never_throws", async () => {

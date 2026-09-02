@@ -305,6 +305,16 @@ export function useProjectConversation(
   // reconcile reads after every (re)subscribe (AD-P22). Seeded from
   // hydrate's own restored turns below.
   const lastKnownTurnIdRef = useRef<number>(0)
+  // Every assistant DB row id whose reply is ALREADY present on the thread but
+  // whose `dbTurnId` slot is NOT the assistant's own — either merged into a
+  // paired user turn by a live realtime event (`applyIncomingTurn` below) or
+  // folded into a paired turn by the hydrate restore (which keeps the USER
+  // row's id on the merged turn, for rewind). A live re-broadcast of such a
+  // row bypasses the reconcile since-cursor, so the plain `dbTurnId` dedupe
+  // can't catch it; `shouldAppendRealtimeTurn` consults this set as the
+  // second, id-precise guard. Seeded by hydrate (paired assistant rows) and
+  // grown by `applyIncomingTurn` (realtime merges).
+  const mergedReplyIdsRef = useRef<Set<number>>(new Set())
   const mountedRef = useRef(true)
   // Reset true on SETUP (not only false on cleanup) — StrictMode's dev
   // mount→cleanup→remount would otherwise leave it false and cancel every ask.
@@ -325,6 +335,12 @@ export function useProjectConversation(
         const { turns } = await conversationsApi.listTurns(conv.id)
         if (cancelled) return
         const restored: ThreadTurn[] = []
+        // Assistant DB row ids that hydrate FOLDED into a paired user turn: the
+        // merged turn keeps the USER row's id on `dbTurnId` (rewind needs it),
+        // so the assistant row's own id lives nowhere on the thread. Recorded
+        // into `mergedReplyIdsRef` below so a realtime re-broadcast of that same
+        // assistant row is deduped by id instead of re-rendered as a duplicate.
+        const pairedReplyIds: number[] = []
         for (let i = 0; i < (turns ?? []).length; i++) {
           const t = turns[i]
           if (t.role === "user") {
@@ -342,19 +358,41 @@ export function useProjectConversation(
               query: t.content,
               reply,
             })
-            if (reply) i++
+            if (reply) {
+              if (typeof next!.id === "number") pairedReplyIds.push(next!.id)
+              i++
+            }
           } else if (t.role === "assistant" && t.content.trim()) {
-            restored.push({ id: `resumed-${conv.id}-${i}`, query: "", reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse })
+            restored.push({
+              id: `resumed-${conv.id}-${i}`,
+              // A standalone assistant row (a delegated brief/notice with no
+              // adjacent user ask) DOES carry its own id here — nothing else
+              // holds it — so a realtime re-broadcast of that exact row is
+              // caught by the plain `dbTurnId` dedupe rather than appended twice.
+              ...(typeof t.id === "number" ? { dbTurnId: t.id } : {}),
+              query: "",
+              reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            })
           }
         }
         restored.forEach((r) => resumedTurnsRef.current.add(r.id))
-        // Seed the realtime reconcile's since-cursor from whatever history just
-        // hydrated — so the FIRST reconcile (fired the instant the channel
-        // below subscribes, right after this hydrate settles) only fetches
-        // what's NEW since this read, never the whole history again.
-        for (const r of restored) {
-          if (typeof r.dbTurnId === "number") lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, r.dbTurnId)
+        // Seed the realtime reconcile's since-cursor PAST EVERY row hydrate just
+        // read — the first reconcile (fired the instant the channel below
+        // subscribes) then only fetches genuinely NEW turns. Seeding from the
+        // restored turns' `dbTurnId`s alone left the cursor at the last USER
+        // row's id: a paired assistant row (written right after its user row,
+        // so a HIGHER id) sits above that cursor but off the thread's dbTurnIds,
+        // so the reconcile refetched it and re-appended it as a duplicate
+        // standalone bubble. Reading the raw `turns` ids (which include the
+        // paired assistant rows) closes that gap.
+        for (const t of (turns ?? [])) {
+          if (typeof t.id === "number") lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, t.id)
         }
+        // A live re-broadcast bypasses the since-cursor, so also remember every
+        // paired assistant row id for `shouldAppendRealtimeTurn`'s id-precise
+        // second guard (the merged turn's `dbTurnId` is the user row's, not the
+        // assistant's, so the plain dbTurnId dedupe can't catch these on its own).
+        for (const id of pairedReplyIds) mergedReplyIdsRef.current.add(id)
         // Only fill a still-empty thread — never clobber one a send already started.
         if (restored.length) setThread((prev) => (prev.length === 0 ? restored : prev))
       } catch {
@@ -377,14 +415,14 @@ export function useProjectConversation(
   // AD-P22) refetches anything landed since `lastKnownTurnIdRef` — the gap a
   // dropped broadcast or a reconnect would otherwise leave.
   //
-  // `mergedReplyIdsRef`: an assistant turn.created that MERGES into a paired
-  // user turn deliberately never gets its own `dbTurnId` slot (the merged
-  // turn keeps the user row's id — see `applyRealtimeTurn`), so a later
+  // `mergedReplyIdsRef` (declared above, beside `lastKnownTurnIdRef`, so the
+  // hydrate effect can seed it too): an assistant turn.created that MERGES into
+  // a paired user turn deliberately never gets its own `dbTurnId` slot (the
+  // merged turn keeps the user row's id — see `applyRealtimeTurn`), so a later
   // redelivery of that exact assistant row wouldn't be caught by the
-  // dbTurnId-dedupe alone. This ref remembers every payload id that WAS
-  // merged (never a standalone-appended one, which is already covered by
-  // its own `dbTurnId`) so `shouldAppendRealtimeTurn` can still catch it.
-  const mergedReplyIdsRef = useRef<Set<number>>(new Set())
+  // dbTurnId-dedupe alone. The ref remembers every payload id that WAS merged
+  // (never a standalone-appended one, which is already covered by its own
+  // `dbTurnId`) so `shouldAppendRealtimeTurn` can still catch it.
   const applyIncomingTurn = useCallback((payload: RealtimeTurnPayload) => {
     lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, payload.id)
     setThread((prev) => {
