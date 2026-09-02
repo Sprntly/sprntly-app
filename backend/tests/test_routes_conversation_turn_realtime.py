@@ -132,6 +132,34 @@ def test_add_turn_publish_failure_does_not_break_the_write(tenant_client, monkey
     assert turns[0]["content"] == "still persisted despite the publish hiccup"
 
 
+def test_add_turn_never_publishes_whitespace_only_content(tenant_client, monkeypatch):
+    """Defense-in-depth: a whitespace-only body still passes `TurnIn`'s
+    `min_length=1` validation (so the row is still written, unchanged) but
+    must never be broadcast — mirrors the client's own
+    `parseRealtimeTurnPayload` blank-content guard, closing the gap from the
+    OTHER side so a stray blank write can never reach a live thread as a
+    phantom bubble, however it was produced."""
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t)
+    conv_id = _individual_conversation_id(project_id, t.user_id)
+
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        conversations_route, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    resp = t.client.post(
+        f"/v1/conversations/{conv_id}/turns",
+        json={"role": "assistant", "content": "   "},
+    )
+    assert resp.status_code == 200, resp.text
+
+    turns = t.client.get(f"/v1/conversations/{conv_id}/turns").json()["turns"]
+    assert turns[0]["content"] == "   ", "the row is still persisted, unchanged"
+    assert published == [], "a blank-content turn must never publish"
+
+
 def test_non_project_individual_conversation_never_publishes(tenant_client, monkeypatch):
     """A `kind='individual'` row with NO `project_id` (an ordinary main-chat
     conversation — every main-chat row defaults to `kind='individual'` too)
