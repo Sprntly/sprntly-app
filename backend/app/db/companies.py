@@ -634,6 +634,37 @@ def prototype_enabled_for_company(company_id: str) -> bool:
 
 
 @retry_on_disconnect
+def declared_prioritization_framework(company_id: str) -> str | None:
+    """The framework this company named at onboarding
+    (`companies.prioritization_framework`), already canonicalised to one of
+    the DB CHECK constraint's six values (goal-based, rice, wsjf, moscow,
+    kano, volume-severity) by the onboarding wizard's own classifier — this
+    reads the stored value verbatim rather than re-classifying it.
+
+    None when unset, the row is missing, or the read fails (legacy schema,
+    fake test client) — callers fall back to choosing a framework from the
+    data alone, which is always a safe default.
+    """
+    try:
+        rows = (
+            require_client()
+            .table("companies")
+            .select("prioritization_framework")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — framework selection must never 500 a run
+        return None
+    if not rows:
+        return None
+    value = rows[0].get("prioritization_framework")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+@retry_on_disconnect
 def memberships_for_user(user_id: str) -> list[dict]:
     """All company memberships for a Supabase user id.
 

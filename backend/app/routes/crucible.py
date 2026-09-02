@@ -1012,17 +1012,46 @@ def execute_run(
                 from app.crucible.plan import (
                     SourceInventory, derive_gaps_and_promises,
                 )
+                kept_inventory = [
+                    SourceInventory(
+                        source_type=src.get("source_type") or "",
+                        signal_count=int(src.get("signal_count") or 0),
+                        label=src.get("label") or "",
+                        witnesses=src.get("witnesses") or "",
+                    )
+                    for src in kept
+                ]
+
+                # AND THE FRAMEWORK, RE-CHOSEN FROM THE KEPT SET TOO (AC-2).
+                # `build_plan` picked a framework when analytics was still on
+                # the table; a reader who then unticks the one numeric source
+                # that made RICE derivable must not keep a RICE table with
+                # every row scoring None — the exact failure this ticket
+                # exists to remove, one step later than the gaps bug it was
+                # extracted alongside.
+                from app.crucible.framework import (
+                    questions_for, select_framework,
+                )
+                from app.db.companies import declared_prioritization_framework
+
+                declared = None
+                try:
+                    declared = declared_prioritization_framework(company_id)
+                except Exception:  # noqa: BLE001 — never block approval on this
+                    logger.warning(
+                        "crucible approve: could not read declared framework "
+                        "for %s", company_id,
+                    )
+                choice = select_framework(kept_inventory, declared)
+                plan_json["framework"] = choice.framework
+                plan_json["framework_reason"] = choice.reason
+                plan_json["questions"] = [
+                    {"id": q.id, "prompt": q.prompt, "why": q.why}
+                    for q in questions_for(choice.framework)
+                ]
+
                 gaps, produce = derive_gaps_and_promises(
-                    [
-                        SourceInventory(
-                            source_type=src.get("source_type") or "",
-                            signal_count=int(src.get("signal_count") or 0),
-                            label=src.get("label") or "",
-                            witnesses=src.get("witnesses") or "",
-                        )
-                        for src in kept
-                    ],
-                    tuple(hypotheses),
+                    kept_inventory, tuple(hypotheses), framework_choice=choice,
                 )
                 plan_json["cannot_answer"] = [
                     {"question": g.question, "because": g.because,
@@ -1300,6 +1329,21 @@ def execute_run(
             f for f, reason in zip(result.findings, set_aside_by_rank)
             if reason is None
         ]
+        # SAME FILTER, ON THE OTHER TWO SEQUENCES. `build_deep_recommendations`
+        # needs each finding's frozen `Impact`/`Confidence` alongside it —
+        # positionally, exactly like `pipeline.build_findings`'s own three
+        # return sequences — so the filter that produced `relevant` from
+        # `result.findings` is applied identically here rather than re-derived,
+        # which is how the two lists could silently stop agreeing on which
+        # finding is at which index.
+        relevant_impacts = [
+            imp for imp, reason in zip(result.impacts, set_aside_by_rank)
+            if reason is None
+        ]
+        relevant_confidences = [
+            conf for conf, reason in zip(result.confidences, set_aside_by_rank)
+            if reason is None
+        ]
 
         # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
         #
@@ -1325,12 +1369,39 @@ def execute_run(
         except Exception:  # noqa: BLE001
             logger.exception("crucible: recommendations skipped for run %s", run_id)
 
+        # A DEEP RECOMMENDATION FOR THE TOP OF THE RANKING, SIZED BY THE GOAL.
+        #
+        # Apurva: "once we pick the top two, then we could just compare them."
+        # `build_deep_recommendations` decides how many with pure arithmetic
+        # over the frozen `relevant_impacts` (I2/I10) — never an LLM, and
+        # never a count this route invents. TOTAL, same reasoning as the flat
+        # pass above.
+        deep = {}
+        recommendation_basis = ""
+        try:
+            from app.crucible.recommend import build_deep_recommendations
+
+            deep_result = build_deep_recommendations(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=relevant,
+                impacts=relevant_impacts,
+                confidences=relevant_confidences,
+                claims=claims,
+            )
+            deep = deep_result.by_id
+            recommendation_basis = deep_result.count.basis
+        except Exception:  # noqa: BLE001
+            logger.exception("crucible: deep recommendations skipped for run %s", run_id)
+
         # CARRIED IN THE RUN'S OWN JSON, not in new columns on
         # `crucible_findings`. Adding columns means a migration against the
         # shared Supabase, which is a production change and not one to make
         # without being asked; the meta blob is already where this run's plan
         # lives and costs nothing to extend.
         meta = dict(_meta_of(run_id, company_id))
+        meta["recommendation_basis"] = recommendation_basis
         meta["findings_extra"] = {
             f.id: {
                 "label": f.label,
@@ -1343,6 +1414,23 @@ def execute_run(
                 **({"recommendation": {
                     "action": recs[f.id].action, "because": recs[f.id].because,
                 }} if f.id in recs else {}),
+                # THE DEEP PASS TAKES PRECEDENCE where both exist — a finding
+                # in the deep set is one the flat pass ALSO ran on (`relevant`
+                # feeds both), and the renderer shows the deeper one rather
+                # than both, so a reader is never shown two disagreeing
+                # suggestions for the same finding.
+                **({"deep_recommendation": {
+                    "action": deep[f.id].action,
+                    "because": deep[f.id].because,
+                    "changes": [
+                        {"text": c.text, "claim_id": c.claim_id,
+                         "cited_claim": c.cited_claim}
+                        for c in deep[f.id].changes
+                    ],
+                    "open_questions": list(deep[f.id].open_questions),
+                    "what_would_falsify": deep[f.id].what_would_falsify,
+                    "comparison": deep[f.id].comparison,
+                }} if f.id in deep else {}),
             }
             for f in result.findings
         }

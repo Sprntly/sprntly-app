@@ -493,3 +493,40 @@ describe("the funnel survives the run", () => {
     expect(screen.queryByTestId("goal-narration-recap")).toBeNull()
   })
 })
+
+describe("AC-5: a visible generating state for the recommendations", () => {
+  // David: "this doesn't show something is happening… can this have some
+  // way of showing that it's thinking, which is more prominent." Apurva,
+  // live: "we need to have this something rendering here that still
+  // generating." `enrichment_pending` goes up before `status` reaches
+  // `ready` and comes down in the same write that publishes the deep
+  // recommendations — before this, a reader who opened the report while it
+  // was still true saw a finished-looking document with no sign anything
+  // else was coming.
+  it("shows a generating banner while the deep recommendations are still coming", async () => {
+    get.mockResolvedValue({
+      ...RUN, status: "ready", findings: [FINDING],
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    const banner = await screen.findByTestId("goal-recommendations-generating")
+    expect(banner.textContent).toMatch(/generat/i)
+  })
+
+  it("shows no generating banner once the recommendations have landed", async () => {
+    get.mockResolvedValue({
+      ...RUN, status: "ready", findings: [FINDING],
+      prioritisation: { enrichment_pending: false },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-recommendations-generating")).toBeNull()
+  })
+
+  it("shows no generating banner on a run stored before the flag existed", async () => {
+    get.mockResolvedValue({ ...RUN, status: "ready", findings: [FINDING] })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-recommendations-generating")).toBeNull()
+  })
+})

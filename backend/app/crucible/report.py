@@ -255,7 +255,11 @@ def _stat_strip(
         return ""
     sized = [f for f in kept if f.get("impact_value") is not None]
     high = [f for f in kept if (f.get("confidence_band") or "") == "high"]
-    recommended = [f for f in kept if _as_dict(f.get("recommendation")).get("action")]
+    recommended = [
+        f for f in kept
+        if _as_dict(f.get("recommendation")).get("action")
+        or _as_dict(f.get("deep_recommendation")).get("action")
+    ]
     reach = sum(float(f.get("impact_value") or 0) for f in sized)
 
     cells: list[tuple[str, str]] = [
@@ -331,7 +335,47 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
     return "".join(out)
 
 
-def _rice_section(findings: list[dict], framework: str) -> str:
+def _recommendation_basis_section(basis: str) -> str:
+    """AC-2: the count of deep recommendations is arithmetic, not a bare
+    number — David: "the number of projects really has to be in context of
+    the question and what the goal is." Silent when there is nothing to say
+    (no deep pass ran, or every finding on the run predates it).
+    """
+    basis = (basis or "").strip()
+    if not basis:
+        return ""
+    return _p(
+        f"<strong>How many got a full recommendation.</strong> "
+        f"{_esc_clipped(basis, MAX_STATEMENT_CHARS)}"
+    )
+
+
+def _framework_section(findings: list[dict], plan: dict) -> str:
+    """Dispatch to the ranking table for whichever framework this run
+    actually used — RICE or MoSCoW (`app.crucible.framework.
+    SUPPORTED_FRAMEWORKS`). ADDITIVE, per the ticket's own constraint on this
+    file: the RICE branch below is `_rice_section`, byte-for-byte the section
+    that already existed, plus one line stating WHY it was chosen (AC-2 —
+    "the reason it was chosen appear[s] in the plan and in the final
+    report"). Only the MoSCoW branch is new.
+    """
+    from app.crucible.framework import display_name
+
+    framework = str(plan.get("framework") or "")
+    reason = str(plan.get("framework_reason") or "")
+    # THE HEADING IS SAID, NOT THE ENUM. `framework` on the stored plan is the
+    # storage/comparison value ("rice", "moscow") — display_name() is what a
+    # reader is shown ("RICE", "MoSCoW"). Passed down already-converted so
+    # neither section function has to remember to do it.
+    label = display_name(framework) if framework else framework
+    if framework.strip().lower() == "moscow":
+        return _moscow_section(findings, label, reason)
+    return _rice_section(findings, label, reason)
+
+
+def _rice_section(
+    findings: list[dict], framework: str, framework_reason: str = "",
+) -> str:
     """The ranking, and the arithmetic behind it — the memo's §04.
 
     THE SKILL'S OUTPUT SPEC, followed: "The main artifact is always the ranked
@@ -365,6 +409,8 @@ def _rice_section(findings: list[dict], framework: str) -> str:
         return ""
 
     out = [f"<h2>How this was ranked ({_esc(framework)})</h2>"]
+    if framework_reason:
+        out.append(_p(framework_reason))
     # WHAT EACH TERM MEANS HERE, because RICE's letters carry assumptions this
     # corpus cannot all satisfy and a reader who assumes the standard ones will
     # misread the table.
@@ -429,6 +475,82 @@ def _rice_section(findings: list[dict], framework: str) -> str:
             "<strong>Sensitive to an estimate we do not have:</strong> "
             + _esc(", ".join(flips))
             + " — where their effort lands decides where they sit."
+        ))
+    return "".join(out)
+
+
+def _moscow_section(
+    findings: list[dict], framework: str, framework_reason: str = "",
+) -> str:
+    """The MUST/SHOULD/COULD ranking, for a corpus RICE cannot size.
+
+    SAME NON-REORDERING DISCIPLINE AS `_rice_section` (I10): `_rank` already
+    froze the order this ran with, so `moscow.group_by_bucket` groups rows by
+    bucket without disturbing the sequence within a bucket.
+    """
+    from app.crucible.moscow import moscow_for
+
+    if not findings or not framework:
+        return ""
+    rows = [
+        moscow_for(
+            label=(f.get("label") or "").strip() or _statement_text(f),
+            reach=f.get("impact_value"),
+            reach_unit=(f.get("currency") or "accounts"),
+            claim_types=[str(t) for t in _as_list(f.get("claim_types"))],
+            surfaced_by=[str(s) for s in _as_list(f.get("surfaced_by"))],
+        )
+        for f in findings[:MAX_RICE_ROWS]
+    ]
+    if not rows:
+        return ""
+
+    out = [f"<h2>How this was ranked ({_esc(framework)})</h2>"]
+    if framework_reason:
+        out.append(_p(framework_reason))
+    out.append(_ul([
+        "<strong>MUST</strong> — a stated blocker: something is stopping an "
+        "account today. <em>Marked <strong>MUST?</strong> when only one "
+        "source document backs it — real, worth confirming.</em>",
+        "<strong>SHOULD / COULD</strong> — a stated preference: something an "
+        "account asked for.",
+        "<strong>Reach</strong> — how many of your accounts the theme "
+        "touches. Counted, not estimated.",
+        "Graded by how many <strong>independent source documents</strong> "
+        "back each one, not by raw claim count — several restatements of one "
+        "complaint from one document are one voice, not several.",
+    ]))
+
+    body = "".join(
+        "<tr>"
+        f"<td>{_esc_clipped(r.label, MAX_PARAM_NAME_CHARS)}</td>"
+        f"<td>{_esc(r.bucket)}</td>"
+        f"<td>{_esc(r.bucket_basis)}</td>"
+        f"<td>{'—' if r.reach is None else f'{r.reach:g} {_esc(r.reach_unit)}'}</td>"
+        f"<td>{r.doc_count}</td>"
+        "</tr>"
+        for r in rows
+    )
+    out.append(
+        "<table><thead><tr>"
+        "<th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>"
+        "<th>Source documents</th>"
+        "</tr></thead><tbody>" + body + "</tbody></table>"
+    )
+
+    unranked = sum(1 for r in rows if r.bucket == "unranked")
+    if unranked:
+        out.append(_p(
+            f"{unranked} of these neither state a blocker nor a preference "
+            f"— they describe the world rather than asking for or blocking "
+            f"something, so MoSCoW does not bucket them. Listed below in "
+            f"rank order; not scored out here."
+        ))
+    if len(findings) > len(rows):
+        out.append(_p(
+            f"The {len(findings) - len(rows)} findings below these are "
+            f"ranked in the list that follows, but not bucketed out here — a "
+            f"table this long stops being one."
         ))
     return "".join(out)
 
@@ -824,10 +946,60 @@ def _finding_block(
     # suggestion that quoted a figure, promised an outcome or failed the lint
     # was dropped rather than repaired. The card then reads exactly as it did
     # before, which is a document that says nothing it cannot stand behind.
+    # THE DEEP PASS TAKES PRECEDENCE. A finding in the deep set also has a
+    # flat `recommendation` (the same `relevant` findings feed both LLM
+    # calls), and showing both would put two suggestions on one finding —
+    # rendered once, as the deeper of the two.
+    deep = _as_dict(finding.get("deep_recommendation"))
     rec = _as_dict(finding.get("recommendation"))
+    deep_action = (deep.get("action") or "").strip()
+    deep_because = (deep.get("because") or "").strip()
     action = (rec.get("action") or "").strip()
     because = (rec.get("because") or "").strip()
-    if action and because:
+    if deep_action and deep_because:
+        out.append(_p(
+            f"<strong>Recommended.</strong> "
+            f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
+        ))
+        out.append(_p(
+            f"<em>Why.</em> {_esc_clipped(deep_because, MAX_STATEMENT_CHARS)}"
+        ))
+        changes = [
+            c for c in _as_list(deep.get("changes"))
+            if isinstance(c, dict) and (c.get("text") or "").strip()
+        ]
+        if changes:
+            out.append("<p><strong>What to change.</strong></p>")
+            out.append(_ul(
+                f"{_esc_clipped(c.get('text'), MAX_STATEMENT_CHARS)} "
+                f"<em>— from: “"
+                f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
+                f"”</em>"
+                for c in changes[:MAX_DEEP_CHANGES]
+            ))
+        open_qs = [
+            q for q in _as_list(deep.get("open_questions"))
+            if isinstance(q, str) and q.strip()
+        ]
+        if open_qs:
+            out.append("<p><strong>Still open.</strong></p>")
+            out.append(_ul(
+                _esc_clipped(q, MAX_STATEMENT_CHARS)
+                for q in open_qs[:MAX_DEEP_OPEN_QUESTIONS]
+            ))
+        falsify = (deep.get("what_would_falsify") or "").strip()
+        if falsify:
+            out.append(_p(
+                f"<em>Would change this if.</em> "
+                f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)}"
+            ))
+        comparison = (deep.get("comparison") or "").strip()
+        if comparison:
+            out.append(_p(
+                f"<strong>Why this over the next.</strong> "
+                f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
+            ))
+    elif action and because:
         out.append(_p(
             f"<strong>Recommended.</strong> "
             f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
@@ -960,6 +1132,13 @@ MAX_DETAILED_FINDINGS = MAX_RICE_ROWS
 MAX_ASSUMED_PARAMS = 8
 MAX_PARAM_NAME_CHARS = 120
 MAX_PARAM_BASIS_CHARS = 300
+
+#: `changes[]` / `open_questions[]` rows a deep recommendation renders.
+#: Mirrors `recommend.MAX_CHANGES_PER_DEEP` / `MAX_OPEN_QUESTIONS_PER_DEEP` —
+#: not imported, because `report.py` renders STORED rows and must bound them
+#: even for a row written before either constant existed or changed value.
+MAX_DEEP_CHANGES = 5
+MAX_DEEP_OPEN_QUESTIONS = 5
 
 #: A source document's name, as rendered. Tenant text, so it is bounded.
 MAX_SOURCE_NAME_CHARS = 120
@@ -1452,6 +1631,9 @@ def render_report_html(
     set_aside = [(f, r) for f, r in zip(findings, _aside_reasons) if r]
 
     goal = (run.get("goal_text") or "").strip()
+    recommendation_basis = str(
+        _as_dict(run.get("prioritisation")).get("recommendation_basis") or ""
+    )
     def _assemble(full_cap: int, overflow_cap: int) -> str:
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
@@ -1460,8 +1642,9 @@ def render_report_html(
             _stat_strip(plan, findings, kept),
             _decision_section(plan, kept),
             _funnel_section(len(findings), len(kept)),
-            _rice_section(kept, str(plan.get("framework") or "")),
+            _framework_section(kept, plan),
             _headline_section(kept),
+            _recommendation_basis_section(recommendation_basis),
             _findings_section(kept, full_cap, overflow_cap),
             _set_aside_section(set_aside),
             _hypotheses_section(plan),

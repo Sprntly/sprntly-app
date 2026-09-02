@@ -847,6 +847,79 @@ describe("the card leads with what to do", () => {
     ) as never} />)
     expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
   })
+
+  it("renders the deep recommendation instead of the flat one when both exist", () => {
+    // The same findings feed both LLM calls — showing both would put two
+    // suggestions on one finding.
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: { action: "Flat action", because: "flat because" },
+      deep_recommendation: {
+        action: "Ship the deeper fix",
+        because: "three accounts named export in a renewal call",
+        changes: [
+          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
+        ],
+        open_questions: ["Is this already partly built?"],
+        what_would_falsify: "No account raises this again",
+        comparison: "",
+      },
+    }]) as never} />)
+    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    expect(card).toContain("Ship the deeper fix")
+    expect(card).not.toContain("Flat action")
+    expect(card).toContain("Raise the export row cap")
+    expect(card).toContain("export runs time out past 10k rows")
+    expect(card).toContain("Is this already partly built?")
+    expect(card).toContain("No account raises this again")
+  })
+
+  it("renders the comparison only when it is present", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "Ship the deeper fix",
+        because: "three accounts named export in a renewal call",
+        changes: [
+          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
+        ],
+        open_questions: [],
+        what_would_falsify: "",
+        comparison: "Ranked above “onboarding delay” because it touches more accounts: 3 against 2.",
+      },
+    }]) as never} />)
+    expect(screen.getByTestId("goal-finding-comparison").textContent)
+      .toContain("Ranked above")
+    expect(screen.getByTestId("goal-finding-comparison").textContent)
+      .toContain("3 against 2")
+  })
+
+  it("does not render a deep block when the deep recommendation is half-empty", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "", because: "", changes: [], open_questions: [],
+        what_would_falsify: "", comparison: "",
+      },
+    }]) as never} />)
+    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
+  })
+})
+
+describe("AC-2: how many got a full recommendation", () => {
+  it("renders the basis sentence when the run recorded one", () => {
+    render(<GoalAnalysisReport run={{
+      ...RUN, findings: [SIZED],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
+      },
+    } as never} />)
+    expect(screen.getByTestId("goal-recommendation-basis").textContent)
+      .toContain("you asked for 2")
+  })
+
+  it("renders nothing when no basis was recorded — a run stored before the deep pass shipped", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-recommendation-basis")).toBeNull()
+  })
 })
 
 describe("the goal-relevance gate, in the panel", () => {
@@ -971,6 +1044,100 @@ describe("the RICE table in the panel", () => {
   it("says nothing when no framework is set", () => {
     render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
     expect(screen.queryByTestId("goal-rice")).toBeNull()
+  })
+
+  it("says RICE in the heading even when the stored value is lowercase", () => {
+    // A real run's `plan["framework"]` is always the lowercase comparison
+    // value ("rice") — only these fixtures use the pre-cased "RICE".
+    const run = {
+      ...RUN, findings: [F(1, "blocked", 5, ["constraint"])],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), framework: "rice" },
+      },
+    }
+    render(<GoalAnalysisReport run={run as never} />)
+    const heading = screen.getByTestId("goal-rice").querySelector("h2")?.textContent ?? ""
+    expect(heading).toContain("RICE")
+  })
+})
+
+describe("the MoSCoW table in the panel", () => {
+  const withMoscow = (findings: unknown[], reason = "") => ({
+    ...RUN, findings,
+    prioritisation: {
+      ...(RUN.prioritisation ?? {}),
+      plan: {
+        ...((RUN.prioritisation ?? {}).plan ?? {}),
+        framework: "moscow", framework_reason: reason,
+      },
+    },
+  })
+  const M = (id: number, label: string, reach: number | null, types: string[],
+             surfacedBy: string[]) => ({
+    ...SIZED, id, label, statement: `${label} stmt`,
+    impact_value: reach, claim_types: types, surfaced_by: surfacedBy,
+  })
+
+  it("renders MUST/SHOULD buckets, and never a RICE table, for a MoSCoW run", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
+    ]) as never} />)
+    expect(screen.getByTestId("goal-moscow").textContent).toContain("MUST")
+    expect(screen.queryByTestId("goal-rice")).toBeNull()
+  })
+
+  it("says the reader's word for the framework in the heading, not the stored lowercase value", () => {
+    // `framework` on the stored plan is the storage/comparison value
+    // ("moscow"); the heading must show "MoSCoW", never the raw value.
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
+    ]) as never} />)
+    const heading = screen.getByTestId("goal-moscow").querySelector("h2")?.textContent ?? ""
+    expect(heading).toContain("MoSCoW")
+    expect(heading).not.toContain("moscow")
+  })
+
+  it("flags a single-document blocker as thin rather than a full MUST", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "thin", 1, ["constraint"], ["doc-a (1)"]),
+      M(2, "solid", 3, ["constraint"], ["doc-a (2)", "doc-b (1)", "doc-c (1)"]),
+    ]) as never} />)
+    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
+      .map((r) => r.querySelectorAll("td")[1]?.textContent)
+    expect(cells).toEqual(["MUST?", "MUST"])
+  })
+
+  it("expands the overflow summary entry back into its real document count", () => {
+    // `surfaced_by` is pre-formatted for display: up to 4 named "doc (n)"
+    // entries plus one "+K more documents" summary. Counting entries
+    // directly would undercount the best-attested findings.
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "well attested", 2, ["constraint"],
+        ["doc-a (5)", "doc-b (3)", "doc-c (2)", "doc-d (1)", "+3 more documents"]),
+    ]) as never} />)
+    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody td")]
+      .map((c) => c.textContent)
+    expect(cells).toContain("7")
+  })
+
+  it("states why MoSCoW was chosen, in the panel", () => {
+    render(<GoalAnalysisReport run={withMoscow(
+      [M(1, "x", 1, ["preference"], ["doc-a (1)"])],
+      "nothing connected here carries a number",
+    ) as never} />)
+    expect(screen.getByTestId("goal-moscow").textContent)
+      .toContain("nothing connected here carries a number")
+  })
+
+  it("does not reorder findings in the MoSCoW table either", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "first", 1, ["preference"], ["doc-a (1)"]),
+      M(2, "second", 50, ["constraint"], ["doc-a (1)"]),
+    ]) as never} />)
+    const rows = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
+      .map((r) => r.querySelector("td")?.textContent)
+    expect(rows).toEqual(["first", "second"])
   })
 })
 
