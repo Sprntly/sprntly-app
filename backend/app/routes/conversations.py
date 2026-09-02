@@ -33,6 +33,7 @@ from app.auth import (
 )
 from app.db.client import require_client, utc_now
 from app.design_agent.csrf import require_same_origin  # server-side CSRF/Origin gate
+from app.realtime import publish_broadcast
 
 logger = logging.getLogger(__name__)
 
@@ -469,15 +470,35 @@ def _catalog_turn_attachments(
             )
 
 
+# The exact `conversation_turns` read-DTO key set published on a fresh turn —
+# same whitelist as `routes/projects.py::_TURN_CREATED_DTO_KEYS` (AD-P21
+# no-schema-coupling). Kept as its own copy here rather than importing that
+# module's private helper: this is a routes<->routes cross-import that would
+# otherwise couple two independently-owned route files over a private name.
+_TURN_CREATED_DTO_KEYS = ("id", "role", "content", "created_at")
+
+
 @router.post("/{conversation_id}/turns")
 def add_turn(
     conversation_id: int,
     body: TurnIn,
     company: CompanyContext = Depends(require_company),
 ):
-    """Add a turn (message) to a conversation — owner only."""
+    """Add a turn (message) to a conversation — owner only.
+
+    Realtime fan-out (best-effort, AD-P22): this is the SHARED write path for
+    every conversation turn (main chat AND the individual project chat's own
+    plain-ask flow both persist here client-side — see
+    `web/.../projects/useProjectConversation.ts`'s `chatPersistence`). A
+    `turn.created` broadcast fires ONLY when the conversation just written to
+    is an INDIVIDUAL PROJECT chat (`kind == "individual" and project_id is
+    not None`) — every other conversation (main chat, non-project, legacy
+    group) is byte-identical: no publish, no added query, no added latency
+    beyond the cheap in-memory gate check on the row this route already
+    fetched for the ownership check below."""
     c = require_client()
-    if _get_owned_conversation(c, conversation_id, company) is None:
+    conversation = _get_owned_conversation(c, conversation_id, company)
+    if conversation is None:
         raise HTTPException(404, "Conversation not found")
     row: dict[str, Any] = {
         "conversation_id": conversation_id,
@@ -505,6 +526,28 @@ def add_turn(
     if body.role == "user":
         patch["preview"] = body.content[:200]
     c.table("conversations").update(patch).eq("id", conversation_id).execute()
+
+    # ── Realtime gate: individual project chat ONLY ─────────────────────────
+    if conversation.get("kind") == "individual" and conversation.get("project_id") is not None and turn:
+        try:
+            # The conversation is private to its own `user_id` — that's the
+            # owner uid the per-user topic keys on, never the acting request
+            # user (same row already fetched above; no second query, mirrors
+            # `get_individual_conversation_owner`'s own resolution).
+            owner_uid = conversation.get("user_id")
+            if owner_uid is not None:
+                publish_broadcast(
+                    f"project:{conversation['project_id']}:user:{owner_uid}",
+                    "turn.created",
+                    {k: turn[k] for k in _TURN_CREATED_DTO_KEYS if k in turn},
+                )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P22: never mask a successful write
+            logger.warning(
+                "realtime_publish_prep_failed topic=project:%s:user:? event=turn.created "
+                "conversation_id=%s",
+                conversation.get("project_id"), conversation_id,
+            )
+
     return resp.data[0] if resp.data else {}
 
 

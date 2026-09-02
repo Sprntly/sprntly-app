@@ -67,6 +67,7 @@ import { GreetingTurnBody } from "./GreetingTurnBody"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
 import { useConversationGeneration } from "../useConversationGeneration"
+import { useRealtimeChannel } from "./useRealtimeChannel"
 import type { ConversationHandle, AskGrounding } from "../conversationCore"
 import type { ThreadTurn, ChatTab } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
@@ -119,8 +120,74 @@ const PROJECT_LANDING_CHIPS = DEFAULT_HOME_CHIPS.filter((c) => c.kind === "start
 const newId = () =>
   (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`)
 
+/** The whitelisted DTO shape the server publishes on `turn.created` /
+ *  `brief.delivered` (mirrors `IndividualTurn` / `_TURN_CREATED_DTO_KEYS`,
+ *  backend/app/routes/projects.py). */
+export type RealtimeTurnPayload = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  created_at?: string
+}
+
+/** Narrow an unknown broadcast payload to `RealtimeTurnPayload`, or `null`
+ *  when it doesn't carry the fields this surface renders on — a malformed/
+ *  future-shaped payload is dropped rather than crashing the append.
+ *  Exported (alongside the two helpers below) for direct unit-testing of the
+ *  dedupe contract, independent of the DOM/React harness. */
+export function parseRealtimeTurnPayload(payload: unknown): RealtimeTurnPayload | null {
+  const p = payload as Partial<RealtimeTurnPayload> | null | undefined
+  if (!p || typeof p.id !== "number" || typeof p.content !== "string") return null
+  if (p.role !== "user" && p.role !== "assistant") return null
+  return { id: p.id, role: p.role, content: p.content, created_at: p.created_at }
+}
+
+/** Whether an incoming realtime turn is safe to append to `existing`.
+ *  False in two cases (AC: id-dedupe + no double-render on a local-echo
+ *  race):
+ *   - the exact DB row is ALREADY on the thread (a rehydrated turn, or a
+ *     prior delivery of the SAME broadcast/reconcile) — matched by
+ *     `dbTurnId`, the durable row id every rendered turn eventually carries.
+ *   - the client's OWN optimistic echo of this same turn is still showing,
+ *     not yet reconciled with its row id (`dbTurnId == null`) — matched by
+ *     role + exact content over a short recent window (broadcasts are
+ *     at-most-once and typically land within moments of the local send, so
+ *     only the tail of the thread is worth checking; a genuine repeat
+ *     message further back in history is never suppressed). */
+export function shouldAppendRealtimeTurn(existing: ThreadTurn[], payload: RealtimeTurnPayload): boolean {
+  if (existing.some((t) => t.dbTurnId === payload.id)) return false
+  const recentUnreconciled = existing.slice(-6).filter((t) => t.dbTurnId == null)
+  if (payload.role === "user") {
+    return !recentUnreconciled.some((t) => t.query === payload.content)
+  }
+  return !recentUnreconciled.some((t) => t.reply?.answer === payload.content)
+}
+
+/** Shape a whitelisted realtime DTO into the same bare, query-or-reply-only
+ *  `ThreadTurn` the hydrate restore already builds for a standalone
+ *  user/assistant row (see the hydrate effect below) — one turn per event,
+ *  never paired, since a live user+assistant pair arrives as two separate
+ *  events. */
+export function realtimeTurnToThreadTurn(payload: RealtimeTurnPayload): ThreadTurn {
+  if (payload.role === "user") {
+    return { id: newId(), dbTurnId: payload.id, query: payload.content }
+  }
+  return {
+    id: newId(), dbTurnId: payload.id, query: "",
+    reply: {
+      answer: payload.content, sources: [], follow_ups: [], key_points: [],
+      citations: [], confidence: 1, unanswered: "",
+    } as AskResponse,
+  }
+}
+
 export function useProjectConversation(
   projectId: number | string,
+  /** The caller's own uid — needed to subscribe to this chat's PER-USER
+   *  realtime topic (`project:{id}:user:{uid}`). `null`/omitted (unresolved
+   *  auth) leaves this surface realtime-blind, same as before this ticket:
+   *  no crash, just no live turn.created/brief.delivered updates. */
+  currentUserId?: string | null,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId), [projectId])
@@ -178,6 +245,11 @@ export function useProjectConversation(
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const askStartRef = useRef<Map<string, number>>(new Map())
   const resumedTurnsRef = useRef<Set<string>>(new Set())
+  // The highest `conversation_turns.id` this surface has SEEN (hydrated,
+  // realtime-delivered, or reconciled) — the since-cursor the realtime
+  // reconcile reads after every (re)subscribe (AD-P22). Seeded from
+  // hydrate's own restored turns below.
+  const lastKnownTurnIdRef = useRef<number>(0)
   const mountedRef = useRef(true)
   // Reset true on SETUP (not only false on cleanup) — StrictMode's dev
   // mount→cleanup→remount would otherwise leave it false and cancel every ask.
@@ -221,6 +293,13 @@ export function useProjectConversation(
           }
         }
         restored.forEach((r) => resumedTurnsRef.current.add(r.id))
+        // Seed the realtime reconcile's since-cursor from whatever history just
+        // hydrated — so the FIRST reconcile (fired the instant the channel
+        // below subscribes, right after this hydrate settles) only fetches
+        // what's NEW since this read, never the whole history again.
+        for (const r of restored) {
+          if (typeof r.dbTurnId === "number") lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, r.dbTurnId)
+        }
         // Only fill a still-empty thread — never clobber one a send already started.
         if (restored.length) setThread((prev) => (prev.length === 0 ? restored : prev))
       } catch {
@@ -232,6 +311,48 @@ export function useProjectConversation(
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
+
+  // ── Realtime: this chat's own per-user topic ────────────────────────────────
+  // `turn.created` (a fresh individual-chat write — the generate/clarify/
+  // terminal-outcome branches and the PRD-edit path) and `brief.delivered` (a
+  // delegated brief/notice; the server already publishes it) both append live,
+  // id-deduped against whatever's already on the thread (`shouldAppendRealtimeTurn`
+  // — closes both a repeat delivery AND a race with this client's own
+  // optimistic echo). `onReconcile` (fired once on every (re)subscribe, AD-P22)
+  // refetches anything landed since `lastKnownTurnIdRef` — the gap a dropped
+  // broadcast or a reconnect would otherwise leave.
+  const applyIncomingTurn = useCallback((payload: RealtimeTurnPayload) => {
+    lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, payload.id)
+    setThread((prev) => (shouldAppendRealtimeTurn(prev, payload) ? [...prev, realtimeTurnToThreadTurn(payload)] : prev))
+  }, [])
+
+  const handleRealtimeEvent = useCallback((event: string, payload: unknown) => {
+    if (event !== "turn.created" && event !== "brief.delivered") return
+    const parsed = parseRealtimeTurnPayload(payload)
+    if (parsed) applyIncomingTurn(parsed)
+  }, [applyIncomingTurn])
+
+  const handleRealtimeReconcile = useCallback(() => {
+    void projectsApi.individualTurns(projectId, lastKnownTurnIdRef.current)
+      .then((turns) => {
+        for (const t of turns) applyIncomingTurn({ id: t.id, role: t.role, content: t.content, created_at: t.created_at })
+      })
+      .catch(() => { /* best-effort — the NEXT reconnect/reconcile closes it */ })
+  }, [projectId, applyIncomingTurn])
+
+  // Gated on `!hydrating`: the channel's first reconcile fires the instant it
+  // subscribes, and a reconcile-driven append landing BEFORE hydrate's own
+  // `setThread` would make hydrate's `prev.length === 0 ? restored : prev`
+  // guard a silent no-op (losing the ordered, paired restore for the bare
+  // reconcile shape). Waiting for hydrate to settle first — regardless of
+  // whether it restored anything — makes the ordering safe either way.
+  const conversationRealtimeTopic = !hydrating && currentUserId
+    ? `project:${projectId}:user:${currentUserId}`
+    : null
+  useRealtimeChannel(conversationRealtimeTopic, {
+    onEvent: handleRealtimeEvent,
+    onReconcile: handleRealtimeReconcile,
+  })
 
   // ── Mirror this conversation into the shared content store (main parity) ────
   // Main's ChatScreen stamps `content.conversationId` with the active tab's
