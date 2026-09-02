@@ -125,8 +125,51 @@ function ReportFinding({
           lines has the actionable half.
           ABSENT IS NORMAL: only the top findings get one, and anything that
           quoted a figure, promised an outcome or failed the lint was dropped
-          rather than repaired. */}
-      {(f.recommendation?.action || "").trim()
+          rather than repaired.
+          THE DEEP PASS TAKES PRECEDENCE over the flat one when both exist —
+          the same findings feed both LLM calls, and showing both would put
+          two suggestions on one finding. */}
+      {(f.deep_recommendation?.action || "").trim()
+        && (f.deep_recommendation?.because || "").trim() ? (
+        <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
+          <p><strong>Recommended.</strong> {f.deep_recommendation!.action}</p>
+          <p className="ga-finding-rec-why">
+            <em>Why.</em> {f.deep_recommendation!.because}
+          </p>
+          {f.deep_recommendation!.changes.length ? (
+            <>
+              <p><strong>What to change.</strong></p>
+              <ul className="ga-assumed" data-testid="goal-finding-changes">
+                {f.deep_recommendation!.changes.map((c, i) => (
+                  <li key={i}>
+                    {c.text} <em>— from: “{c.cited_claim}”</em>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {f.deep_recommendation!.open_questions.length ? (
+            <>
+              <p><strong>Still open.</strong></p>
+              <ul className="ga-assumed">
+                {f.deep_recommendation!.open_questions.map((q, i) => (
+                  <li key={i}>{q}</li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+          {f.deep_recommendation!.what_would_falsify ? (
+            <p className="ga-weakest">
+              <b>Would change this if.</b> {f.deep_recommendation!.what_would_falsify}
+            </p>
+          ) : null}
+          {f.deep_recommendation!.comparison ? (
+            <p className="ga-weakest" data-testid="goal-finding-comparison">
+              <b>Why this over the next.</b> {f.deep_recommendation!.comparison}
+            </p>
+          ) : null}
+        </div>
+      ) : (f.recommendation?.action || "").trim()
         && (f.recommendation?.because || "").trim() ? (
         <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
           <p><strong>Recommended.</strong> {f.recommendation!.action}</p>
@@ -220,6 +263,10 @@ export function GoalAnalysisReport({
   busy?: boolean
 }) {
   const plan: GoalRunPlan | undefined = run.prioritisation?.plan
+  // AC-2: how many findings got a full recommendation, and why — a sentence
+  // computed from the goal's own ask, never a bare number. Mirrors
+  // `report.py`'s `_recommendation_basis_section`, same placement.
+  const recommendationBasis = (run.prioritisation?.recommendation_basis || "").trim()
   // ── THE THEME, THE QUOTE AND THE RECOMMENDATION, MERGED IN ONCE. ────────
   //
   // These three live in the run's own JSON rather than in columns on
@@ -758,6 +805,13 @@ export function GoalAnalysisReport({
           </p>
         )}
       </section>
+
+      {recommendationBasis ? (
+        <p className="ga-doc-note" data-testid="goal-recommendation-basis">
+          <strong>How many got a full recommendation.</strong>{" "}
+          {recommendationBasis}
+        </p>
+      ) : null}
 
       {/* ── 4. The findings, ranked ──────────────────────────────────────── */}
       {findings.length ? (

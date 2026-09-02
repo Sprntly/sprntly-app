@@ -41,6 +41,7 @@ import {
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
+import { GeneratingBanner } from "./GenerationState"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
@@ -200,10 +201,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
       // Read off the row every tick rather than latched once: the server turns
       // it off in the same write that publishes the results, so the tick that
       // sees the results is the tick that stops.
-      enrichmentPending.current = Boolean(
-        (detail as { prioritisation?: { enrichment_pending?: boolean } })
-          .prioritisation?.enrichment_pending,
-      )
+      enrichmentPending.current = Boolean(detail.prioritisation?.enrichment_pending)
       return detail.status
     } catch {
       failures.current += 1
@@ -493,10 +491,29 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     </p>
   ) : null
 
+  // AC-5: A REPORT THAT IS "READY" IS NOT NECESSARILY DONE. Findings publish
+  // the moment the ranking exists so the reader is not held behind four
+  // model calls (`enrichment_pending`'s own docstring in api.ts) — but until
+  // this clears, the deep recommendations for the top of the ranking are
+  // still coming. David: "this doesn't show something is happening… can
+  // this have some way of showing that it's thinking, which is more
+  // prominent." Apurva, live: "we need to have this something rendering
+  // here that still generating." Read from `run` (not the poll-cadence ref)
+  // so it re-renders the moment a fresh poll clears it.
+  const stillGenerating = Boolean(run.prioritisation?.enrichment_pending)
+  const generatingBanner = stillGenerating ? (
+    <GeneratingBanner
+      title="Still working on this analysis"
+      sub="The findings are ready; a deeper recommendation for the top of the ranking is still generating."
+      testId="goal-recommendations-generating"
+    />
+  ) : null
+
   if (editing && doc) {
     return (
       <div className="ga" data-testid="goal-ready">
         {banner}
+        {generatingBanner}
         {note}
         <GoalReportDocument
           doc={doc}
@@ -511,6 +528,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   return (
     <div className="ga" data-testid="goal-ready">
       {banner}
+      {generatingBanner}
       {note}
       {/* An edited version exists and the reader is looking at the original.
           Saying so is not optional: without it the panel shows the run's own

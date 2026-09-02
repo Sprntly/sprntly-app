@@ -847,6 +847,79 @@ describe("the card leads with what to do", () => {
     ) as never} />)
     expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
   })
+
+  it("renders the deep recommendation instead of the flat one when both exist", () => {
+    // The same findings feed both LLM calls — showing both would put two
+    // suggestions on one finding.
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: { action: "Flat action", because: "flat because" },
+      deep_recommendation: {
+        action: "Ship the deeper fix",
+        because: "three accounts named export in a renewal call",
+        changes: [
+          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
+        ],
+        open_questions: ["Is this already partly built?"],
+        what_would_falsify: "No account raises this again",
+        comparison: "",
+      },
+    }]) as never} />)
+    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    expect(card).toContain("Ship the deeper fix")
+    expect(card).not.toContain("Flat action")
+    expect(card).toContain("Raise the export row cap")
+    expect(card).toContain("export runs time out past 10k rows")
+    expect(card).toContain("Is this already partly built?")
+    expect(card).toContain("No account raises this again")
+  })
+
+  it("renders the comparison only when it is present", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "Ship the deeper fix",
+        because: "three accounts named export in a renewal call",
+        changes: [
+          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
+        ],
+        open_questions: [],
+        what_would_falsify: "",
+        comparison: "Ranked above “onboarding delay” because it touches more accounts: 3 against 2.",
+      },
+    }]) as never} />)
+    expect(screen.getByTestId("goal-finding-comparison").textContent)
+      .toContain("Ranked above")
+    expect(screen.getByTestId("goal-finding-comparison").textContent)
+      .toContain("3 against 2")
+  })
+
+  it("does not render a deep block when the deep recommendation is half-empty", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "", because: "", changes: [], open_questions: [],
+        what_would_falsify: "", comparison: "",
+      },
+    }]) as never} />)
+    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
+  })
+})
+
+describe("AC-2: how many got a full recommendation", () => {
+  it("renders the basis sentence when the run recorded one", () => {
+    render(<GoalAnalysisReport run={{
+      ...RUN, findings: [SIZED],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
+      },
+    } as never} />)
+    expect(screen.getByTestId("goal-recommendation-basis").textContent)
+      .toContain("you asked for 2")
+  })
+
+  it("renders nothing when no basis was recorded — a run stored before the deep pass shipped", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-recommendation-basis")).toBeNull()
+  })
 })
 
 describe("the goal-relevance gate, in the panel", () => {

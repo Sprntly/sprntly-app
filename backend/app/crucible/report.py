@@ -255,7 +255,11 @@ def _stat_strip(
         return ""
     sized = [f for f in kept if f.get("impact_value") is not None]
     high = [f for f in kept if (f.get("confidence_band") or "") == "high"]
-    recommended = [f for f in kept if _as_dict(f.get("recommendation")).get("action")]
+    recommended = [
+        f for f in kept
+        if _as_dict(f.get("recommendation")).get("action")
+        or _as_dict(f.get("deep_recommendation")).get("action")
+    ]
     reach = sum(float(f.get("impact_value") or 0) for f in sized)
 
     cells: list[tuple[str, str]] = [
@@ -329,6 +333,21 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
             f"a forecast of what changes if you act."
         ))
     return "".join(out)
+
+
+def _recommendation_basis_section(basis: str) -> str:
+    """AC-2: the count of deep recommendations is arithmetic, not a bare
+    number — David: "the number of projects really has to be in context of
+    the question and what the goal is." Silent when there is nothing to say
+    (no deep pass ran, or every finding on the run predates it).
+    """
+    basis = (basis or "").strip()
+    if not basis:
+        return ""
+    return _p(
+        f"<strong>How many got a full recommendation.</strong> "
+        f"{_esc_clipped(basis, MAX_STATEMENT_CHARS)}"
+    )
 
 
 def _framework_section(findings: list[dict], plan: dict) -> str:
@@ -927,10 +946,60 @@ def _finding_block(
     # suggestion that quoted a figure, promised an outcome or failed the lint
     # was dropped rather than repaired. The card then reads exactly as it did
     # before, which is a document that says nothing it cannot stand behind.
+    # THE DEEP PASS TAKES PRECEDENCE. A finding in the deep set also has a
+    # flat `recommendation` (the same `relevant` findings feed both LLM
+    # calls), and showing both would put two suggestions on one finding —
+    # rendered once, as the deeper of the two.
+    deep = _as_dict(finding.get("deep_recommendation"))
     rec = _as_dict(finding.get("recommendation"))
+    deep_action = (deep.get("action") or "").strip()
+    deep_because = (deep.get("because") or "").strip()
     action = (rec.get("action") or "").strip()
     because = (rec.get("because") or "").strip()
-    if action and because:
+    if deep_action and deep_because:
+        out.append(_p(
+            f"<strong>Recommended.</strong> "
+            f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
+        ))
+        out.append(_p(
+            f"<em>Why.</em> {_esc_clipped(deep_because, MAX_STATEMENT_CHARS)}"
+        ))
+        changes = [
+            c for c in _as_list(deep.get("changes"))
+            if isinstance(c, dict) and (c.get("text") or "").strip()
+        ]
+        if changes:
+            out.append("<p><strong>What to change.</strong></p>")
+            out.append(_ul(
+                f"{_esc_clipped(c.get('text'), MAX_STATEMENT_CHARS)} "
+                f"<em>— from: “"
+                f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
+                f"”</em>"
+                for c in changes[:MAX_DEEP_CHANGES]
+            ))
+        open_qs = [
+            q for q in _as_list(deep.get("open_questions"))
+            if isinstance(q, str) and q.strip()
+        ]
+        if open_qs:
+            out.append("<p><strong>Still open.</strong></p>")
+            out.append(_ul(
+                _esc_clipped(q, MAX_STATEMENT_CHARS)
+                for q in open_qs[:MAX_DEEP_OPEN_QUESTIONS]
+            ))
+        falsify = (deep.get("what_would_falsify") or "").strip()
+        if falsify:
+            out.append(_p(
+                f"<em>Would change this if.</em> "
+                f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)}"
+            ))
+        comparison = (deep.get("comparison") or "").strip()
+        if comparison:
+            out.append(_p(
+                f"<strong>Why this over the next.</strong> "
+                f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
+            ))
+    elif action and because:
         out.append(_p(
             f"<strong>Recommended.</strong> "
             f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
@@ -1063,6 +1132,13 @@ MAX_DETAILED_FINDINGS = MAX_RICE_ROWS
 MAX_ASSUMED_PARAMS = 8
 MAX_PARAM_NAME_CHARS = 120
 MAX_PARAM_BASIS_CHARS = 300
+
+#: `changes[]` / `open_questions[]` rows a deep recommendation renders.
+#: Mirrors `recommend.MAX_CHANGES_PER_DEEP` / `MAX_OPEN_QUESTIONS_PER_DEEP` —
+#: not imported, because `report.py` renders STORED rows and must bound them
+#: even for a row written before either constant existed or changed value.
+MAX_DEEP_CHANGES = 5
+MAX_DEEP_OPEN_QUESTIONS = 5
 
 #: A source document's name, as rendered. Tenant text, so it is bounded.
 MAX_SOURCE_NAME_CHARS = 120
@@ -1555,6 +1631,9 @@ def render_report_html(
     set_aside = [(f, r) for f, r in zip(findings, _aside_reasons) if r]
 
     goal = (run.get("goal_text") or "").strip()
+    recommendation_basis = str(
+        _as_dict(run.get("prioritisation")).get("recommendation_basis") or ""
+    )
     def _assemble(full_cap: int, overflow_cap: int) -> str:
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
@@ -1565,6 +1644,7 @@ def render_report_html(
             _funnel_section(len(findings), len(kept)),
             _framework_section(kept, plan),
             _headline_section(kept),
+            _recommendation_basis_section(recommendation_basis),
             _findings_section(kept, full_cap, overflow_cap),
             _set_aside_section(set_aside),
             _hypotheses_section(plan),

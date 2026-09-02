@@ -1329,6 +1329,21 @@ def execute_run(
             f for f, reason in zip(result.findings, set_aside_by_rank)
             if reason is None
         ]
+        # SAME FILTER, ON THE OTHER TWO SEQUENCES. `build_deep_recommendations`
+        # needs each finding's frozen `Impact`/`Confidence` alongside it —
+        # positionally, exactly like `pipeline.build_findings`'s own three
+        # return sequences — so the filter that produced `relevant` from
+        # `result.findings` is applied identically here rather than re-derived,
+        # which is how the two lists could silently stop agreeing on which
+        # finding is at which index.
+        relevant_impacts = [
+            imp for imp, reason in zip(result.impacts, set_aside_by_rank)
+            if reason is None
+        ]
+        relevant_confidences = [
+            conf for conf, reason in zip(result.confidences, set_aside_by_rank)
+            if reason is None
+        ]
 
         # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
         #
@@ -1354,12 +1369,39 @@ def execute_run(
         except Exception:  # noqa: BLE001
             logger.exception("crucible: recommendations skipped for run %s", run_id)
 
+        # A DEEP RECOMMENDATION FOR THE TOP OF THE RANKING, SIZED BY THE GOAL.
+        #
+        # Apurva: "once we pick the top two, then we could just compare them."
+        # `build_deep_recommendations` decides how many with pure arithmetic
+        # over the frozen `relevant_impacts` (I2/I10) — never an LLM, and
+        # never a count this route invents. TOTAL, same reasoning as the flat
+        # pass above.
+        deep = {}
+        recommendation_basis = ""
+        try:
+            from app.crucible.recommend import build_deep_recommendations
+
+            deep_result = build_deep_recommendations(
+                enterprise_id=company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                findings=relevant,
+                impacts=relevant_impacts,
+                confidences=relevant_confidences,
+                claims=claims,
+            )
+            deep = deep_result.by_id
+            recommendation_basis = deep_result.count.basis
+        except Exception:  # noqa: BLE001
+            logger.exception("crucible: deep recommendations skipped for run %s", run_id)
+
         # CARRIED IN THE RUN'S OWN JSON, not in new columns on
         # `crucible_findings`. Adding columns means a migration against the
         # shared Supabase, which is a production change and not one to make
         # without being asked; the meta blob is already where this run's plan
         # lives and costs nothing to extend.
         meta = dict(_meta_of(run_id, company_id))
+        meta["recommendation_basis"] = recommendation_basis
         meta["findings_extra"] = {
             f.id: {
                 "label": f.label,
@@ -1372,6 +1414,23 @@ def execute_run(
                 **({"recommendation": {
                     "action": recs[f.id].action, "because": recs[f.id].because,
                 }} if f.id in recs else {}),
+                # THE DEEP PASS TAKES PRECEDENCE where both exist — a finding
+                # in the deep set is one the flat pass ALSO ran on (`relevant`
+                # feeds both), and the renderer shows the deeper one rather
+                # than both, so a reader is never shown two disagreeing
+                # suggestions for the same finding.
+                **({"deep_recommendation": {
+                    "action": deep[f.id].action,
+                    "because": deep[f.id].because,
+                    "changes": [
+                        {"text": c.text, "claim_id": c.claim_id,
+                         "cited_claim": c.cited_claim}
+                        for c in deep[f.id].changes
+                    ],
+                    "open_questions": list(deep[f.id].open_questions),
+                    "what_would_falsify": deep[f.id].what_would_falsify,
+                    "comparison": deep[f.id].comparison,
+                }} if f.id in deep else {}),
             }
             for f in result.findings
         }
