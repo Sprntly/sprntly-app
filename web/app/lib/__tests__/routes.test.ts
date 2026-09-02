@@ -80,6 +80,28 @@ describe("routes — projectPath chat-param (fork-to-private-chat nav)", () => {
   })
 })
 
+describe("routes — projectPath prd-param (seamless PRD-create landing, D1)", () => {
+  it("test_projectPath_prd_param — appends &prd= after &chat= when a project id, opts.chat, AND opts.prd are all present", () => {
+    expect(projectPath(555, { chat: "individual", prd: 501 })).toBe("/projects?id=555&chat=individual&prd=501")
+    expect(projectPath("555", { chat: "individual", prd: "501" })).toBe("/projects?id=555&chat=individual&prd=501")
+  })
+
+  it("test_projectPath_prd_param_no_chat — opts.prd with no opts.chat still appends &prd= right after &id=", () => {
+    expect(projectPath(555, { prd: 501 })).toBe("/projects?id=555&prd=501")
+  })
+
+  it("test_projectPath_prd_param_ignored_without_id — with no project id, opts.prd is ignored (same as opts.chat)", () => {
+    expect(projectPath(null, { prd: 501 })).toBe(PROJECTS_PATH)
+    expect(projectPath(undefined, { prd: 501 })).toBe(PROJECTS_PATH)
+  })
+
+  it("test_projectPath_byte_identical_no_prd_opt — omitting opts.prd (or opts entirely) is unchanged from the existing chat-only/no-opts forms", () => {
+    expect(projectPath(7, { chat: "individual" })).toBe("/projects?id=7&chat=individual")
+    expect(projectPath(7, {})).toBe("/projects?id=7")
+    expect(projectPath(7)).toBe("/projects?id=7")
+  })
+})
+
 describe("connectors route file (commit A)", () => {
   it("does not exist on disk", () => {
     const file = join(
