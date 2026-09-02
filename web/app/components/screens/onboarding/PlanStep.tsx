@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
 import { ApiError, apiErrorMessage, billingApi } from "../../../lib/api"
 import { useWorkspace } from "../../../context/WorkspaceContext"
+import { useOnboarding } from "../../../context/OnboardingContext"
 import { ONBOARDING_STEP_SLUGS } from "../../../lib/onboarding/types"
 import { SprntlyLockup } from "../../shared/SprntlyMark"
 import {
@@ -59,7 +60,23 @@ type Phase =
 export function PlanStep() {
   const router = useRouter()
   const params = useSearchParams()
-  const { workspace, orgRole, refresh } = useWorkspace()
+  // PAID-STATE READS COME FROM THE ONBOARDING CONTEXT, NOT THE WORKSPACE ONE,
+  // because that is the context `OnboardingPaymentGuard` reads. The two hold
+  // separate copies of the same company, and when they disagreed about
+  // `companyHasPaid` the result was an infinite redirect loop: this step saw
+  // paid and pushed to the next slug, the guard saw unpaid and replaced back
+  // to /onboarding/plan, forever. The guard's own provider wraps the whole
+  // /onboarding subtree so it never remounts between steps — it fetched once
+  // and stayed stale — while this component DID remount on every bounce,
+  // resetting the `alreadyPaid` latch that would otherwise have stopped it.
+  //
+  // Reading the same source the guard reads makes the disagreement
+  // unrepresentable, which is why this is not a redirect-count circuit breaker.
+  const { workspace, refresh: refreshOnboarding } = useOnboarding()
+  // orgRole only lives on the workspace context; its refresh is still called
+  // after payment so the OUTER OnboardingRequiredGuard is not left stale when
+  // onboarding later completes.
+  const { orgRole, refresh: refreshWorkspace } = useWorkspace()
 
   const [interval, setInterval] = useState<"monthly" | "annual">("monthly")
   const [plan, setPlan] = useState<string>(SELF_SERVE_PLANS[0]!.id)
@@ -111,7 +128,10 @@ export function PlanStep() {
         try {
           const summary = await billingApi.summary()
           if (subscriptionGrantsAccess(summary.plan, summary.subscription_status)) {
-            await refresh()
+            // BOTH caches, and the onboarding one is the load-bearing half:
+            // advancing while the guard's copy still says unpaid is exactly
+            // the redirect loop this ordering exists to prevent.
+            await Promise.all([refreshOnboarding(), refreshWorkspace()])
             if (!stopped) advance()
             return
           }
@@ -150,7 +170,7 @@ export function PlanStep() {
       confirming.current = false
       window.clearTimeout(slowTimer)
     }
-  }, [checkout, refresh, advance])
+  }, [checkout, refreshOnboarding, refreshWorkspace, advance])
 
   async function startCheckout() {
     setError(null)
