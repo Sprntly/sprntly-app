@@ -5593,19 +5593,27 @@ export const conversationsApi = {
    *  `reply` is the assistant turn's STRUCTURED payload — everything the turn
    *  showed beyond its prose, which `content` alone cannot hold (see
    *  `PersistedTurnReply`). Omitted on user turns, and the backend drops it on
-   *  one regardless. */
+   *  one regardless.
+   *
+   *  `clientMessageId`: an assistant turn's reply-persist dedup key (project
+   *  individual chat only — the server ignores it everywhere else). A
+   *  same-key retry collapses to the SAME row via the backend's idempotent
+   *  upsert instead of inserting a second one. Omitted by every other
+   *  caller (main chat, a user turn), byte-identical to before. */
   addTurn: (
     conversationId: number,
     role: "user" | "assistant",
     content: string,
     attachments?: TurnAttachment[],
     reply?: PersistedTurnReply | null,
+    clientMessageId?: string,
   ) =>
     api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
       role,
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
       ...(reply ? { reply } : {}),
+      ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
     }),
   /** REWIND the conversation to just before `turnId` — deletes that turn and
    *  every turn after it. `turnId` must be a USER turn: you rewind to a

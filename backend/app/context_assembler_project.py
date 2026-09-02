@@ -188,6 +188,13 @@ class ProjectContextAssembler:
                 _project_id: int = project_id,
             ) -> dict:
                 turn = post_individual_turn(_conversation_id, "assistant", content)
+                # Defense-in-depth: never publish a blank-content row (the
+                # row above is still written either way) — mirrors the
+                # client's own `parseRealtimeTurnPayload` blank-content
+                # guard, so a blank write here can never render a phantom
+                # bubble on the receiving thread.
+                if not (turn.get("content") or "").strip():
+                    return turn
                 try:
                     owner_uid = get_individual_conversation_owner(_conversation_id)
                     if owner_uid is not None:
