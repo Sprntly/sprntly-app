@@ -224,6 +224,14 @@ def _send_via_resend(
                 log_label, to_email, resp.status_code, resp.text[:200],
             )
             return False
+        message_id = None
+        try:
+            message_id = resp.json().get("id")
+        except Exception:  # noqa: BLE001 — a success is still a success without an id
+            message_id = None
+        logger.info(
+            "resend_sent label=%s to=%s message_id=%s", log_label, to_email, message_id,
+        )
         return True
     except Exception as exc:  # noqa: BLE001 — best-effort
         logger.warning("Resend task-%s email raised for %s: %s", log_label, to_email, exc)

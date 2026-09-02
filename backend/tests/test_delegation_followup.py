@@ -873,6 +873,100 @@ def test_completion_email_falls_back_to_generic_project_name():
     assert "in Sprntly" in body_text
 
 
+# ── Successful send is self-evidencing in logs ──────────────────────────────
+
+
+def test_send_via_resend_logs_message_id_on_success(isolated_settings, monkeypatch, caplog):
+    """A 2xx Resend response logs an INFO line carrying the recipient +
+    the Resend message-id BEFORE returning True — so a successful send
+    leaves a trace, not just failures."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"id": "msg_abc123"}
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="assignment",
+        )
+
+    assert ok is True
+    sent_lines = [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    assert len(sent_lines) == 1
+    msg = sent_lines[0].getMessage()
+    assert "assignee@co.com" in msg
+    assert "msg_abc123" in msg
+    assert "assignment" in msg
+
+
+def test_send_via_resend_logs_success_when_body_unparseable(isolated_settings, monkeypatch, caplog):
+    """A 2xx response with an unparseable/empty body still logs success
+    (message_id=None) and still returns True — parsing the id never
+    turns a successful send into an error."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            raise ValueError("no body")
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="completion",
+        )
+
+    assert ok is True
+    sent_lines = [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    assert len(sent_lines) == 1
+    msg = sent_lines[0].getMessage()
+    assert "message_id=None" in msg
+
+
+def test_send_via_resend_failure_branch_unchanged(isolated_settings, monkeypatch, caplog):
+    """Non-2xx still warns and returns False — the success-logging change
+    must not touch this branch."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 500
+        text = "boom"
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="assignment",
+        )
+
+    assert ok is False
+    assert not [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "assignee@co.com" in warnings[0].getMessage()
+
+
 # ── Privacy property tests: no email ever carries task text ────────────────
 
 
