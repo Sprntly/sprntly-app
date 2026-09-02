@@ -843,6 +843,79 @@ def test_excluding_a_numeric_source_flips_the_gap_the_run_states(ctx):
     )
 
 
+# ─── AC-2: the framework is chosen from the inventory, not hardcoded ────────
+
+
+def test_the_plan_chooses_moscow_when_nothing_carries_a_number(ctx):
+    """The corpus this ticket exists for. RICE cannot derive Reach or Impact
+    from three customer_voice signals — measured on a real 1,275-signal
+    corpus, this is exactly the shape that scores 26/26 findings `None`."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "moscow"
+    assert plan["framework_reason"]
+    assert "account_value" not in [q["id"] for q in plan.get("questions") or []]
+
+
+def test_the_plan_chooses_rice_when_a_numeric_source_is_connected(ctx):
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    require_client().table("kg_signal").insert({
+        "id": "sig-9200", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "analytics", "content": "activation rate moved",
+        "properties": {}, "provenance": {"doc": "NW-3002"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "rice"
+    assert "account_value" in [q["id"] for q in plan.get("questions") or []]
+
+
+def test_dropping_the_only_numeric_source_at_approval_downgrades_the_framework(ctx):
+    """Framework selection is RE-DERIVED from the KEPT inventory at approve
+    time, same fix as the gaps re-derivation above and for the same reason: a
+    reader who unticks the one source that made RICE derivable must not keep
+    a RICE table where every row scores `None` — this ticket's whole reason
+    for existing, one step later than the bug the gaps fix already covers."""
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    require_client().table("kg_signal").insert({
+        "id": "sig-9201", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "analytics", "content": "activation rate moved",
+        "properties": {}, "provenance": {"doc": "NW-3003"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    offered = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert offered["framework"] == "rice", "fixture is wrong: RICE must be chosen BEFORE the exclusion"
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": ["analytics"], "hypotheses": []})
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "moscow", (
+        "the run kept ranking by RICE after the reader dropped the only "
+        "source that made it derivable"
+    )
+    assert "account_value" not in [q["id"] for q in plan.get("questions") or []]
+
+
 def test_the_approved_plan_records_what_the_user_decided(ctx):
     """THE REPORT READS THIS. `build_plan` runs BEFORE the user sees it, so the
     stored plan still describes the run they were OFFERED. Left alone, the

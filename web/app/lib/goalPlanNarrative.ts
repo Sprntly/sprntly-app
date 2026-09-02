@@ -38,7 +38,7 @@ export type PlanStep = {
 export function planNarrative(
   plan: Pick<GoalRunPlan,
     "sources" | "definition_text" | "will_produce" | "cannot_answer"
-    | "definition_adopted" | "framework">,
+    | "definition_adopted" | "framework" | "framework_reason">,
   excluded: ReadonlySet<string>,
 ): PlanStep[] {
   const kept = (plan.sources ?? []).filter((s) => !excluded.has(s.source_type))
@@ -85,26 +85,41 @@ export function planNarrative(
     })
   }
 
-  // 3b. HOW THE SURVIVORS GET ORDERED, named before the run.
+  // 3b. HOW THE SURVIVORS GET ORDERED, named before the run — AND WHY THAT
+  //     FRAMEWORK, not another.
   //
   // Apurva: "in the initial plan that we are going to output, we should
   // highlight that we are using the RICE framework." A ranking method
   // discovered in the output is a convention; one stated in the plan is a
   // choice, and the reader can say no to it while the gate is still open.
   //
-  // The terms are spelled out because RICE's letters carry assumptions this
-  // corpus cannot all satisfy — effort in particular is not in the data, and
-  // saying so here is cheaper than explaining it under a table later.
+  // CHOSEN BY CODE OVER WHAT IS CONNECTED, never by a model (I2) — see
+  // `app.crucible.framework.select_framework`. RICE needs a numeric source
+  // (analytics/revenue/measured outcome) to size Reach and Impact; without
+  // one it renders every row unmeasured rather than ranking badly (measured
+  // on a real corpus: 26/26 findings scored `None`). MoSCoW needs only a
+  // stated blocker or a stated preference, which any corpus with either
+  // already carries — so the terms spelled out below differ by which
+  // framework this run actually picked.
   const framework = (plan.framework || "").trim()
   if (framework) {
+    const isMoscow = framework.trim().toLowerCase() === "moscow"
+    const items = isMoscow
+      ? [
+          "MUST — a stated blocker: something is stopping an account today",
+          "SHOULD or COULD — a stated preference: something an account asked for",
+          "Graded by how many independent source documents back each one, not by raw claim count",
+        ]
+      : [
+          "Reach — how many of your accounts the theme touches, counted",
+          "Impact — how directly it bears on the metric, read from the kind of claim behind it",
+          "Confidence — the band the evidence earns, not a guess",
+          "Effort — not in your connected data, so the ranking is by reach × impact × confidence until you supply one",
+        ]
+    const reason = (plan.framework_reason || "").trim()
     steps.push({
       text: `Rank what survives with ${framework}:`,
-      items: [
-        "Reach — how many of your accounts the theme touches, counted",
-        "Impact — how directly it bears on the metric, read from the kind of claim behind it",
-        "Confidence — the band the evidence earns, not a guess",
-        "Effort — not in your connected data, so the ranking is by reach × impact × confidence until you supply one",
-      ],
+      items: reason ? [...items, reason] : items,
     })
   }
 

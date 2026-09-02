@@ -85,6 +85,23 @@ class Gap:
 
 
 @dataclass(frozen=True)
+class PlanQuestion:
+    """Something the CHOSEN framework needs and cannot derive — asked once,
+    batched, before generation begins (AC-5). Replaces the old fixed set of
+    three questions asked unconditionally regardless of what would actually
+    use the answer; see `app.crucible.framework.questions_for`.
+
+    Skipping one is not the same as answering it with nothing: the gate
+    never invents a value for a blank field, and the gap it would have
+    closed is carried into the output instead (I3/I8's discipline, applied
+    to an input rather than a finding).
+    """
+    id: str
+    prompt: str
+    why: str
+
+
+@dataclass(frozen=True)
 class RunPlan:
     goal_text: str
     definition_text: str
@@ -128,6 +145,17 @@ class RunPlan:
     #: it in the plan is what makes it a choice they can override rather than a
     #: convention they discover afterwards.
     framework: str = "RICE"
+    #: WHY THIS FRAMEWORK, said as a sentence rather than left for the reader
+    #: to infer from the table underneath it. Chosen by code over the source
+    #: inventory (`app.crucible.framework.select_framework`), never by a
+    #: model (I2) — reasoning over what is connected, not a choice an LLM
+    #: made. Empty only on a plan built before this field existed.
+    framework_reason: str = ""
+    #: WHAT THE CHOSEN FRAMEWORK NEEDS AND CANNOT DERIVE, batched (AC-5).
+    #: Replaces the old fixed three (account value / decision owner /
+    #: needed-by) asked unconditionally regardless of which framework would
+    #: use the answer — see `app.crucible.framework.questions_for`.
+    questions: tuple[PlanQuestion, ...] = ()
     #: ── THINGS THIS RUN CANNOT KNOW, AND NOW ASKS FOR. ──────────────────
     #:
     #: Apurva: "the plan gate can start asking questions it doesn't know
@@ -171,6 +199,8 @@ class RunPlan:
             "definition_note": self.definition_note,
             "definition_adopted": self.definition_adopted,
             "framework": self.framework,
+            "framework_reason": self.framework_reason,
+            "questions": [asdict(q) for q in self.questions],
             "account_value": self.account_value,
             "decision_owner": self.decision_owner,
             "needed_by": self.needed_by,
@@ -213,6 +243,8 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
 def derive_gaps_and_promises(
     kept: "tuple[SourceInventory, ...] | list[SourceInventory]",
     hypotheses: tuple[str, ...] = (),
+    *,
+    framework_choice: "Optional[object]" = None,
 ) -> tuple[tuple["Gap", ...], tuple[str, ...]]:
     """What this run will NOT be able to answer, and what it WILL produce,
     derived from the sources it will actually read.
@@ -226,12 +258,37 @@ def derive_gaps_and_promises(
     carries numbers") along with its actionable remedy, and were handed "no
     action needed from you" instead.
 
-    Pure: it reads only the kept inventory, so the plan gate and the approve
-    path cannot drift.
+    Pure: it reads only the kept inventory (plus the framework choice already
+    derived from it), so the plan gate and the approve path cannot drift.
+
+    `framework_choice` is an `app.crucible.framework.FrameworkChoice` — typed
+    loosely (`object`) here rather than imported at module level, because
+    `framework.py` imports FROM this module (`NUMERIC_SOURCES`,
+    `SourceInventory`, `PlanQuestion`) and a top-level import back would be
+    circular. Duck-typed on `.declared` / `.honoured_declared` / `.reason` /
+    `.remedy`.
     """
 
     present = {s.source_type for s in kept}
     gaps: list[Gap] = []
+
+    # THE FRAMEWORK THE COMPANY ASKED FOR, SAID PLAINLY WHEN IT COULD NOT BE
+    # HONOURED (AC-2/AC-3). A gap the reader did not expect — "why isn't this
+    # ranked by the thing I set at onboarding?" — is exactly the kind this
+    # step exists to surface rather than let a reader discover in the output.
+    declared = getattr(framework_choice, "declared", None)
+    honoured = getattr(framework_choice, "honoured_declared", True)
+    if framework_choice is not None and declared and not honoured:
+        from app.crucible.framework import display_name
+
+        gaps.append(Gap(
+            question=f"Why isn't this ranked by {display_name(declared)}?",
+            because=getattr(framework_choice, "reason", "") or
+                    f"{display_name(declared)} needs data this run does not "
+                    f"have connected",
+            remedy=getattr(framework_choice, "remedy", "") or
+                   "connect the source this framework needs",
+        ))
 
     if not present & set(NUMERIC_SOURCES):
         gaps.append(Gap(
@@ -314,7 +371,11 @@ def build_plan(
     definition_source: str = "",
     definition_note: str = "",
     definition_adopted: bool = False,
-    framework: str = "RICE",
+    #: `None` means "choose it" — the normal path. A caller that passes a
+    #: string is asking for that framework explicitly (used by tests and by
+    #: the approve path's re-derivation, which already has a `FrameworkChoice`
+    #: from `select_framework` and does not need this function to pick again).
+    framework: Optional[str] = None,
     account_value: Optional[float] = None,
     decision_owner: str = "",
     needed_by: str = "",
@@ -323,7 +384,31 @@ def build_plan(
     will not be able to tell you."""
     sources, total = source_inventory(company_id)
     kept = tuple(s for s in sources if s.source_type not in excluded_sources)
-    gaps, produce = derive_gaps_and_promises(kept, hypotheses)
+
+    # ── WHICH FRAMEWORK, CHOSEN BY CODE OVER THE INVENTORY (AC-2). ──────────
+    # Local imports: `app.crucible.framework` imports `NUMERIC_SOURCES` /
+    # `SourceInventory` / `PlanQuestion` FROM this module, so a top-level
+    # import back here would be circular.
+    from app.crucible.framework import FrameworkChoice, questions_for, select_framework
+
+    if framework:
+        choice = FrameworkChoice(framework=framework, reason="", declared=None,
+                                 honoured_declared=True)
+    else:
+        declared = None
+        try:
+            from app.db.companies import declared_prioritization_framework
+
+            declared = declared_prioritization_framework(company_id)
+        except Exception:  # noqa: BLE001 — an unreadable company row must
+            # never block a plan; fall back to choosing from data alone.
+            logger.warning(
+                "crucible plan: could not read declared framework for %s",
+                company_id,
+            )
+        choice = select_framework(kept, declared)
+
+    gaps, produce = derive_gaps_and_promises(kept, hypotheses, framework_choice=choice)
     return RunPlan(
         goal_text=goal_text,
         definition_text=definition_text,
@@ -337,7 +422,9 @@ def build_plan(
         definition_source=definition_source,
         definition_note=definition_note,
         definition_adopted=definition_adopted,
-        framework=framework or "RICE",
+        framework=choice.framework,
+        framework_reason=choice.reason,
+        questions=questions_for(choice.framework),
         account_value=account_value,
         decision_owner=decision_owner,
         needed_by=needed_by,

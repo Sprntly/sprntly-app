@@ -30,7 +30,18 @@
 import * as React from "react"
 import { useMemo, useState } from "react"
 import { planNarrative } from "../../lib/goalPlanNarrative"
-import type { GoalRunPlan } from "../../lib/api"
+import type { GoalPlanQuestion, GoalRunPlan } from "../../lib/api"
+
+/** The three questions asked before `plan.questions` existed, used only as a
+ *  fallback for a plan stored before this field landed — a run still sitting
+ *  `awaiting_approval` from before this shipped must not lose its "what I
+ *  cannot know" section outright. Every NEW plan carries its own
+ *  framework-derived list (AC-5); this is not the default going forward. */
+const LEGACY_QUESTIONS: GoalPlanQuestion[] = [
+  { id: "account_value", prompt: "What is one account worth to you, per year?", why: "" },
+  { id: "decision_owner", prompt: "Who decides this?", why: "" },
+  { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+]
 
 export type PlanDecision = {
   excluded_sources: string[]
@@ -145,6 +156,34 @@ export function GoalAnalysisPlan({
         .filter(Boolean),
     })
   }
+
+  // WHICH INPUT RENDERS FOR WHICH QUESTION ID — the prompt text and the "why"
+  // travel with the plan (AC-5: the reader sees why this is being asked), the
+  // input shape and where the answer lands stay client-side, keyed on the
+  // same three field names `ApprovePlan` has always accepted.
+  const questionInputs: Record<
+    string,
+    { inputMode?: "decimal"; placeholder: string; note?: string; value: string;
+      onChange: (v: string) => void }
+  > = {
+    account_value: {
+      inputMode: "decimal", placeholder: "e.g. 12000",
+      note: "Used as your estimate, and labelled as one.",
+      value: accountValue, onChange: setAccountValue,
+    },
+    decision_owner: {
+      placeholder: "e.g. VP Product",
+      value: decisionOwner, onChange: setDecisionOwner,
+    },
+    needed_by: {
+      placeholder: "e.g. before the Q3 review",
+      value: neededBy, onChange: setNeededBy,
+    },
+  }
+  // ONLY WHAT THE CHOSEN FRAMEWORK NEEDS. `plan.questions` is the framework-
+  // derived batch (AC-5); a plan stored before this field existed falls back
+  // to the old fixed three rather than losing the section outright.
+  const questions = plan.questions?.length ? plan.questions : LEGACY_QUESTIONS
 
   return (
     <div className="ga-plan" data-testid="goal-plan">
@@ -343,47 +382,42 @@ export function GoalAnalysisPlan({
           Apurva: "the plan gate can start asking questions it doesn't know
           answers to." Until now the gate asked one thing — what the metric
           means — and everything else it lacked was reported afterwards as a
-          limit. These three are the difference between a document that says
-          "no revenue is mapped to accounts" and one that sizes the work.
-          OPTIONAL, AND SAID TO BE. A reader who skips them gets the document
-          they got before; nothing here is required to run. */}
-      <section className="ga-plan-section" data-testid="goal-plan-unknowns">
-        <h2 className="ga-doc-h3">What I cannot know</h2>
-        <p className="ga-doc-note">
-          None of this is in your connected sources, and I will not guess at
-          it. Answer what you can — anything you leave blank stays stated as
-          missing rather than filled in.
-        </p>
-        <label className="ga-plan-ask">
-          <span>What is one account worth to you, per year?</span>
-          <input
-            type="text" inputMode="decimal" placeholder="e.g. 12000"
-            aria-label="What is one account worth to you, per year?"
-            value={accountValue}
-            onChange={(e) => setAccountValue(e.target.value)}
-          />
-          <em>Lets the findings be sized in money instead of account counts.
-            Used as your estimate, and labelled as one.</em>
-        </label>
-        <label className="ga-plan-ask">
-          <span>Who decides this?</span>
-          <input
-            type="text" placeholder="e.g. VP Product"
-            aria-label="Who decides this?"
-            value={decisionOwner}
-            onChange={(e) => setDecisionOwner(e.target.value)}
-          />
-        </label>
-        <label className="ga-plan-ask">
-          <span>When do you need the decision?</span>
-          <input
-            type="text" placeholder="e.g. before the Q3 review"
-            aria-label="When do you need the decision?"
-            value={neededBy}
-            onChange={(e) => setNeededBy(e.target.value)}
-          />
-        </label>
-      </section>
+          limit.
+          ONLY WHAT THE CHOSEN FRAMEWORK NEEDS (AC-5), not a fixed three asked
+          regardless of whether anything downstream reads the answer — MoSCoW
+          has no dollar arithmetic to feed, so a MoSCoW-ranked run does not ask
+          for one.
+          OPTIONAL, AND SAID TO BE. A reader who skips one gets the document
+          they got before, with the gap it would have closed stated rather
+          than filled in. */}
+      {questions.length ? (
+        <section className="ga-plan-section" data-testid="goal-plan-unknowns">
+          <h2 className="ga-doc-h3">What I cannot know</h2>
+          <p className="ga-doc-note">
+            None of this is in your connected sources, and I will not guess at
+            it. Answer what you can — anything you leave blank stays stated as
+            missing rather than filled in.
+          </p>
+          {questions.map((q) => {
+            const input = questionInputs[q.id]
+            if (!input) return null
+            return (
+              <label className="ga-plan-ask" key={q.id}>
+                <span>{q.prompt}</span>
+                <input
+                  type="text" inputMode={input.inputMode}
+                  placeholder={input.placeholder} aria-label={q.prompt}
+                  value={input.value}
+                  onChange={(e) => input.onChange(e.target.value)}
+                />
+                {q.why || input.note ? (
+                  <em>{q.why || input.note}</em>
+                ) : null}
+              </label>
+            )
+          })}
+        </section>
+      ) : null}
 
       {settled ? (
         settled.hypotheses.length ? (

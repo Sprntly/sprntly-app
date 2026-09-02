@@ -1354,6 +1354,89 @@ def test_the_table_does_not_reorder_the_findings():
     assert body.index("first") < body.index("second")
 
 
+def test_the_report_states_why_this_framework_was_chosen():
+    """AC-2: the chosen framework and the reason it was chosen appear in the
+    plan AND in the final report — not just its name in a heading."""
+    run = _rice_run()
+    run["prioritisation"]["plan"]["framework_reason"] = (
+        "a numeric source is connected, so reach and impact can be sized"
+    )
+    body = _rice_html(render_report_html(run, [_finding(claim_types=["constraint"])]))
+    assert "a numeric source is connected" in body
+
+
+# ─── MoSCoW: the ranking for a corpus RICE cannot size ──────────────────────
+
+
+def _moscow_run(reason: str = "") -> dict:
+    run = _run()
+    run["prioritisation"] = {"plan": {
+        "framework": "moscow", "framework_reason": reason,
+        "definition_text": "d", "sources": [],
+    }}
+    return run
+
+
+def _moscow_html(html: str) -> str:
+    i = html.index("How this was ranked")
+    return html[i:html.index("The short version", i)]
+
+
+def test_moscow_renders_when_that_is_the_chosen_framework():
+    findings = [_finding(statement="a", label="blocked", impact_value=5,
+                         claim_types=["constraint"],
+                         surfaced_by=["doc-a", "doc-b"])]
+    body = _moscow_html(render_report_html(_moscow_run(), findings))
+    assert "MUST" in body
+    assert "How this was ranked (moscow)" in body
+
+
+def test_moscow_never_renders_a_score_it_cannot_support():
+    """This ticket exists because RICE renders a quantitative-looking score
+    with no quantity in it. MoSCoW must not repeat that mistake — no numeric
+    'score' column, ever."""
+    findings = [_finding(statement="a", label="x", impact_value=5,
+                         claim_types=["preference"], surfaced_by=["doc-a"])]
+    body = _moscow_html(render_report_html(_moscow_run(), findings))
+    assert "Score" not in body
+    assert "RICE" not in body
+
+
+def test_moscow_grades_by_documents_not_by_a_number_the_reader_cannot_check():
+    findings = [_finding(statement="a", label="thin", impact_value=1,
+                         claim_types=["constraint"], surfaced_by=["doc-a"]),
+                _finding(statement="b", label="solid", impact_value=3,
+                         claim_types=["constraint"],
+                         surfaced_by=["doc-a", "doc-b", "doc-c"])]
+    body = _moscow_html(render_report_html(_moscow_run(), findings))
+    assert "MUST?" in body       # the single-document one is flagged thin
+    assert "MUST</td>" in body   # the well-corroborated one is not
+
+
+def test_moscow_states_why_it_was_chosen_in_the_report():
+    body = _moscow_html(render_report_html(
+        _moscow_run("nothing connected here carries a number"),
+        [_finding(claim_types=["constraint"], surfaced_by=["doc-a", "doc-b"])],
+    ))
+    assert "nothing connected here carries a number" in body
+
+
+def test_no_framework_still_means_no_moscow_table():
+    html = render_report_html(_moscow_run() | {"prioritisation": {
+        "plan": {"framework": "", "definition_text": "d", "sources": []}
+    }}, [_finding(claim_types=["constraint"])])
+    assert "How this was ranked" not in html
+
+
+def test_moscow_does_not_reorder_findings_either():
+    findings = [_finding(statement="a", label="first", impact_value=1,
+                         claim_types=["preference"], surfaced_by=["doc-a"]),
+                _finding(statement="b", label="second", impact_value=50,
+                         claim_types=["constraint"], surfaced_by=["doc-a"])]
+    body = _moscow_html(render_report_html(_moscow_run(), findings))
+    assert body.index("first") < body.index("second")
+
+
 def test_the_table_says_when_it_stopped_short():
     """NO SILENT CAPS. A table that stops at ten without saying so reads as the
     whole ranking — the rule this file applies everywhere else."""

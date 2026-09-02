@@ -1012,17 +1012,46 @@ def execute_run(
                 from app.crucible.plan import (
                     SourceInventory, derive_gaps_and_promises,
                 )
+                kept_inventory = [
+                    SourceInventory(
+                        source_type=src.get("source_type") or "",
+                        signal_count=int(src.get("signal_count") or 0),
+                        label=src.get("label") or "",
+                        witnesses=src.get("witnesses") or "",
+                    )
+                    for src in kept
+                ]
+
+                # AND THE FRAMEWORK, RE-CHOSEN FROM THE KEPT SET TOO (AC-2).
+                # `build_plan` picked a framework when analytics was still on
+                # the table; a reader who then unticks the one numeric source
+                # that made RICE derivable must not keep a RICE table with
+                # every row scoring None — the exact failure this ticket
+                # exists to remove, one step later than the gaps bug it was
+                # extracted alongside.
+                from app.crucible.framework import (
+                    questions_for, select_framework,
+                )
+                from app.db.companies import declared_prioritization_framework
+
+                declared = None
+                try:
+                    declared = declared_prioritization_framework(company_id)
+                except Exception:  # noqa: BLE001 — never block approval on this
+                    logger.warning(
+                        "crucible approve: could not read declared framework "
+                        "for %s", company_id,
+                    )
+                choice = select_framework(kept_inventory, declared)
+                plan_json["framework"] = choice.framework
+                plan_json["framework_reason"] = choice.reason
+                plan_json["questions"] = [
+                    {"id": q.id, "prompt": q.prompt, "why": q.why}
+                    for q in questions_for(choice.framework)
+                ]
+
                 gaps, produce = derive_gaps_and_promises(
-                    [
-                        SourceInventory(
-                            source_type=src.get("source_type") or "",
-                            signal_count=int(src.get("signal_count") or 0),
-                            label=src.get("label") or "",
-                            witnesses=src.get("witnesses") or "",
-                        )
-                        for src in kept
-                    ],
-                    tuple(hypotheses),
+                    kept_inventory, tuple(hypotheses), framework_choice=choice,
                 )
                 plan_json["cannot_answer"] = [
                     {"question": g.question, "because": g.because,

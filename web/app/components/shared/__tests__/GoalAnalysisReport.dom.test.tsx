@@ -974,6 +974,74 @@ describe("the RICE table in the panel", () => {
   })
 })
 
+describe("the MoSCoW table in the panel", () => {
+  const withMoscow = (findings: unknown[], reason = "") => ({
+    ...RUN, findings,
+    prioritisation: {
+      ...(RUN.prioritisation ?? {}),
+      plan: {
+        ...((RUN.prioritisation ?? {}).plan ?? {}),
+        framework: "moscow", framework_reason: reason,
+      },
+    },
+  })
+  const M = (id: number, label: string, reach: number | null, types: string[],
+             surfacedBy: string[]) => ({
+    ...SIZED, id, label, statement: `${label} stmt`,
+    impact_value: reach, claim_types: types, surfaced_by: surfacedBy,
+  })
+
+  it("renders MUST/SHOULD buckets, and never a RICE table, for a MoSCoW run", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
+    ]) as never} />)
+    expect(screen.getByTestId("goal-moscow").textContent).toContain("MUST")
+    expect(screen.queryByTestId("goal-rice")).toBeNull()
+  })
+
+  it("flags a single-document blocker as thin rather than a full MUST", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "thin", 1, ["constraint"], ["doc-a (1)"]),
+      M(2, "solid", 3, ["constraint"], ["doc-a (2)", "doc-b (1)", "doc-c (1)"]),
+    ]) as never} />)
+    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
+      .map((r) => r.querySelectorAll("td")[1]?.textContent)
+    expect(cells).toEqual(["MUST?", "MUST"])
+  })
+
+  it("expands the overflow summary entry back into its real document count", () => {
+    // `surfaced_by` is pre-formatted for display: up to 4 named "doc (n)"
+    // entries plus one "+K more documents" summary. Counting entries
+    // directly would undercount the best-attested findings.
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "well attested", 2, ["constraint"],
+        ["doc-a (5)", "doc-b (3)", "doc-c (2)", "doc-d (1)", "+3 more documents"]),
+    ]) as never} />)
+    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody td")]
+      .map((c) => c.textContent)
+    expect(cells).toContain("7")
+  })
+
+  it("states why MoSCoW was chosen, in the panel", () => {
+    render(<GoalAnalysisReport run={withMoscow(
+      [M(1, "x", 1, ["preference"], ["doc-a (1)"])],
+      "nothing connected here carries a number",
+    ) as never} />)
+    expect(screen.getByTestId("goal-moscow").textContent)
+      .toContain("nothing connected here carries a number")
+  })
+
+  it("does not reorder findings in the MoSCoW table either", () => {
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "first", 1, ["preference"], ["doc-a (1)"]),
+      M(2, "second", 50, ["constraint"], ["doc-a (1)"]),
+    ]) as never} />)
+    const rows = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
+      .map((r) => r.querySelector("td")?.textContent)
+    expect(rows).toEqual(["first", "second"])
+  })
+})
+
 describe("the memo's cover strip and appendix table, in the panel", () => {
   const withPlan = (extra: Record<string, unknown>, findings: unknown[], aside: (string|null)[]) => ({
     ...RUN, findings,

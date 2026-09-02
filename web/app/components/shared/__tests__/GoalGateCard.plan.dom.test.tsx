@@ -669,3 +669,66 @@ describe("the gate asks what it cannot know", () => {
     expect(onApprove.mock.calls[0][0].account_value).toBeUndefined()
   })
 })
+
+describe("the gate asks only what the CHOSEN framework needs (AC-5)", () => {
+  // Replaces the fixed three above with the batch `plan.questions` carries —
+  // derived server-side from which framework this run actually picked.
+  const withQuestions = (questions: GoalRunPlan["questions"]) =>
+    ({ ...PLAN, framework: "moscow", questions } as unknown as GoalRunPlan)
+
+  it("does not ask for a dollar value when MoSCoW ranked the findings", () => {
+    // MoSCoW's ranking has no arithmetic that reads account_value — asking
+    // for it collects an input nothing downstream uses.
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 8,
+        plan: withQuestions([
+          { id: "decision_owner", prompt: "Who decides this?", why: "" },
+          { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.queryByLabelText(/one account worth/i)).toBeNull()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
+  })
+
+  it("shows the framework's own reason for asking, when the plan carries one", () => {
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 9,
+        plan: withQuestions([
+          {
+            id: "decision_owner", prompt: "Who decides this?",
+            why: "Named on the decision box so the ranking has an owner.",
+          },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.getByTestId("goal-plan-unknowns").textContent)
+      .toContain("Named on the decision box so the ranking has an owner.")
+  })
+
+  it("still asks for a dollar value when RICE ranked the findings", () => {
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 10,
+        plan: withQuestions([
+          { id: "account_value", prompt: "What is one account worth to you, per year?", why: "" },
+          { id: "decision_owner", prompt: "Who decides this?", why: "" },
+          { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+  })
+
+  it("falls back to the old fixed three for a plan stored before this field existed", () => {
+    // `PLAN` (used everywhere else in this file) carries no `questions` at
+    // all — a run left `awaiting_approval` from before this shipped.
+    renderPlan()
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
+  })
+})

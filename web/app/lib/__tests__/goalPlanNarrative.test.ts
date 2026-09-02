@@ -179,4 +179,29 @@ describe("the plan reads as an approach, not a form", () => {
     const steps = planNarrative({ ...PLAN, framework: "" } as never, new Set())
     expect(steps.find((s) => /RICE|Rank what survives/.test(s.text))).toBeUndefined()
   })
+
+  it("names MoSCoW's own terms, not RICE's, when that is the chosen framework", () => {
+    // AC-2: the chosen framework is named, and its terms are ITS terms — a
+    // plan that picked MoSCoW because nothing carries a number must not then
+    // describe Reach/Impact/Effort, which is exactly the arithmetic MoSCoW
+    // was chosen to avoid promising.
+    const steps = planNarrative({ ...PLAN, framework: "moscow" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("moscow"))!
+    expect(rank).toBeTruthy()
+    const terms = (rank.items ?? []).join(" ")
+    expect(terms).toMatch(/MUST/)
+    expect(terms).toMatch(/SHOULD|COULD/)
+    expect(terms).not.toMatch(/Reach —|Impact —|Effort —/)
+  })
+
+  it("states why this framework was chosen, alongside its name", () => {
+    // AC-2: "the chosen framework and the reason it was chosen appear in the
+    // plan and in the final report."
+    const steps = planNarrative(
+      { ...PLAN, framework: "RICE", framework_reason: "a numeric source is connected" } as never,
+      new Set(),
+    )
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect((rank.items ?? []).join(" ")).toContain("a numeric source is connected")
+  })
 })

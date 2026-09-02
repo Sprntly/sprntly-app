@@ -756,6 +756,17 @@ export type GoalPlanGap = {
   remedy: string
 }
 
+/** Something the CHOSEN framework needs and cannot derive — asked once,
+ *  batched, before generation begins. Replaces the old fixed set of three
+ *  questions asked unconditionally regardless of which framework would use
+ *  the answer. Skipping one carries the gap into the output rather than
+ *  inventing a value for it. */
+export type GoalPlanQuestion = {
+  id: string
+  prompt: string
+  why: string
+}
+
 /** What the run will do, said BEFORE it does it. This is what the user
  *  approves, and it stays on the run afterwards as the record of what was
  *  read. */
@@ -783,6 +794,14 @@ export type GoalRunPlan = {
    *  plan so it is a choice the reader can override rather than a convention
    *  they discover in the output. */
   framework?: string
+  /** Why this framework, not another — shown beside its name in the plan and
+   *  in the finished report, chosen by reasoning over the source inventory
+   *  rather than by a model (I2). Empty only on a plan built before this
+   *  field existed. */
+  framework_reason?: string
+  /** What the chosen framework needs and cannot derive, batched — replaces
+   *  the old fixed three questions asked regardless of framework. */
+  questions?: GoalPlanQuestion[]
   /** Answers the reader gave at the gate to things the run cannot know. Each
    *  is an ASSUMPTION when present, and the document labels it as one where it
    *  is used. */

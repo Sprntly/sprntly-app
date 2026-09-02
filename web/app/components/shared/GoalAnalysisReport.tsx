@@ -41,6 +41,7 @@
  * test those rules against without a server.
  */
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
+import { MAX_MOSCOW_ROWS, moscowFor } from "../../lib/goalMoscow"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
@@ -237,6 +238,8 @@ export function GoalAnalysisReport({
   // same sequence, and setting aside the WRONG finding is far worse than
   // setting none aside.
   const framework = (run.prioritisation?.plan?.framework || "").trim()
+  const frameworkReason = (run.prioritisation?.plan?.framework_reason || "").trim()
+  const isMoscowFramework = framework.toLowerCase() === "moscow"
   const accountValue = Number(run.prioritisation?.plan?.account_value ?? 0) || 0
   const asideRaw = run.prioritisation?.set_aside_by_rank
   const findingsExtra = run.prioritisation?.findings_extra_by_rank
@@ -522,9 +525,10 @@ export function GoalAnalysisReport({
           The table NEVER re-sorts: `_rank` froze the order before any of this
           ran, and a scoring table that reordered would be the prioritisation
           step mutating the ranking (I10). */}
-      {framework && findings.length ? (
+      {framework && findings.length && !isMoscowFramework ? (
         <section className="ga-doc-section" data-testid="goal-rice">
           <h2 className="ga-doc-h2">How this was ranked ({framework})</h2>
+          {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
           <ul className="ga-doc-note">
             <li><strong>Reach</strong> — how many of your accounts the theme
               touches. Counted, not estimated.</li>
@@ -577,6 +581,59 @@ export function GoalAnalysisReport({
             effort applied equally to every row divides them all by the same
             number and cannot change their order.
           </p>
+        </section>
+      ) : null}
+
+      {/* ── HOW THIS WAS RANKED, WHEN THE FRAMEWORK IS MOSCOW. ─────────────
+          MoSCoW is what this run picked when nothing connected carries a
+          number — RICE's Reach and Impact would both come back unmeasured on
+          every row rather than ranking anything. Same non-reordering
+          discipline as the RICE table above (I10): rows render in the order
+          `_rank` already froze. */}
+      {framework && findings.length && isMoscowFramework ? (
+        <section className="ga-doc-section" data-testid="goal-moscow">
+          <h2 className="ga-doc-h2">How this was ranked ({framework})</h2>
+          {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
+          <ul className="ga-doc-note">
+            <li><strong>MUST</strong> — a stated blocker: something is
+              stopping an account today. <em>Marked <strong>MUST?</strong>{" "}
+              when only one source document backs it.</em></li>
+            <li><strong>SHOULD / COULD</strong> — a stated preference:
+              something an account asked for.</li>
+            <li>Graded by how many <strong>independent source
+              documents</strong> back each one, not by raw claim count.</li>
+          </ul>
+          <div className="ga-rice-scroll">
+            <table className="ga-rice">
+              <thead>
+                <tr>
+                  <th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>
+                  <th>Source documents</th>
+                </tr>
+              </thead>
+              <tbody>
+                {findings.slice(0, MAX_MOSCOW_ROWS).map((f) => {
+                  const r = moscowFor(f)
+                  return (
+                    <tr key={f.id}>
+                      <td>{r.label}</td>
+                      <td>{r.bucket}</td>
+                      <td>{r.bucketBasis}</td>
+                      <td>{r.reach === null ? "—" : `${r.reach} ${r.reachUnit}`}</td>
+                      <td>{r.docCount}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {findings.length > MAX_MOSCOW_ROWS ? (
+            <p className="ga-doc-note">
+              The {findings.length - MAX_MOSCOW_ROWS} findings below these are
+              ranked in the list that follows, but not bucketed out here — a
+              table this long stops being one.
+            </p>
+          ) : null}
         </section>
       ) : null}
 

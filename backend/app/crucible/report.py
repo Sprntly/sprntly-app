@@ -331,7 +331,25 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
     return "".join(out)
 
 
-def _rice_section(findings: list[dict], framework: str) -> str:
+def _framework_section(findings: list[dict], plan: dict) -> str:
+    """Dispatch to the ranking table for whichever framework this run
+    actually used — RICE or MoSCoW (`app.crucible.framework.
+    SUPPORTED_FRAMEWORKS`). ADDITIVE, per the ticket's own constraint on this
+    file: the RICE branch below is `_rice_section`, byte-for-byte the section
+    that already existed, plus one line stating WHY it was chosen (AC-2 —
+    "the reason it was chosen appear[s] in the plan and in the final
+    report"). Only the MoSCoW branch is new.
+    """
+    framework = str(plan.get("framework") or "")
+    reason = str(plan.get("framework_reason") or "")
+    if framework.strip().lower() == "moscow":
+        return _moscow_section(findings, framework, reason)
+    return _rice_section(findings, framework, reason)
+
+
+def _rice_section(
+    findings: list[dict], framework: str, framework_reason: str = "",
+) -> str:
     """The ranking, and the arithmetic behind it — the memo's §04.
 
     THE SKILL'S OUTPUT SPEC, followed: "The main artifact is always the ranked
@@ -365,6 +383,8 @@ def _rice_section(findings: list[dict], framework: str) -> str:
         return ""
 
     out = [f"<h2>How this was ranked ({_esc(framework)})</h2>"]
+    if framework_reason:
+        out.append(_p(framework_reason))
     # WHAT EACH TERM MEANS HERE, because RICE's letters carry assumptions this
     # corpus cannot all satisfy and a reader who assumes the standard ones will
     # misread the table.
@@ -429,6 +449,82 @@ def _rice_section(findings: list[dict], framework: str) -> str:
             "<strong>Sensitive to an estimate we do not have:</strong> "
             + _esc(", ".join(flips))
             + " — where their effort lands decides where they sit."
+        ))
+    return "".join(out)
+
+
+def _moscow_section(
+    findings: list[dict], framework: str, framework_reason: str = "",
+) -> str:
+    """The MUST/SHOULD/COULD ranking, for a corpus RICE cannot size.
+
+    SAME NON-REORDERING DISCIPLINE AS `_rice_section` (I10): `_rank` already
+    froze the order this ran with, so `moscow.group_by_bucket` groups rows by
+    bucket without disturbing the sequence within a bucket.
+    """
+    from app.crucible.moscow import moscow_for
+
+    if not findings or not framework:
+        return ""
+    rows = [
+        moscow_for(
+            label=(f.get("label") or "").strip() or _statement_text(f),
+            reach=f.get("impact_value"),
+            reach_unit=(f.get("currency") or "accounts"),
+            claim_types=[str(t) for t in _as_list(f.get("claim_types"))],
+            surfaced_by=[str(s) for s in _as_list(f.get("surfaced_by"))],
+        )
+        for f in findings[:MAX_RICE_ROWS]
+    ]
+    if not rows:
+        return ""
+
+    out = [f"<h2>How this was ranked ({_esc(framework)})</h2>"]
+    if framework_reason:
+        out.append(_p(framework_reason))
+    out.append(_ul([
+        "<strong>MUST</strong> — a stated blocker: something is stopping an "
+        "account today. <em>Marked <strong>MUST?</strong> when only one "
+        "source document backs it — real, worth confirming.</em>",
+        "<strong>SHOULD / COULD</strong> — a stated preference: something an "
+        "account asked for.",
+        "<strong>Reach</strong> — how many of your accounts the theme "
+        "touches. Counted, not estimated.",
+        "Graded by how many <strong>independent source documents</strong> "
+        "back each one, not by raw claim count — several restatements of one "
+        "complaint from one document are one voice, not several.",
+    ]))
+
+    body = "".join(
+        "<tr>"
+        f"<td>{_esc_clipped(r.label, MAX_PARAM_NAME_CHARS)}</td>"
+        f"<td>{_esc(r.bucket)}</td>"
+        f"<td>{_esc(r.bucket_basis)}</td>"
+        f"<td>{'—' if r.reach is None else f'{r.reach:g} {_esc(r.reach_unit)}'}</td>"
+        f"<td>{r.doc_count}</td>"
+        "</tr>"
+        for r in rows
+    )
+    out.append(
+        "<table><thead><tr>"
+        "<th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>"
+        "<th>Source documents</th>"
+        "</tr></thead><tbody>" + body + "</tbody></table>"
+    )
+
+    unranked = sum(1 for r in rows if r.bucket == "unranked")
+    if unranked:
+        out.append(_p(
+            f"{unranked} of these neither state a blocker nor a preference "
+            f"— they describe the world rather than asking for or blocking "
+            f"something, so MoSCoW does not bucket them. Listed below in "
+            f"rank order; not scored out here."
+        ))
+    if len(findings) > len(rows):
+        out.append(_p(
+            f"The {len(findings) - len(rows)} findings below these are "
+            f"ranked in the list that follows, but not bucketed out here — a "
+            f"table this long stops being one."
         ))
     return "".join(out)
 
@@ -1460,7 +1556,7 @@ def render_report_html(
             _stat_strip(plan, findings, kept),
             _decision_section(plan, kept),
             _funnel_section(len(findings), len(kept)),
-            _rice_section(kept, str(plan.get("framework") or "")),
+            _framework_section(kept, plan),
             _headline_section(kept),
             _findings_section(kept, full_cap, overflow_cap),
             _set_aside_section(set_aside),
