@@ -53,7 +53,11 @@ from app.llm_telemetry import RunUsage, log_llm_run
 # why the inbound reply path needs them too. No new realtime channel/event
 # name; both broadcast on the existing per-user `project:{id}:user:{uid}`
 # topics.
-from app.project_delegation import _publish_brief_delivered, _publish_delegation_event
+from app.project_delegation import (
+    _notify_assigner_task_completed_email,
+    _publish_brief_delivered,
+    _publish_delegation_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +306,15 @@ def notify_requester_task_completed(
     private project chat. Best-effort / never raises: a failed post must not
     roll back a durably-recorded completion (mirrors the delegation handler's
     non-fatal posture). Reuses `_route_to_requester` (loads the assigner +
-    posts) + `_display_first_name` (the completer's first name)."""
+    posts) + `_display_first_name` (the completer's first name).
+
+    Also fires the shared best-effort transactional completion email
+    to the assigner via `project_delegation._notify_assigner_task_completed_email`
+    — the SAME DRY helper `handle_complete_task` calls directly (that path
+    has no in-app notice today), so all three completion paths email
+    identically. Called unconditionally, independent of whether the
+    in-app notice above succeeded — the email helper is entirely
+    self-contained/never-raising."""
     try:
         name = _display_first_name(project_id, assignee_user_id)
         summary = (task_summary or "").strip()
@@ -313,6 +325,9 @@ def notify_requester_task_completed(
             "delegation_completion_notice_failed project_id=%s delegation_id=%s",
             project_id, delegation_id,
         )
+    _notify_assigner_task_completed_email(
+        project_id, delegation_id, assignee_user_id=assignee_user_id
+    )
 
 
 def _apply_classification(

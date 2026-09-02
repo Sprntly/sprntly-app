@@ -851,6 +851,194 @@ def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, 
     assert len(delegations) == 1
 
 
+# ── Assignment-email nudge (fires once per delegation) ────────────────────
+
+
+def test_delegate_task_sends_assignment_email_to_assignee(isolated_settings, monkeypatch):
+    """A successful delegation invokes `send_assignment_email` exactly once,
+    addressed to the ASSIGNEE's own email (never the assigner's), with the
+    project chat link and the assigner's roster name."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_assignment_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result
+    assert len(calls) == 1
+    assert calls[0]["to_email"] == f"{assignee_id}@co.com"
+    assert calls[0]["assigner_name"] == "Alex Assigner"
+    assert calls[0]["project_id"] == project["id"]
+
+
+def test_delegate_task_assignment_email_skipped_without_recipient_email(
+    isolated_settings, monkeypatch,
+):
+    """Best-effort skip (never raises, never blocks the delegation) when
+    `emails_for_user_ids` has no email on file for the assignee."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", lambda user_ids: {})
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_assignment_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result, "a missing email must never block the delegation"
+    assert calls == []
+
+
+def test_delegate_task_assignment_email_failure_is_best_effort(
+    isolated_settings, monkeypatch, caplog,
+):
+    """A raised send error is swallowed and does NOT break the delegation
+    write — mirrors every other best-effort helper in this module."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    def _boom(**kwargs):  # noqa: ARG001
+        raise RuntimeError("simulated assignment-email failure")
+
+    monkeypatch.setattr(project_delegation, "send_assignment_email", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
+        result = _delegate(project, ctx.user_id)
+    assert "Sent the brief" in result
+
+    from app.db.client import require_client
+    delegations = (
+        require_client()
+        .table("project_delegations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert len(delegations) == 1
+    assert any("assignment_email_failed" in r.message for r in caplog.records)
+
+
+# ── Completion-email helper (`_notify_assigner_task_completed_email`) ─────
+# The DRY helper itself, unit-tested directly. Its wiring into all three
+# completion call sites (`notify_requester_task_completed`'s two callers +
+# `handle_complete_task` directly) is covered in
+# `test_delegation_completion_notice.py` and `test_delegation_followup.py`.
+
+
+def test_completion_email_helper_recipient_is_assigner(isolated_settings, monkeypatch):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+    monkeypatch.setattr(
+        project_delegation, "emails_for_user_ids",
+        lambda user_ids: {"U_assigner": "assigner@co.com"},
+    )
+    monkeypatch.setattr(project_delegation, "_member_first_name", lambda pid, uid: "Fortune")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_completion_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    project_delegation._notify_assigner_task_completed_email(
+        1, 5, assignee_user_id="U_do",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["to_email"] == "assigner@co.com"
+    assert calls[0]["assignee_name"] == "Fortune"
+
+
+def test_completion_email_helper_skips_without_recipient_email(isolated_settings, monkeypatch):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", lambda user_ids: {})
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_completion_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    project_delegation._notify_assigner_task_completed_email(1, 5, assignee_user_id="U_do")
+    assert calls == []
+
+
+def test_completion_email_helper_swallows_failure(isolated_settings, monkeypatch, caplog):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+
+    def _boom(user_ids):  # noqa: ARG001
+        raise RuntimeError("simulated profile lookup failure")
+
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
+        result = project_delegation._notify_assigner_task_completed_email(
+            1, 5, assignee_user_id="U_do",
+        )
+    assert result is None
+    assert any("completion_email_failed" in r.message for r in caplog.records)
+
+
+def test_complete_task_tool_fires_completion_email(isolated_settings, monkeypatch):
+    """`handle_complete_task` (the THIRD completion path — no in-app notice
+    of its own today) invokes the SAME DRY completion-email helper as the
+    other two paths, addressed to the ASSIGNER."""
+    from app.db.project_delegations import record_delegation
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    deleg = record_delegation(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        assignee_user_id=assignee_id,
+        task_summary="Ship the deck",
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=None,
+        delivered_turn_id=None,
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        project_delegation, "_notify_assigner_task_completed_email",
+        lambda project_id, delegation_id, *, assignee_user_id: calls.append(
+            (project_id, delegation_id, assignee_user_id)
+        ),
+    )
+    monkeypatch.setattr(
+        project_delegation, "list_status_for_assignee",
+        lambda project_id, user_id: [
+            {"delegation_id": deleg["id"], "status": "assigned", "task_summary": "Ship the deck"}
+        ],
+    )
+    monkeypatch.setattr(project_delegation, "status_dto", lambda delegation_id: None)
+    monkeypatch.setattr(project_delegation, "_publish_delegation_event", lambda **kwargs: None)
+
+    result = project_delegation.handle_complete_task(
+        project_id=project["id"], completer_user_id=assignee_id,
+        tool_input={"task_summary": "Ship the deck"},
+    )
+    assert "marked" in result
+    assert len(calls) == 1
+    assert calls[0] == (project["id"], deleg["id"], assignee_id)
+
+
 # ── Cost / observability (AC10/AC11) ──────────────────────────────────────
 
 
