@@ -1743,6 +1743,127 @@ def test_defers_to_ticket_action_predicate_unit():
     assert qa._defers_to_ticket_action(None) is False
 
 
+# ── Lexical-gate veto vs planner-approved delegation (fix part B) ──────────
+# `skill_router._PROJECT_TOOL_MENTION_VETO` runs FIRST inside
+# `is_project_tool_request` and its alternation includes "summarize" — so
+# "can you have David look into X and summarize the differences", which the
+# PLANNER already classified `delegate`, was vetoed and never reached the
+# tool loop. `_admits_on_delegate_plan` trusts the planner's verdict instead
+# of growing/loosening the regex.
+
+
+def test_admits_on_delegate_plan_predicate_unit():
+    """Pure-unit coverage: `plan.action == "delegate"` admits; a non-delegate
+    action and no plan at all do not."""
+    assert qa._admits_on_delegate_plan(Plan(action="delegate")) is True
+    assert qa._admits_on_delegate_plan(Plan(action="assign_tickets")) is False
+    assert qa._admits_on_delegate_plan(Plan()) is False
+    assert qa._admits_on_delegate_plan(None) is False
+
+
+def test_sixth_branch_gate_and_delegate_plan_admit_use_same_predicate():
+    """Symmetry proof (source-level): the gate's admit-on-delegate-plan
+    disjunct reads `_admits_on_delegate_plan(plan)` — one predicate, one call
+    site, so the mechanism cannot silently drift out of sync with itself."""
+    src = inspect.getsource(qa.answer)
+    assert "or _admits_on_delegate_plan(plan)" in src
+
+
+def test_veto_masked_delegation_admitted_via_planner_verdict(monkeypatch):
+    """MUTATION-shaped proof of the fix. The phrasing lexically fails
+    `is_project_tool_request` (its mention veto's alternation includes
+    "summarize"), so WITHOUT the new disjunct the turn falls through to the
+    composer even though the planner already resolved it `delegate` (RED —
+    the exact reported symptom). WITH the disjunct present the turn is
+    admitted into the tool loop (GREEN)."""
+    question = "can you have David look into the export bug and summarize the differences"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="delegate")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    # Sanity: the phrasing really is lexically vetoed — this is what makes
+    # the new disjunct load-bearing rather than incidental (a phrasing the
+    # veto never caught would pass either way).
+    from app.skill_router import is_project_tool_request
+
+    assert is_project_tool_request(question) is False, question
+
+    # GREEN (fix present): the planner's `delegate` verdict admits the turn
+    # into the tool loop despite the lexical veto.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+    # RED (mutation: force the new predicate off, as if it never existed) —
+    # reproduces the reported symptom: a planner-approved delegation vetoed
+    # by the crude regex never reaches the tool loop.
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "_admits_on_delegate_plan", lambda *a, **kw: False)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "I can't find that in the project.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "I can't find that in the project."
+
+
+def test_answer_first_summarize_not_admitted_via_delegate_disjunct(monkeypatch):
+    """Must-not-regress / narrow-scope proof: a pure summarize ask (planner
+    classifies it `answer`, never `delegate`) must NOT be admitted via the
+    new disjunct — the fix trusts the planner's verdict, it does not make
+    every "summarize"-containing turn a delegation. Phrased WITHOUT a
+    project-content noun ("PRD"/"report"/etc.) so this isolates the new
+    disjunct specifically — "summarize the PRD" independently satisfies the
+    pre-existing `is_project_content_request` gate regardless of this fix,
+    which would make the assertion below vacuous."""
+    question = "summarize the differences"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="answer")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "FABRICATED — should never be reached", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "Here's the PRD summary.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "Here's the PRD summary."
+
+
 # ── Delegation-confabulation fix: composer split (fix part 2) ──────────────
 
 
