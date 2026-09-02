@@ -138,13 +138,27 @@ class ProjectContextAssembler:
         # facts. Reuses the `roster` fetched just above for the sidecars (no
         # re-fetch). The constants/helper are imported (not reimplemented) from
         # `app.ask_job_runner`, where they still live on this commit.
-        from app.ask_job_runner import _PRIVATE_SCOPE_SYSTEM, _private_roster_block
+        from app.ask_job_runner import (
+            _PRIVATE_SCOPE_COMPOSER_FOLD,
+            _PRIVATE_SCOPE_SYSTEM,
+            _private_roster_block,
+        )
 
         system_addendum = (
             f"{_PRIVATE_SCOPE_SYSTEM}\n\n{_private_roster_block(roster)}"
         )
         if instr_block:
             system_addendum = f"{system_addendum}\n\n{instr_block}"
+
+        # The gate-decline / composer fall-through's OWN addendum — same
+        # roster/instructions composition, but built from the delegate-tool-
+        # guidance-free `_PRIVATE_SCOPE_COMPOSER_FOLD` instead of the full
+        # `_PRIVATE_SCOPE_SYSTEM` (see `SurfaceScope.composer_fold_addendum`).
+        composer_fold_addendum = (
+            f"{_PRIVATE_SCOPE_COMPOSER_FOLD}\n\n{_private_roster_block(roster)}"
+        )
+        if instr_block:
+            composer_fold_addendum = f"{composer_fold_addendum}\n\n{instr_block}"
 
         # `post_turn` — the execute-task progress writer. RELOCATED in shape from
         # `_build_private_scope`: the private surface's turn writer, bound to the
@@ -166,6 +180,7 @@ class ProjectContextAssembler:
             project_id=project_id,
             context_payload=block,
             system_addendum=system_addendum,
+            composer_fold_addendum=composer_fold_addendum,
             # The project tools, stable order: delegate + execute + the 4
             # shared read tools. Non-empty `extra_tools` is the on-switch the
             # sixth branch gates on (along with its intent gate).
