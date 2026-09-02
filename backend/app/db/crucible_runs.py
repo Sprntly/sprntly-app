@@ -172,25 +172,51 @@ def save_findings(
         ]).execute()
 
 
+#: Supabase/PostgREST's own default cap on rows returned by one request. An
+#: unpaged `select` past this silently returns exactly this many rows with no
+#: error — not a partial-result flag, not a warning, nothing to catch. A real
+#: run hit 831 findings, 83% of the way there, before anyone noticed this
+#: reader had no `.range` at all.
+_FINDINGS_PAGE = 1000
+
+
+def _paged(client, table: str, run_id: int, company_id: str) -> list[dict]:
+    """Every row of `table` for this run, paged past PostgREST's row cap.
+
+    ORDER IS NOT OPTIONAL WITH `.range` — an unordered query's rows may come
+    back in a different order per page, which can repeat a row on page 2 and
+    never return another (the same reasoning `routes/crucible.py`'s
+    `_signal_page` states for the same pattern).
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table(table).select("*")
+            .eq("run_id", run_id).eq("company_id", company_id)
+            .order("id")
+            .range(offset, offset + _FINDINGS_PAGE - 1)
+            .execute()
+        ).data or []
+        rows.extend(page)
+        if len(page) < _FINDINGS_PAGE:
+            break
+        offset += _FINDINGS_PAGE
+    return rows
+
+
 def load_findings(run_id: int, company_id: str) -> tuple[list[dict], list[dict]]:
     client = require_client()
-    findings = (
-        client.table("crucible_findings").select("*")
-        .eq("run_id", run_id).eq("company_id", company_id)
-        # INSERTION ORDER IS THE RANK. `save_findings` writes one batch in the
-        # order `_rank` produced, and that order is not recoverable from any
-        # column: it puts an authoritative CONFLICT first regardless of size,
-        # because two sources that may both speak disagreeing is worth more
-        # than either claim. Re-sorting by `impact_value` here threw that away
-        # and sent conflicts to the bottom — while the `tier` written at rank
-        # time still said `deep`, so the row claimed a standing its position
-        # contradicted.
-        .order("id").execute()
-    ).data or []
-    ledger = (
-        client.table("crucible_ledger").select("*")
-        .eq("run_id", run_id).eq("company_id", company_id).execute()
-    ).data or []
+    # INSERTION ORDER IS THE RANK. `save_findings` writes one batch in the
+    # order `_rank` produced, and that order is not recoverable from any
+    # column: it puts an authoritative CONFLICT first regardless of size,
+    # because two sources that may both speak disagreeing is worth more
+    # than either claim. Re-sorting by `impact_value` here threw that away
+    # and sent conflicts to the bottom — while the `tier` written at rank
+    # time still said `deep`, so the row claimed a standing its position
+    # contradicted. `_paged`'s own `.order("id")` preserves it across pages.
+    findings = _paged(client, "crucible_findings", run_id, company_id)
+    ledger = _paged(client, "crucible_ledger", run_id, company_id)
     return findings, ledger
 
 
@@ -262,6 +288,74 @@ def sweep_orphans(*, older_than_minutes: int = 45) -> int:
     if stale:
         logger.info("crucible: swept %d abandoned run(s)", len(stale))
     return len(stale)
+
+
+#: How stale `heartbeat_at` must be before an enrichment is presumed dead.
+#: `_progress` (routes/crucible.py) refreshes it before each of the three
+#: model-call stages, so a genuinely healthy enrichment never sits idle this
+#: long — a single stage can retry up to `app.llm.MAX_ATTEMPTS` times against
+#: `app.llm._REQUEST_TIMEOUT_S = 120.0`, which is a worst case around 8
+#: minutes; this leaves real margin above that rather than tripping on a slow
+#: provider.
+STALLED_ENRICHMENT_AGE_MINUTES = 10
+
+
+def find_stalled_enrichment(
+    *, older_than_minutes: int = STALLED_ENRICHMENT_AGE_MINUTES,
+) -> list[dict]:
+    """Runs that are `ready`, still say `enrichment_pending`, and have not
+    heartbeat in a while — `sweep_orphans`'s own predicate (`resolving_goal`,
+    `planning`, `running`) never sees these, because a run this stuck already
+    published its findings and moved to `ready` before its worker died. THE
+    ROW IS THE JOB, same as `sweep_orphans` — no separate job table.
+
+    Client-side filtered on `enrichment_pending`, deliberately: it lives
+    inside the `prioritisation` jsonb blob, not a column, and this table's
+    `status`/`heartbeat_at` columns already narrow the candidate set to
+    something small before that filter runs.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
+    cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+    client = require_client()
+    candidates = (
+        client.table(TABLE).select("*")
+        .eq("status", "ready")
+        .lt("heartbeat_at", cutoff_iso)
+        .limit(100).execute()
+    ).data or []
+    out = []
+    for row in candidates:
+        meta = row.get("prioritisation") or {}
+        if isinstance(meta, str):
+            try:
+                meta = json.loads(meta)
+            except Exception:  # noqa: BLE001
+                meta = {}
+        if isinstance(meta, dict) and meta.get("enrichment_pending"):
+            out.append(row)
+    return out
+
+
+def claim_stalled_enrichment(
+    run_id: int, company_id: str, *, expected_heartbeat_at
+) -> Optional[dict]:
+    """Atomically claim a stalled enrichment for a re-run. None if lost.
+
+    THE CLAIM IS IN THE WHERE CLAUSE (`heartbeat_at` still equal to the value
+    just read), same reasoning as `claim_for_confirmation`: read-then-write
+    would let two sweep ticks — or a sweep tick racing the run's own worker,
+    which was alive after all and about to heartbeat — both see the same stale
+    row and both re-run enrichment. The loser's update touches zero rows and
+    gets None back; it does no work.
+    """
+    res = (
+        require_client().table(TABLE)
+        .update({"heartbeat_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", run_id).eq("company_id", company_id)
+        .eq("heartbeat_at", expected_heartbeat_at)   # the claim
+        .execute()
+    )
+    return (res.data or [None])[0]
 
 
 def save_definition(company_id: str, definition) -> Optional[int]:

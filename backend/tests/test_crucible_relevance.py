@@ -88,17 +88,20 @@ def test_an_authoritative_conflict_is_never_set_aside():
     assert [f.id for f, _ in aside] == ["b"]
 
 
-def test_a_verdict_with_no_reason_is_not_a_verdict():
+def test_a_false_verdict_with_no_reason_is_not_a_verdict():
     """The reason is what the reader sees in the appendix. A `false` with
     nothing beside it sets a finding aside and cannot say why, which is the
-    silent filtering this whole design exists to avoid."""
+    silent filtering this whole design exists to avoid. Verdicts are keyed by
+    `idx` — the theme's 1-based position in the numbered prompt — not by the
+    real finding id (the id never has to leave `_input`/`_judge_chunk`,
+    which is half the output-token saving)."""
     from app.crucible.relevance import _judge_chunk
     import app.graph.gateway as gw
 
     class _R:
         output = {"verdicts": [
-            {"finding_id": "a", "bears_on_goal": False, "reason": ""},
-            {"finding_id": "b", "bears_on_goal": False, "reason": "off-topic"},
+            {"idx": 1, "bears_on_goal": False, "reason": ""},
+            {"idx": 2, "bears_on_goal": False, "reason": "off-topic"},
         ]}
 
     real = gw.llm_call
@@ -112,14 +115,38 @@ def test_a_verdict_with_no_reason_is_not_a_verdict():
     assert out["b"].bears_on_goal is False
 
 
-def test_a_verdict_for_an_unknown_finding_is_discarded():
-    """A hallucinated id must not set aside a finding that was never judged."""
+def test_a_true_verdict_with_no_reason_is_still_a_verdict():
+    """The biggest real lever on the gate's wall clock: a `true` verdict is never rendered
+    anywhere, so it needs no reason at all — only a `false` one does. A gate
+    that dropped empty-reason `true` verdicts would defeat the whole point of
+    telling the model not to bother writing one."""
     from app.crucible.relevance import _judge_chunk
     import app.graph.gateway as gw
 
     class _R:
         output = {"verdicts": [
-            {"finding_id": "does-not-exist", "bears_on_goal": False, "reason": "x"},
+            {"idx": 1, "bears_on_goal": True, "reason": ""},
+        ]}
+
+    real = gw.llm_call
+    try:
+        gw.llm_call = lambda **kw: _R()
+        out = _judge_chunk(enterprise_id="e", goal_text="g",
+                           definition_text="d", findings=[_f("a")])
+    finally:
+        gw.llm_call = real
+    assert out["a"] == Verdict(True, "")
+
+
+def test_a_verdict_for_an_unknown_index_is_discarded():
+    """An out-of-range or hallucinated `idx` must not set aside a finding
+    that was never judged."""
+    from app.crucible.relevance import _judge_chunk
+    import app.graph.gateway as gw
+
+    class _R:
+        output = {"verdicts": [
+            {"idx": 99, "bears_on_goal": False, "reason": "x"},
         ]}
 
     real = gw.llm_call
@@ -132,9 +159,59 @@ def test_a_verdict_for_an_unknown_finding_is_discarded():
     assert out == {}
 
 
+def test_the_prompt_numbers_themes_and_never_leaks_the_real_id():
+    """The id never leaves this function — the input-side half of the ordinal-index saving —
+    sent nowhere in the prompt, so the model cannot echo it back and the
+    numbered list is all it has to work from."""
+    from app.crucible.relevance import _input
+
+    findings = [_f("a-long-opaque-id-1"), _f("a-long-opaque-id-2")]
+    text = _input("grow revenue", "definition", findings)
+    assert "1. theme a-long-opaque-id-1" in text
+    assert "2. theme a-long-opaque-id-2" in text
+    assert "a-long-opaque-id-1" not in text.replace(
+        "1. theme a-long-opaque-id-1", ""
+    )
+    assert "finding_id" not in text
+
+
+def test_the_chunk_calls_the_fast_model():
+    """`judge_goal_relevance` is exactly the shape `FAST_MODEL`'s own
+    charter names — high-volume, closed-set, short-output — not the
+    reasoning-depth default."""
+    from app.crucible.relevance import _judge_chunk
+    from app.llm import FAST_MODEL
+    import app.graph.gateway as gw
+
+    seen = {}
+
+    def spy(**kw):
+        seen.update(kw)
+
+        class _R:
+            output = {"verdicts": []}
+        return _R()
+
+    real = gw.llm_call
+    try:
+        gw.llm_call = spy
+        _judge_chunk(enterprise_id="e", goal_text="g", definition_text="d",
+                     findings=[_f("a")])
+    finally:
+        gw.llm_call = real
+    assert seen.get("model") == FAST_MODEL
+
+
 def test_one_bad_chunk_does_not_lose_the_others():
     """A 300-finding run is several calls. One failing must cost only its own
-    chunk's verdicts, and those findings are then kept."""
+    chunk's verdicts, and those findings are then kept.
+
+    Forced to `MAX_PARALLEL = 1` so the two chunks run in a known order —
+    with real concurrency, which of the two chunks happens to make the FIRST
+    call (and so hits the injected failure) is a race this test does not need
+    to resolve; it only needs to prove one bad chunk cannot cost the other
+    one's verdicts, which is exactly as true one-at-a-time.
+    """
     import app.crucible.relevance as mod
     import app.graph.gateway as gw
 
@@ -146,20 +223,23 @@ def test_one_bad_chunk_does_not_lose_the_others():
             raise RuntimeError("gateway hiccup")
 
         class _R:
+            # `idx=1` — "later" is the sole finding in its own chunk, so it is
+            # always the first (and only) numbered theme in THAT call.
             output = {"verdicts": [
-                {"finding_id": "later", "bears_on_goal": False, "reason": "off-topic"},
+                {"idx": 1, "bears_on_goal": False, "reason": "off-topic"},
             ]}
         return _R()
 
     findings = [_f(f"f{i}") for i in range(mod.CHUNK)] + [_f("later")]
-    real, off = gw.llm_call, mod._offline
+    real, off, parallel = gw.llm_call, mod._offline, mod.MAX_PARALLEL
     try:
         gw.llm_call = flaky
         mod._offline = lambda: False
+        mod.MAX_PARALLEL = 1
         out = mod.judge_relevance(enterprise_id="e", goal_text="g",
                                   definition_text="d", findings=findings)
     finally:
-        gw.llm_call, mod._offline = real, off
+        gw.llm_call, mod._offline, mod.MAX_PARALLEL = real, off, parallel
 
     assert calls["n"] == 2
     # The failed chunk contributed nothing, so all of its findings are kept.
@@ -177,7 +257,9 @@ def test_the_gate_stops_asking_at_its_deadline():
     unsaved and invisible — no error, because there was no error.
 
     Past the deadline the gate stops asking and everything unjudged is kept,
-    the same direction every other failure here resolves in.
+    the same direction every other failure here resolves in. The deadline is
+    checked before each WAVE of up to `MAX_PARALLEL` chunks, not before each
+    individual chunk — a wave already in flight always finishes.
     """
     import app.crucible.relevance as mod
     import app.graph.gateway as gw
@@ -204,8 +286,9 @@ def test_the_gate_stops_asking_at_its_deadline():
     finally:
         gw.llm_call, mod._offline, mod.time.monotonic = real, off, mono
 
-    # It asked once, then the budget was gone. It did not ask three times.
-    assert calls["n"] == 1
+    # The first WAVE (up to MAX_PARALLEL chunks) always fires before the
+    # deadline can stop it; the second wave never starts.
+    assert calls["n"] == min(mod.MAX_PARALLEL, 3)
     # And nothing it never judged was set aside.
     kept, aside = partition(findings, out)
     assert len(kept) == len(findings)

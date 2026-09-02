@@ -153,25 +153,43 @@ def _definition_section(run: dict, plan: dict) -> str:
         (plan.get("definition_text") or "").strip()
         or (_as_dict(run.get("prioritisation")).get("proposed_definition") or "").strip()
     )
+    # DID A RELEVANCE GATE ACTUALLY RUN ON THIS RUN? Written by the route the
+    # moment `judge_relevance` completes without raising — never guessed from
+    # whether anything ended up set aside, because a gate that ran and kept
+    # everything is still a gate that ran, and reads this sentence's "it did
+    # not decide which findings appear below" as false the moment it exists.
+    gate_ran = bool(_as_dict(run.get("prioritisation")).get("relevance_gate_ran"))
     out = ["<h2>What this was asked to establish</h2>"]
     if definition:
         out.append(_p("You confirmed this goal means, in your own words:"))
         out.append(f"<blockquote>{_esc(definition)}</blockquote>")
         # WHAT THIS SENTENCE ACTUALLY GOVERNS. The previous text — "everything
-        # below is measured against that sentence and nothing else" — is the
-        # exact claim the limits section now denies: claim selection never sees
-        # the definition (`build_findings` takes a `goal_accounts` filter that
-        # production does not pass). Leaving it here would have put the
-        # falsehood three sections ABOVE its own correction, in the more
-        # prominent position, which is worse than never having written the
-        # disclosure.
-        out.append(_p(
-            "This is the sentence the run was given to work from, and it is "
-            "recorded here so a decision can be defended against it. It did "
-            "not decide which findings appear below — nothing here was "
-            "filtered or ranked by it. If it is not what you meant, say so "
-            "before you rely on any of this."
-        ))
+        # below is measured against that sentence and nothing else" — was the
+        # exact claim the limits section used to deny: claim SELECTION never
+        # sees the definition (`build_findings` takes a `goal_accounts` filter
+        # that production does not pass). That is still true of selection. It
+        # stopped being true of the LIST below the moment a relevance gate
+        # shipped: `judge_relevance` is handed this exact sentence and used to
+        # decide which findings stay in view (`app.crucible.relevance`), so a
+        # run that ran the gate must not deny having filtered by it.
+        if gate_ran:
+            out.append(_p(
+                "This is the sentence the run was given to work from, and it "
+                "is recorded here so a decision can be defended against it. "
+                "It shaped which findings appear below: each was checked "
+                "against it for whether it bears on this goal, and any that "
+                "did not are listed separately, with the reason, further "
+                "down. If it is not what you meant, say so before you rely "
+                "on any of this."
+            ))
+        else:
+            out.append(_p(
+                "This is the sentence the run was given to work from, and it "
+                "is recorded here so a decision can be defended against it. "
+                "It did not decide which findings appear below — nothing "
+                "here was filtered or ranked by it. If it is not what you "
+                "meant, say so before you rely on any of this."
+            ))
     else:
         # STATED, NOT SKIPPED. A report with no recorded definition is a report
         # whose subject is unknown, and omitting the section would make that
@@ -270,7 +288,12 @@ def _stat_strip(
         ("High confidence", f"{len(high):,}"),
     ]
     if recommended:
-        cells.append(("With a recommendation", f"{len(recommended):,}"))
+        # NOT "with A recommendation" — that read as the same count the prose
+        # a few lines down names ("the top 2 get a full recommendation"),
+        # which counts only the DEEP pass. This cell counts flat OR deep — the
+        # union — so a run can show 8 here and 2 there, both true, about two
+        # different senses of the word. The label says which one this is.
+        cells.append(("Flagged with any suggestion", f"{len(recommended):,}"))
     value = plan.get("account_value")
     if sized and isinstance(value, (int, float)) and value > 0:
         # LABELLED IN THE CELL ITSELF. A number in a strip is read as a fact,
@@ -580,6 +603,37 @@ def _funnel_section(considered: int, kept: int) -> str:
             f"aside for this goal may be the answer to a different one."
         ),
     ])
+
+
+def _relevance_coverage_section(relevance_judged: dict) -> str:
+    """The disclosure half of the relevance-gate performance fix.
+    `relevance.py` promises "the renderer says how many were not evaluated" —
+    the relevance gate has a hard budget
+    (`MAX_JUDGED`, and a wall-clock deadline that can stop it earlier still),
+    and neither this document nor the panel ever said so. That is a silent cap
+    on top of the funnel `_funnel_section` already discloses, and it needs its
+    own sentence: `_funnel_section` is silent whenever nothing was SET ASIDE,
+    which says nothing about whether everything was even LOOKED AT.
+
+    Separate from `_funnel_section` rather than folded into it: this fires
+    whenever the gate stopped short, even on a run where every judged finding
+    came back `true` and the appendix below is empty — a reader still needs to
+    know the "found" count above includes themes the gate never got to.
+    """
+    judged = relevance_judged.get("judged")
+    considered = relevance_judged.get("considered")
+    if (
+        not isinstance(judged, int) or not isinstance(considered, int)
+        or considered <= 0 or judged >= considered
+    ):
+        return ""
+    remaining = considered - judged
+    return _p(
+        f"Of the {considered} themes found, this run evaluated {judged} for "
+        f"relevance to your goal before its time or cost budget ran out. The "
+        f"other {remaining} were never judged and are kept in the list above "
+        f"— unjudged, not irrelevant."
+    )
 
 
 def _worth(finding: dict) -> str:
@@ -957,8 +1011,13 @@ def _finding_block(
     action = (rec.get("action") or "").strip()
     because = (rec.get("because") or "").strip()
     if deep_action and deep_because:
+        # A DIFFERENT HEADER FROM THE FLAT PASS BELOW, deliberately. Both used
+        # to say the identical "Recommended." — the only visible discriminator
+        # was whether a "What to change" list happened to follow, which a
+        # reader has no reason to go looking for. This is the deeper of the
+        # two passes — the full write-up, not a one-liner — and it says so.
         out.append(_p(
-            f"<strong>Recommended.</strong> "
+            f"<strong>Recommended — the full write-up.</strong> "
             f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
         ))
         out.append(_p(
@@ -1494,7 +1553,7 @@ def _ledger_section(ledger: list[dict]) -> str:
     return "".join(out)
 
 
-def _limits_section(plan: dict) -> str:
+def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
     out = ["<h2>What this cannot tell you</h2>"]
     out.append(_p(
         "This reading is qualitative. It sizes a theme by reach — how many "
@@ -1503,34 +1562,37 @@ def _limits_section(plan: dict) -> str:
         "nothing it read carries the numbers those need. Where you expected "
         "one of those, this is why it is absent."
     ))
-    # WHICH FINDINGS APPEAR IS NOT DECIDED BY THE GOAL, and a reader cannot
-    # tell that from the output — which is the problem. The definition gate
-    # establishes what the goal means with some care, and then claim selection
-    # never sees it: `_load_signals` reads the whole connected corpus and
-    # `build_findings` is called with no goal argument at all. So a run about
-    # enterprise churn returns export reliability and receipt-scanning accuracy
-    # alongside anything that does bear on churn, with nothing marking which is
-    # which.
-    #
-    # Stated rather than quietly left for the reader to notice, because the
-    # alternative is a document that LOOKS like it answered the question it was
-    # asked. This is the same rule as I3 and as the headline's superlative: do
-    # not present something the run did not establish. The filter itself is
-    # real work and is not pretended at here.
-    # SAYS ONLY THE PART THAT IS TRUE. The first draft added "every theme in
-    # the sources you approved is listed", which the same document contradicts
-    # a section earlier — findings are capped, and anecdote / ungroupable /
-    # refuted candidates never reach this list at all. The relevance claim is
-    # solid on its own (`build_findings` has a `goal_accounts` parameter that
-    # production never passes); the completeness claim was unearned, and
-    # bundling them would have made the true half easy to dismiss.
-    out.append(_p(
-        "<strong>These findings were not selected for your goal.</strong> "
-        "Nothing here was filtered or ranked by relevance to your definition — "
-        "a theme appears because it is in the evidence you approved, not "
-        "because it bears on what you asked about. Its presence is not a claim "
-        "that it matters to this goal; judge that yourself."
-    ))
+    # WHICH FINDINGS APPEAR WAS NOT ALWAYS DECIDED BY THE GOAL, and the
+    # sentence below is what said so — CORRECTLY, until a relevance gate
+    # shipped. Claim SELECTION still never sees the goal (`_load_signals` reads
+    # the whole connected corpus and `build_findings` runs with no goal
+    # argument), but the list a reader is SHOWN is a different question, and
+    # `app.crucible.relevance.judge_relevance` now answers it: it is handed
+    # this run's goal and definition and used to move findings that do not
+    # bear on either into the appendix below. A run that ran the gate must not
+    # print the sentence that denies it — that is exactly the falsehood this
+    # branch exists to close. `relevance_gate_ran` is true only
+    # when `judge_relevance` completed without raising (`routes/crucible.py`);
+    # a run that predates the gate, or whose gate call failed and kept
+    # everything, gets the original, still-true sentence.
+    if relevance_gate_ran:
+        out.append(_p(
+            "<strong>These findings were filtered for relevance to your "
+            "goal.</strong> A model checked every theme against your goal "
+            "and definition and kept what could plausibly bear on it; what "
+            "did not is listed separately below, with the reason. Being in "
+            "the evidence you approved AND surviving that check is still not "
+            "a claim about how much a theme matters — judge that yourself."
+        ))
+    else:
+        out.append(_p(
+            "<strong>These findings were not selected for your goal.</strong> "
+            "Nothing here was filtered or ranked by relevance to your "
+            "definition — a theme appears because it is in the evidence you "
+            "approved, not because it bears on what you asked about. Its "
+            "presence is not a claim that it matters to this goal; judge "
+            "that yourself."
+        ))
     gaps = [g for g in _as_list(plan.get("cannot_answer")) if isinstance(g, dict)]
     if gaps:
         # Built from the run PLAN's own gaps, so what the user was warned about
@@ -1631,9 +1693,13 @@ def render_report_html(
     set_aside = [(f, r) for f, r in zip(findings, _aside_reasons) if r]
 
     goal = (run.get("goal_text") or "").strip()
-    recommendation_basis = str(
-        _as_dict(run.get("prioritisation")).get("recommendation_basis") or ""
-    )
+    prioritisation = _as_dict(run.get("prioritisation"))
+    recommendation_basis = str(prioritisation.get("recommendation_basis") or "")
+    # Whether `judge_relevance` actually ran on this run — see
+    # `_definition_section` and `_limits_section` for what turns on it.
+    relevance_gate_ran = bool(prioritisation.get("relevance_gate_ran"))
+    relevance_judged_info = _as_dict(prioritisation.get("relevance_judged"))
+
     def _assemble(full_cap: int, overflow_cap: int) -> str:
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
@@ -1642,6 +1708,7 @@ def render_report_html(
             _stat_strip(plan, findings, kept),
             _decision_section(plan, kept),
             _funnel_section(len(findings), len(kept)),
+            _relevance_coverage_section(relevance_judged_info),
             _framework_section(kept, plan),
             _headline_section(kept),
             _recommendation_basis_section(recommendation_basis),
@@ -1649,7 +1716,7 @@ def render_report_html(
             _set_aside_section(set_aside),
             _hypotheses_section(plan),
             _ledger_section(ledger),
-            _limits_section(plan),
+            _limits_section(plan, relevance_gate_ran=relevance_gate_ran),
         ]
         return "".join(p for p in parts if p)
 

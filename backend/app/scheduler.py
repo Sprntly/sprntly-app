@@ -980,6 +980,20 @@ def _run_orphan_ask_job_sweep() -> None:
             )
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("stranded Goal Analysis document sweep failed")
+    try:
+        # Goal Analysis runs stranded mid-ENRICHMENT. Already `ready` —
+        # findings published — so `sweep_orphans` above cannot see them (its
+        # own predicate is `resolving_goal`/`planning`/`running`). Re-runs
+        # enrichment once from the stored rows, then clears the flag with an
+        # honest outcome either way. Never fails the run — see the function's
+        # own docstring for why.
+        from app.routes.crucible import sweep_stalled_enrichment
+
+        n = sweep_stalled_enrichment()
+        if n:
+            logger.info("Re-ran %d stalled Goal Analysis enrichment(s)", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("stalled Goal Analysis enrichment sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:

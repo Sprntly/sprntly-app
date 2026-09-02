@@ -833,6 +833,16 @@ export type GoalRunPlan = {
  *  renders whatever is present and says nothing about what is not. */
 export type GoalRunProgress = {
   step?: "grouping" | "analysing" | "done"
+  /** Which of the three ENRICHMENT model calls is in flight, once the
+   *  deterministic pipeline (`step`) has already reached `"done"`. A
+   *  SEPARATE field from `step`, deliberately: `step === "done"` gates the
+   *  "How this was narrowed" recap (`GoalAnalysisTab`), and enrichment can
+   *  run for up to another ~3.5 minutes after that — overloading `step` with
+   *  these values would make the recap panel vanish the moment enrichment
+   *  started, then never come back. Absent once enrichment clears
+   *  (`enrichment_pending: false`); a reader who wants "is anything still
+   *  happening" reads that flag, not this one. */
+  enrichment_step?: "judging_relevance" | "recommending" | "deep_recommending"
   signals_read?: number
   claims?: number
   /** Signals dropped before projection, by REASON — they are two different
@@ -923,6 +933,25 @@ export type GoalRunDetail = GoalRun & {
      *  sentence, not a bare number, computed from the goal's own ask. Empty
      *  on a run stored before the deep pass shipped. */
     recommendation_basis?: string
+    /** True only when `judge_relevance` completed without raising on THIS
+     *  run — never guessed from whether anything ended up set aside, so a
+     *  gate that judged everything `true` still reads as having run. Absent
+     *  on a run stored before the gate shipped, or one whose gate call
+     *  failed and kept everything. Turns `report.py`'s relevance-disclosure
+     *  sentences. */
+    relevance_gate_ran?: boolean
+    /** The relevance gate's disclosure half: how many of the found themes it
+     *  gate actually judged before its time/cost budget ran out, out of how
+     *  many were found. Absent (or `judged >= considered`) means nothing was
+     *  left unjudged. */
+    relevance_judged?: { judged: number; considered: number }
+    /** How an enrichment reached its terminal state: `"completed"` for the
+     *  ordinary live path, `"completed_by_sweep"` when the stalled-
+     *  enrichment sweep re-ran it after the original worker died,
+     *  `"no_findings_to_enrich"` / `"gave_up_after_sweep"` when the sweep
+     *  could not produce recommendations but still closed the run out
+     *  honestly. Absent on a run that predates the sweep. */
+    enrichment_outcome?: string
   }
 }
 

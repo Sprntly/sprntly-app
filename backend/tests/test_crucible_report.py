@@ -665,6 +665,64 @@ def test_the_definition_does_not_claim_to_have_selected_the_findings():
     assert "not selected for your goal" in html
 
 
+def test_a_run_whose_gate_ran_says_it_filtered_not_that_it_did_not():
+    """`judge_relevance` shipped and now decides which findings appear
+    below — the OLD sentence denying that is false the moment the gate ran,
+    whether or not it set anything aside. `relevance_gate_ran` is written by
+    the route only when the gate call completed without raising."""
+    run = _run()
+    run["prioritisation"] = {**_as_meta(run), "relevance_gate_ran": True}
+    html = render_report_html(run, [_finding()], plan=_full_plan())
+    assert "did not decide which findings appear below" not in html
+    assert "measured against that sentence" not in html  # still never claimed
+    assert "shaped which findings appear below" in html
+    assert "not selected for your goal" not in html
+    assert "filtered for relevance to your goal" in html
+
+
+def test_a_run_whose_gate_never_ran_keeps_the_original_honest_sentence():
+    """The control for the test above: a run with no `relevance_gate_ran` key
+    at all (every run stored before the gate shipped, or one whose gate call
+    raised and kept everything) must still get the ORIGINAL sentence — it
+    really is true for that run."""
+    html = render_report_html(_run(), [_finding()], plan=_full_plan())
+    assert "did not decide which findings appear below" in html
+    assert "not selected for your goal" in html
+    assert "filtered for relevance to your goal" not in html
+
+
+def test_the_relevance_truncation_is_disclosed_even_with_nothing_set_aside():
+    """The relevance gate's disclosure half. It has a hard budget (`MAX_JUDGED`) and a
+    wall-clock deadline that can stop it early — `_funnel_section` alone is
+    silent whenever nothing was SET ASIDE, which says nothing about whether
+    everything was even judged. A run that judged 60 of 240 and every one of
+    those 60 came back `true` still owes the reader that fact."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        "relevance_judged": {"judged": 60, "considered": 240},
+    }
+    html = render_report_html(run, [_finding()], plan=_full_plan())
+    assert "evaluated 60" in html
+    assert "180" in html  # the remainder, named
+    assert "kept in the list above" in html
+
+
+def test_no_relevance_truncation_note_when_everything_was_judged():
+    """Silent when the gate judged everything it found — a note here would be
+    the "329 of 329" noise `_funnel_section` already refuses to print."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        "relevance_judged": {"judged": 4, "considered": 4},
+    }
+    html = render_report_html(run, [_finding()], plan=_full_plan())
+    assert "evaluated 4" not in html
+    assert "were never judged" not in html
+
+
 def test_an_order_the_reader_cannot_check_says_so():
     """`_rank`'s last term is a confidence SCORE, which is never rendered — the
     reader sees bands. On a corpus with no outcome evidence every band comes
@@ -1128,6 +1186,35 @@ def test_the_quote_is_not_shown_twice_when_the_sentence_is_the_heading():
 # ─── The card leads with what to do ─────────────────────────────────────────
 
 
+def test_the_stat_strip_labels_any_suggestion_not_a_full_recommendation():
+    """The stat strip cell used to read "With a recommendation" — a
+    reader compared it directly against the prose sentence naming the DEEP
+    count ("the top 2 get a full recommendation") and saw two different
+    numbers with no way to tell they were two different questions. The cell
+    counts flat OR deep (the union); the label now says which."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [
+            {"recommendation": {"action": "a", "because": "b"}},
+            {"deep_recommendation": {
+                "action": "c", "because": "d", "changes": [],
+                "open_questions": [], "what_would_falsify": "",
+                "comparison": "",
+            }},
+        ],
+    }
+    html = render_report_html(
+        run, [_finding(claim_ids=["c1"]), _finding(claim_ids=["c2"])],
+    )
+    assert "With a recommendation" not in html
+    assert "Flagged with any suggestion" in html
+    # THE UNION, counting the deep-only finding too — not just the flat ones.
+    i = html.find("Flagged with any suggestion")
+    cell = html[max(0, i - 60):i]
+    assert "2" in cell
+
+
 def test_the_recommendation_leads_the_card_and_carries_its_justification():
     """Apurva: "we should start with a recommendation on how to solve this,
     this is only the issues, no suggestion on how to solve"."""
@@ -1150,6 +1237,33 @@ def test_the_recommendation_leads_the_card_and_carries_its_justification():
     assert "three accounts named export in a renewal call" in body
     # It leads: the suggestion is above the counts, not a footnote under them.
     assert body.index("Recommended.") < body.index("medium confidence")
+
+
+def test_a_deep_recommendation_says_it_is_the_full_write_up():
+    """The deep and flat passes used to share the identical
+    "Recommended." header, with a "What to change" list as the only visible
+    discriminator. The deep pass — the full write-up, AC-1 — says so now."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "findings_extra_by_rank": [{
+            "label": "export latency",
+            "deep_recommendation": {
+                "action": "Raise the export row cap",
+                "because": "three accounts hit the same timeout",
+                "changes": [{
+                    "text": "Raise the export row limit past 10k",
+                    "claim_id": "c1",
+                    "cited_claim": "export runs time out past 10k rows",
+                }],
+                "open_questions": [], "what_would_falsify": "", "comparison": "",
+            },
+        }],
+    }
+    html = render_report_html(run, [_finding()])
+    body = _findings_html(html)
+    assert "Recommended — the full write-up." in body
+    assert "Raise the export row cap" in body
 
 
 def test_a_finding_with_no_recommendation_renders_exactly_as_before():

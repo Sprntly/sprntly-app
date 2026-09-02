@@ -202,15 +202,20 @@ describe("polling", () => {
   })
 
   it("gives up on a pending enrichment rather than spinning forever", async () => {
-    // A backend that died mid-enrichment leaves the flag up. Unbounded, this
-    // would poll for the life of the tab.
+    // A backend that died mid-enrichment used to leave the flag up forever;
+    // the server-side sweep now clears a genuinely dead run's flag on
+    // its own, but a ceiling still exists here for the case nothing ever
+    // does — unbounded, this would poll for the life of the tab. Sized past
+    // the sweep's own worst case (see `ENRICH_POLL_CEILING_MS`'s comment), so
+    // 21 minutes — one minute past it — is where THIS test proves the panel
+    // stops, not the old 3-minute value.
     get.mockResolvedValue({
       ...RUN, status: "ready",
       prioritisation: { enrichment_pending: true },
     })
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-ready")
-    await vi.advanceTimersByTimeAsync(4 * 60 * 1000)
+    await vi.advanceTimersByTimeAsync(21 * 60 * 1000)
     const calls = get.mock.calls.length
     await vi.advanceTimersByTimeAsync(30_000)
     expect(get.mock.calls.length).toBe(calls)
@@ -528,5 +533,29 @@ describe("AC-5: a visible generating state for the recommendations", () => {
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-ready")
     expect(screen.queryByTestId("goal-recommendations-generating")).toBeNull()
+  })
+
+  it("the banner text tracks the published enrichment stage", async () => {
+    // Three DIFFERENT sentences for three different stages, not one static
+    // line for the whole ~2-3 minutes enrichment can take. Each is written
+    // by `_run_enrichment` (routes/crucible.py) before its own model call.
+    const stages: [string | undefined, RegExp][] = [
+      [undefined, /checking which of them bear on your goal/i],
+      ["recommending", /a suggestion for each of the top ones/i],
+      ["deep_recommending", /the full recommendation for the top of the ranking/i],
+    ]
+    for (const [enrichment_step, expected] of stages) {
+      cleanup()
+      get.mockResolvedValue({
+        ...RUN, status: "ready", findings: [FINDING],
+        prioritisation: {
+          enrichment_pending: true,
+          ...(enrichment_step ? { progress: { enrichment_step } } : {}),
+        },
+      })
+      render(<GoalAnalysisTab runId={7} />)
+      const banner = await screen.findByTestId("goal-recommendations-generating")
+      expect(banner.textContent).toMatch(expected)
+    }
   })
 })

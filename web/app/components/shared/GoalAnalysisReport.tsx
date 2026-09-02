@@ -132,7 +132,11 @@ function ReportFinding({
       {(f.deep_recommendation?.action || "").trim()
         && (f.deep_recommendation?.because || "").trim() ? (
         <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
-          <p><strong>Recommended.</strong> {f.deep_recommendation!.action}</p>
+          {/* A DIFFERENT HEADER FROM THE FLAT PASS BELOW, deliberately. Both
+              used to say the identical "Recommended." — the only visible
+              discriminator was whether a "What to change" list happened to
+              follow. Mirrors `report.py`'s `_finding_block` fix. */}
+          <p><strong>Recommended — the full write-up.</strong> {f.deep_recommendation!.action}</p>
           <p className="ga-finding-rec-why">
             <em>Why.</em> {f.deep_recommendation!.because}
           </p>
@@ -267,6 +271,13 @@ export function GoalAnalysisReport({
   // computed from the goal's own ask, never a bare number. Mirrors
   // `report.py`'s `_recommendation_basis_section`, same placement.
   const recommendationBasis = (run.prioritisation?.recommendation_basis || "").trim()
+  // Whether `judge_relevance` actually ran on this run — turns the
+  // "these findings were not selected"/"were filtered" branch below. Never
+  // guessed from `setAside.length`: a gate that judged everything `true`
+  // still ran. Mirrors `report.py`'s `relevance_gate_ran`.
+  const relevanceGateRan = Boolean(run.prioritisation?.relevance_gate_ran)
+  // The relevance gate's coverage disclosure — see the funnel section below.
+  const relevanceJudged = run.prioritisation?.relevance_judged
   // ── THE THEME, THE QUOTE AND THE RECOMMENDATION, MERGED IN ONCE. ────────
   //
   // These three live in the run's own JSON rather than in columns on
@@ -489,18 +500,31 @@ export function GoalAnalysisReport({
               You confirmed this goal means, in your own words:
             </p>
             <blockquote className="ga-doc-quote">{definition}</blockquote>
-            {/* WHAT THIS SENTENCE ACTUALLY GOVERNS. "Everything below is
-                measured against that sentence and nothing else" is the exact
-                claim the closing section denies — claim selection never sees
-                the definition. Leaving it put the falsehood five sections
-                above its own correction, in the more prominent position. */}
-            <p className="ga-doc-note" data-testid="goal-definition-note">
-              This is the sentence the run was given to work from, and it is
-              recorded here so a decision can be defended against it. It did not
-              decide which findings appear below — nothing here was filtered or
-              ranked by it. If it is not what you meant, say so before you rely
-              on any of this.
-            </p>
+            {/* WHAT THIS SENTENCE ACTUALLY GOVERNS. Claim SELECTION still
+                never sees the definition (`build_findings` runs with no goal
+                argument). But the LIST a reader is shown is a different
+                question, and `judge_relevance` now answers it, handed this
+                exact sentence — so a run that ran the gate must not deny
+                having filtered by it. Mirrors `report.py`'s
+                `_definition_section`. */}
+            {relevanceGateRan ? (
+              <p className="ga-doc-note" data-testid="goal-definition-note">
+                This is the sentence the run was given to work from, and it is
+                recorded here so a decision can be defended against it. It
+                shaped which findings appear below: each was checked against
+                it for whether it bears on this goal, and any that did not are
+                listed separately, with the reason, further down. If it is not
+                what you meant, say so before you rely on any of this.
+              </p>
+            ) : (
+              <p className="ga-doc-note" data-testid="goal-definition-note">
+                This is the sentence the run was given to work from, and it is
+                recorded here so a decision can be defended against it. It did
+                not decide which findings appear below — nothing here was
+                filtered or ranked by it. If it is not what you meant, say so
+                before you rely on any of this.
+              </p>
+            )}
           </>
         ) : (
           // Stated, not skipped. A report with no recorded definition is a
@@ -708,9 +732,18 @@ export function GoalAnalysisReport({
               ["Sized", findings.filter((f) => f.impact_value != null).length.toLocaleString()],
               ["High confidence",
                findings.filter((f) => f.confidence_band === "high").length.toLocaleString()],
-              ...(findings.some((f) => f.recommendation?.action)
-                ? [["With a recommendation",
-                    findings.filter((f) => f.recommendation?.action).length.toLocaleString()]]
+              // NOT "with A recommendation" — that read as the same count the
+              // prose below names ("the top 2 get a full recommendation"),
+              // which counts only the DEEP pass. This cell counts flat OR
+              // deep — the union, mirroring `report.py`'s `_stat_strip` —
+              // so a run can show 8 here and 2 there, both true, about two
+              // different senses of the word. Also fixed here: this used to
+              // check `f.recommendation` alone, undercounting a finding whose
+              // ONLY suggestion was the deep one.
+              ...(findings.some((f) => f.recommendation?.action || f.deep_recommendation?.action)
+                ? [["Flagged with any suggestion",
+                    findings.filter((f) => f.recommendation?.action || f.deep_recommendation?.action)
+                      .length.toLocaleString()]]
                 : []),
               // LABELLED IN THE CELL. A number in a strip reads as a fact, and
               // this one is the reader's own estimate multiplied out.
@@ -745,6 +778,24 @@ export function GoalAnalysisReport({
             The other {setAside.length} are listed at the end with the reason
             each was set aside — they are not gone, and a theme set aside for
             this goal may be the answer to a different one.
+          </p>
+        </section>
+      ) : null}
+      {/* The relevance gate's disclosure half. `relevance.py` promises "the renderer says
+          how many were not evaluated" — the gate has a hard budget and a
+          wall-clock deadline that can stop it early, and until this fired,
+          nothing ever said so. Separate from the funnel above: this fires
+          even when nothing was set aside, because a reader still needs to
+          know the "found" count can include themes the gate never got to.
+          Mirrors `report.py`'s `_relevance_coverage_section`. */}
+      {relevanceJudged && relevanceJudged.considered > relevanceJudged.judged ? (
+        <section className="ga-doc-section" data-testid="goal-relevance-coverage">
+          <p className="ga-doc-note">
+            Of the {relevanceJudged.considered} themes found, this run
+            evaluated {relevanceJudged.judged} for relevance to your goal
+            before its time or cost budget ran out. The other{" "}
+            {relevanceJudged.considered - relevanceJudged.judged} were never
+            judged and are kept in the list above — unjudged, not irrelevant.
           </p>
         </section>
       ) : null}
@@ -1063,20 +1114,34 @@ export function GoalAnalysisReport({
           nothing it read carries the numbers those need. Where you expected one
           of those, this is why it is absent.
         </p>
-        {/* WHICH FINDINGS APPEAR IS NOT DECIDED BY THE GOAL, and nothing on
-            screen tells the reader that. The definition gate establishes what
-            the goal means with some care and then claim selection never sees
-            it, so a run about enterprise churn returns export reliability
-            alongside anything that does bear on churn, with nothing marking
-            which is which. Stated, because the alternative is a panel that
-            LOOKS like it answered the question it was asked. */}
-        <p className="ga-doc-note" data-testid="goal-not-selected">
-          <strong>These findings were not selected for your goal.</strong>{" "}
-          Nothing here was filtered or ranked by relevance to your definition —
-          a theme appears because it is in the evidence you approved, not
-          because it bears on what you asked about. Its presence is not a claim
-          that it matters to this goal; judge that yourself.
-        </p>
+        {/* WHICH FINDINGS APPEAR WAS NOT ALWAYS DECIDED BY THE GOAL, and this
+            note is what said so — correctly, until a relevance gate shipped.
+            Claim SELECTION still never sees the goal, but the list a reader
+            is SHOWN is a different question, and `judge_relevance` now
+            answers it. A run that ran the gate must not deny having filtered
+            by it. `relevanceGateRan` is true only when the gate
+            completed without raising. Mirrors `report.py`'s
+            `_limits_section`. */}
+        {relevanceGateRan ? (
+          <p className="ga-doc-note" data-testid="goal-not-selected">
+            <strong>These findings were filtered for relevance to your
+            goal.</strong>{" "}
+            A model checked every theme against your goal and definition and
+            kept what could plausibly bear on it; what did not is listed
+            separately below, with the reason. Being in the evidence you
+            approved AND surviving that check is still not a claim about how
+            much a theme matters — judge that yourself.
+          </p>
+        ) : (
+          <p className="ga-doc-note" data-testid="goal-not-selected">
+            <strong>These findings were not selected for your goal.</strong>{" "}
+            Nothing here was filtered or ranked by relevance to your
+            definition — a theme appears because it is in the evidence you
+            approved, not because it bears on what you asked about. Its
+            presence is not a claim that it matters to this goal; judge that
+            yourself.
+          </p>
+        )}
         {gaps.length ? (
           <ul className="ga-doc-gaps">
             {gaps.map((g, i) => (

@@ -503,6 +503,116 @@ def test_deep_pass_gives_the_top_two_a_real_recommendation_with_a_comparison(mon
     assert out.by_id[result.findings[1].id].comparison == ""
 
 
+def test_the_basis_reflects_drops_when_kept_deep_is_less_than_promised(monkeypatch):
+    """A genuine count wrongness: `resolve_recommendation_count` writes its
+    sentence BEFORE the citation gate runs, so it cannot know one of the
+    promised deep recommendations is about to be dropped. Ticket's own AC:
+    cover kept-deep < promised-deep, not just deep < flat. Here the goal
+    promises 2; the model's SECOND finding cites nothing shown, so
+    `_deep_acceptable` drops it and only 1 survives — the basis must say so.
+    """
+    _, result = _build_two()
+
+    def fake_llm_call(**kwargs):
+        class _R:
+            output = {"deep_recommendations": [
+                {
+                    "finding_id": result.findings[0].id,
+                    "action": "Raise the export row cap",
+                    "because": "Three accounts hit the same timeout",
+                    "changes": [{
+                        "claim_id": "c1",
+                        "evidence": "export runs time out past 10k rows",
+                        "change": "Raise the export row limit past 10k",
+                    }],
+                    "open_questions": [],
+                    "what_would_falsify": "No account raises this again",
+                },
+                {
+                    "finding_id": result.findings[1].id,
+                    "action": "Cut onboarding to two weeks",
+                    "because": "Two accounts named the six-week onboarding",
+                    "changes": [{
+                        # NEVER SHOWN for this finding — the citation gate
+                        # (AC-3) must drop the whole deep recommendation.
+                        "claim_id": "not-a-real-claim-id",
+                        "evidence": "onboarding takes six weeks to complete",
+                        "change": "Automate the onboarding checklist",
+                    }],
+                    "open_questions": [],
+                    "what_would_falsify": "No account raises this again",
+                },
+            ]}
+        return _R()
+
+    monkeypatch.setattr(recommend_mod, "_offline", lambda: False)
+    monkeypatch.setattr("app.graph.gateway.llm_call", fake_llm_call)
+
+    out = build_deep_recommendations(
+        enterprise_id="e", goal_text="What are two things I can do?",
+        definition_text="d", findings=result.findings, impacts=result.impacts,
+        confidences=result.confidences, claims=_two_finding_corpus(),
+    )
+    # The promised count is still 2 (that arithmetic did not change) — only
+    # what SURVIVED did.
+    assert out.count.count == 2
+    assert set(out.by_id) == {result.findings[0].id}
+    assert "you asked for 2, so the top 2 get a full recommendation." in (
+        out.count.basis
+    )
+    # The correction is appended, not a silent contradiction the reader has
+    # to notice on their own.
+    assert "only 1" in out.count.basis.lower()
+    assert "2" in out.count.basis  # still names how many were promised
+
+
+def test_the_basis_says_none_survived_when_the_whole_deep_pass_is_dropped(
+    monkeypatch,
+):
+    """The zero-survivor edge the drops test above does not cover: every
+    promised deep recommendation fails the gate."""
+    _, result = _build_two()
+
+    def fake_llm_call(**kwargs):
+        class _R:
+            output = {"deep_recommendations": [
+                {
+                    "finding_id": result.findings[0].id,
+                    "action": "Raise the export row cap",
+                    "because": "Three accounts hit the same timeout",
+                    "changes": [{
+                        "claim_id": "not-shown-1",
+                        "evidence": "export runs time out past 10k rows",
+                        "change": "Raise the export row limit past 10k",
+                    }],
+                    "open_questions": [], "what_would_falsify": "",
+                },
+                {
+                    "finding_id": result.findings[1].id,
+                    "action": "Cut onboarding to two weeks",
+                    "because": "Two accounts named the six-week onboarding",
+                    "changes": [{
+                        "claim_id": "not-shown-2",
+                        "evidence": "onboarding takes six weeks to complete",
+                        "change": "Automate the onboarding checklist",
+                    }],
+                    "open_questions": [], "what_would_falsify": "",
+                },
+            ]}
+        return _R()
+
+    monkeypatch.setattr(recommend_mod, "_offline", lambda: False)
+    monkeypatch.setattr("app.graph.gateway.llm_call", fake_llm_call)
+
+    out = build_deep_recommendations(
+        enterprise_id="e", goal_text="What are two things I can do?",
+        definition_text="d", findings=result.findings, impacts=result.impacts,
+        confidences=result.confidences, claims=_two_finding_corpus(),
+    )
+    assert out.by_id == {}
+    assert "none" in out.count.basis.lower()
+
+
 def test_deep_pass_survives_a_gateway_that_dies(monkeypatch):
     """TOTAL, same contract as the flat pass: a suggestion layer that failed
     must not cost a reader the findings that succeeded."""

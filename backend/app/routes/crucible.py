@@ -334,6 +334,23 @@ async def create_document(
             f"write a report from yet.",
         )
 
+    # `status="ready"` fires the moment the analysis exists, up to
+    # `DEADLINE_SECONDS` (relevance) + `DEADLINE_SECONDS` (recommend) +
+    # `DEADLINE_SECONDS` (deep recommend) later than the recommendations and
+    # the appendix actually land — and `POST /{run_id}/document` above is
+    # IDEMPOTENT FOREVER: a document created in that window is permanently
+    # missing them, its `detached` flag reads false, and it certifies itself
+    # as the run's complete output with no way back. Refused here instead —
+    # the panel already renders a "still generating" banner off this same
+    # flag, so a reader who tries anyway is not surprised by the 409.
+    if bool((await asyncio.to_thread(_meta_of, run_id, company.company_id))
+            .get("enrichment_pending")):
+        raise HTTPException(
+            409,
+            "This analysis is still finishing — the recommendations and the "
+            "appendix have not landed yet. Try again in a moment.",
+        )
+
     if row.get("artifact_id"):
         # A link pointing at a document that is not there. The FK is ON DELETE
         # SET NULL, so Postgres cannot produce this — but a half-landed link
@@ -1304,156 +1321,425 @@ def execute_run(
         #
         # BY RANK, because the stored rows carry no id and the renderer reads
         # them back positionally.
-        set_aside_by_rank: list = [None] * len(result.findings)
-        try:
-            from app.crucible.relevance import judge_relevance, partition
-
-            verdicts = judge_relevance(
-                enterprise_id=company_id,
-                goal_text=goal_text,
-                definition_text=definition_text,
-                findings=result.findings,
-            )
-            _, aside = partition(result.findings, verdicts)
-            reason_of = {f.id: reason for f, reason in aside}
-            set_aside_by_rank = [
-                reason_of.get(f.id) for f in result.findings
-            ]
-        except Exception:  # noqa: BLE001 — a gate that failed keeps everything
-            logger.exception("crucible: relevance gate skipped for run %s", run_id)
-
-        # AND THE SUGGESTIONS GO TO THE ONES THAT SURVIVED IT. Recommending an
-        # action for a theme the gate just judged irrelevant would spend the
-        # reader's attention on the thing they were told to ignore.
-        relevant = [
-            f for f, reason in zip(result.findings, set_aside_by_rank)
-            if reason is None
-        ]
-        # SAME FILTER, ON THE OTHER TWO SEQUENCES. `build_deep_recommendations`
-        # needs each finding's frozen `Impact`/`Confidence` alongside it —
-        # positionally, exactly like `pipeline.build_findings`'s own three
-        # return sequences — so the filter that produced `relevant` from
-        # `result.findings` is applied identically here rather than re-derived,
-        # which is how the two lists could silently stop agreeing on which
-        # finding is at which index.
-        relevant_impacts = [
-            imp for imp, reason in zip(result.impacts, set_aside_by_rank)
-            if reason is None
-        ]
-        relevant_confidences = [
-            conf for conf, reason in zip(result.confidences, set_aside_by_rank)
-            if reason is None
-        ]
-
-        # ── WHAT TO DO ABOUT EACH OF THEM. ─────────────────────────────
         #
-        # AFTER the ranking, and that ordering is the invariant rather than a
-        # detail. `result.findings` is already sorted and every score is already
-        # frozen; nothing below is fed back into either. I2 says no LLM returns
-        # a score, a rank or a decision, and it still holds — this returns prose
-        # to hang beside a decision the engine already made on its own.
-        #
-        # TOTAL, like everything else on this path: a suggestion layer that
-        # failed must not cost a reader the findings that succeeded.
-        recs = {}
-        try:
-            from app.crucible.recommend import build_recommendations
-
-            recs = build_recommendations(
-                enterprise_id=company_id,
-                goal_text=goal_text,
-                definition_text=definition_text,
-                findings=relevant,
-                claims=claims,
-            )
-        except Exception:  # noqa: BLE001
-            logger.exception("crucible: recommendations skipped for run %s", run_id)
-
-        # A DEEP RECOMMENDATION FOR THE TOP OF THE RANKING, SIZED BY THE GOAL.
-        #
-        # Apurva: "once we pick the top two, then we could just compare them."
-        # `build_deep_recommendations` decides how many with pure arithmetic
-        # over the frozen `relevant_impacts` (I2/I10) — never an LLM, and
-        # never a count this route invents. TOTAL, same reasoning as the flat
-        # pass above.
-        deep = {}
-        recommendation_basis = ""
-        try:
-            from app.crucible.recommend import build_deep_recommendations
-
-            deep_result = build_deep_recommendations(
-                enterprise_id=company_id,
-                goal_text=goal_text,
-                definition_text=definition_text,
-                findings=relevant,
-                impacts=relevant_impacts,
-                confidences=relevant_confidences,
-                claims=claims,
-            )
-            deep = deep_result.by_id
-            recommendation_basis = deep_result.count.basis
-        except Exception:  # noqa: BLE001
-            logger.exception("crucible: deep recommendations skipped for run %s", run_id)
-
-        # CARRIED IN THE RUN'S OWN JSON, not in new columns on
-        # `crucible_findings`. Adding columns means a migration against the
-        # shared Supabase, which is a production change and not one to make
-        # without being asked; the meta blob is already where this run's plan
-        # lives and costs nothing to extend.
-        meta = dict(_meta_of(run_id, company_id))
-        meta["recommendation_basis"] = recommendation_basis
-        meta["findings_extra"] = {
-            f.id: {
-                "label": f.label,
-                "example": f.example,
-                # RICE's Impact term is read from the kinds of claim behind a
-                # finding, so the renderer needs them. Carried here for the same
-                # reason as the label: adding a column to `crucible_findings`
-                # means a migration against the shared Supabase.
-                "claim_types": sorted(set(f.confidence_inputs.claim_types)),
-                **({"recommendation": {
-                    "action": recs[f.id].action, "because": recs[f.id].because,
-                }} if f.id in recs else {}),
-                # THE DEEP PASS TAKES PRECEDENCE where both exist — a finding
-                # in the deep set is one the flat pass ALSO ran on (`relevant`
-                # feeds both), and the renderer shows the deeper one rather
-                # than both, so a reader is never shown two disagreeing
-                # suggestions for the same finding.
-                **({"deep_recommendation": {
-                    "action": deep[f.id].action,
-                    "because": deep[f.id].because,
-                    "changes": [
-                        {"text": c.text, "claim_id": c.claim_id,
-                         "cited_claim": c.cited_claim}
-                        for c in deep[f.id].changes
-                    ],
-                    "open_questions": list(deep[f.id].open_questions),
-                    "what_would_falsify": deep[f.id].what_would_falsify,
-                    "comparison": deep[f.id].comparison,
-                }} if f.id in deep else {}),
-            }
-            for f in result.findings
-        }
-        # Keyed by RANK as well, because the stored finding rows carry no id —
-        # the renderer reads them back positionally.
-        # THE FUNNEL, SAID IN NUMBERS THE RENDERER CAN QUOTE. How many were
-        # considered and how many bear on the goal is the first thing Apurva's
-        # reference memo states, and it is the thing a filtered list has to
-        # disclose or it reads as the whole picture.
+        # `_run_enrichment` is SHARED with `_reenrich_stalled_run` (the
+        # stalled-enrichment sweep below) — the same relevance-gate-then-
+        # recommend decision must never be reimplemented twice and drift, and
+        # it also carries the `_progress` calls that double as this stage's
+        # heartbeat: every stage a reader sees advance is a point a dead
+        # process would never reach, so a process that died anywhere in these
+        # three model calls no longer looks, from the row alone, identical to
+        # one still working.
+        enrichment_meta = _run_enrichment(
+            run_id=run_id, company_id=company_id, goal_text=goal_text,
+            definition_text=definition_text, findings=result.findings,
+            impacts=result.impacts, confidences=result.confidences,
+            claims=claims,
+        )
         # DOWN IN THE SAME WRITE THAT PUBLISHES THE RESULTS. Clearing it
         # separately leaves a window where the panel has stopped polling and
         # the verdicts are not there yet — the exact bug this flag exists to
         # close, one write narrower.
+        meta = dict(_meta_of(run_id, company_id))
+        meta.update(enrichment_meta)
         meta["enrichment_pending"] = False
-        meta["set_aside_by_rank"] = list(set_aside_by_rank)
-        meta["findings_extra_by_rank"] = [
-            meta["findings_extra"][f.id] for f in result.findings
-        ]
+        # A NORMAL FINISH SAYS SO. The sweep writes its own value here when it
+        # is the one that closes out a stranded run (`sweep_stalled_enrichment`
+        # below); a run that reaches this line unassisted gets the ordinary
+        # marker, so the two are distinguishable on the row rather than only
+        # in the logs.
+        meta["enrichment_outcome"] = "completed"
         runs_db.update(run_id, company_id, prioritisation=meta)
 
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))
+
+
+def _run_enrichment(
+    *, run_id: int, company_id: str, goal_text: str, definition_text: str,
+    findings: list, impacts: list, confidences: list, claims: list,
+) -> dict:
+    """Stages 9-10: which findings bear on the goal, and what to do about the
+    ones that do. Returns the `prioritisation` fields this stage contributes;
+    the CALLER writes them (merged with whatever else its own meta carries) —
+    this function never touches the row itself, so a caller reading a fresh
+    `_meta_of` right before merging never loses a concurrent write.
+
+    SHARED between `execute_run`'s own tail and `_reenrich_stalled_run` (the
+    stalled-enrichment sweep), so the relevance-gate-then-recommend decision
+    is made in exactly one place: two implementations of "which findings bear
+    on the goal" would be two places that could silently stop agreeing.
+
+    `findings`/`impacts`/`confidences` must be the same length and in the same
+    positional order — `execute_run` passes `pipeline.build_findings`'s own
+    three return sequences directly; the sweep passes ones it reconstructed
+    from stored rows (`_reconstruct_enrichment_inputs`). Either way this
+    function only reads them, never re-derives an order (I10).
+    """
+    # ── WHICH OF THEM BEAR ON THE GOAL THAT WAS ASKED. ──────────────────────
+    #
+    # The ranking orders by how many accounts mention a theme, so a run for
+    # "grow revenue by 5%" led with three descriptions of the company's own
+    # product: what gets mentioned most on a sales call is the vendor's own
+    # demo. The report conceded the gap in as many words — "nothing here was
+    # filtered or ranked by it" — and this is that filter.
+    #
+    # NOTHING IS DROPPED FROM THE ROW SET. Every finding is still stored and
+    # still rendered; a set-aside one moves to an appendix carrying the
+    # reason. Storing only the survivors would destroy the record a wrong
+    # verdict has to be recoverable from.
+    _progress(run_id, company_id, enrichment_step="judging_relevance")
+    set_aside_by_rank: list = [None] * len(findings)
+    relevance_gate_ran = False
+    relevance_judged_info: dict = {}
+    try:
+        from app.crucible.relevance import judge_relevance, partition
+
+        verdicts = judge_relevance(
+            enterprise_id=company_id,
+            goal_text=goal_text,
+            definition_text=definition_text,
+            findings=findings,
+        )
+        _, aside = partition(findings, verdicts)
+        reason_of = {f.id: reason for f, reason in aside}
+        set_aside_by_rank = [reason_of.get(f.id) for f in findings]
+        # THE GATE RAN, whether or not it set anything aside — the report's
+        # own disclosure turns on this, not on `aside` being non-empty. A
+        # gate that judged everything `true` still ran, and the "nothing here
+        # was filtered" sentence is just as false for it as for a run with a
+        # full appendix.
+        relevance_gate_ran = True
+        # THE COVERAGE DISCLOSURE. `len(verdicts)` is exactly the findings the
+        # gate returned a usable answer for — the same count `partition` reads
+        # to decide kept/aside — so it is the honest number of "evaluated",
+        # never a guess at how many chunks ran.
+        relevance_judged_info = {
+            "judged": len(verdicts), "considered": len(findings),
+        }
+    except Exception:  # noqa: BLE001 — a gate that failed keeps everything
+        logger.exception("crucible: relevance gate skipped for run %s", run_id)
+
+    # AND THE SUGGESTIONS GO TO THE ONES THAT SURVIVED IT. Recommending an
+    # action for a theme the gate just judged irrelevant would spend the
+    # reader's attention on the thing they were told to ignore.
+    relevant = [
+        f for f, reason in zip(findings, set_aside_by_rank) if reason is None
+    ]
+    # SAME FILTER, ON THE OTHER TWO SEQUENCES — see this function's own
+    # docstring on why the three arrive positionally paired.
+    relevant_impacts = [
+        imp for imp, reason in zip(impacts, set_aside_by_rank)
+        if reason is None
+    ]
+    relevant_confidences = [
+        conf for conf, reason in zip(confidences, set_aside_by_rank)
+        if reason is None
+    ]
+    claims_by_id = {c.id: c for c in claims}
+
+    # ── WHAT TO DO ABOUT EACH OF THEM. ──────────────────────────────────────
+    #
+    # AFTER the ranking, and that ordering is the invariant rather than a
+    # detail. `findings` is already sorted and every score is already frozen;
+    # nothing below is fed back into either. I2 says no LLM returns a score, a
+    # rank or a decision, and it still holds — this returns prose to hang
+    # beside a decision the engine already made on its own.
+    #
+    # TOTAL, like everything else on this path: a suggestion layer that failed
+    # must not cost a reader the findings that succeeded.
+    _progress(run_id, company_id, enrichment_step="recommending")
+    recs = {}
+    try:
+        from app.crucible.recommend import build_recommendations
+
+        recs = build_recommendations(
+            enterprise_id=company_id,
+            goal_text=goal_text,
+            definition_text=definition_text,
+            findings=relevant,
+            claims=claims,
+        )
+    except Exception:  # noqa: BLE001
+        logger.exception("crucible: recommendations skipped for run %s", run_id)
+
+    # A DEEP RECOMMENDATION FOR THE TOP OF THE RANKING, SIZED BY THE GOAL.
+    #
+    # Apurva: "once we pick the top two, then we could just compare them."
+    # `build_deep_recommendations` decides how many with pure arithmetic over
+    # the frozen `relevant_impacts` (I2/I10) — never an LLM, and never a count
+    # this route invents. TOTAL, same reasoning as the flat pass above.
+    _progress(run_id, company_id, enrichment_step="deep_recommending")
+    deep = {}
+    recommendation_basis = ""
+    try:
+        from app.crucible.recommend import build_deep_recommendations
+
+        deep_result = build_deep_recommendations(
+            enterprise_id=company_id,
+            goal_text=goal_text,
+            definition_text=definition_text,
+            findings=relevant,
+            impacts=relevant_impacts,
+            confidences=relevant_confidences,
+            claims=claims,
+        )
+        deep = deep_result.by_id
+        recommendation_basis = deep_result.count.basis
+    except Exception:  # noqa: BLE001
+        logger.exception("crucible: deep recommendations skipped for run %s", run_id)
+
+    # CARRIED IN THE RUN'S OWN JSON, not in new columns on `crucible_findings`.
+    # Adding columns means a migration against the shared Supabase, which is a
+    # production change and not one to make without being asked; the meta blob
+    # is already where this run's plan lives and costs nothing to extend.
+    findings_extra = {
+        f.id: {
+            "label": f.label,
+            "example": f.example,
+            # RICE's Impact term is read from the kinds of claim behind a
+            # finding, so the renderer needs them. Carried here for the same
+            # reason as the label: adding a column to `crucible_findings`
+            # means a migration against the shared Supabase. Read from the
+            # CLAIMS this call was actually given, not from
+            # `f.confidence_inputs.claim_types` — the sweep's reconstructed
+            # findings carry no confidence_inputs worth reading (see
+            # `_reconstruct_enrichment_inputs`), and computing it here instead
+            # means this function does not care which caller built `findings`.
+            "claim_types": sorted({
+                claims_by_id[cid].type for cid in f.claim_ids
+                if cid in claims_by_id
+            }),
+            **({"recommendation": {
+                "action": recs[f.id].action, "because": recs[f.id].because,
+            }} if f.id in recs else {}),
+            # THE DEEP PASS TAKES PRECEDENCE where both exist — a finding in
+            # the deep set is one the flat pass ALSO ran on (`relevant` feeds
+            # both), and the renderer shows the deeper one rather than both,
+            # so a reader is never shown two disagreeing suggestions for the
+            # same finding.
+            **({"deep_recommendation": {
+                "action": deep[f.id].action,
+                "because": deep[f.id].because,
+                "changes": [
+                    {"text": c.text, "claim_id": c.claim_id,
+                     "cited_claim": c.cited_claim}
+                    for c in deep[f.id].changes
+                ],
+                "open_questions": list(deep[f.id].open_questions),
+                "what_would_falsify": deep[f.id].what_would_falsify,
+                "comparison": deep[f.id].comparison,
+            }} if f.id in deep else {}),
+        }
+        for f in findings
+    }
+    return {
+        "recommendation_basis": recommendation_basis,
+        # Recorded so the renderer can tell "the gate ran and kept
+        # everything" from "no gate ever touched this run" — see
+        # `report.py`'s `_definition_section`/`_limits_section`.
+        "relevance_gate_ran": relevance_gate_ran,
+        # How many of the found themes the gate actually judged, so a
+        # truncated pass says so rather than looking like a complete one.
+        # Empty when the gate did not run at all.
+        "relevance_judged": relevance_judged_info,
+        # Keyed by RANK, because the stored finding rows carry no id — the
+        # renderer reads them back positionally.
+        "set_aside_by_rank": list(set_aside_by_rank),
+        "findings_extra_by_rank": [findings_extra[f.id] for f in findings],
+    }
+
+
+def _reconstruct_enrichment_inputs(
+    rows: list[dict],
+) -> tuple[list, list, list]:
+    """`Finding`/`Impact`/`Confidence` objects, rebuilt from STORED
+    `crucible_findings` rows for the stalled-enrichment sweep below — never
+    re-scored (I10). Every
+    number that is actually READ downstream (by `judge_relevance`,
+    `build_recommendations`/`build_deep_recommendations`, or `_run_enrichment`
+    itself) is read back exactly as `execute_run` wrote it: `id`, `statement`,
+    `claim_ids`, `adjudication`, and the frozen `impact_value`/
+    `affected_population`/`confidence_band`/`weakest_leg*`/`cap_reason`.
+
+    The placeholder fields below (`impact_inputs`, `confidence_inputs`,
+    `Confidence.score`, `movable_gap`, `value_per_unit`, `native_units`) are
+    NEVER read by any of those three call sites — only `Finding`'s own
+    `id`/`label`/`statement`/`claim_ids`/`adjudication` and the separate
+    `Impact`/`Confidence` objects this function ALSO builds are — so filling
+    them with honest, inert placeholders costs nothing real. `label`/`example`
+    are not stored columns (they live only in `findings_extra_by_rank`, which
+    a stalled run never got to write); both fall back to `statement` wherever
+    they would have been read, same as any run stored before `label` shipped.
+    """
+    from app.crucible.types import (
+        Confidence, ConfidenceInputs, Finding, Impact, ImpactInputs,
+    )
+
+    findings: list = []
+    impacts: list = []
+    confidences: list = []
+    for row in rows:
+        currency = row.get("currency") or "accounts"
+        impact_dict = row.get("impact") or {}
+        confidence_dict = row.get("confidence") or {}
+        findings.append(Finding(
+            id=str(row.get("id")),
+            statement=row.get("statement") or "",
+            claim_ids=tuple(row.get("claim_ids") or ()),
+            impact_inputs=ImpactInputs(
+                currency=currency, affected_population=None,
+                movable_gap=None, value_per_unit=None,
+            ),
+            confidence_inputs=ConfidenceInputs(
+                strengths=(), claim_types=(), observed_ats=(),
+                authoritative_count=0, claim_count=0,
+                independent_authoritative_source_types=0,
+            ),
+            adjudication=row.get("adjudication") or "no_authoritative_source",
+        ))
+        impacts.append(Impact(
+            value=row.get("impact_value"),
+            currency=currency,
+            affected_population=impact_dict.get("affected_population"),
+            movable_gap=None, value_per_unit=None,
+        ))
+        confidences.append(Confidence(
+            band=row.get("confidence_band") or "low",
+            score=0.0,   # "internal only, NEVER rendered" (types.py)
+            weakest_leg=confidence_dict.get("weakest_leg") or "problem",
+            weakest_leg_reason=confidence_dict.get("weakest_leg_reason") or "",
+            cap_reason=confidence_dict.get("cap_reason"),
+        ))
+    return findings, impacts, confidences
+
+
+def _load_signals_by_id(company_id: str, ids: set[str]) -> list[dict]:
+    """A targeted signal read, scoped to exactly `ids` — the "fresh signal
+    read" the stalled-enrichment sweep needs to reconstruct `Claim` objects
+    for citation grounding, without re-reading a whole (possibly 10k+-signal)
+    corpus for a
+    handful of already-selected findings. Claim ids ARE signal ids
+    (`app.crucible.claims.project_signal`), so this is the same table and the
+    same columns `_load_signals` reads, filtered by id instead of paged.
+    """
+    if not ids:
+        return []
+    from app.db.client import require_client
+
+    client = require_client()
+    cols = (
+        "id,kind,source_type,content,properties,provenance,"
+        "valid_at,created_at,source_id"
+    )
+    id_list = list(ids)
+    rows: list[dict] = []
+    # Chunked well under PostgREST's practical `in.()` URL-length limits.
+    for i in range(0, len(id_list), 200):
+        batch = id_list[i:i + 200]
+        page = (
+            client.table("kg_signal").select(cols)
+            .eq("enterprise_id", company_id)
+            .in_("id", batch)
+            .execute()
+        ).data or []
+        rows.extend(page)
+    return rows
+
+
+def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
+    """One re-run attempt for a run the stalled-enrichment sweep just
+    claimed. TOTAL, like
+    `execute_run`'s own tail: whatever happens here, this ends with
+    `enrichment_pending` cleared and an honest `enrichment_outcome` — never a
+    bare exception, and NEVER `runs_db.fail()`. `fail()` sets
+    `status="failed"`, which would hide a perfectly good, already-published
+    analysis behind an error screen — exactly the run this sweep exists to
+    rescue, not to discard.
+    """
+    meta = dict(_meta_of(run_id, company_id))
+    outcome = "gave_up_after_sweep"
+    try:
+        finding_rows, _ledger_rows = runs_db.load_findings(run_id, company_id)
+        if finding_rows:
+            plan = meta.get("plan") or {}
+            goal_text = row.get("goal_text") or ""
+            definition_text = str(plan.get("definition_text") or "")
+
+            findings, impacts, confidences = _reconstruct_enrichment_inputs(
+                finding_rows
+            )
+            all_claim_ids = {
+                cid for f in findings for cid in f.claim_ids if cid
+            }
+            signals = _load_signals_by_id(company_id, all_claim_ids)
+            from app.crucible.claims import project_signals
+
+            claims, _stats = project_signals(signals)
+
+            enrichment_meta = _run_enrichment(
+                run_id=run_id, company_id=company_id, goal_text=goal_text,
+                definition_text=definition_text, findings=findings,
+                impacts=impacts, confidences=confidences, claims=claims,
+            )
+            meta.update(enrichment_meta)
+            outcome = "completed_by_sweep"
+        else:
+            # No stored findings at all (should not normally happen — findings
+            # are saved before `enrichment_pending` is ever set) — nothing to
+            # re-run, but still a terminal state rather than a spin.
+            outcome = "no_findings_to_enrich"
+    except Exception:  # noqa: BLE001 — this function must ALWAYS reach the
+        # write below. A re-run attempt that failed leaves the run no worse
+        # off than the stall it was trying to fix — the findings and any
+        # flat/deep recommendations already in `meta` before this attempt are
+        # untouched — and it must not become a second stall.
+        logger.exception(
+            "crucible: sweep re-enrichment failed for run %s; clearing "
+            "enrichment_pending without recommendations", run_id,
+        )
+
+    meta["enrichment_pending"] = False
+    meta["enrichment_outcome"] = outcome
+    runs_db.update(run_id, company_id, prioritisation=meta)
+
+
+def sweep_stalled_enrichment() -> int:
+    """A deploy that restarts the process mid-enrichment strands a run
+    forever: it is already `ready` (findings published), it
+    still says `enrichment_pending`, and `sweep_orphans`'s own predicate
+    (`resolving_goal`/`planning`/`running`) cannot see it — a `ready` run is,
+    by definition, past all three. THE ROW IS THE JOB (`routes/crucible.py`'s
+    own header): no `design_agent_jobs`-style table is built here. Findings
+    are already durable, so a stalled run is re-run ONCE from the stored rows
+    plus a fresh, targeted signal read, then its flag is cleared with an
+    honest outcome marker EITHER WAY — see `_reenrich_stalled_run`.
+
+    Called on the same recurring interval as `sweep_orphans` (see
+    `scheduler.py`), not startup-only, for the reason `sweep_orphans`'s own
+    docstring states: a process that dies at 03:00 must not wait for the next
+    deploy to be noticed.
+    """
+    candidates = runs_db.find_stalled_enrichment()
+    swept = 0
+    for row in candidates:
+        run_id, company_id = row["id"], row["company_id"]
+        # THE CLAIM IS ATOMIC (compare-and-set on `heartbeat_at`), same
+        # reasoning as `claim_for_confirmation`: two sweep ticks — or a sweep
+        # tick racing a worker that was alive after all and about to
+        # heartbeat — must not both re-run the same enrichment. The loser
+        # does no work.
+        claimed = runs_db.claim_stalled_enrichment(
+            run_id, company_id, expected_heartbeat_at=row.get("heartbeat_at"),
+        )
+        if claimed is None:
+            continue
+        swept += 1
+        _reenrich_stalled_run(run_id, company_id, row)
+    if swept:
+        logger.info("crucible: swept %d stalled enrichment(s)", swept)
+    return swept
 
 
 #: Stage 0's proposal, held between the resolve call and the confirm that
@@ -1567,6 +1853,16 @@ def _progress(run_id: int, company_id: str, **fields) -> None:
     and the approved plan, and replacing it would erase the plan the report has
     to reprint.
 
+    ALSO THE ENRICHMENT HEARTBEAT. Every stage this narrates during
+    enrichment (`judging_relevance`, `recommending`, `deep_recommending`) is a
+    point a dead process would never reach, so bumping `heartbeat_at` in the
+    SAME write a reader sees advance gives `sweep_stalled_enrichment` a
+    liveness signal for free — one write, two purposes, rather than a second
+    query per stage. Before this, nothing touched `heartbeat_at` between the
+    write just before `save_findings` and the one enrichment eventually
+    finishes with, so a run whose worker died anywhere in between looked, from
+    the row alone, identical to one still working.
+
     TOTAL, like its caller. A run that produced real findings must not fail
     because a progress write did — the narration is display, and display never
     outranks the answer.
@@ -1576,7 +1872,10 @@ def _progress(run_id: int, company_id: str, **fields) -> None:
         progress = dict(meta.get("progress") or {})
         progress.update(fields)
         meta["progress"] = progress
-        runs_db.update(run_id, company_id, prioritisation=meta)
+        runs_db.update(
+            run_id, company_id, prioritisation=meta,
+            heartbeat_at=datetime.now(timezone.utc).isoformat(),
+        )
     except Exception:  # noqa: BLE001 — see the docstring; display only.
         logger.warning("crucible: could not write progress for run %s", run_id)
 

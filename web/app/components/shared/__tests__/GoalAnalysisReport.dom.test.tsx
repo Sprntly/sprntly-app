@@ -430,6 +430,54 @@ describe("what the report admits it did not do", () => {
       screen.getByTestId("goal-definition-note").textContent ?? "",
     ).toMatch(/did not decide which findings appear below/i)
   })
+
+  it("says it FILTERED, not that it did not, once the relevance gate ran", () => {
+    // `relevance_gate_ran` is true only when `judge_relevance` completed
+    // without raising — the OLD sentence is false the moment that happened,
+    // whether or not anything ended up set aside.
+    const run = {
+      ...RUN,
+      prioritisation: { ...RUN.prioritisation, relevance_gate_ran: true },
+    }
+    render(<GoalAnalysisReport run={run} />)
+    const notSelected = screen.getByTestId("goal-not-selected").textContent ?? ""
+    expect(notSelected).not.toMatch(/not selected for your goal/i)
+    expect(notSelected).toMatch(/filtered for relevance to your goal/i)
+    const note = screen.getByTestId("goal-definition-note").textContent ?? ""
+    expect(note).not.toMatch(/did not decide which findings appear below/i)
+    expect(note).toMatch(/shaped which findings appear below/i)
+  })
+})
+
+describe("the relevance gate's own truncation is disclosed", () => {
+  it("says how many were evaluated when the gate stopped short", () => {
+    const run = {
+      ...RUN,
+      prioritisation: {
+        ...RUN.prioritisation,
+        relevance_gate_ran: true,
+        relevance_judged: { judged: 60, considered: 240 },
+      },
+    }
+    render(<GoalAnalysisReport run={run} />)
+    const said = screen.getByTestId("goal-relevance-coverage").textContent ?? ""
+    expect(said).toMatch(/evaluated 60/)
+    expect(said).toMatch(/180/)
+    expect(said).toMatch(/kept in the list above/i)
+  })
+
+  it("says nothing when the gate judged everything it found", () => {
+    const run = {
+      ...RUN,
+      prioritisation: {
+        ...RUN.prioritisation,
+        relevance_gate_ran: true,
+        relevance_judged: { judged: 4, considered: 4 },
+      },
+    }
+    render(<GoalAnalysisReport run={run} />)
+    expect(screen.queryByTestId("goal-relevance-coverage")).toBeNull()
+  })
 })
 
 describe("provenance", () => {
@@ -873,6 +921,24 @@ describe("the card leads with what to do", () => {
     expect(card).toContain("No account raises this again")
   })
 
+  it("labels a deep recommendation as the full write-up, not just 'Recommended.'", () => {
+    // The deep and flat passes used to share the identical "Recommended."
+    // header — the only visible discriminator was whether a "What to change"
+    // list happened to follow it.
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "Ship the deeper fix",
+        because: "three accounts named export in a renewal call",
+        changes: [
+          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
+        ],
+        open_questions: [], what_would_falsify: "", comparison: "",
+      },
+    }]) as never} />)
+    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    expect(card).toContain("Recommended — the full write-up.")
+  })
+
   it("renders the comparison only when it is present", () => {
     render(<GoalAnalysisReport run={withRec([{
       deep_recommendation: {
@@ -1181,6 +1247,28 @@ describe("the memo's cover strip and appendix table, in the panel", () => {
   it("shows no money cell when the reader gave no figure", () => {
     render(<GoalAnalysisReport run={withPlan({}, [A], [null]) as never} />)
     expect(screen.getByTestId("goal-strip").textContent).not.toContain("your estimate")
+  })
+
+  it("labels the recommendation stat 'any suggestion', counting flat OR deep", () => {
+    // This cell used to read "With a recommendation" and count ONLY
+    // `f.recommendation` — undercounting a finding whose only suggestion was
+    // the deep one, and reading as the same count the basis sentence names
+    // for the DEEP pass alone.
+    const withFlat = { ...A, recommendation: { action: "a", because: "b" } }
+    const withDeepOnly = {
+      ...B,
+      deep_recommendation: {
+        action: "c", because: "d", changes: [], open_questions: [],
+        what_would_falsify: "", comparison: "",
+      },
+    }
+    render(<GoalAnalysisReport run={
+      withPlan({}, [withFlat, withDeepOnly], [null, null]) as never
+    } />)
+    const t = screen.getByTestId("goal-strip").textContent ?? ""
+    expect(t).not.toContain("With a recommendation")
+    expect(t).toContain("Flagged with any suggestion")
+    expect(t).toMatch(/2\s*Flagged with any suggestion/)
   })
 
   it("renders the appendix as the memo's four columns", () => {
