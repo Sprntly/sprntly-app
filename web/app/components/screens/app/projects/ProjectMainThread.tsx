@@ -20,9 +20,11 @@ import styles from "./ProjectMainThread.module.css"
  *  unmounts cleanly on a project switch (keyed by the host below). */
 function ProjectChatSurface({
   projectId,
+  currentUserId,
   onOpenArtifact,
 }: {
   projectId: number | string
+  currentUserId?: string | null
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
 }) {
   // The adapter owns the attachment-viewer state (main keeps it on ChatScreen);
@@ -30,7 +32,7 @@ function ProjectChatSurface({
   // surface root — mirroring how ChatScreen mounts the same component beside its
   // own conversation view. Everything else is the exact `ConversationViewProps`.
   const { viewerAttachment, setViewerAttachment, ...viewProps } =
-    useProjectConversation(projectId, onOpenArtifact)
+    useProjectConversation(projectId, currentUserId, onOpenArtifact)
   return (
     <>
       <ConversationView {...viewProps} />
@@ -43,6 +45,10 @@ function ProjectChatSurface({
 
 export type ProjectMainThreadProps = {
   projectId: number | string
+  /** The caller's own uid — threaded into `useProjectConversation` so this
+   *  chat can subscribe to its own realtime topic (`project:{id}:user:{uid}`).
+   *  `null`/omitted (unresolved auth) leaves it realtime-blind, not crashed. */
+  currentUserId?: string | null
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void
   /** DEFERRED (dropped with the old chats): the cross-chat insight banner. Kept
    *  in the prop type so callers are unchanged; unused until the rebuilt chat
@@ -62,10 +68,15 @@ export type ProjectMainThreadProps = {
  *  together rather than reconciling in place — latent/defensive, no
  *  current nav path does a direct A→B without an unmount, but it makes the
  *  asserted flat-route premise hold rather than patching a live bug. */
-export function ProjectMainThread({ projectId, onOpenArtifact }: ProjectMainThreadProps) {
+export function ProjectMainThread({ projectId, currentUserId, onOpenArtifact }: ProjectMainThreadProps) {
   return (
     <div className={styles.host} data-testid="main-thread-individual" data-project-id={String(projectId)}>
-      <ProjectChatSurface key={String(projectId)} projectId={projectId} onOpenArtifact={onOpenArtifact} />
+      <ProjectChatSurface
+        key={String(projectId)}
+        projectId={projectId}
+        currentUserId={currentUserId}
+        onOpenArtifact={onOpenArtifact}
+      />
     </div>
   )
 }

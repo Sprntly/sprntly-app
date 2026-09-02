@@ -446,6 +446,30 @@ def post_individual_turn(conversation_id: int, role: str, content: str) -> dict[
     return resp.data[0]
 
 
+def get_individual_conversation_owner(conversation_id: int) -> str | None:
+    """The `user_id` that OWNS an individual project chat — resolved from the
+    conversation row itself, never from the caller's own identity. Needed by
+    a cross-user writer (`post_individual_turn`, the agent's own async reply)
+    that has a `conversation_id` but not necessarily the OWNER's uid: the
+    acting caller and the conversation's owner are not guaranteed to be the
+    same person (a delegate/execute-task reply can land in a teammate's
+    individual chat). Returns None when the row is missing or not
+    `kind='individual'` — callers treat that as "nothing to publish to"
+    rather than guessing a topic."""
+    rows = (
+        require_client()
+        .table("conversations")
+        .select("user_id, kind")
+        .eq("id", conversation_id)
+        .eq("kind", "individual")
+        .limit(1)
+        .execute()
+        .data
+        or []
+    )
+    return rows[0]["user_id"] if rows else None
+
+
 def list_individual_turns(
     conversation_id: int, user_id: str, since: int | None = None
 ) -> list[dict[str, Any]]:
