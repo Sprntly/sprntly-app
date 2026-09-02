@@ -2087,6 +2087,34 @@ def _defers_to_ticket_action(plan: "Optional[AskPlan]") -> bool:
     return bool(plan is not None and plan.action in _TICKET_ACTION_IDS)
 
 
+def _admits_on_delegate_plan(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    delegation — the mirror of `_defers_to_ticket_action`, but an ADMIT
+    disjunct on the sixth branch's own gate rather than a DEFER AND-clause.
+
+    Root cause this closes: `skill_router.is_project_tool_request` runs its
+    mention veto FIRST, and that veto's alternation includes "summarize" —
+    so a turn like "can you have David look into X and summarize the
+    differences" is vetoed by the crude regex even though the planner has
+    ALREADY classified it `delegate` (see `ask_planner._ACTIONS`'s
+    `"delegate"` entry; the raw `Plan` reaching this gate via
+    `ask_job_runner.run_ask_job` still carries `"delegate"` unrewritten —
+    the `delegate`->`answer` rewrite is only on the separate
+    client-dispatch-envelope path). Trust the planner's verdict: admit the
+    turn into the tool loop regardless of what the lexical gate/veto decide.
+    Safe to admit unconditionally — `handle_delegate_task` re-resolves the
+    assignee against the roster and declines gracefully for a non-member,
+    and `_defers_to_ticket_action` already subtracts the ticket-ownership
+    actions this gate must NOT claim, so there is no fabrication risk this
+    disjunct could introduce that the loop doesn't already handle.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan, e.g.
+    planner-decide off) leaves the sixth branch's admission exactly as the
+    gates above already decide it."""
+    return bool(plan is not None and plan.action == "delegate")
+
+
 def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
     """The specific subject this question is about, when the planner named one.
 
@@ -2664,6 +2692,13 @@ def answer(
                 scope.edit_prd_handler is not None
                 and is_project_edit_request(routing_text, history)
             )
+            # The planner has ALREADY classified this exact turn `delegate`
+            # ("can you have David look into X and summarize the
+            # differences") — trust that verdict even when `is_project_tool_
+            # request`'s own mention veto (its alternation includes
+            # "summarize") would otherwise block it from ever reaching here.
+            # See `_admits_on_delegate_plan`'s docstring.
+            or _admits_on_delegate_plan(plan)
         )
         # Yield to the connector interceptor path when the turn NAMES a live
         # source: `_skip_project_connectors` returns True only when NO source is
