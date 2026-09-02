@@ -70,10 +70,19 @@ const GATE_POLL_CEILING_MS = 30 * 60 * 1000
 //: listening before the results landed and wrote them to a row nobody read
 //: again. The analysis appeared; the suggestions never did.
 //:
-//: Bounded, because a backend that died mid-enrichment leaves the flag up
-//: forever and an unbounded poll would spin for the life of the tab. The server
-//: budgets 75s for the gate and 60s for the suggestions, so this is those plus
-//: room for a slow write.
+//: Bounded, because a backend that died mid-enrichment used to leave the flag
+//: up forever and an unbounded poll would spin for the life of the tab. That is
+//: no longer the failure mode this bounds: the server's `sweep_stalled_
+//: enrichment` now clears a genuinely dead run's flag on its own, on a
+//: 5-minute recurring sweep, after `STALLED_ENRICHMENT_AGE_MINUTES = 10` of no
+//: heartbeat — worst case ~15 minutes from the moment a worker actually dies.
+//: A 3-MINUTE CEILING GAVE UP BEFORE A REAL RUN EVEN FINISHED (measured:
+//: 159.5s on a 14,509-signal tenant, "barely" inside 3 minutes), let alone
+//: before the sweep could ever rescue a stranded one — an open tab watching a
+//: dead run would stop asking well before the honest terminal state existed to
+//: see. Set comfortably past the sweep's own worst case instead, so a tab left
+//: open long enough is still polling when the sweep finishes the job.
+const ENRICH_POLL_CEILING_MS = 20 * 60 * 1000
 
 //: Statuses where the run is waiting on a PERSON, not on work.
 const HUMAN_GATES = new Set(["awaiting_confirmation", "awaiting_approval"])
@@ -96,8 +105,6 @@ const POLL_UNREACHABLE = "__unreachable__"
  *  describing the membership it lost is the same defect as a report claiming
  *  a ranking it does not have: the next reader trusts the prose over the
  *  three words below it. */
-const ENRICH_POLL_CEILING_MS = 3 * 60 * 1000
-
 const TERMINAL = new Set([
   // A GATE IS NO LONGER TERMINAL FOR THIS PANEL. Both gates moved to the chat
   // thread, so the click that releases them happens somewhere this component
@@ -501,10 +508,25 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   // here that still generating." Read from `run` (not the poll-cadence ref)
   // so it re-renders the moment a fresh poll clears it.
   const stillGenerating = Boolean(run.prioritisation?.enrichment_pending)
+  // An HONEST STAGE, when the run has published one, rather than a
+  // single static sentence for the whole ~2-3 minutes enrichment can take.
+  // `progress.enrichment_step` is written by `_run_enrichment` before each
+  // of the three model calls (`routes/crucible.py`) — the same write that
+  // refreshes the row's liveness signal for the stalled-enrichment sweep,
+  // so a reader who
+  // watches this advance is watching the same clock the server uses to tell
+  // a live run from a dead one.
+  const enrichmentStep = run.prioritisation?.progress?.enrichment_step
+  const enrichmentSub =
+    enrichmentStep === "recommending"
+      ? "The findings are ready; a suggestion for each of the top ones is still generating."
+      : enrichmentStep === "deep_recommending"
+        ? "The findings are ready; the full recommendation for the top of the ranking is still generating."
+        : "The findings are ready; checking which of them bear on your goal — a deeper recommendation is still generating."
   const generatingBanner = stillGenerating ? (
     <GeneratingBanner
       title="Still working on this analysis"
-      sub="The findings are ready; a deeper recommendation for the top of the ranking is still generating."
+      sub={enrichmentSub}
       testId="goal-recommendations-generating"
     />
   ) : null

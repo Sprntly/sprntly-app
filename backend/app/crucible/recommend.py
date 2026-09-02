@@ -1030,4 +1030,33 @@ def build_deep_recommendations(
         )
         kept[first.id] = replace(kept[first.id], comparison=comparison)
 
+    # THE BASIS SENTENCE MUST SAY WHAT SURVIVED, NOT ONLY WHAT WAS PROMISED.
+    # `count_info.basis` was written by `resolve_recommendation_count` BEFORE
+    # this call, from the goal's own ask alone — it has no way to know that
+    # `_deep_acceptable`'s citation gate (a documented, deliberate check, not a
+    # bug) is about to drop some of `top`. Left as-is, a report can promise
+    # "the top 2 get a full recommendation" over one write-up or zero, which
+    # reads as an error when it is really two true, unconnected sentences: how
+    # many the goal asked for, and how many the evidence supported. Corrected
+    # HERE, once, so both this module's own `resolve_recommendation_count` and
+    # the report renderer never disagree about which count they printed.
+    if len(kept) < n:
+        if not kept:
+            gate_note = (
+                f" None of the {n} met the citation bar for a full "
+                f"recommendation, so none are shown below — the flat "
+                f"recommendation above still stands for each."
+            )
+        elif len(kept) == 1:
+            gate_note = (
+                f" Only 1 of the {n} met the citation bar for a full "
+                f"recommendation and is shown below."
+            )
+        else:
+            gate_note = (
+                f" Only {len(kept)} of the {n} met the citation bar for a "
+                f"full recommendation and are shown below."
+            )
+        count_info = replace(count_info, basis=count_info.basis + gate_note)
+
     return DeepRecommendationResult(by_id=kept, count=count_info)

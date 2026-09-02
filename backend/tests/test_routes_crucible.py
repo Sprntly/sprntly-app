@@ -394,6 +394,174 @@ def test_the_sweep_leaves_a_live_run_alone(ctx):
     assert runs_db.sweep_orphans() == 0
 
 
+def test_find_stalled_enrichment_sees_a_ready_run_stuck_pending(ctx):
+    """`sweep_orphans`'s own predicate (resolving_goal/planning/running)
+    cannot see this run — it is already `ready`, findings published, only the
+    enrichment flag left up by a worker that died. `find_stalled_enrichment`
+    is the sweep that CAN see it."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    stalled = runs_db.find_stalled_enrichment()
+    assert [r["id"] for r in stalled] == [run_id]
+
+
+def test_find_stalled_enrichment_ignores_a_recent_heartbeat(ctx):
+    """A run whose worker is genuinely still working (recent heartbeat) must
+    not be swept out from under it — that is the race `claim_stalled_
+    enrichment`'s compare-and-set exists to prevent, but a fresh heartbeat
+    should mean this sweep never even tries."""
+    from datetime import datetime, timezone
+
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at=datetime.now(timezone.utc).isoformat(),
+    )
+    assert runs_db.find_stalled_enrichment() == []
+
+
+def test_find_stalled_enrichment_ignores_a_run_whose_enrichment_finished(ctx):
+    """`enrichment_pending: False` (or absent) means the run is genuinely
+    done, not stalled — even with a stale heartbeat (an old, finished run)."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": False},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    assert runs_db.find_stalled_enrichment() == []
+
+
+def test_claim_stalled_enrichment_is_a_compare_and_set(ctx):
+    """THE CLAIM IS ATOMIC. Two sweep ticks (or a sweep tick racing a worker
+    that was alive after all) reading the SAME stale `heartbeat_at` must not
+    both win — the second compare-and-set touches zero rows."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    row = runs_db.get(run_id, ctx.company_id)
+    first = runs_db.claim_stalled_enrichment(
+        run_id, ctx.company_id, expected_heartbeat_at=row["heartbeat_at"],
+    )
+    assert first is not None
+    # The SAME stale value again — the row has already moved on, so this
+    # compare-and-set must lose.
+    second = runs_db.claim_stalled_enrichment(
+        run_id, ctx.company_id, expected_heartbeat_at=row["heartbeat_at"],
+    )
+    assert second is None
+
+
+def test_sweep_stalled_enrichment_clears_the_flag_without_ever_failing_the_run(ctx):
+    """A run whose process died mid-enrichment reaches a terminal,
+    honest state without human intervention — and its findings stay intact.
+    Never `runs_db.fail()`: that would hide a perfectly good, already-
+    published analysis behind an error screen."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _start(ctx).json()["id"]
+    require_client().table("crucible_findings").insert({
+        "run_id": run_id, "company_id": ctx.company_id,
+        "statement": "Renewals stall on the parts flow",
+        "claim_ids": ["c1"], "adjudication": "corroborated",
+        "impact_value": 4, "currency": "accounts", "confidence_band": "medium",
+        "tier": "deep",
+    }).execute()
+    runs_db.update(
+        run_id, ctx.company_id, status="ready", goal_text="raise renewals",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+
+    swept = sweep_stalled_enrichment()
+    assert swept == 1
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready"          # NEVER failed
+    assert row["prioritisation"]["enrichment_pending"] is False
+    assert row["prioritisation"]["enrichment_outcome"] in (
+        "completed_by_sweep", "gave_up_after_sweep",
+    )
+    # The finding saved before enrichment ever started is untouched.
+    assert len(row["findings"]) == 1
+    assert row["findings"][0]["statement"] == "Renewals stall on the parts flow"
+
+    # A second tick must not re-process the same, now-current, run.
+    assert sweep_stalled_enrichment() == 0
+
+
+def test_document_creation_is_refused_while_enrichment_is_pending(ctx):
+    """`POST /{run_id}/document` is idempotent FOREVER — a document made
+    while `enrichment_pending` is true would permanently lack the
+    recommendations and the appendix, certifying itself as complete with no
+    way back. Refused with a 409 instead."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+    )
+    resp = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert resp.status_code == 409
+
+    runs_db.update(
+        run_id, ctx.company_id,
+        prioritisation={"enrichment_pending": False},
+    )
+    resp = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert resp.status_code == 200
+
+
+def test_load_findings_pages_past_the_row_cap(ctx, monkeypatch):
+    """The hardening note: `load_findings` used to carry no `.range` at all,
+    so Supabase's default row cap would silently truncate a large run — a
+    known run hit 831 findings, 83% of the way there. Proven here by shrinking
+    the page size rather than inserting a thousand real rows: if the paging
+    loop is missing, this run's own findings get cut off at the fake page
+    size instead of returning all of them."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    monkeypatch.setattr(runs_db, "_FINDINGS_PAGE", 2)
+
+    run_id = _start(ctx).json()["id"]
+    client = require_client()
+    for i in range(5):
+        client.table("crucible_findings").insert({
+            "run_id": run_id, "company_id": ctx.company_id,
+            "statement": f"finding {i}", "claim_ids": [], "tier": "shallow",
+        }).execute()
+        client.table("crucible_ledger").insert({
+            "run_id": run_id, "company_id": ctx.company_id,
+            "label": f"rejected {i}", "reason": "anecdote", "claim_ids": [],
+        }).execute()
+
+    findings, ledger = runs_db.load_findings(run_id, ctx.company_id)
+    assert len(findings) == 5
+    assert len(ledger) == 5
+    # INSERTION ORDER PRESERVED across pages.
+    assert [f["statement"] for f in findings] == [f"finding {i}" for i in range(5)]
+
+
 def test_an_unlocked_definition_is_refused_by_the_db_layer(ctx):
     """Stated where the caller can see it, so a mistake is a readable error
     rather than a Postgres constraint violation at 3am."""
@@ -2079,13 +2247,25 @@ def test_the_report_is_published_before_any_model_is_asked_anything():
 
     Asserted on the SOURCE ORDER, because that is the property: findings saved
     and the run marked ready before either enrichment is reached.
+
+    `judge_relevance`/`build_recommendations` moved out of `execute_run`'s own
+    body into `_run_enrichment` (SHARED with the stalled-enrichment sweep's re-run, so the same
+    decision is never reimplemented twice) — so the check now reads BOTH
+    functions' source, concatenated in the order they actually run: everything
+    `execute_run` does up to the point it calls `_run_enrichment`, THEN
+    everything inside `_run_enrichment` itself, which is exactly the order
+    those statements execute in.
     """
     import ast
     import inspect
 
     from app.routes import crucible as routes
 
-    tree = ast.parse(inspect.cleandoc(inspect.getsource(routes.execute_run)))
+    combined_src = (
+        inspect.cleandoc(inspect.getsource(routes.execute_run)) + "\n"
+        + inspect.cleandoc(inspect.getsource(routes._run_enrichment))
+    )
+    tree = ast.parse(combined_src)
     marks: list[str] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -2129,6 +2309,13 @@ def test_the_run_announces_that_enrichment_is_still_coming():
     Asserted on source order: the flag must go UP before `ready`, so there is no
     window where a panel can see a ready run without knowing more is coming, and
     DOWN in the write that publishes the results rather than in one of its own.
+
+    `up`/`ready` are still `execute_run`'s own statements. `down` and the merge
+    of `_run_enrichment`'s results (`meta.update(enrichment_meta)`) moved into
+    a tight block at the end of `execute_run`'s tail — the enriched data is
+    read back from `_run_enrichment`'s RETURN VALUE now, not assigned to
+    `meta["set_aside_by_rank"]` directly inside `execute_run`, so `results` is
+    redefined as that merge line rather than a no-longer-existing assignment.
     """
     import ast
     import inspect
@@ -2147,21 +2334,27 @@ def test_the_run_announces_that_enrichment_is_still_coming():
                 up = node.lineno
             elif "enrichment_pending'] = False" in flat:
                 down = node.lineno
-            elif "set_aside_by_rank'] =" in flat:
-                results = node.lineno
         if isinstance(node, ast.Call):
             # `ast.unparse` normalises quotes, so match on the normalised form
             # rather than on how the source happens to be written.
-            if "status='ready'" in ast.unparse(node).replace('"', "'"):
+            unparsed = ast.unparse(node).replace('"', "'")
+            if "status='ready'" in unparsed:
                 ready = node.lineno
+            elif unparsed == "meta.update(enrichment_meta)":
+                results = node.lineno
 
     assert up and down and ready and results, (up, down, ready, results)
     assert up < ready, "the flag must be raised before the run is marked ready"
     assert down > ready, "the flag comes down after the enrichment, not before"
-    # Cleared in the same write that publishes the verdicts: clearing it
-    # separately leaves a window where the panel stopped and the results are
-    # not there yet.
-    assert abs(down - results) <= 3, (
-        f"the flag is cleared {abs(down - results)} lines from the results; "
-        "it must be the same write"
+    # The enriched results are merged in, THEN the flag comes down, THEN (a
+    # line or two later) the single `runs_db.update` publishes both together.
+    # Cleared in a separate write would leave a window where the panel stopped
+    # polling and the verdicts are not there yet.
+    assert results < down, (
+        "the enrichment results must be merged into `meta` BEFORE the "
+        "pending flag comes down"
+    )
+    assert down - results <= 3, (
+        f"the flag is cleared {down - results} lines after the results are "
+        "merged in; it must be the same write, not a separate one"
     )
