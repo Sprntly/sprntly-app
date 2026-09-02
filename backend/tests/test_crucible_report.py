@@ -1365,6 +1365,18 @@ def test_the_report_states_why_this_framework_was_chosen():
     assert "a numeric source is connected" in body
 
 
+def test_the_heading_shows_the_readers_word_not_the_stored_lowercase_value():
+    """`select_framework` always stores the lowercase comparison value
+    ("rice"/"moscow") on a real run — the heading must never leak that
+    straight through. Real fixture: a real run's `plan["framework"]` is
+    lowercase, unlike the "RICE" fixtures used elsewhere in this file."""
+    body = _rice_html(render_report_html(
+        _rice_run(framework="rice"), [_finding(claim_types=["constraint"])],
+    ))
+    assert "How this was ranked (RICE)" in body
+    assert "How this was ranked (rice)" not in body
+
+
 # ─── MoSCoW: the ranking for a corpus RICE cannot size ──────────────────────
 
 
@@ -1388,7 +1400,11 @@ def test_moscow_renders_when_that_is_the_chosen_framework():
                          surfaced_by=["doc-a", "doc-b"])]
     body = _moscow_html(render_report_html(_moscow_run(), findings))
     assert "MUST" in body
-    assert "How this was ranked (moscow)" in body
+    # THE HEADING IS SAID, NOT THE STORED ENUM. `plan["framework"]` is the
+    # storage/comparison value ("moscow"); the heading must show the reader's
+    # word for it ("MoSCoW"), never the raw lowercase value.
+    assert "How this was ranked (MoSCoW)" in body
+    assert "How this was ranked (moscow)" not in body
 
 
 def test_moscow_never_renders_a_score_it_cannot_support():

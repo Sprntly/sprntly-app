@@ -185,13 +185,26 @@ describe("the plan reads as an approach, not a form", () => {
     // plan that picked MoSCoW because nothing carries a number must not then
     // describe Reach/Impact/Effort, which is exactly the arithmetic MoSCoW
     // was chosen to avoid promising.
+    // `framework` here is lowercase — the real stored/comparison value a run
+    // actually sends — so this also locks in the display casing: the step's
+    // own sentence must say "MoSCoW", never the raw stored value.
     const steps = planNarrative({ ...PLAN, framework: "moscow" } as never, new Set())
-    const rank = steps.find((s) => s.text.includes("moscow"))!
+    const rank = steps.find((s) => s.text.includes("MoSCoW"))!
     expect(rank).toBeTruthy()
+    expect(rank.text).not.toContain("moscow")
     const terms = (rank.items ?? []).join(" ")
     expect(terms).toMatch(/MUST/)
     expect(terms).toMatch(/SHOULD|COULD/)
     expect(terms).not.toMatch(/Reach —|Impact —|Effort —/)
+  })
+
+  it("says RICE in the step's sentence even when the stored value is lowercase", () => {
+    // Mirrors the MoSCoW case above, for the other direction: a real run
+    // stores "rice", never pre-cased text.
+    const steps = planNarrative({ ...PLAN, framework: "rice" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect(rank).toBeTruthy()
+    expect(rank.text).not.toContain("rice:")
   })
 
   it("states why this framework was chosen, alongside its name", () => {

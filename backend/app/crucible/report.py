@@ -340,11 +340,18 @@ def _framework_section(findings: list[dict], plan: dict) -> str:
     "the reason it was chosen appear[s] in the plan and in the final
     report"). Only the MoSCoW branch is new.
     """
+    from app.crucible.framework import display_name
+
     framework = str(plan.get("framework") or "")
     reason = str(plan.get("framework_reason") or "")
+    # THE HEADING IS SAID, NOT THE ENUM. `framework` on the stored plan is the
+    # storage/comparison value ("rice", "moscow") — display_name() is what a
+    # reader is shown ("RICE", "MoSCoW"). Passed down already-converted so
+    # neither section function has to remember to do it.
+    label = display_name(framework) if framework else framework
     if framework.strip().lower() == "moscow":
-        return _moscow_section(findings, framework, reason)
-    return _rice_section(findings, framework, reason)
+        return _moscow_section(findings, label, reason)
+    return _rice_section(findings, label, reason)
 
 
 def _rice_section(

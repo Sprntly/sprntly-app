@@ -1,3 +1,4 @@
+import { frameworkDisplayName } from "./goalFrameworkDisplay"
 import type { GoalRunPlan } from "./api"
 
 /** The plan, said as a person would say it.
@@ -118,7 +119,13 @@ export function planNarrative(
         ]
     const reason = (plan.framework_reason || "").trim()
     steps.push({
-      text: `Rank what survives with ${framework}:`,
+      // THE READER'S WORD, NOT THE STORED VALUE. `plan.framework` is the
+      // storage/comparison value ("rice", "moscow") — a real run never sends
+      // pre-cased text, so interpolating it directly here printed "moscow"
+      // in the middle of a sentence. `frameworkDisplayName` is the frontend
+      // mirror of `app.crucible.framework.display_name`; keep the two in
+      // step if either changes.
+      text: `Rank what survives with ${frameworkDisplayName(framework)}:`,
       items: reason ? [...items, reason] : items,
     })
   }

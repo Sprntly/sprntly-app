@@ -972,6 +972,21 @@ describe("the RICE table in the panel", () => {
     render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
     expect(screen.queryByTestId("goal-rice")).toBeNull()
   })
+
+  it("says RICE in the heading even when the stored value is lowercase", () => {
+    // A real run's `plan["framework"]` is always the lowercase comparison
+    // value ("rice") — only these fixtures use the pre-cased "RICE".
+    const run = {
+      ...RUN, findings: [F(1, "blocked", 5, ["constraint"])],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), framework: "rice" },
+      },
+    }
+    render(<GoalAnalysisReport run={run as never} />)
+    const heading = screen.getByTestId("goal-rice").querySelector("h2")?.textContent ?? ""
+    expect(heading).toContain("RICE")
+  })
 })
 
 describe("the MoSCoW table in the panel", () => {
@@ -997,6 +1012,17 @@ describe("the MoSCoW table in the panel", () => {
     ]) as never} />)
     expect(screen.getByTestId("goal-moscow").textContent).toContain("MUST")
     expect(screen.queryByTestId("goal-rice")).toBeNull()
+  })
+
+  it("says the reader's word for the framework in the heading, not the stored lowercase value", () => {
+    // `framework` on the stored plan is the storage/comparison value
+    // ("moscow"); the heading must show "MoSCoW", never the raw value.
+    render(<GoalAnalysisReport run={withMoscow([
+      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
+    ]) as never} />)
+    const heading = screen.getByTestId("goal-moscow").querySelector("h2")?.textContent ?? ""
+    expect(heading).toContain("MoSCoW")
+    expect(heading).not.toContain("moscow")
   })
 
   it("flags a single-document blocker as thin rather than a full MUST", () => {

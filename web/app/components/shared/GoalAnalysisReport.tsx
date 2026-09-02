@@ -42,6 +42,7 @@
  */
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
 import { MAX_MOSCOW_ROWS, moscowFor } from "../../lib/goalMoscow"
+import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
@@ -240,6 +241,11 @@ export function GoalAnalysisReport({
   const framework = (run.prioritisation?.plan?.framework || "").trim()
   const frameworkReason = (run.prioritisation?.plan?.framework_reason || "").trim()
   const isMoscowFramework = framework.toLowerCase() === "moscow"
+  // THE HEADING IS SAID, NOT THE STORED ENUM. `framework` above is the
+  // storage/comparison value ("rice", "moscow"); this is what a reader is
+  // shown ("RICE", "MoSCoW"). `framework` itself stays raw for the
+  // comparisons above and below — only the two headings render this.
+  const frameworkLabel = frameworkDisplayName(framework)
   const accountValue = Number(run.prioritisation?.plan?.account_value ?? 0) || 0
   const asideRaw = run.prioritisation?.set_aside_by_rank
   const findingsExtra = run.prioritisation?.findings_extra_by_rank
@@ -527,7 +533,7 @@ export function GoalAnalysisReport({
           step mutating the ranking (I10). */}
       {framework && findings.length && !isMoscowFramework ? (
         <section className="ga-doc-section" data-testid="goal-rice">
-          <h2 className="ga-doc-h2">How this was ranked ({framework})</h2>
+          <h2 className="ga-doc-h2">How this was ranked ({frameworkLabel})</h2>
           {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
           <ul className="ga-doc-note">
             <li><strong>Reach</strong> — how many of your accounts the theme
@@ -592,7 +598,7 @@ export function GoalAnalysisReport({
           `_rank` already froze. */}
       {framework && findings.length && isMoscowFramework ? (
         <section className="ga-doc-section" data-testid="goal-moscow">
-          <h2 className="ga-doc-h2">How this was ranked ({framework})</h2>
+          <h2 className="ga-doc-h2">How this was ranked ({frameworkLabel})</h2>
           {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
           <ul className="ga-doc-note">
             <li><strong>MUST</strong> — a stated blocker: something is
