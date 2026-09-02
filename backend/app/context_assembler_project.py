@@ -165,15 +165,50 @@ class ProjectContextAssembler:
         # ask's own conversation. `None` when the ask carries no conversation
         # (nothing to post into), which degrades `execute_task` to no progress
         # posts rather than erroring.
+        #
+        # Realtime fan-out (best-effort, AD-P22): `post_individual_turn` is
+        # CROSS-USER-capable (a delegate/execute-task reply can land in a
+        # teammate's own individual chat, not necessarily `req.user_id`'s), so
+        # the per-user topic's uid is resolved from the WRITTEN conversation
+        # itself (`get_individual_conversation_owner`), never `req.user_id` —
+        # mirrors `project_delegation._publish_brief_delivered`'s same-reasoning
+        # owner resolution. A publish-prep failure never masks the already-
+        # written turn.
         post_turn = None
         if req.conversation_id is not None:
-            from app.db.conversations import post_individual_turn
-
-            post_turn = (
-                lambda content: post_individual_turn(
-                    req.conversation_id, "assistant", content
-                )
+            from app.db.conversations import (
+                get_individual_conversation_owner,
+                post_individual_turn,
             )
+            from app.realtime import publish_broadcast
+
+            def _post_turn(
+                content: str,
+                _conversation_id: int = req.conversation_id,
+                _project_id: int = project_id,
+            ) -> dict:
+                turn = post_individual_turn(_conversation_id, "assistant", content)
+                try:
+                    owner_uid = get_individual_conversation_owner(_conversation_id)
+                    if owner_uid is not None:
+                        publish_broadcast(
+                            f"project:{_project_id}:user:{owner_uid}",
+                            "turn.created",
+                            {
+                                k: turn[k]
+                                for k in ("id", "role", "content", "created_at")
+                                if k in turn
+                            },
+                        )
+                except Exception:  # noqa: BLE001 — best-effort, AD-P22
+                    logger.warning(
+                        "realtime_publish_prep_failed topic=project:%s:user:? "
+                        "event=turn.created conversation_id=%s",
+                        _project_id, _conversation_id, exc_info=True,
+                    )
+                return turn
+
+            post_turn = _post_turn
 
         return SurfaceScope(
             surface=surface,

@@ -240,7 +240,10 @@ export function ProjectDetailView({
   onOpenSettings,
   onOpenInvite,
   insightNote,
-  currentUserId: _currentUserId,
+  // No longer unused-by-design: also threaded into `ProjectMainThread` below
+  // (realtime per-user topic), alongside its existing member-removal-gating
+  // use (still unimplemented in this View — see the prop's own docstring).
+  currentUserId,
   onRemoveMember: _onRemoveMember,
   refetchArtifacts,
   artifactsDrawerOpen,
@@ -368,6 +371,7 @@ export function ProjectDetailView({
               // asserted flat-route premise hold rather than patching a live bug.
               key={project.id}
               projectId={project.id}
+              currentUserId={currentUserId}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}

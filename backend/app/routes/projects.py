@@ -680,6 +680,33 @@ def add_project_artifact(
     return ref
 
 
+# The exact `conversation_turns` read-DTO key set published on a fresh
+# individual-chat turn — mirrors `project_delegation._BRIEF_TURN_DTO_KEYS`
+# (AD-P21 no-schema-coupling): a hard whitelist so an internal column can
+# never ride along on the wire even if a future one is added to the table.
+_TURN_CREATED_DTO_KEYS = ("id", "role", "content", "created_at")
+
+
+def _publish_turn_created(project_id: int, owner_user_id: str, turn: dict) -> None:
+    """Best-effort publish-on-write (AD-P22) for a freshly persisted
+    individual-chat turn — the PER-USER topic keyed on the conversation
+    OWNER's uid, never the group `project:{id}` channel (privacy invariant:
+    individual-chat content is never broadcast group-wide). `publish_broadcast`
+    itself never raises; this wrapper also swallows a DTO-shaping mistake so a
+    realtime hiccup can never break the write it follows."""
+    try:
+        publish_broadcast(
+            f"project:{project_id}:user:{owner_user_id}",
+            "turn.created",
+            {k: turn[k] for k in _TURN_CREATED_DTO_KEYS if k in turn},
+        )
+    except Exception:  # noqa: BLE001 — best-effort, AD-P22: never mask a successful write
+        logger.warning(
+            "realtime_publish_prep_failed topic=project:%s:user:%s event=turn.created",
+            project_id, owner_user_id,
+        )
+
+
 class ProjectChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
     # The PRD open in the artifact drawer beside this chat — the EXPLICIT
@@ -736,18 +763,20 @@ def project_chat_edit(
         client_message_id so a double-submit dedups per side. Best-effort —
         a persist failure never blocks the edit's already-computed result."""
         try:
-            conversations_db.post_owned_individual_user_turn(
+            user_turn = conversations_db.post_owned_individual_user_turn(
                 project_id=project_id,
                 user_id=ctx.user_id,
                 content=body.instruction,
                 client_message_id=resolved_client_message_id,
             )
-            conversations_db.post_owned_individual_assistant_turn(
+            assistant_turn = conversations_db.post_owned_individual_assistant_turn(
                 project_id=project_id,
                 user_id=ctx.user_id,
                 content=answer_text,
                 client_message_id=resolved_client_message_id,
             )
+            _publish_turn_created(project_id, ctx.user_id, user_turn)
+            _publish_turn_created(project_id, ctx.user_id, assistant_turn)
         except Exception:  # noqa: BLE001 — best-effort, AD-P7
             logger.warning(
                 "failed to persist individual-chat edit turns project_id=%s",
@@ -1048,6 +1077,8 @@ def persist_individual_turns_route(
         content=body.answer,
         client_message_id=body.client_message_id,
     )
+    _publish_turn_created(project_id, ctx.user_id, user_turn)
+    _publish_turn_created(project_id, ctx.user_id, assistant_turn)
     return {"user_turn_id": user_turn["id"], "assistant_turn_id": assistant_turn["id"]}
 
 
