@@ -40,12 +40,23 @@ logger = logging.getLogger(__name__)
 # The private ("My chat with Sprntly") individual thread's system-prompt
 # addendum — RELOCATED verbatim from the deleted `project_individual_agent.
 # _SYSTEM` (the standalone bounded-loop responder this collapse replaces).
-# Carried on `SurfaceScope.system_addendum` — read by BOTH the sixth ladder
-# branch (`qa_agent._try_scoped_tool_answer`, as the tool loop's system
-# prompt) AND, on the gate's decline path, folded into `history` ahead of
-# the composer (`qa_agent.answer`'s fall-through seam) — which is how
-# `PROJECT_TOOL_NUDGE` (appended below) reaches a plain-Q&A turn.
-_PRIVATE_SCOPE_SYSTEM = (
+#
+# Split in two (role vs. delegate-tool guidance) so the delegate_task-specific
+# text — including the verbatim handoff-confirmation template — can ONLY reach
+# a turn where `delegate_task` is an actually-callable tool. Folding that
+# template into a turn with no tool available turned it into a fabricated
+# handoff confirmation with no `project_delegations` row ever written (the
+# gate-decline path's confabulation defect): `_PRIVATE_SCOPE_SYSTEM` (role +
+# delegate guidance + nudge) is carried on `SurfaceScope.system_addendum`,
+# read ONLY by the sixth ladder branch's tool loop
+# (`qa_agent._try_scoped_tool_answer`, where `delegate_task` is real);
+# `_PRIVATE_SCOPE_COMPOSER_FOLD` (role + nudge, no delegate guidance) is
+# carried on `SurfaceScope.composer_fold_addendum`, read by the gate's decline
+# path (`qa_agent._fold_project_context`, folded into `history` ahead of the
+# tool-less composer) — which is how `PROJECT_TOOL_NUDGE` reaches a plain-Q&A
+# turn without also reaching for the confirmation template it has no tool to
+# back up.
+_PRIVATE_SCOPE_ROLE = (
     "You are Sprntly, the user's private project assistant in their one-on-one "
     "chat. Answer the user's question about THIS project directly and concisely. "
     "You have tools to read the project's shared memory, its artifact list, a "
@@ -60,19 +71,39 @@ _PRIVATE_SCOPE_SYSTEM = (
     "automatically so the change is undoable — it is NOT queued for approval and "
     "does not need a teammate to manually accept it before it takes effect. Never "
     "describe your role as merely advisory, or claim you cannot edit the PRD, or "
-    "say edits must be accepted before they apply. You also have a delegate_task "
-    "tool: when the user asks you to hand a specific task to a project teammate "
-    "(by name, @handle, or role — resolve them against the roster below), call "
-    "it. Do not call it for a plain question, an FYI, or a request aimed at you. "
-    "Once you call delegate_task, the handoff has happened — you are done. Do "
-    "NOT then do the task yourself, write the deliverable you just handed off, "
-    "or say the teammate has replied, finished, or done anything at all — they "
-    "have not. Confirm the handoff plainly (\"I've asked <name> to <task> — "
-    "I'll bring their answer back here once it's in.\") and stop there; never "
-    "end on a fabricated result. Everything you can read is "
+    "say edits must be accepted before they apply. Everything you can read is "
     "scoped to this one project; never assume data from another project or "
-    "company.\n\n" + PROJECT_TOOL_NUDGE
+    "company."
 )
+
+#: delegate_task-specific guidance, including the verbatim handoff-
+#: confirmation template — ONLY safe where `delegate_task` is genuinely
+#: callable this turn. NEVER fold this into `SurfaceScope.composer_fold_
+#: addendum` (see the module comment above).
+_PRIVATE_SCOPE_DELEGATE_GUIDANCE = (
+    "You also have a delegate_task tool: when the user asks you to hand a "
+    "specific task to a project teammate (by name, @handle, or role — "
+    "resolve them against the roster below), call it. Do not call it for a "
+    "plain question, an FYI, or a request aimed at you. Once you call "
+    "delegate_task, the handoff has happened — you are done. Do NOT then do "
+    "the task yourself, write the deliverable you just handed off, or say "
+    "the teammate has replied, finished, or done anything at all — they "
+    "have not. Confirm the handoff plainly (\"I've asked <name> to <task> — "
+    "I'll bring their answer back here once it's in.\") and stop there; "
+    "never end on a fabricated result."
+)
+
+#: Tool-loop system prompt (unchanged in substance from the pre-split text) —
+#: read ONLY by `SurfaceScope.system_addendum` (the sixth-branch tool loop).
+_PRIVATE_SCOPE_SYSTEM = (
+    _PRIVATE_SCOPE_ROLE + "\n\n" + _PRIVATE_SCOPE_DELEGATE_GUIDANCE
+    + "\n\n" + PROJECT_TOOL_NUDGE
+)
+
+#: Composer fall-through addendum — role + nudge only, deliberately WITHOUT
+#: `_PRIVATE_SCOPE_DELEGATE_GUIDANCE`. Read by `SurfaceScope.composer_fold_
+#: addendum` on the gate-decline path, where no `delegate_task` tool exists.
+_PRIVATE_SCOPE_COMPOSER_FOLD = _PRIVATE_SCOPE_ROLE + "\n\n" + PROJECT_TOOL_NUDGE
 
 
 def _private_roster_block(roster: list[dict]) -> str:

@@ -570,10 +570,20 @@ export function ProjectDetailScreen({
         /* best-effort — leave the last-known rows */
       })
   }, [projectId])
-  // The caller's OWN per-user channel carries BOTH `brief.delivered` (R1-05,
-  // the unread badge) and `delegation.event` (the ledger status change): the
-  // latter refetches the rail counts and bumps `ledgerVersion` so an open
-  // modal re-reads. Any other event is ignored — one subscription, one topic.
+  // The caller's OWN per-user channel carries THREE events. `delegation.event`
+  // (a derived STATUS change) and `brief.delivered` (a TURN posted into the
+  // caller's own individual chat — a fresh brief, or a lifecycle notice: a
+  // "✓ … finished" completion notice, a blocked/can't-do route-back, a
+  // scheduled check-in ping/escalation) both refetch the rail counts + rows
+  // and bump `ledgerVersion` so an open Task-ledger modal re-reads — the SAME
+  // treatment for both, because several of `brief.delivered`'s own senders
+  // (blocked/can't-do/ping/escalation) carry NO paired `delegation.event` at
+  // all (no derived status actually changed), so `brief.delivered` is the
+  // ONLY live signal this screen gets for them. There is no separate "unread
+  // badge" affordance left to patch (removed with the Group⇆Private toggle) —
+  // this refetch IS this screen's live-update surface for a newly delivered
+  // brief or notice; a richer per-turn indicator is a later pass. Any other
+  // event is ignored — one subscription, one topic.
   // "Added to a project" live landing: the SAME per-user channel also carries
   // `member.added` (both add paths — POST /members and POST /tag — publish it).
   // Bring the just-added user straight into the project's private chat (the
@@ -588,7 +598,7 @@ export function ProjectDetailScreen({
         landOnMemberAddedRef.current(payload)
         return
       }
-      if (event === "delegation.event") {
+      if (event === "delegation.event" || event === "brief.delivered") {
         refetchLedgerCounts()
         refetchLedgerRows()
         setLedgerVersion((v) => v + 1)

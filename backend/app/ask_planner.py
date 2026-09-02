@@ -204,7 +204,15 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     product's screen map (app/app_map.py), so a v13 row sends those to
 #     `answer` where a v12 row could reasonably have listed. Same menu, but a
 #     different question is being asked of it, so the two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v14"
+#   v15: the action menu gained `delegate` — hand a NEW task to a project
+#     teammate ("ask David to review the PRD", "assign David to review the
+#     evidence doc"). Reported failure: these phrasings matched
+#     `assign_tickets`'s verb instead and dead-ended at "This PRD has no
+#     tickets yet", so nothing was ever delivered. A v14 row could not name
+#     this action at all; widening on v4's rule — a v15 row answers a
+#     question no v14 row was asked ("is this a hand-off to a teammate, not a
+#     ticket-ownership change") — so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v15"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -264,6 +272,37 @@ _ACTIONS: frozenset[str] = frozenset({
     # is written. Its argument is `instruction` (the assignment request,
     # self-contained: who was named, which tickets were meant).
     "assign_tickets",
+    # Hand a NEW task/brief to a project teammate — "ask David to review the
+    # PRD", "tell Priya to figure out which requirements are important",
+    # "assign David to review the evidence doc and flag risks", "get Sam to
+    # draft an outline", "have Maya look at the export bug". Its own action
+    # rather than a shading of `assign_tickets`, and the split has nothing to
+    # do with the word "assign" — it is about what exists before the message:
+    # `assign_tickets` reassigns OWNERSHIP of a ticket that ALREADY EXISTS
+    # (its whole universe is the thread's generated tickets, `_NEEDS_PRD`-
+    # gated); this hands a teammate something to DO, with no ticket and no
+    # PRD required or implied. Reported failure this closes: "assign David to
+    # review the evidence doc" — a delegation with no ticket in sight —
+    # matched `assign_tickets`'s verb instead and dead-ended on "This PRD has
+    # no tickets yet" (`ticket_assign.py`), with nothing ever delivered to
+    # David.
+    #
+    # Set `instruction` to the hand-off, self-contained: who was named and
+    # what they are being asked to do, the same shape `assign_tickets`'s own
+    # argument takes.
+    #
+    # NOT A CLIENT DISPATCH, on purpose — mirrors `update_ticket`'s own entry
+    # in `_ACTIONS`. `chat_intent._plan_to_envelope` rewrites this straight to
+    # `answer` before the client ever sees it: the project chat's existing
+    # scoped tool loop (`skill_router.is_project_tool_request` →
+    # `delegate_task` → `project_delegation.handle_delegate_task`) already
+    # resolves the assignee against the roster, writes the brief and delivers
+    # it, once it actually SEES the message — and the ORIGINAL message
+    # reaching `/v1/ask` unparaphrased is exactly what that loop reads. This
+    # action exists so the decision is the PLANNER'S OWN, explicit and gated,
+    # never guessed by a text regex alone and never confused with the
+    # ticket-ownership action above it — not to open a second write path.
+    "delegate",
     "multi_agent",
     # Retrieval, not authoring: "open the billing PRD" names a document to SHOW.
     # It is a client intent (`chat_intent._CLIENT_INTENTS`), so a planner that
@@ -401,6 +440,10 @@ _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     # assign them to — same "an action whose ARGUMENT is missing is worse than
     # no action" rule as the other two.
     "assign_tickets",
+    # A hand-off with no instruction has nobody to hand a task to and no task
+    # to hand off — same rule again, and `delegate` is downgraded to `answer`
+    # rather than dispatched with nothing for the tool loop to act on.
+    "delegate",
 })
 #: `open_artifact` without a subject to look up is not an open request — the
 #: same "an action whose ARGUMENT is missing is worse than no action" rule the
@@ -513,8 +556,10 @@ _PLANNER_SCHEMA: dict = {
         "instruction": {
             "type": "string",
             "description": (
-                "edit_prd / update_ticket / assign_tickets only: the change to "
-                "apply, self-contained."
+                "edit_prd / update_ticket / assign_tickets / delegate only: "
+                "the change to apply (edit_prd/update_ticket), the assignment "
+                "request (assign_tickets), or the hand-off — who and what "
+                "(delegate) — self-contained."
             ),
         },
         # THE FORM, decided after the SUBJECT. Schema order is generation order,
@@ -888,6 +933,23 @@ or wants an answer.
   should get. The product resolves names against the workspace roster and asks
   per-ticket when the message names people but not which ticket each one gets
   — so an instruction that only names people is still complete.
+- delegate — hand a NEW task to a teammate, not a ticket: "ask David to
+  review the PRD", "tell David to figure out which requirements are
+  important", "assign David to review the evidence doc", "assign David to
+  review the evidence doc and flag risks", "ask David to take a look at the
+  evidence doc", "get Sam to draft an outline", "have Maya look at the export
+  bug", "loop Priya in on the pricing work".
+  Set `instruction` to the hand-off, self-contained: who was named and what
+  they are being asked to do. NO TICKET, NO PRD, required or implied — the
+  product resolves the name against the project roster and delivers a brief
+  into their own chat; it never touches a ticket's ownership field.
+  delegate vs assign_tickets is NEVER about the word "assign" — it is about
+  what the message points AT. "Assign the login ticket to Dave" names an
+  EXISTING ticket (assign_tickets); "assign David to review the login flow"
+  names a PERSON and a NEW piece of work with no ticket in sight (delegate).
+  When in doubt because no ticket, key, or the word "ticket(s)" appears
+  anywhere in the request, it is a hand-off, not an ownership change —
+  choose delegate.
 - multi_agent — the full multi-agent analysis suite: a PRD, an evidence report
   and four analysis documents (technical design, QA test cases, risk analysis,
   traceability matrix), all cross-referenced. Set `task`.
@@ -955,11 +1017,9 @@ Rules that decide the close calls:
   CHANNEL — a name after "#", "my slack channel", "the team on slack" — never
   a person's name. "Send this to Fortune to prioritize", "give this to the
   designer", "hand this off to Priya", "loop Dave in on this" name a TEAMMATE,
-  not a channel — that is never share_to_slack, whatever the verb. It is
-  `answer`: naming a teammate as the target of "send/give/hand/assign ... to"
-  is a delegation, which the assistant itself resolves and hands off when it
-  answers — not a build action you choose here, and never a guess that a
-  person's name is a Slack channel.
+  not a channel — that is never share_to_slack, whatever the verb. Naming a
+  teammate as the target of "send/give/hand/assign ... to" is `delegate`, and
+  never a guess that a person's name is a Slack channel.
 
 - THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
   answer. "What are my PRDs / tickets / reports?" means the documents THEY
@@ -996,6 +1056,18 @@ Rules that decide the close calls:
   BELONGS to → assign_tickets — even when phrased as an update ("update the
   ticket to Dave", "put Priya on the login ticket"). ASKING about ownership is
   neither: "who is assigned to the auth ticket?" is `answer`.
+- EXISTING TICKET vs NEW TASK decides assign_tickets vs delegate, and this is
+  the pair most often confused because both can be phrased with "assign …
+  to". "Assign the auth ticket to Dave", "give these tickets to Priya",
+  "reassign SPR-3 to Maya" all name a ticket or tickets already in the thread
+  → assign_tickets. "Assign David to review the evidence doc", "ask David to
+  take a look at the export bug", "tell Priya to figure out which
+  requirements are important" name a PERSON and a piece of work with no
+  ticket anywhere in the sentence → delegate. A message naming BOTH a person
+  and an existing ticket by key or clear reference ("put the login ticket on
+  Dave's plate") is still assign_tickets — the ticket is the object being
+  moved. A message naming a person and a VERB PHRASE with no ticket in sight
+  is delegate, even when the verb is "assign".
 - ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
   auth?" is `answer`. This applies hardest to create_artifact, where the
   library is SHARED with the whole team: a document created from a question

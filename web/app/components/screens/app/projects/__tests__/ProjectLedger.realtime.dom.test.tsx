@@ -2,13 +2,16 @@
 //
 // Ledger liveness — the ledger surfaces (Task-ledger modal, rail counts, the
 // assignee's inline brief-turn affordance) going live on the caller's own
-// per-user `delegation.event` broadcast. `useRealtimeChannel` itself is
-// mocked (its subscribe/reconnect/degrade lifecycle is covered by
+// per-user channel. `useRealtimeChannel` itself is mocked (its
+// subscribe/reconnect/degrade lifecycle is covered by
 // useRealtimeChannel.dom.test.tsx) — this file asserts the CONSUMER wiring:
-// one per-user channel per surface (never the group channel), a
-// `delegation.event` refetching counts + re-reading the open modal + patching
-// the brief-turn status, the reconnect reconcile, the degraded fallback, and
-// non-breakage of `brief.delivered` + the send path.
+// one per-user channel per surface (never the group channel), BOTH
+// `delegation.event` AND `brief.delivered` refetching counts + re-reading the
+// open modal (the latter is the only live signal for a lifecycle notice with
+// no paired status change — a ping, a blocked/can't-do route-back, an
+// escalation), a `delegation.event` also patching the brief-turn status, the
+// reconnect reconcile, the degraded fallback, and non-breakage of the send
+// path.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -271,11 +274,26 @@ afterEach(() => cleanup())
 // exercised indirectly by the reconnect-reconcile and degradation tests
 // below, which don't depend on the rail card's own markup.
 describe("rail counts — live update (AC-5)", () => {
-  it("ignores unrelated events (brief.delivered does not refetch counts)", async () => {
+  it("brief.delivered ALSO refetches counts — it is the only live signal for a status-less notice", async () => {
+    // A ping, a blocked/can't-do route-back, and an escalation notice all
+    // post a turn via `brief.delivered` with NO paired `delegation.event`
+    // (no derived status actually changed) — so if this event were still
+    // ignored, those notices would never move the rail card / an open
+    // Task-ledger modal until the next poll tick or reconnect.
     await renderDetailReady()
     const callsAfterMount = ledgerCountsMock.mock.calls.length
     await act(async () => {
       perUserHandlers().onEvent("brief.delivered", { assignee_user_id: "u1" })
+      await Promise.resolve()
+    })
+    expect(ledgerCountsMock.mock.calls.length).toBe(callsAfterMount + 1)
+  })
+
+  it("ignores events outside the known set", async () => {
+    await renderDetailReady()
+    const callsAfterMount = ledgerCountsMock.mock.calls.length
+    await act(async () => {
+      perUserHandlers().onEvent("mention.received", { assignee_user_id: "u1" })
       await Promise.resolve()
     })
     expect(ledgerCountsMock.mock.calls.length).toBe(callsAfterMount)

@@ -46,6 +46,12 @@ from app.delegation_status_ingest import notify_requester_task_completed
 from app.llm import DEFAULT_MODEL, call_json
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
+# Reused, not reimplemented (AD-P21/AD-P22): the SAME best-effort publish
+# helper `project_delegation.handle_delegate_task` uses on the creation path
+# and `delegation_status_ingest._post_to_own_chat` now uses on the inbound
+# reply path — a ping/escalation DM is the same shape (one turn posted into
+# somebody's own individual project chat) as either. No new channel/event.
+from app.project_delegation import _publish_brief_delivered
 
 logger = logging.getLogger(__name__)
 
@@ -351,7 +357,12 @@ def _process_one(row: dict, *, now: datetime, tz_map: dict[str, str], summary: d
         prior_unanswered = _unanswered_dm_count(delegation_id, events)
 
         conv = conversations_db.create_individual_project_chat(project_id, assignee_user_id)
-        conversations_db.post_individual_turn(conv["id"], "assistant", dm_text)
+        turn = conversations_db.post_individual_turn(conv["id"], "assistant", dm_text)
+        # Check-in liveness (3a): mirrors the creation-time publish
+        # (`project_delegation._publish_brief_delivered`) so a scheduled
+        # check-in DM appears live in the assignee's chat instead of sitting
+        # there until their next reconcile/refetch.
+        _publish_brief_delivered(project_id, assignee_user_id, conv["id"], turn)
         sends_db.record_send(
             delegation_id=delegation_id,
             company_id=(projects_db.get_project(project_id) or {}).get("company_id"),
@@ -394,10 +405,13 @@ def _process_one(row: dict, *, now: datetime, tz_map: dict[str, str], summary: d
             latest_status=latest_status, cycles_since_status=cycles,
         ) and assigner_user_id:
             conv = conversations_db.create_individual_project_chat(project_id, assigner_user_id)
-            conversations_db.post_individual_turn(
+            turn = conversations_db.post_individual_turn(
                 conv["id"], "assistant",
                 f"No confirmed progress on: {task_summary}. Reassign or nudge harder?",
             )
+            # Check-in liveness (3a), same as the ping branch above — the
+            # escalation notice is the requester's own version of a check-in.
+            _publish_brief_delivered(project_id, assigner_user_id, conv["id"], turn)
             sends_db.record_send(
                 delegation_id=delegation_id,
                 company_id=(projects_db.get_project(project_id) or {}).get("company_id"),
