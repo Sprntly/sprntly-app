@@ -119,8 +119,10 @@ describe("ClarifyQuestionsCard", () => {
     expect(admins.getAttribute("aria-pressed")).toBe("false")
 
     // Back to nothing answered → submitting is a skip, not an empty answer set.
+    // It now confirms first (see the "nothing answered" describe).
     fireEvent.click(submitBtn())
     expect(onSubmit).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId("clarify-skip-yes"))
     expect(onSkip).toHaveBeenCalledTimes(1)
   })
 
@@ -140,9 +142,10 @@ describe("ClarifyQuestionsCard", () => {
     ])
   })
 
-  it("'Generate now' skips the batch outright", () => {
+  it("'Generate now' skips the batch, once confirmed", () => {
     const { onSubmit, onSkip } = renderCard()
     fireEvent.click(screen.getByTestId("clarify-skip"))
+    fireEvent.click(screen.getByTestId("clarify-skip-yes"))
     expect(onSkip).toHaveBeenCalledTimes(1)
     expect(onSubmit).not.toHaveBeenCalled()
   })
@@ -269,5 +272,82 @@ describe("ClarifyQuestionsCard — the settled record", () => {
     expect(within(cards[2] as HTMLElement).getByTestId("clarify-answer").textContent)
       .toBe("✓Everything")
     expect(within(cards[0] as HTMLElement).getByTestId("clarify-answer-skipped")).toBeTruthy()
+  })
+})
+
+describe("nothing answered", () => {
+  // THE BUG. A user asked for a PRD "based on the AIG call recording". The
+  // Fireflies transcript never arrived, the clarify gate asked for it, every
+  // question was skipped — and a PRD was written about a call nobody had read.
+  // Skipping everything read to the code exactly like answering everything.
+  //
+  // The card is the fallback surface for the QuestionPopup stepper (it renders
+  // when the popup is dismissed), so it applies the same rule: a batch that
+  // produced no answers asks before it generates.
+  const BLOCKING: ClarifyQuestion[] = [
+    { prompt: "Paste the Fireflies transcript for the AIG call.", options: [], blocking: true },
+  ]
+
+  it("asks before generating when Generate now is pressed", () => {
+    const onSkip = vi.fn()
+    render(<ClarifyQuestionsCard questions={QUESTIONS} onSubmit={vi.fn()} onSkip={onSkip} />)
+    fireEvent.click(screen.getByTestId("clarify-skip"))
+    expect(screen.getByTestId("clarify-skip-confirm")).toBeTruthy()
+    // The host has been told nothing — generation cannot have started.
+    expect(onSkip).not.toHaveBeenCalled()
+  })
+
+  it("asks when the submit button is pressed with an empty form", () => {
+    // The old path routed "nothing answered" straight to onSkip.
+    const onSkip = vi.fn()
+    const onSubmit = vi.fn()
+    render(<ClarifyQuestionsCard questions={QUESTIONS} onSubmit={onSubmit} onSkip={onSkip} />)
+    fireEvent.click(screen.getByTestId("clarify-submit"))
+    expect(screen.getByTestId("clarify-skip-confirm")).toBeTruthy()
+    expect(onSkip).not.toHaveBeenCalled()
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it("generates on yes", () => {
+    const onSkip = vi.fn()
+    render(<ClarifyQuestionsCard questions={QUESTIONS} onSubmit={vi.fn()} onSkip={onSkip} />)
+    fireEvent.click(screen.getByTestId("clarify-skip"))
+    fireEvent.click(screen.getByTestId("clarify-skip-yes"))
+    expect(onSkip).toHaveBeenCalledTimes(1)
+  })
+
+  it("returns to the questions on no", () => {
+    const onSkip = vi.fn()
+    render(<ClarifyQuestionsCard questions={QUESTIONS} onSubmit={vi.fn()} onSkip={onSkip} />)
+    fireEvent.click(screen.getByTestId("clarify-skip"))
+    fireEvent.click(screen.getByTestId("clarify-skip-no"))
+    expect(screen.queryByTestId("clarify-skip-confirm")).toBeNull()
+    expect(screen.getByTestId("clarify-skip")).toBeTruthy()
+    expect(onSkip).not.toHaveBeenCalled()
+  })
+
+  it("never asks when something WAS answered", () => {
+    const onSubmit = vi.fn()
+    render(<ClarifyQuestionsCard questions={QUESTIONS} onSubmit={onSubmit} onSkip={vi.fn()} />)
+    fireEvent.click(screen.getAllByTestId("clarify-choice")[0]!)
+    fireEvent.click(screen.getByTestId("clarify-submit"))
+    expect(screen.queryByTestId("clarify-skip-confirm")).toBeNull()
+    expect(onSubmit).toHaveBeenCalledTimes(1)
+  })
+
+  it("says the material never arrived when the question was blocking", () => {
+    // The generic wording ("you didn't answer any of the 3 questions") would be
+    // true but useless here: the point is that no answer COULD have been
+    // guessed, which is what makes generating a real choice rather than a
+    // formality.
+    render(<ClarifyQuestionsCard questions={BLOCKING} onSubmit={vi.fn()} onSkip={vi.fn()} />)
+    fireEvent.click(screen.getByTestId("clarify-skip"))
+    expect(screen.getByTestId("clarify-skip-confirm").textContent).toMatch(/never arrived/i)
+  })
+
+  it("states no fabricated assumption for a blocking question", () => {
+    render(<ClarifyQuestionsCard questions={BLOCKING} onSubmit={vi.fn()} onSkip={vi.fn()} />)
+    expect(screen.getByTestId("clarify-blocking-hint").textContent).toMatch(/can.t assume/i)
+    expect(screen.queryByText(/I'll assume: Cannot proceed/i)).toBeNull()
   })
 })

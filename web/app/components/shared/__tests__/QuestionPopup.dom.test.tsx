@@ -61,6 +61,8 @@ describe("QuestionPopup — batch mode", () => {
   })
 
   it("skips ride the record; skipping everything still completes", () => {
+    // No `skipAllPrompt` → no confirmation. The gate is opt-in, for batches
+    // whose skip CREATES something; see the "nothing answered" describe.
     const onComplete = vi.fn()
     render(<QuestionPopup questions={TWO} onComplete={onComplete} />)
     fireEvent.click(screen.getByTestId("question-popup-skip"))
@@ -314,5 +316,90 @@ describe("QuestionPopup — long option lists scroll", () => {
     list.scrollTop = 200
     fireEvent.scroll(list)
     expect(list.getAttribute("data-scroll-end")).toBe("1")
+  })
+})
+
+describe("QuestionPopup — nothing answered", () => {
+  const PROMPT = "You skipped all 2 questions. Generate the PRD anyway?"
+  // THE BUG. Five Skips read to the code exactly like five answers:
+  // `onComplete` fired either way and the host went ahead. A PRD was written
+  // about a call whose transcript had never been supplied — the questions
+  // asking for it were all skipped, and nothing distinguished that from a user
+  // who had answered them. Only this component can tell a skip from an answer,
+  // so it is the only place the difference can be acted on.
+  const TWO_Q = [
+    { prompt: "Who are the target users?", options: [{ label: "Admins" }] },
+    { prompt: "What is in scope?", options: [{ label: "Everything" }] },
+  ]
+
+  const skipAll = () => {
+    fireEvent.click(screen.getByTestId("question-popup-skip"))
+    fireEvent.click(screen.getByTestId("question-popup-skip"))
+  }
+
+  it("holds the batch back and asks instead of completing", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={TWO_Q} onComplete={onComplete} skipAllPrompt={PROMPT} />)
+    skipAll()
+    expect(screen.getByTestId("question-popup-skip-all-confirm")).toBeTruthy()
+    // The host has been told NOTHING. Generation cannot have started.
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
+  it("names the artifact when the host says what it is", () => {
+    render(
+      <QuestionPopup
+        questions={TWO_Q}
+        onComplete={vi.fn()}
+        skipAllPrompt="You skipped all 2 questions. Generate the PRD anyway?"
+      />,
+    )
+    skipAll()
+    expect(screen.getByText(/Generate the PRD anyway\?/)).toBeTruthy()
+  })
+
+  it("goes ahead on yes, handing over the full skipped record", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={TWO_Q} onComplete={onComplete} skipAllPrompt={PROMPT} />)
+    skipAll()
+    fireEvent.click(screen.getByTestId("question-popup-skip-all-yes"))
+    expect(onComplete).toHaveBeenCalledTimes(1)
+    expect(onComplete.mock.calls[0][0].map((a: { skipped: boolean }) => a.skipped)).toEqual([
+      true,
+      true,
+    ])
+  })
+
+  it("returns to a CLEAN first question on no", () => {
+    // Every settled entry is a skip, so leaving them would send the stepper
+    // straight back to the confirmation — making it the only reachable screen.
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={TWO_Q} onComplete={onComplete} skipAllPrompt={PROMPT} />)
+    skipAll()
+    fireEvent.click(screen.getByTestId("question-popup-skip-all-no"))
+    expect(screen.queryByTestId("question-popup-skip-all-confirm")).toBeNull()
+    expect(screen.getByTestId("question-popup-count").textContent).toBe("1/2")
+    expect(onComplete).not.toHaveBeenCalled()
+  })
+
+  it("lets the second pass through once something is answered", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={TWO_Q} onComplete={onComplete} skipAllPrompt={PROMPT} />)
+    skipAll()
+    fireEvent.click(screen.getByTestId("question-popup-skip-all-no"))
+    fireEvent.click(screen.getAllByTestId("question-popup-option")[0]!)
+    fireEvent.click(screen.getByTestId("question-popup-skip"))
+    // One real answer — no confirmation, straight through.
+    expect(screen.queryByTestId("question-popup-skip-all-confirm")).toBeNull()
+    expect(onComplete).toHaveBeenCalledTimes(1)
+  })
+
+  it("never asks when even one question was answered", () => {
+    const onComplete = vi.fn()
+    render(<QuestionPopup questions={TWO_Q} onComplete={onComplete} skipAllPrompt={PROMPT} />)
+    fireEvent.click(screen.getAllByTestId("question-popup-option")[0]!)
+    fireEvent.click(screen.getByTestId("question-popup-skip"))
+    expect(screen.queryByTestId("question-popup-skip-all-confirm")).toBeNull()
+    expect(onComplete).toHaveBeenCalledTimes(1)
   })
 })

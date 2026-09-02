@@ -111,6 +111,23 @@ export type QuestionPopupProps = {
    *  submit: nothing leaves the popup until `onComplete`, exactly as before
    *  (the owner's finish-everything-first directive holds). */
   onProgress?: (index: number, answer: PopupAnswer) => void
+  /** The question asked when EVERY question was skipped, before anything is
+   *  handed to the host.
+   *
+   *  Skipping the whole batch used to be indistinguishable from answering it:
+   *  `onComplete` fired either way and the host generated. A PRD was written
+   *  about a call whose transcript was never supplied, because five Skips read
+   *  to the code exactly like five answers. So a batch that produced nothing
+   *  now stops and asks whether to go ahead at all — which is the ONE thing
+   *  the popup can tell that no host can, since only it knows a skip from an
+   *  answer.
+   *
+   *  OPT-IN, and that is the point: the gate belongs to batches whose skip
+   *  CREATES something from nothing. Skipping every assign question assigns
+   *  nobody and skipping a share question posts nothing — both already fail
+   *  safe, and asking "go ahead anyway?" when the answer is "nothing happens"
+   *  is noise. Absent, the batch completes exactly as it always did. */
+  skipAllPrompt?: string
 }
 
 /** Next index without a settled answer, looking forward from `from` then
@@ -134,6 +151,7 @@ export function QuestionPopup({
   onDismiss,
   initialAnswers,
   onProgress,
+  skipAllPrompt,
 }: QuestionPopupProps) {
   // Seeded from the previous sitting's draft (lazy initializers — read once
   // per mount, exactly like fresh state). The start index is the first
@@ -166,6 +184,9 @@ export function QuestionPopup({
   // `onComplete` must fire exactly once even though settling state and firing
   // it happen across renders.
   const [completed, setCompleted] = useState(false)
+  // The whole batch, held back because nothing in it was answered. Non-null
+  // means the confirmation is on screen; the host has not been told anything.
+  const [skippedAll, setSkippedAll] = useState<PopupAnswer[] | null>(null)
   // The scrolling option list: the measured height of the first
   // MAX_VISIBLE_OPTIONS rows, and whether the user has scrolled to the last one
   // (the bottom fade lifts there).
@@ -223,12 +244,72 @@ export function QuestionPopup({
 
   if (!q || completed) return null
 
+  // Everything was skipped. The host has been told nothing yet and will only
+  // hear from us if the answer here is yes.
+  if (skippedAll) {
+    return (
+      <div
+        className="qpu"
+        data-testid="question-popup-skip-all-confirm"
+        role="dialog"
+        aria-label={skipAllPrompt}
+      >
+        <div className="qpu-head">
+          <span className="qpu-chip">Nothing answered</span>
+        </div>
+        <div className="qpu-prompt">{skipAllPrompt}</div>
+        <div className="qpu-options">
+          <button
+            type="button"
+            className="qpu-option"
+            data-testid="question-popup-skip-all-yes"
+            disabled={busy}
+            onClick={() => {
+              if (busy) return
+              setCompleted(true)
+              onComplete(skippedAll)
+            }}
+          >
+            Yes, go ahead
+          </button>
+          <button
+            type="button"
+            className="qpu-option"
+            data-testid="question-popup-skip-all-no"
+            disabled={busy}
+            onClick={() => {
+              if (busy) return
+              // Back to the top of a clean batch. Clearing `settled` matters:
+              // every entry in it is a skip, so leaving them in place would
+              // send the stepper straight past every question to `finish`
+              // again — the confirmation would be the only screen reachable.
+              setSkippedAll(null)
+              setSettled({})
+              setIndex(0)
+            }}
+          >
+            No, let me answer
+          </button>
+        </div>
+      </div>
+    )
+  }
+
   const record = settled[index]
 
   const finish = (all: Record<number, PopupAnswer>) => {
     const full = questions.map(
       (qq, i) => all[i] ?? { prompt: qq.prompt, answer: "", skipped: true },
     )
+    // Nothing was answered — ask before handing this to the host. Skipping
+    // every question is a plausible "I don't know, just do it", but it is
+    // equally a "I could not answer these", and the two want opposite
+    // outcomes. Only this component can tell a skip from an answer, so it is
+    // the only place the difference can be acted on.
+    if (skipAllPrompt && full.every((a) => a.skipped)) {
+      setSkippedAll(full)
+      return
+    }
     setCompleted(true)
     onComplete(full)
   }
