@@ -44,9 +44,17 @@ from app.db.delegation_events import (
     status_dto,
 )
 from app.db.delegation_followups import upsert_followup
+from app.db.profiles import emails_for_user_ids
 from app.db.project_delegations import record_delegation
-from app.db.projects import _match_keys, is_project_member, resolve_member
+from app.db.projects import (
+    _match_keys,
+    get_project,
+    is_project_member,
+    list_members,
+    resolve_member,
+)
 from app.delegation_cadence import MIN_INTERVAL
+from app.delegation_followup_email import send_assignment_email, send_completion_email
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
@@ -265,6 +273,107 @@ def _publish_mention_signal(
             "realtime_publish_prep_failed topic=project:%s:user:%s event=mention.received "
             "error_class=%s",
             project_id, target_user_id, type(exc).__name__,
+        )
+
+
+def _member_first_name(project_id: int, user_id: str | None) -> str:
+    """Best-effort first name off the project roster. Mirrors
+    `delegation_status_ingest._display_first_name`'s lookup shape exactly
+    but is kept as its own tiny copy here (not imported) so this module
+    never imports FROM `delegation_status_ingest` — that module already
+    imports FROM this one (`_publish_brief_delivered`/
+    `_publish_delegation_event`), and a reverse import would be a cycle."""
+    if not user_id:
+        return "Someone"
+    try:
+        roster = list_members(project_id)
+        member = next((m for m in roster if m.get("user_id") == user_id), None)
+        name = (member or {}).get("name")
+        return name.split()[0] if name else "Someone"
+    except Exception:  # noqa: BLE001 — best-effort
+        return "Someone"
+
+
+def _project_display_name(project_id: int) -> str:
+    """Project name for email copy — falls back to the literal "Sprntly"
+    (the locked fallback) whenever the row or its `name` is unavailable."""
+    try:
+        project = get_project(project_id)
+        name = (project or {}).get("name")
+        return name.strip() if name and name.strip() else "Sprntly"
+    except Exception:  # noqa: BLE001 — best-effort
+        return "Sprntly"
+
+
+def _notify_assignee_task_assigned_email(
+    project_id: int, assignee_user_id: str, assigner_name: str | None
+) -> None:
+    """Best-effort transactional email nudging the ASSIGNEE that a
+    task landed in their chat — fires once per delegation, right after the
+    brief is delivered + recorded. Own try/except: a send failure must
+    never roll back the already-committed delivery above it. NAME/project
+    only — never task_summary/task text (the raw task text never reaches
+    this function at all)."""
+    try:
+        to_email = emails_for_user_ids([assignee_user_id]).get(assignee_user_id)
+        if not to_email:
+            logger.info(
+                "send_assignment_email skipped: no email for assignee_user_id=%s",
+                assignee_user_id,
+            )
+            return
+        send_assignment_email(
+            to_email=to_email,
+            assigner_name=assigner_name or "A teammate",
+            project_id=project_id,
+            project_name=_project_display_name(project_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a delivered handoff
+        logger.warning(
+            "assignment_email_failed project_id=%s assignee_user_id=%s error_class=%s",
+            project_id, assignee_user_id, type(exc).__name__,
+        )
+
+
+def _notify_assigner_task_completed_email(
+    project_id: int, delegation_id: int, *, assignee_user_id: str
+) -> None:
+    """ONE DRY best-effort transactional email to the delegation's
+    ASSIGNER when the assignee's task completes — invoked from ALL THREE
+    completion paths (the inbound explicit-done classifier and the
+    outbound soft-done finalize, both via
+    `delegation_status_ingest.notify_requester_task_completed`; and
+    `handle_complete_task` below directly, since that path has no
+    in-app notice to piggyback on today).
+
+    Resolves the assigner off `load_delegation_for_authz(delegation_id)` —
+    never trusts a caller-supplied assigner id for this cross-user email
+    recipient. Entirely best-effort/never-raising: a failed or skipped
+    send must never affect the already-recorded completion. NAME/project
+    only — never task_summary/task text (the raw task text never reaches
+    this function at all)."""
+    try:
+        fact = load_delegation_for_authz(delegation_id)
+        assigner_user_id = (fact or {}).get("assigner_user_id")
+        if not assigner_user_id:
+            return
+        to_email = emails_for_user_ids([assigner_user_id]).get(assigner_user_id)
+        if not to_email:
+            logger.info(
+                "send_completion_email skipped: no email for assigner_user_id=%s",
+                assigner_user_id,
+            )
+            return
+        send_completion_email(
+            to_email=to_email,
+            assignee_name=_member_first_name(project_id, assignee_user_id),
+            project_id=project_id,
+            project_name=_project_display_name(project_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a recorded completion
+        logger.warning(
+            "completion_email_failed project_id=%s delegation_id=%s error_class=%s",
+            project_id, delegation_id, type(exc).__name__,
         )
 
 
@@ -611,6 +720,13 @@ def handle_delegate_task(
         # every other member. Entirely best-effort (AD-P22): see
         # `_publish_brief_delivered`.
         _publish_brief_delivered(project_id, assignee["user_id"], conv["id"], turn)
+        # Best-effort transactional email nudge to the ASSIGNEE — own
+        # try/except lives inside the helper; a send failure must never
+        # roll back the already-delivered+recorded handoff above.
+        assigner_name = next(
+            (m.get("name") for m in roster if m.get("user_id") == assigner_user_id), None
+        )
+        _notify_assignee_task_assigned_email(project_id, assignee["user_id"], assigner_name)
         # Ledger-create liveness: mirror the emit route's publish so the Task
         # ledger updates LIVE on CREATION too (not only on later status
         # changes). Publish the shaped `assigned` status DTO to BOTH parties'
@@ -750,6 +866,15 @@ def handle_complete_task(
         logger.info(
             "delegation_completed project_id=%s delegation_id=%s actor=%s",
             project_id, delegation_id, completer_user_id,
+        )
+        # Best-effort transactional email to the ASSIGNER — this
+        # `complete_task`-tool path has no in-app requester notice today
+        # (unlike the two inbound/outbound completion paths, which post one
+        # via `notify_requester_task_completed`), so this is the only
+        # completion signal fired from here. Own try/except lives inside
+        # the (DRY, shared-with-those-two-paths) helper.
+        _notify_assigner_task_completed_email(
+            project_id, delegation_id, assignee_user_id=completer_user_id
         )
         # Ledger liveness: publish the shaped completed status DTO to BOTH
         # parties' per-user channels (best-effort, AD-P22) so the Task ledger
