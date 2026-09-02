@@ -752,11 +752,20 @@ export function ChatScreen() {
   // and the server decides what runs.
   const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
   const { content, setContent } = useContent()
+  // Live mirror of the composer's `draft`/`setDraft` (declared later, once
+  // `useComposer()` runs) — kept in sync on every render, same pattern as
+  // this file's other cross-closure refs (`tabsRef`, `activeTabIdRef`, …).
+  // `bindActiveProject` below reads/clears through this ref rather than
+  // closing over `draft`/`setDraft` directly, since it is defined ahead of
+  // the composer destructure; refs are exempt from its deps array, matching
+  // every other ref this file already reads inside a `useCallback`.
+  const draftHandoffRef = useRef<{ get: () => string; clear: () => void }>({
+    get: () => "", clear: () => {},
+  })
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
   // generate response. We always RECORD the forked project id on the shared
-  // content state so the header's project-menu affordance stays correct even
-  // when the auto-nav below is skipped.
+  // content state so the header's project-menu affordance stays correct.
   //
   // Client decision D1 (2026-09-02): the entry-flow reshape used to stop at
   // recording — the user stayed on `/` and had to click the header pill to
@@ -764,11 +773,22 @@ export function ChatScreen() {
   // into the project with that PRD already open: `/` and `/projects` share
   // the same `(app)` layout, so `router.push` is an SPA transition (no full
   // reload, no white flash) and the persistent `ContentPanel` keeps the PRD
-  // on screen across it. Busy-user guard: never yank someone who is actively
-  // typing — same `document.activeElement` TEXTAREA/INPUT check
-  // `memberAddedLanding.ts`'s caller uses for the analogous "added to a
-  // project" landing. Busy → fall back to the old record-only behavior; the
-  // header pill remains the manual way in.
+  // on screen across it. ALWAYS navigates now (product-owner refinement,
+  // 2026-09-02) — the user initiated the generate, so a focused composer is
+  // the resting state, not "busy"; there is no suppression.
+  //
+  // The main-chat conversation IS (server-side) the project's private chat
+  // going forward — `maybe_auto_create_project_for_prd` binds this exact
+  // conversation row to the new project rather than starting a fresh one
+  // (`backend/app/project_from_prd.py`), and the project's individual-chat
+  // resolver picks that SAME row back up (`get_individual_project_chat`
+  // matches on `project_id`+`kind='individual'`+`user_id`, and every chat
+  // conversation is `kind='individual'` by column default — see
+  // `20260813130100_conversations_project_columns.sql`). So the user's
+  // half-typed NEXT message belongs in that same thread too: stash it on
+  // shared content (consumed once by `useProjectConversation` on mount) and
+  // clear it from the main-chat composer — it MOVES, it does not stay behind
+  // AND get duplicated.
   //
   // Best-effort: no id (an unbound generate, or an older backend) → no-op, the
   // panel renders exactly as it always has.
@@ -776,9 +796,11 @@ export function ChatScreen() {
     (projectId: number | null | undefined, justCreatedPrdId?: number | null) => {
       if (projectId == null) return
       setContent({ activeProjectId: projectId })
-      const el = typeof document !== "undefined" ? document.activeElement : null
-      const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
-      if (busy) return
+      const draftToCarry = draftHandoffRef.current.get()
+      if (draftToCarry) {
+        setContent({ pendingComposerDraft: draftToCarry })
+        draftHandoffRef.current.clear()
+      }
       router.push(projectPath(projectId, { chat: "individual", prd: justCreatedPrdId ?? undefined }))
     },
     [setContent, router],
@@ -1034,6 +1056,9 @@ export function ChatScreen() {
     filteredSkills, slashOpen,
     skillForQuery,
   } = composer
+  // Keeps `bindActiveProject` (declared above, ahead of the composer
+  // destructure) reading the LIVE draft/setDraft rather than a stale closure.
+  draftHandoffRef.current = { get: () => draft, clear: () => setDraft("") }
 
   // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
   // strip large/transient fields (prd, evidence, *Generating). Placed AFTER the

@@ -409,6 +409,33 @@ export function useProjectConversation(
   // ── The shared unit ────────────────────────────────────────────────────────
   const composer = useComposer({ showToast })
 
+  // ── Composer draft hand-off (client decision D1, 2026-09-02) ──────────────
+  // A PRD generated in main chat auto-forks/attaches THIS project server-side
+  // (`maybe_auto_create_project_for_prd` binds the very conversation row this
+  // hook resolves below via `individualChat` — every chat conversation is
+  // `kind='individual'` by column default, so the bind is enough to make the
+  // get-or-create resolve back to the SAME row; see `ChatScreen`'s
+  // `bindActiveProject` for the full trace). The main-chat conversation IS
+  // this project's private chat going forward, so whatever the user had
+  // half-typed there travels with them instead of vanishing on the page
+  // transition: `ChatScreen` stashes it on `content.pendingComposerDraft`
+  // right before navigating and clears its own composer. Consumed exactly
+  // once — guarded by the ref, not the deps array, so a mount that observes
+  // the field arrive a render late (nothing guarantees the seeding write and
+  // this mount land in the same commit) still picks it up — then cleared
+  // back to null so it never leaks into a later visit to this or any other
+  // project's chat (this surface remounts per distinct project — see
+  // `ProjectMainThread`'s `key={projectId}`).
+  const draftHandoffConsumedRef = useRef(false)
+  useEffect(() => {
+    if (draftHandoffConsumedRef.current) return
+    if (!content.pendingComposerDraft) return
+    draftHandoffConsumedRef.current = true
+    composer.setDraft(content.pendingComposerDraft)
+    setContent({ pendingComposerDraft: null })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content.pendingComposerDraft])
+
   const scroll = useThreadScroll({ thread, activeTabId: convKey, pendingSend: composer.pendingSend })
   const engine = useMainConversation({
     makeHandle, activeKey: convKey, activeCompany, askingRef,
