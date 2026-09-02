@@ -152,3 +152,43 @@ def test_clarify_passes_skip_default_and_drops_blank(tenant_client, monkeypatch)
     ).json()
     assert body["questions"][0]["skip_default"] == "all end users"
     assert body["questions"][1]["skip_default"] is None
+
+
+def test_clarify_marks_blocking_and_refuses_to_carry_a_fake_default(tenant_client, monkeypatch):
+    """A question with no defensible default must reach the client as
+    `blocking`, with `skip_default` cleared.
+
+    THE BUG: asked for a PRD "based on the AIG call recording" whose Fireflies
+    transcript never arrived, the model had no field in which to say "there is
+    no defensible default here" — so it wrote that sentence into `skip_default`.
+    The card rendered it as an assumption ("Skipped — assumed: Cannot proceed
+    without the call content"), the user pressed Generate now, and a PRD was
+    written about a call nobody had read.
+
+    Clearing the text server-side matters even though the prompt now tells the
+    model to leave it empty: the model is the one thing here we cannot make
+    obey, and a blocking question that still carries prose gets that prose
+    rendered as an assumption by every existing client.
+    """
+    t = tenant_client.make(slug="acme")
+    monkeypatch.setattr(prd_clarify, "llm_call", lambda **kw: _llm_result({
+        "sufficient": False,
+        "questions": [
+            {
+                "prompt": "Paste the Fireflies transcript for the AIG call.",
+                "blocking": True,
+                "skip_default": "Cannot proceed without the call content.",
+            },
+            {"prompt": "Who are the target users?", "skip_default": "all end users"},
+        ],
+    }))
+    body = t.client.post(
+        "/v1/prd/clarify-task", json={"task": "PRD for the AIG call"}
+    ).json()
+
+    assert body["questions"][0]["blocking"] is True
+    assert body["questions"][0]["skip_default"] is None
+
+    # An ordinary question is untouched — the gate must stay rare.
+    assert body["questions"][1]["blocking"] is False
+    assert body["questions"][1]["skip_default"] == "all end users"

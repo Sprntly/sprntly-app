@@ -3518,7 +3518,16 @@ export const prdApi = {
   clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
     api.post<{
       sufficient: boolean
-      questions: { prompt: string; header?: string | null; options: string[]; skip_default?: string | null }[]
+      // `blocking`: no defensible default exists, so the card refuses to
+      // generate until it is answered. Optional on the wire so a response from
+      // a backend that predates it still parses.
+      questions: {
+        prompt: string
+        header?: string | null
+        options: string[]
+        skip_default?: string | null
+        blocking?: boolean
+      }[]
       missing: string[]
     }>("/v1/prd/clarify-task", {
       task,

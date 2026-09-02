@@ -444,6 +444,10 @@ export function ConversationView(props: ConversationViewProps) {
             skipDefault: cq.skip_default,
           }))}
           fallbackHeader="PRD details"
+          skipAllPrompt={
+            `You skipped ${pendingClarifyTurn.clarify.length === 1 ? "the question" : `all ${pendingClarifyTurn.clarify.length} questions`}. ` +
+            "Generate the PRD anyway? It will be written from your original request alone."
+          }
           busy={busy || !!activeTab?.prdGenerating}
           onDismiss={() =>
             setClarifyPopupDismissed((p) => ({ ...p, [pendingClarifyTurn.id]: true }))

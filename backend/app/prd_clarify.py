@@ -31,7 +31,9 @@ _AGENT = "prd"
 # v4: the overflow clause stopped naming the "User input needed" section —
 # prd-author v4.8 retired it from the house format, so unasked questions now
 # land inline as [NEED]/[ESCALATE] markers rather than in an appendix list.
-CLARIFY_PROMPT_VERSION = "prd-clarify-v4"
+# v5: added `blocking`, so a question with no defensible default can stop
+# generation instead of having its refusal read back as an assumption.
+CLARIFY_PROMPT_VERSION = "prd-clarify-v5"
 
 _SCHEMA: dict = {
     "type": "object",
@@ -50,6 +52,14 @@ _SCHEMA: dict = {
                     },
                     "options": {"type": "array", "items": {"type": "string"}},
                     "skip_default": {"type": "string"},
+                    "blocking": {
+                        "type": "boolean",
+                        "description": (
+                            "True when NO defensible default exists — the material "
+                            "needed to answer is simply absent, so proceeding would "
+                            "invent it. Leave skip_default empty when this is true."
+                        ),
+                    },
                 },
                 "required": ["prompt"],
                 "additionalProperties": False,
@@ -104,6 +114,15 @@ otherwise leave options empty for free text.
 - Every question carries `skip_default`: the one-line assumption the author \
 proceeds with if the user skips it. Make it the most defensible default, not \
 a guess.
+- When NO defensible default exists — the source material the question asks \
+for is absent, so any answer would be invented — set `blocking: true` and \
+leave `skip_default` empty. Do NOT write the refusal into `skip_default`: \
+that field is read as an assumption to proceed with, so a sentence like \
+"cannot proceed without the call content" is acted on as though it were a \
+default and the PRD gets written ungrounded anyway. `blocking` is the only \
+thing that actually stops generation. Use it sparingly — it is for missing \
+INPUT (an unattached transcript, a document that never arrived), never for a \
+judgement call you could make on the user's behalf.
 - Every question carries `header`: a 2–3 word category label naming what the \
 question is about ("Target users", "Success metric", "Scope cut") — it is \
 worn as a chip above the question in the UI, so keep it a noun phrase, never \
@@ -146,11 +165,21 @@ def clarify_prd_task(enterprise_id: str, task: str, source_docs_md: str | None =
                 opts = [o for o in (q.get("options") or []) if isinstance(o, str) and o.strip()]
                 skip = q.get("skip_default")
                 header = q.get("header")
+                blocking = bool(q.get("blocking"))
+                skip_text = skip.strip() if isinstance(skip, str) and skip.strip() else None
+                # A blocking question has NO default by definition, so any text
+                # the model still put there is dropped rather than rendered.
+                # Otherwise the card shows "if skipped, I'll assume: <a sentence
+                # explaining that it cannot proceed>" — which is how an
+                # ungrounded PRD got written from a call nobody had read.
+                if blocking:
+                    skip_text = None
                 questions.append({
                     "prompt": q["prompt"].strip(),
                     "header": header.strip() if isinstance(header, str) and header.strip() else None,
                     "options": opts[:4],
-                    "skip_default": skip.strip() if isinstance(skip, str) and skip.strip() else None,
+                    "skip_default": skip_text,
+                    "blocking": blocking,
                 })
         sufficient = bool(out.get("sufficient")) or not questions
         return {
