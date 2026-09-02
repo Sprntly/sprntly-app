@@ -7,19 +7,15 @@ name: Deploy backend (staging + prod)
 #                                     sprintly.service on :8000)
 # The target environment is resolved from github.ref (see the job-level `env`
 # block) and passed into the on-box script via appleboy's `envs:`. Both stacks
-# live on the SAME EC2 box. The staging clone (~/Sprntly-staging) has its OWN
-# real backend/.env (staging FRONTEND_URL/ALLOWED_ORIGINS), but its Supabase
-# URL/keys are repointed at the PROD project so connectors (rows + encrypted
-# OAuth tokens) are shared with prod and OAuth callbacks work on staging without
-# separate app registration. See BRANCHING.md.
+# live on the SAME EC2 box, but they no longer share a database: the staging
+# clone (~/Sprntly-staging) has its own backend/.env pointing at the STAGING
+# Supabase project (ghcpqurzykyymtwtngtx), which is also the project local
+# development uses. Prod is the only fenced-off environment. See BRANCHING.md.
 #
 # Schema safety: a `migrate` job applies any pending Supabase migrations BEFORE
 # the backend restarts, so code never goes live against a schema missing its
-# tables. Because staging and prod now share ONE Supabase project (staging
-# repointed at prod), the migrate job hits the same DB from either branch — it's
-# idempotent (db push only applies migrations not yet recorded), so a staging
-# deploy applying a new migration is a no-op when prod later deploys the same
-# commit.
+# tables. Each branch migrates its own project, so a migration is exercised
+# against staging data first and only reaches prod when `production` deploys.
 #
 # Full docs (SUPABASE_DB_URL secret, scripts/apply_migrations.py, backfill):
 # supabase/MIGRATIONS.md
@@ -61,17 +57,23 @@ jobs:
           # Session-mode pooler connection string from the Supabase dashboard
           # (Settings -> Database -> Connection pooling -> Mode: Session). The
           # GitHub runner is IPv4-only, so the IPv6 direct host can't be used —
-          # the pooler is the IPv4 path. SHARED DB: staging is repointed at the
-          # prod Supabase project, so BOTH branches migrate the prod DB via
-          # SUPABASE_DB_URL. `db push` is idempotent (only applies migrations not
-          # yet recorded), so staging applying a new migration is a no-op when
-          # prod later deploys the same commit. Restore the
-          # `production && SUPABASE_DB_URL || SUPABASE_DB_URL_DEV` split to
-          # re-isolate staging's schema later.
-          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # the pooler is the IPv4 path.
+          #
+          # ISOLATED DBs: each branch migrates its OWN Supabase project —
+          # `main` -> staging (ghcpqurzykyymtwtngtx), `production` -> prod
+          # (vnfnmiauoblodxmjmaqw). Until 2026-09-01 both branches pointed at
+          # the prod URL, which meant a migration merged to `main` altered real
+          # customer data before any human had seen it on prod. That is the
+          # single change this split exists to stop.
+          #
+          # CONSEQUENCE, and it is deliberate: prod's schema no longer advances
+          # on a merge to `main`. It advances when `production` deploys. A
+          # migration therefore ships as part of a promotion, not ahead of one,
+          # so do not assume prod is already migrated because staging is.
+          SUPABASE_DB_URL: ${{ github.ref == 'refs/heads/production' && secrets.SUPABASE_DB_URL || secrets.SUPABASE_DB_URL_DEV }}
         run: |
           if [ -z "$SUPABASE_DB_URL" ]; then
-            echo "::warning title=Migrations skipped::SUPABASE_DB_URL secret is not set — pending migrations were NOT applied. Add the Session-mode pooler connection string from the Supabase dashboard to enable auto-apply. Until then, prod schema can drift."
+            echo "::warning title=Migrations skipped::No DB URL for this branch (SUPABASE_DB_URL for production, SUPABASE_DB_URL_DEV for main) — pending migrations were NOT applied. Add the Session-mode pooler connection string from that project's Supabase dashboard to enable auto-apply. Until then, this environment's schema can drift."
             exit 0
           fi
           # --yes: non-interactive. db push compares against the baselined

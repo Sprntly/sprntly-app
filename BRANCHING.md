@@ -33,45 +33,52 @@ The four deploy workflows (`deploy-backend`, `deploy-app`, `deploy-agent`,
 `deploy-mcp`) each trigger on both branches and resolve the target env from
 `github.ref`.
 
-## Environments (DB SHARED with prod; app URL per-env)
+## Environments (two Supabase projects — prod is fenced off)
 
-**Staging is repointed at the PROD Supabase project** (`vnfnmiauoblodxmjmaqw`) —
-same DB, same encrypted connector tokens, same OAuth callbacks — so connectors
-Just Work on staging without registering separate OAuth apps. Speed of iteration
-is the priority over environment isolation right now. The separate `sprntly-dev`
-project (`ghcpqurzykyymtwtngtx`, us-east-2) still exists but is **no longer wired
-in** (the `*_DEV` secrets are dormant).
+Since **2026-09-01** each environment has its own database.
 
-`~/Sprntly-staging/backend/.env` is a **real file**: prod's Supabase URL/keys
-(`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
-`SUPABASE_DB_PASSWORD`) with only the app-facing keys kept staging-specific
-(`FRONTEND_URL=https://staging.sprntly.ai`, `ALLOWED_ORIGINS=staging...`). The
-workflows use the prod project on BOTH branches:
+| Environment | Supabase project | Who points at it |
+|---|---|---|
+| **prod** | `vnfnmiauoblodxmjmaqw` | the `production` branch only |
+| **staging** | `ghcpqurzykyymtwtngtx` (us-east-2) | the `main` branch **and every local dev machine** |
+
+Local development and staging share one project on purpose. The line that
+matters is the one around **prod**: nothing but a `production` deploy may point
+at it, and no laptop ever should.
+
+The workflows resolve the project from `github.ref`:
 
 - **deploy-app** builds the static bundle with `NEXT_PUBLIC_SUPABASE_URL/ANON_KEY`
-  = the prod project on both `main` and `production` (only `NEXT_PUBLIC_API_URL`
-  differs per env — staging points at `api.staging.sprntly.ai`).
-- **deploy-backend** migrate job runs `db push` against `SUPABASE_DB_URL` (prod)
-  on both branches; idempotent, so a staging deploy applying a migration is a
-  no-op when prod later ships the same commit.
+  from the `*_DEV` secrets on `main` and the prod secrets on `production`. These
+  are inlined at build time (`output: "export"`), so a bundle is welded to
+  whichever project it was built against — repointing needs a rebuild.
+- **deploy-backend**'s migrate job runs `db push` against `SUPABASE_DB_URL_DEV`
+  on `main` and `SUPABASE_DB_URL` on `production`.
 
-What this buys us: connectors, PRDs, and all data are shared, so anything
-connected on prod is immediately usable on staging (and vice versa).
+`~/Sprntly-staging/backend/.env` carries the staging project's
+`SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`,
+`SUPABASE_JWT_SECRET` and `SUPABASE_DB_PASSWORD`, alongside the app-facing keys
+that were already staging-specific (`FRONTEND_URL=https://staging.sprntly.ai`,
+`ALLOWED_ORIGINS=staging...`).
 
-Trade-offs (accepted for now): **no prod-data isolation** — staging writes land
-in the prod DB, and background schedulers (weekly brief, connector refresh) run
-against prod data from whichever env has `SCHEDULER_ENABLED`. Shared too:
-Anthropic/OpenAI keys, connector OAuth apps, Resend, `TOKEN_ENCRYPTION_KEY`,
-`JWT_SECRET`, `COOKIE_DOMAIN=.sprntly.ai`.
+### What this changes, and what it costs
 
-### Re-isolating staging (full isolation) — later
-Point the staging `.env` + the deploy workflows back at the `sprntly-dev`
-project (restore the `github.ref == production && prod || *_DEV` split in
-deploy-app / deploy-backend, and swap the four Supabase keys in
-`~/Sprntly-staging/backend/.env` back to the dev values — backups saved as
-`~/Sprntly-staging/backend/.env.bak-repoint-*`). Then give staging its own
-connector OAuth apps + Resend + `TOKEN_ENCRYPTION_KEY`, and configure the dev
-Supabase project's Auth (Site URL, redirect allow-list, SMTP).
+**A migration merged to `main` no longer touches customer data.** It applies to
+staging, gets exercised there, and reaches prod when `production` deploys. The
+corollary is that **prod is not migrated until you promote** — never assume it
+is because staging is.
+
+The cost is the thing the shared setup was buying: connectors no longer come
+for free on staging. Staging needs its own connector OAuth apps, its own
+`TOKEN_ENCRYPTION_KEY`, its own Resend configuration, and its own Auth settings
+on the staging project (Site URL, redirect allow-list, SMTP). Anything
+connected on prod is no longer visible from staging — that is the point, but it
+does mean staging needs its own seed tenant and test accounts.
+
+`TOKEN_ENCRYPTION_KEY` must be **identical on the staging box and on every
+local machine**, since both read the same `connections` rows. A mismatch fails
+as an opaque Fernet `InvalidToken` on refresh, not as a clear configuration
+error. Prod's key is separate and shared with neither.
 
 ## Prod safety
 Never deploy `production` or touch prod services/DB/DNS without explicit sign-off.
