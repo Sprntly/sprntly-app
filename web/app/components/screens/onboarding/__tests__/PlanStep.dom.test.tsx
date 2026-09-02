@@ -45,11 +45,27 @@ vi.mock("../../../../lib/api", async () => {
 })
 
 const refresh = vi.fn().mockResolvedValue(undefined)
-let workspace: Record<string, unknown> | null = null
 let orgRole: string | null = "owner"
 
+// Deliberately its OWN state, not an alias of `onboardingWorkspace`. The bug
+// this file now guards is the two contexts DISAGREEING, so a shared object
+// would make it unreproducible.
+let workspaceCtxWorkspace: Record<string, unknown> | null = null
+
 vi.mock("../../../../context/WorkspaceContext", () => ({
-  useWorkspace: () => ({ workspace, orgRole, refresh }),
+  useWorkspace: () => ({ workspace: workspaceCtxWorkspace, orgRole, refresh }),
+}))
+
+// TWO CONTEXTS, ONE COMPANY. `OnboardingPaymentGuard` reads the onboarding
+// context; this step must read the same one, or the two disagree about
+// `companyHasPaid` and bounce the user between /onboarding/plan and the next
+// slug forever. `refreshOnboarding` is tracked separately from `refresh` so a
+// test can assert the guard's copy is the one that gets re-read after payment.
+const refreshOnboarding = vi.fn().mockResolvedValue(undefined)
+let onboardingWorkspace: Record<string, unknown> | null = null
+
+vi.mock("../../../../context/OnboardingContext", () => ({
+  useOnboarding: () => ({ workspace: onboardingWorkspace, refresh: refreshOnboarding }),
 }))
 
 import { TRIAL_CREDITS } from "../../../../lib/billingPlans"
@@ -58,9 +74,11 @@ import { PlanStep } from "../PlanStep"
 beforeEach(() => {
   search = ""
   orgRole = "owner"
-  workspace = { id: "ws-1", display_name: "Acme", plan: "starter", subscription_status: null }
+  onboardingWorkspace = { id: "ws-1", display_name: "Acme", plan: "starter", subscription_status: null }
+  workspaceCtxWorkspace = { ...onboardingWorkspace }
   push.mockClear()
   refresh.mockClear()
+  refreshOnboarding.mockClear()
   checkout.mockReset()
   summary.mockReset()
 })
@@ -132,21 +150,54 @@ describe("choosing a plan", () => {
 
 describe("a company that already pays", () => {
   it("is forwarded straight through rather than asked to buy again", async () => {
-    workspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
     render(<PlanStep />)
     await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
   })
 
   it("includes a trialling one — the card is already on file", async () => {
-    workspace = { id: "ws-1", plan: "starter", subscription_status: "trialing" }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "trialing" }
     render(<PlanStep />)
     await waitFor(() => expect(push).toHaveBeenCalled())
   })
 
   it("includes a plan that was never sold through Stripe", async () => {
-    workspace = { id: "ws-1", plan: "legacy", subscription_status: null }
+    onboardingWorkspace = { id: "ws-1", plan: "legacy", subscription_status: null }
     render(<PlanStep />)
     await waitFor(() => expect(push).toHaveBeenCalled())
+  })
+})
+
+describe("the two contexts disagreeing", () => {
+  it("does not advance on the workspace context alone", async () => {
+    // THE INFINITE REDIRECT LOOP. `OnboardingPaymentGuard` reads the ONBOARDING
+    // context; this step used to read the workspace one. After checkout the
+    // step's poll refreshed only the workspace copy, so the step saw paid and
+    // pushed to the next slug while the guard still saw unpaid and replaced
+    // back to /onboarding/plan — for as long as the tab stayed open. Observed
+    // live: `GET /onboarding/plan` and `GET /onboarding/import-context`
+    // alternating a few dozen times a second.
+    //
+    // Nothing stopped it because the guard's provider wraps the whole
+    // /onboarding subtree and never remounts between steps (so its copy stayed
+    // stale), while this component DID remount on every bounce, resetting the
+    // `alreadyPaid` latch that would otherwise have fired only once.
+    workspaceCtxWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: null }
+
+    render(<PlanStep />)
+
+    // A push here is the loop: the guard would immediately replace back.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("advances on the onboarding context — the one the guard reads", async () => {
+    workspaceCtxWorkspace = { id: "ws-1", plan: "starter", subscription_status: null }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
   })
 })
 
