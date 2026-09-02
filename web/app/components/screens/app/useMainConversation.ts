@@ -92,7 +92,19 @@ export interface UseMainConversationDeps {
    *  the suggestion fetch wait for the assistant row to land. */
   finalizeConversationTurn: (
     turnId: string,
-    updates: { reply?: AskResponse; error?: string },
+    updates: {
+      reply?: AskResponse
+      error?: string
+      /** This ask's reply-persist dedup key (see `runAskGeneration`'s
+       *  `replyClientMessageId` opt) — threaded through so a surface whose
+       *  persist implementation understands it (a project chat, whose
+       *  ask-scope is shared across every tab/mount on the SAME
+       *  conversation, unlike main's per-tab scope) can stamp it on the
+       *  write and let the server's idempotent upsert collapse a same-key
+       *  double-submit. Main's own implementation ignores it — its per-tab
+       *  scope never faces the collision this exists for. */
+      clientMessageId?: string
+    },
     key: string,
   ) => Promise<void>
   /** The post-answer next-prompt hook (only `onSettled` is used by the run). */
@@ -170,6 +182,15 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
       // The conversation id resolved inside `ask` below, captured so the
       // post-answer suggestion fetch can reuse it without a second lookup.
       let askConvId: number | null = null
+      // This send's OWN reply-persist dedup key (see `runAskGeneration`'s
+      // `replyClientMessageId` doc) — minted here, in the SAME outer scope
+      // `askConvId` already uses to cross from the `ask()` closure into
+      // `onResult`'s. It travels with THIS closure rather than being
+      // re-read from the persisted job record afterward: by the time
+      // `onResult` runs, this SAME poll has already cleared that record
+      // (`_pollAskLoop`'s clear-on-terminal-exit), so there is nothing left
+      // to read back — the id has to ride along, not be looked up after.
+      let askReplyClientMessageId: string | null = null
       // runTabAsk holds the AUTHORITATIVE per-conversation in-flight guard + busy
       // marking. It returns false (running nothing) if this conversation already
       // has an ask in flight; otherwise it runs the ask CONCURRENTLY with other
@@ -197,11 +218,16 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
             displayQuery,
           })
           askConvId = convId
+          askReplyClientMessageId =
+            typeof crypto !== "undefined" && crypto.randomUUID
+              ? crypto.randomUUID()
+              : `reply-${Date.now()}-${Math.random()}`
           // `sendQuery` carries any attached-document content; `isStopped` lets
           // the user stop the ask.
           return runAskGeneration(sendQuery, activeCompany, targetTabId, {
             isCancelled: () => !mountedRef.current,
             isStopped: () => conv.isStopped(),
+            replyClientMessageId: askReplyClientMessageId,
             // Live token stream: the accumulating answer markdown renders in
             // place of the thinking skeleton as the model writes it. Display
             // only — onResult's authoritative reply replaces it.
@@ -253,7 +279,9 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           conv.patchTurns((thread) => thread.map((turn) => turn.id === id
             ? { ...turn, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }
             : turn))
-          const persisted = finalizeConversationTurn(id, { reply: res }, tabId)
+          const persisted = finalizeConversationTurn(
+            id, { reply: res, clientMessageId: askReplyClientMessageId ?? undefined }, tabId,
+          )
           // The answer is on screen and stored. If it IS a report, the server
           // has just captured it as an artifact hanging off this thread — say
           // so, so the thread's report list is re-read and the panel can open

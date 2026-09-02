@@ -586,9 +586,24 @@ export function useProjectConversation(
   }, [persistence])
 
   const finalizeConversationTurn = useCallback((
-    turnId: string, updates: { reply?: AskResponse; error?: string }, key: string,
+    turnId: string,
+    updates: { reply?: AskResponse; error?: string; clientMessageId?: string },
+    key: string,
   ): Promise<void> => {
-    if (updates.reply) return persistence.pushAssistantTurn(key, replyToText(updates.reply))
+    // `clientMessageId` (an ask's reply-persist dedup key, when the caller
+    // has one — see `runAskGeneration`'s `replyClientMessageId` doc)
+    // threads straight to the write: THIS surface is exactly the one
+    // `client_message_id` exists for. Its ask-scope (`askScope(convKey)`,
+    // `surfaceKey(projectId)`) is the SAME across every tab/mount on this
+    // project — unlike main chat's per-tab uuid scope — so a second
+    // mount/tab can independently resume and persist the SAME completed ask.
+    // Stamping the identical key on both persists lets the server's
+    // idempotent upsert collapse a same-key double-submit to one row.
+    if (updates.reply) {
+      return persistence.pushAssistantTurn(
+        key, replyToText(updates.reply), undefined, updates.clientMessageId,
+      )
+    }
     return Promise.resolve()
   }, [persistence])
 
@@ -714,6 +729,15 @@ export function useProjectConversation(
     if (!pending) return
     const askId = Number(pending.id)
     if (!Number.isFinite(askId)) return
+    // Captured HERE, before this resume's own poll runs — not re-read once it
+    // settles. This conversation's ask-scope (`askScope(convKey)`) is the
+    // SAME across every tab/mount on this project, so the ORIGINATING send
+    // may have minted a reply dedup key under this SAME pending-job record
+    // (`runAskGeneration`'s `replyClientMessageId`); by the time this poll
+    // resolves it has already cleared that record itself
+    // (`_pollAskLoop`'s clear-on-terminal-exit), so the key must travel with
+    // this closure, exactly like `askId`/`turnId` already do.
+    const replyClientMessageId = pending.clientMessageId
     // Re-attach only when the last turn is still awaiting a reply — the marker
     // that survives in the persisted (hydrated) thread.
     const last = threadRef.current[threadRef.current.length - 1]
@@ -751,7 +775,7 @@ export function useProjectConversation(
         const streamed = threadRef.current.find((t) => t.id === turnId)
         if (streamed?.partial) animatedTurnIds.current.add(turnId)
         patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }))
-        void finalizeConversationTurn(turnId, { reply: res }, convKey)
+        void finalizeConversationTurn(turnId, { reply: res, clientMessageId: replyClientMessageId }, convKey)
       } catch (e) {
         // Unmounted again mid-resume: leave the persisted ask so the NEXT mount
         // re-attaches; don't write an error.

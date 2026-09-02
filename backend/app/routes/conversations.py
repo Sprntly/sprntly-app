@@ -374,6 +374,14 @@ class TurnIn(BaseModel):
     #: writer) restores exactly as it did before.
     reply: dict[str, Any] | None = None
 
+    #: Client-issued idempotency key for an ASSISTANT turn on an INDIVIDUAL
+    #: PROJECT chat only (`add_turn`'s idempotent-upsert branch below) — a
+    #: retry/double-submit of the SAME completed ask carrying the SAME key
+    #: collapses to one row instead of inserting a second. Ignored on main
+    #: chat and on a user turn: only the narrow gate below reads it, so
+    #: every existing caller that omits it is byte-identical to before.
+    client_message_id: str | None = None
+
     @field_validator("reply")
     @classmethod
     def _bounded(cls, v: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -495,37 +503,76 @@ def add_turn(
     not None`) — every other conversation (main chat, non-project, legacy
     group) is byte-identical: no publish, no added query, no added latency
     beyond the cheap in-memory gate check on the row this route already
-    fetched for the ownership check below."""
+    fetched for the ownership check below.
+
+    Idempotent-upsert branch (individual project chat, assistant turn, a
+    `client_message_id` present): the project chat's ask-completion persist
+    can legitimately fire twice for the SAME logical answer — the SAME
+    conversation-scoped ask can be independently "resumed" by a second mount
+    of this chat (a second browser tab open on it, or a navigate-away-and-
+    back while the ask is still in flight — see `useProjectConversation.ts`'s
+    resume effect), each of which persists the settled reply through this
+    SAME route. Routing that one case through
+    `db.conversations.post_owned_individual_assistant_turn`'s existing
+    `(conversation_id, role='assistant', client_message_id)` upsert collapses
+    a same-key double-submit to ONE row. Every other caller (main chat, a
+    user turn, or an assistant turn with no key) takes the ORIGINAL insert
+    path below, byte-identical to before."""
     c = require_client()
     conversation = _get_owned_conversation(c, conversation_id, company)
     if conversation is None:
         raise HTTPException(404, "Conversation not found")
-    row: dict[str, Any] = {
-        "conversation_id": conversation_id,
-        "role": body.role,
-        "content": body.content,
-    }
-    if body.attachments:
-        # exclude_none keeps the stored shape minimal — a text-only attachment
-        # stays {name, content}; key/mime/size appear only when a file was stored.
-        row["attachments"] = [a.model_dump(exclude_none=True) for a in body.attachments]
-    # ASSISTANT TURNS ONLY. `reply` is what the product said, in the shape it
-    # said it; a user turn has no structured reply and a client sending one is
-    # describing a turn that does not exist, so the field is dropped rather
-    # than stored. `list_turns` selects `*`, so a row written here comes back
-    # to the client with no read-side change.
-    if body.reply is not None and body.role == "assistant":
-        row["reply"] = body.reply
-    resp = c.table("conversation_turns").insert(row).execute()
-    turn = resp.data[0] if resp.data else {}
-    _catalog_turn_attachments(turn, body, company)
-    # Update conversation preview + timestamp. Only overwrite preview on user
-    # turns — assistant turns should NOT blank out the last user message shown
-    # in the chat-history list (ChatsScreen).
-    patch: dict[str, Any] = {"updated_at": utc_now()}
-    if body.role == "user":
-        patch["preview"] = body.content[:200]
-    c.table("conversations").update(patch).eq("id", conversation_id).execute()
+
+    is_individual_project = (
+        conversation.get("kind") == "individual"
+        and conversation.get("project_id") is not None
+    )
+
+    if is_individual_project and body.role == "assistant" and body.client_message_id:
+        from app.db import conversations as conversations_db
+
+        # `post_owned_individual_assistant_turn` resolves its OWN conversation
+        # server-side from `(project_id, user_id)` — the same single row
+        # `_get_owned_conversation` above already confirmed the caller owns,
+        # so this can never write anywhere but the conversation the caller
+        # just posted to. It also advances the caller's own read cursor and
+        # bumps `conversations.updated_at` itself, so nothing further is
+        # needed on this path (no attachments, no `reply` jsonb — the
+        # assistant-turn callers that carry a client_message_id never send
+        # either today; adding one back would need this branch reconsidered).
+        turn = conversations_db.post_owned_individual_assistant_turn(
+            project_id=conversation["project_id"],
+            user_id=conversation["user_id"],
+            content=body.content,
+            client_message_id=body.client_message_id,
+        )
+    else:
+        row: dict[str, Any] = {
+            "conversation_id": conversation_id,
+            "role": body.role,
+            "content": body.content,
+        }
+        if body.attachments:
+            # exclude_none keeps the stored shape minimal — a text-only attachment
+            # stays {name, content}; key/mime/size appear only when a file was stored.
+            row["attachments"] = [a.model_dump(exclude_none=True) for a in body.attachments]
+        # ASSISTANT TURNS ONLY. `reply` is what the product said, in the shape it
+        # said it; a user turn has no structured reply and a client sending one is
+        # describing a turn that does not exist, so the field is dropped rather
+        # than stored. `list_turns` selects `*`, so a row written here comes back
+        # to the client with no read-side change.
+        if body.reply is not None and body.role == "assistant":
+            row["reply"] = body.reply
+        resp = c.table("conversation_turns").insert(row).execute()
+        turn = resp.data[0] if resp.data else {}
+        _catalog_turn_attachments(turn, body, company)
+        # Update conversation preview + timestamp. Only overwrite preview on user
+        # turns — assistant turns should NOT blank out the last user message shown
+        # in the chat-history list (ChatsScreen).
+        patch: dict[str, Any] = {"updated_at": utc_now()}
+        if body.role == "user":
+            patch["preview"] = body.content[:200]
+        c.table("conversations").update(patch).eq("id", conversation_id).execute()
 
     # ── Realtime gate: individual project chat ONLY ─────────────────────────
     # Defense-in-depth (matches the client's own `parseRealtimeTurnPayload`
@@ -533,12 +580,7 @@ def add_turn(
     # the row is still persisted above exactly as before, only the publish
     # is skipped, so a client that somehow still receives it can never
     # render an empty/phantom bubble from THIS row.
-    if (
-        conversation.get("kind") == "individual"
-        and conversation.get("project_id") is not None
-        and turn
-        and (turn.get("content") or "").strip()
-    ):
+    if is_individual_project and turn and (turn.get("content") or "").strip():
         try:
             # The conversation is private to its own `user_id` — that's the
             # owner uid the per-user topic keys on, never the acting request
@@ -558,7 +600,7 @@ def add_turn(
                 conversation.get("project_id"), conversation_id,
             )
 
-    return resp.data[0] if resp.data else {}
+    return turn
 
 
 @router.delete("/{conversation_id}/turns/{turn_id}")
