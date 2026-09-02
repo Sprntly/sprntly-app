@@ -780,6 +780,15 @@ class Settings(BaseSettings):
     task_followup_enabled: bool = False
     task_followup_interval_hours: int = 1
 
+    # In-session "are you done?" check (context_assembler_project.py): while
+    # an assignee is chatting in their PRIVATE project chat, proactively ask
+    # (never mark done, never assume done) whether an OPEN task delegated TO
+    # them is finished, when their message relates to it. OFF by default —
+    # request-time gate, no behavior change at all while unset; the
+    # completion itself still flows exclusively through the existing
+    # `delegation_status_ingest.maybe_ingest_status` reply classifier.
+    insession_task_check_enabled: bool = False
+
     # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
     # check of recent extraction output per skill_id against the expected
     # shape each vendored connector-extraction skill declares in its own

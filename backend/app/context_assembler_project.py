@@ -29,6 +29,7 @@ block and never blocks the answer. Returns a `SurfaceScope` (the type
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 
 from fastapi import HTTPException
 
@@ -36,6 +37,150 @@ from app.context_assembler import AssembleRequest
 from app.surface_scope import Surface, SurfaceScope
 
 logger = logging.getLogger(__name__)
+
+# ── In-session "are you done?" check (A5, request-time flag-gated) ─────────
+#
+# Feature: while the ASSIGNEE is chatting in their OWN private project chat,
+# proactively surface a "have you finished this?" nudge for their OWN open
+# delegated task(s) — woven into the model's normal reply via an injected
+# instruction, never a mechanical append and never a new interjection
+# channel. The instruction only ever asks; it explicitly forbids marking a
+# task done or assuming it is done. Completion capture is unchanged and
+# unrelated to this feature — a "yes" reply is still caught exclusively by
+# the EXISTING `delegation_status_ingest.maybe_ingest_status` classifier
+# (wired at `ask_job_runner.py`'s post-answer `_on_committed`), which this
+# module never imports and never calls.
+#
+# Throttled per delegation via `delegation_followups.last_insession_ask_at`
+# (see `db/delegation_followups.py` / the
+# `20260902120000_delegation_followups_insession_ask.sql` migration): a task
+# is only (re-)injected once its last ask is NULL or older than
+# `_INSESSION_ASK_WINDOW_HOURS`. The ask path has no first-class
+# session/thread boundary of its own, so this window is a deliberate proxy —
+# "not asked about within N hours" reads as "a new session" — rather than a
+# literal session id.
+_INSESSION_ASK_WINDOW_HOURS = 6
+
+#: Cap on how many of the assignee's own open tasks get named in one
+#: instruction — mirrors `project_group_context._LEDGER_DIGEST_ROWS`'s
+#: soft-cap posture; a heavily-delegated assignee can't blow up the prompt.
+_INSESSION_TASK_CHECK_CAP = 3
+
+#: Per-task summary length cap in the injected instruction (bounded-length
+#: LLM-facing text) — mirrors `project_group_context._MANIFEST_TITLE_CHARS`'s
+#: truncate-with-ellipsis posture.
+_INSESSION_TASK_SUMMARY_CHARS = 160
+
+
+def _parse_iso(value) -> datetime | None:
+    """Best-effort ISO-8601 -> aware UTC datetime; any missing/unparseable
+    value degrades to `None` (mirrors `delegation_status_ingest._parse_iso`
+    — duplicated rather than imported, matching this codebase's existing
+    per-module `_parse_iso` precedent)."""
+    if not value:
+        return None
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        text = str(value).strip()
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _insession_task_check_block(project_id: int, user_id: str | None) -> str:
+    """The A5 injected instruction naming the CALLER's own open delegated
+    task(s) in this project — or `""` when: the flag is off, there is no
+    caller identity, the caller has no open delegation, or every open
+    delegation was already asked about within
+    `_INSESSION_ASK_WINDOW_HOURS`. Ask-only: the returned text always
+    forbids marking a task done or assuming it is done — never a
+    completion side-effect. Best-effort (AD-P7): every DB read/write below
+    is individually swallowed so a failure degrades to omitting the
+    instruction, never to blocking the reply. Records the throttle write
+    (`last_insession_ask_at = now`) for every task actually surfaced, so a
+    read failure that never reaches the write can't leave a stale marker
+    behind."""
+    from app.config import settings
+
+    if not settings.insession_task_check_enabled or not user_id:
+        return ""
+
+    from app.db import delegation_events as delegation_events_db
+
+    try:
+        open_rows = [
+            row
+            for row in delegation_events_db.list_status_for_assignee(project_id, user_id)
+            if row.get("status") in delegation_events_db.OPEN_STATES
+        ]
+    except Exception:  # noqa: BLE001 — best-effort, AD-P7
+        logger.warning(
+            "insession_task_check_prefilter_failed project_id=%s",
+            project_id, exc_info=True,
+        )
+        return ""
+    if not open_rows:
+        return ""
+
+    from app.db import delegation_followups as delegation_followups_db
+
+    now = datetime.now(timezone.utc)
+    cutoff = now - timedelta(hours=_INSESSION_ASK_WINDOW_HOURS)
+
+    due: list[dict] = []
+    for row in open_rows:
+        delegation_id = row.get("delegation_id")
+        if delegation_id is None:
+            continue
+        try:
+            followup = delegation_followups_db.get_followup(delegation_id)
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            followup = None
+        last_ask = _parse_iso((followup or {}).get("last_insession_ask_at"))
+        if last_ask is not None and last_ask > cutoff:
+            continue  # asked within the window already — throttled
+        due.append(row)
+        if len(due) >= _INSESSION_TASK_CHECK_CAP:
+            break
+    if not due:
+        return ""
+
+    for row in due:
+        try:
+            delegation_followups_db.upsert_followup(
+                row["delegation_id"], last_insession_ask_at=now
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7: a write
+            # failure only risks a possibly-early re-ask next turn; it must
+            # never suppress THIS turn's instruction.
+            logger.warning(
+                "insession_task_check_upsert_failed delegation_id=%s",
+                row.get("delegation_id"), exc_info=True,
+            )
+
+    summaries = []
+    for row in due:
+        summary = (row.get("task_summary") or "").strip() or "(no summary)"
+        if len(summary) > _INSESSION_TASK_SUMMARY_CHARS:
+            summary = summary[:_INSESSION_TASK_SUMMARY_CHARS].rstrip() + "…"
+        summaries.append(summary)
+    tasks_text = "; ".join(f"'{s}'" for s in summaries)
+    plural = "s" if len(summaries) > 1 else ""
+
+    return (
+        f"The user has an open task{plural} assigned to them: {tasks_text}. If "
+        "their current message relates to it, naturally ask whether they've "
+        "finished it so it can be reported back. Do NOT mark it done, and do "
+        "NOT assume it's done — only ask. If you have already asked about "
+        "this task earlier in this conversation, do not ask again."
+    )
 
 
 class ProjectContextAssembler:
@@ -103,6 +248,22 @@ class ProjectContextAssembler:
         except Exception:  # noqa: BLE001 — best-effort
             instr_block = ""
 
+        # ── In-session "are you done?" check (A5) ────────────────────────────
+        # See the module-level `_insession_task_check_block` docstring. Flag
+        # off (the default) or any read/write failure both degrade to "" —
+        # byte-identical to pre-A5 behavior either way.
+        insession_check_block = ""
+        try:
+            insession_check_block = _insession_task_check_block(
+                project_id, req.user_id
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            logger.warning(
+                "insession_task_check_block_failed project_id=%s",
+                project_id, exc_info=True,
+            )
+            insession_check_block = ""
+
         # ── Depth tools (the breadth → depth flip) ───────────────────────────
         # Populate `extra_tools` with the 6 project tools so the EXISTING sixth
         # ladder branch (`qa_agent._try_scoped_tool_answer`, which reads
@@ -149,16 +310,28 @@ class ProjectContextAssembler:
         )
         if instr_block:
             system_addendum = f"{system_addendum}\n\n{instr_block}"
+        if insession_check_block:
+            system_addendum = f"{system_addendum}\n\n{insession_check_block}"
 
         # The gate-decline / composer fall-through's OWN addendum — same
         # roster/instructions composition, but built from the delegate-tool-
         # guidance-free `_PRIVATE_SCOPE_COMPOSER_FOLD` instead of the full
         # `_PRIVATE_SCOPE_SYSTEM` (see `SurfaceScope.composer_fold_addendum`).
+        #
+        # `insession_check_block` is folded into BOTH addenda, same as
+        # `instr_block` just above it: a plain "how's it going" message from
+        # the assignee is exactly the kind of turn the gate declines (no
+        # delegate/execute intent) and falls through to the composer, so the
+        # nudge must reach that path too — not just the tool-loop branch.
         composer_fold_addendum = (
             f"{_PRIVATE_SCOPE_COMPOSER_FOLD}\n\n{_private_roster_block(roster)}"
         )
         if instr_block:
             composer_fold_addendum = f"{composer_fold_addendum}\n\n{instr_block}"
+        if insession_check_block:
+            composer_fold_addendum = (
+                f"{composer_fold_addendum}\n\n{insession_check_block}"
+            )
 
         # `post_turn` — the execute-task progress writer. RELOCATED in shape from
         # `_build_private_scope`: the private surface's turn writer, bound to the
