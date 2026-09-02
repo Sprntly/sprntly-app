@@ -14,27 +14,59 @@
 // Fix without touching nginx: give each such directory an `index.html` that is
 // a copy of its sibling `<name>.html`, so `$uri/` resolves. This ships via the
 // normal app deploy (rsync of `out/`) with no server change.
-import { copyFileSync, existsSync, mkdirSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+//
+// THE LIST IS DERIVED, NOT MAINTAINED. It used to be a hardcoded `["docs"]`
+// with a comment asking whoever added the next such route to remember. They
+// did not: `/artifacts` grew an `artifacts/doc` child, started exporting an
+// `out/artifacts/` directory, and every full page load of `/artifacts` 403'd
+// in production. It survived unnoticed for a while because client-side
+// navigation never reaches nginx — only a reload, a bookmark, or a session
+// expiry that forces a real request does. A list that must be updated by hand
+// in a different file from the one being changed is a list that drifts, and
+// the failure is a hard 403 on a real screen, so this now scans the build
+// output instead: every `<name>/` directory sitting beside a `<name>.html`
+// gets the copy, automatically and forever.
+import { copyFileSync, existsSync, readdirSync, statSync } from "node:fs"
+import { join, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 const OUT = resolve(process.cwd(), "out")
 
-// Each entry: an index page whose route also has child pages. Add more here if
-// another route ever grows children (e.g. a second docs-style section).
-const INDEX_ROUTES = ["docs"]
+// `_next/` holds the content-hashed asset tree — thousands of entries, none of
+// which can ever have an `.html` sibling. Skipping it keeps this scan cheap.
+const SKIP_DIRS = new Set(["_next"])
 
-let fixed = 0
-for (const route of INDEX_ROUTES) {
-  const src = resolve(OUT, `${route}.html`)
-  const destDir = resolve(OUT, route)
-  const dest = resolve(destDir, "index.html")
-  if (!existsSync(src)) {
-    console.warn(`[postbuild] skip: ${route}.html not found (route removed?)`)
-    continue
+/**
+ * Every exported directory that shadows a sibling `<name>.html` and has no
+ * `index.html` of its own — i.e. exactly the shape nginx 403s on.
+ */
+export function directoriesShadowingAnHtmlSibling(root) {
+  const found = []
+  for (const rel of readdirSync(root, { recursive: true })) {
+    const relPath = String(rel)
+    if (SKIP_DIRS.has(relPath.split(/[\\/]/)[0])) continue
+
+    const dir = join(root, relPath)
+    if (!statSync(dir).isDirectory()) continue
+
+    const sibling = `${dir}.html`
+    const index = join(dir, "index.html")
+    if (existsSync(sibling) && !existsSync(index)) {
+      found.push({ route: relPath.replace(/\\/g, "/"), sibling, index })
+    }
   }
-  mkdirSync(dirname(dest), { recursive: true })
-  copyFileSync(src, dest)
-  console.log(`[postbuild] ${route}.html -> ${route}/index.html`)
-  fixed++
+  return found
 }
-console.log(`[postbuild] static-fix done (${fixed} route(s))`)
+
+// Only when run as a script (`node scripts/postbuild-static-fix.mjs`), so a
+// test can import the detection above without this writing into `out/`.
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  const shadowed = directoriesShadowingAnHtmlSibling(OUT)
+
+  for (const { route, sibling, index } of shadowed) {
+    copyFileSync(sibling, index)
+    console.log(`[postbuild] ${route}.html -> ${route}/index.html`)
+  }
+
+  console.log(`[postbuild] static-fix done (${shadowed.length} route(s))`)
+}
