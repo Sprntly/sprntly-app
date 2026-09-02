@@ -139,12 +139,19 @@ export function parseRealtimeTurnPayload(payload: unknown): RealtimeTurnPayload 
   const p = payload as Partial<RealtimeTurnPayload> | null | undefined
   if (!p || typeof p.id !== "number" || typeof p.content !== "string") return null
   if (p.role !== "user" && p.role !== "assistant") return null
+  // Blank content never renders anything real — mirrors hydrate's own
+  // `content.trim()` guard on a standalone assistant row (below) — and a
+  // blank body is exactly what an empty-tool-loop / interrupted write can
+  // persist server-side. Dropping it here, at the parse boundary, keeps
+  // both `shouldAppendRealtimeTurn` and the merge/append logic below from
+  // ever having to reason about an empty-string turn at all.
+  if (p.content.trim() === "") return null
   return { id: p.id, role: p.role, content: p.content, created_at: p.created_at }
 }
 
-/** Whether an incoming realtime turn is safe to append to `existing`.
- *  False in two cases (AC: id-dedupe + no double-render on a local-echo
- *  race):
+/** Whether an incoming realtime turn is safe to apply to `existing` at all
+ *  (id-dedupe + no double-render on a local-echo race). False in three
+ *  cases:
  *   - the exact DB row is ALREADY on the thread (a rehydrated turn, or a
  *     prior delivery of the SAME broadcast/reconcile) — matched by
  *     `dbTurnId`, the durable row id every rendered turn eventually carries.
@@ -153,9 +160,22 @@ export function parseRealtimeTurnPayload(payload: unknown): RealtimeTurnPayload 
  *     role + exact content over a short recent window (broadcasts are
  *     at-most-once and typically land within moments of the local send, so
  *     only the tail of the thread is worth checking; a genuine repeat
- *     message further back in history is never suppressed). */
-export function shouldAppendRealtimeTurn(existing: ThreadTurn[], payload: RealtimeTurnPayload): boolean {
+ *     message further back in history is never suppressed).
+ *   - this exact assistant row was already MERGED into a paired user turn
+ *     by a previous call (`mergedReplyIds`, optional — passed only by
+ *     `applyRealtimeTurn`'s caller below). A merge sets the paired turn's
+ *     `reply` but deliberately leaves `dbTurnId` pointing at the USER row
+ *     (rewind needs the user row's id, not the assistant's — see
+ *     `realtimeTurnToThreadTurn`), so the plain `dbTurnId` check above
+ *     cannot by itself catch a redelivery of that same assistant row; this
+ *     is the second, independent guard that closes it. */
+export function shouldAppendRealtimeTurn(
+  existing: ThreadTurn[],
+  payload: RealtimeTurnPayload,
+  mergedReplyIds?: ReadonlySet<number>,
+): boolean {
   if (existing.some((t) => t.dbTurnId === payload.id)) return false
+  if (mergedReplyIds?.has(payload.id)) return false
   const recentUnreconciled = existing.slice(-6).filter((t) => t.dbTurnId == null)
   if (payload.role === "user") {
     return !recentUnreconciled.some((t) => t.query === payload.content)
@@ -165,9 +185,9 @@ export function shouldAppendRealtimeTurn(existing: ThreadTurn[], payload: Realti
 
 /** Shape a whitelisted realtime DTO into the same bare, query-or-reply-only
  *  `ThreadTurn` the hydrate restore already builds for a standalone
- *  user/assistant row (see the hydrate effect below) — one turn per event,
- *  never paired, since a live user+assistant pair arrives as two separate
- *  events. */
+ *  user/assistant row (see the hydrate effect below) — used when
+ *  `applyRealtimeTurn` has nothing to pair an assistant turn with (or for a
+ *  user turn.created, which always arrives before its reply exists). */
 export function realtimeTurnToThreadTurn(payload: RealtimeTurnPayload): ThreadTurn {
   if (payload.role === "user") {
     return { id: newId(), dbTurnId: payload.id, query: payload.content }
@@ -179,6 +199,41 @@ export function realtimeTurnToThreadTurn(payload: RealtimeTurnPayload): ThreadTu
       citations: [], confidence: 1, unanswered: "",
     } as AskResponse,
   }
+}
+
+/** Apply one incoming realtime turn to `existing`, mirroring hydrate's own
+ *  query+reply PAIRING (~hydrate effect below: a `user` row is paired with
+ *  the row immediately after it) instead of appending every `turn.created`
+ *  event as its own separate `ThreadTurn`. Previously every assistant
+ *  turn.created became a headless `{query:"", reply}` turn beside a
+ *  reply-less `{query}` turn from the user's own turn.created — on an
+ *  observer tab (no optimistic echo) the reply-less user turn rendered the
+ *  "No response was generated for this message." fallback
+ *  (`ChatBubble.tsx`'s no-reply ladder) directly above its own real answer.
+ *
+ *  Gated first by `shouldAppendRealtimeTurn` (id/local-echo dedupe,
+ *  unchanged) — a duplicate or optimistic-echo delivery is dropped exactly
+ *  as before. An assistant turn.created that passes the gate MERGES into
+ *  the thread's LAST turn when that turn is a reply-less user turn (the
+ *  adjacent pairing hydrate itself relies on: the assistant row is always
+ *  written immediately after its user row) — setting `reply` in place
+ *  rather than appending a second, headless turn. It only appends a
+ *  standalone assistant turn when the last turn is NOT an unpaired user
+ *  turn — e.g. a `brief.delivered` notice, which has no matching ask in
+ *  this thread at all. A user turn.created always appends bare: its pairing
+ *  partner (the reply) hasn't arrived yet. */
+export function applyRealtimeTurn(
+  existing: ThreadTurn[],
+  payload: RealtimeTurnPayload,
+  mergedReplyIds?: ReadonlySet<number>,
+): ThreadTurn[] {
+  if (!shouldAppendRealtimeTurn(existing, payload, mergedReplyIds)) return existing
+  const last = existing[existing.length - 1]
+  if (payload.role === "assistant" && last && last.query && !last.reply) {
+    const shaped = realtimeTurnToThreadTurn(payload)
+    return [...existing.slice(0, -1), { ...last, reply: shaped.reply }]
+  }
+  return [...existing, realtimeTurnToThreadTurn(payload)]
 }
 
 export function useProjectConversation(
@@ -315,15 +370,34 @@ export function useProjectConversation(
   // ── Realtime: this chat's own per-user topic ────────────────────────────────
   // `turn.created` (a fresh individual-chat write — the generate/clarify/
   // terminal-outcome branches and the PRD-edit path) and `brief.delivered` (a
-  // delegated brief/notice; the server already publishes it) both append live,
-  // id-deduped against whatever's already on the thread (`shouldAppendRealtimeTurn`
-  // — closes both a repeat delivery AND a race with this client's own
-  // optimistic echo). `onReconcile` (fired once on every (re)subscribe, AD-P22)
-  // refetches anything landed since `lastKnownTurnIdRef` — the gap a dropped
-  // broadcast or a reconnect would otherwise leave.
+  // delegated brief/notice; the server already publishes it) both apply live
+  // via `applyRealtimeTurn` — id/local-echo deduped exactly as before, but
+  // PAIRED the way hydrate pairs a restored user+assistant row (see that
+  // function's own doc). `onReconcile` (fired once on every (re)subscribe,
+  // AD-P22) refetches anything landed since `lastKnownTurnIdRef` — the gap a
+  // dropped broadcast or a reconnect would otherwise leave.
+  //
+  // `mergedReplyIdsRef`: an assistant turn.created that MERGES into a paired
+  // user turn deliberately never gets its own `dbTurnId` slot (the merged
+  // turn keeps the user row's id — see `applyRealtimeTurn`), so a later
+  // redelivery of that exact assistant row wouldn't be caught by the
+  // dbTurnId-dedupe alone. This ref remembers every payload id that WAS
+  // merged (never a standalone-appended one, which is already covered by
+  // its own `dbTurnId`) so `shouldAppendRealtimeTurn` can still catch it.
+  const mergedReplyIdsRef = useRef<Set<number>>(new Set())
   const applyIncomingTurn = useCallback((payload: RealtimeTurnPayload) => {
     lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, payload.id)
-    setThread((prev) => (shouldAppendRealtimeTurn(prev, payload) ? [...prev, realtimeTurnToThreadTurn(payload)] : prev))
+    setThread((prev) => {
+      const next = applyRealtimeTurn(prev, payload, mergedReplyIdsRef.current)
+      // A merge replaces the thread with a same-LENGTH array (one turn's
+      // `reply` set in place); an append or a no-op (deduped) never does —
+      // append grows the array, and a no-op returns the identical `prev`
+      // reference. Length-equality plus a changed reference is therefore an
+      // unambiguous "this call merged" signal, without `applyRealtimeTurn`
+      // needing to hand back anything beyond the new array.
+      if (next !== prev && next.length === prev.length) mergedReplyIdsRef.current.add(payload.id)
+      return next
+    })
   }, [])
 
   const handleRealtimeEvent = useCallback((event: string, payload: unknown) => {

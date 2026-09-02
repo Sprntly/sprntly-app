@@ -528,7 +528,17 @@ def add_turn(
     c.table("conversations").update(patch).eq("id", conversation_id).execute()
 
     # ── Realtime gate: individual project chat ONLY ─────────────────────────
-    if conversation.get("kind") == "individual" and conversation.get("project_id") is not None and turn:
+    # Defense-in-depth (matches the client's own `parseRealtimeTurnPayload`
+    # blank-content guard): a blank-content row is never worth a broadcast —
+    # the row is still persisted above exactly as before, only the publish
+    # is skipped, so a client that somehow still receives it can never
+    # render an empty/phantom bubble from THIS row.
+    if (
+        conversation.get("kind") == "individual"
+        and conversation.get("project_id") is not None
+        and turn
+        and (turn.get("content") or "").strip()
+    ):
         try:
             # The conversation is private to its own `user_id` — that's the
             # owner uid the per-user topic keys on, never the acting request

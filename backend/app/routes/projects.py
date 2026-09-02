@@ -693,7 +693,15 @@ def _publish_turn_created(project_id: int, owner_user_id: str, turn: dict) -> No
     OWNER's uid, never the group `project:{id}` channel (privacy invariant:
     individual-chat content is never broadcast group-wide). `publish_broadcast`
     itself never raises; this wrapper also swallows a DTO-shaping mistake so a
-    realtime hiccup can never break the write it follows."""
+    realtime hiccup can never break the write it follows.
+
+    Defense-in-depth: a blank-content `turn` is never published (the row is
+    already persisted by the caller either way) — mirrors the client's own
+    `parseRealtimeTurnPayload` blank-content guard, so an empty write can
+    never render a phantom bubble even if some future caller starts passing
+    one through."""
+    if not (turn.get("content") or "").strip():
+        return
     try:
         publish_broadcast(
             f"project:{project_id}:user:{owner_user_id}",
