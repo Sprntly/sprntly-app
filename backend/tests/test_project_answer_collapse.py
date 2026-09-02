@@ -1597,6 +1597,152 @@ def test_sixth_branch_still_claims_genuine_project_turns_with_plan_present(monke
     assert out["answer"] == "project agent turn"
 
 
+# ── Ticket-ownership-vs-delegation confabulation fix (F2) ──────────────────
+# "assign the auth ticket to David" in a project with NO tickets is lexically
+# an `is_project_tool_request` match — the delegate-verb regex is object-blind
+# between a ticket and a person — even though the planner already correctly
+# classifies it `assign_tickets` (ticket OWNERSHIP, not a task delegation).
+# The delegate tool loop has no ticket-assignment tool at all, so it
+# fabricated a delegation row instead of declining. When the planner has
+# ALREADY resolved this turn to a ticket-family action, the gate must defer,
+# mirroring the existing `_defers_to_report_pipeline` clause rather than
+# inventing a new mechanism.
+
+
+@pytest.mark.parametrize(
+    "action", ["assign_tickets", "update_ticket", "generate_tickets"],
+)
+def test_ticket_action_verdict_defers_the_sixth_branch(monkeypatch, action):
+    """MUTATION-shaped proof of the fix. With the deferral clause present the
+    turn falls through to the composer (GREEN, no fabricated delegation row);
+    forcing the predicate to always report "nothing to defer to" (the pre-fix
+    gate) reproduces the wrongful claim (RED) — the exact reported symptom."""
+    question = "assign the auth ticket to David"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action=action)
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "FABRICATED by the connector-blind project loop", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "There's no auth ticket in this project yet.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    # Sanity: the phrasing really does lexically satisfy the sixth-branch
+    # tool gate — this is what makes the deferral load-bearing rather than
+    # incidental (a phrasing the gate never matched would pass either way).
+    from app.skill_router import is_project_tool_request
+
+    assert is_project_tool_request(question) is True, question
+
+    # GREEN (fix present): the turn reaches the ordinary composer, never the
+    # tool loop that fabricated the delegation row.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "There's no auth ticket in this project yet."
+
+    # RED (mutation: force the predicate as if no plan ever deferred it) —
+    # reproduces the fabricated-delegation-row symptom the bug report named.
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "_defers_to_ticket_action", lambda *a, **kw: False)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"].startswith("FABRICATED")
+
+
+def test_delegate_verdict_is_not_deferred(monkeypatch):
+    """Must-not-regress: `delegate` is NOT in the ticket-family defer set —
+    it is the delegate tool loop's OWN action — so a genuine delegation
+    turn ("ask David to review the PRD") must still reach `delegate_task`
+    unchanged, never fall through to the composer."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="delegate")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    out = qa.answer(
+        enterprise_id="c1", question="ask David to review the PRD", dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+
+def test_ticket_action_deferral_is_a_noop_with_no_plan(monkeypatch):
+    """AC byte-identity for every caller that predates the planner threading:
+    `plan=None` (the sixth branch's own default) must behave exactly as it
+    did before this fix — the project tool loop still claims a genuine
+    delegation turn with no plan supplied at all."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    out = qa.answer(
+        enterprise_id="c1", question="ask David to review the PRD", dataset="d",
+        scope=scope,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+
+def test_sixth_branch_gate_and_ticket_action_defer_use_same_predicate():
+    """Symmetry proof (source-level), mirroring `test_sixth_branch_gate_and_
+    report_defer_use_same_predicate`: the gate's ticket-action-defer clause
+    reads `_defers_to_ticket_action(plan)` — one predicate, one call site, so
+    the mechanism cannot silently drift out of sync with itself."""
+    src = inspect.getsource(qa.answer)
+    assert "and not _defers_to_ticket_action(plan)" in src
+
+
+def test_defers_to_ticket_action_predicate_unit():
+    """Pure-unit coverage of the predicate itself: every member of the
+    ticket-family action set defers; `delegate`, a non-ticket action, and no
+    plan at all do not."""
+    for ticket_action in sorted(qa._TICKET_ACTION_IDS):
+        assert qa._defers_to_ticket_action(
+            Plan(action=ticket_action)
+        ) is True, ticket_action
+
+    # The delegate loop's own action must never be read as ticket ownership.
+    assert qa._defers_to_ticket_action(Plan(action="delegate")) is False
+    # The ordinary default action.
+    assert qa._defers_to_ticket_action(Plan()) is False
+    # No plan at all.
+    assert qa._defers_to_ticket_action(None) is False
+
+
 # ── Delegation-confabulation fix: composer split (fix part 2) ──────────────
 
 

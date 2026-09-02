@@ -2046,6 +2046,47 @@ def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
     )
 
 
+#: The `Plan.action` values that name TICKET-OWNERSHIP/authoring work — an
+#: action the delegate tool loop has no execution path for (it can only
+#: create a NEW delegation row via `handle_delegate_task`; it cannot
+#: assign/update/generate a ticket). `"delegate"` is deliberately OUT of this
+#: set — it is the loop's OWN action. See `ask_planner._ACTIONS`'s
+#: `"delegate"` entry: `chat_intent._plan_to_envelope` rewrites it to
+#: `"answer"` only on the separate client-dispatch envelope path; the RAW
+#: `Plan` reaching this gate via `ask_job_runner.run_ask_job` still carries
+#: `"delegate"` unrewritten, and it must keep claiming the turn.
+_TICKET_ACTION_IDS: frozenset[str] = frozenset({
+    "assign_tickets",
+    "update_ticket",
+    "generate_tickets",
+})
+
+
+def _defers_to_ticket_action(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    ticket-ownership/authoring action — the mirror of
+    `_defers_to_report_pipeline`, one more narrow AND-clause on the sixth
+    branch's own claim rather than a new mechanism.
+
+    Root cause this closes: in a project with NO tickets, "assign the auth
+    ticket to David" is lexically an `is_project_tool_request` match — the
+    regex is object-blind, "assign X to Y" matches identically whether X is
+    a ticket or a person — even though the planner has already correctly
+    classified the turn `assign_tickets` (ticket OWNERSHIP, not a task
+    delegation). The delegate tool loop has no ticket-assignment tool at
+    all, so it fabricated a delegation row ("Handle the auth ticket")
+    instead of declining. When the planner has already named a
+    ticket-family action for this exact turn, the delegate loop's claim is
+    wrong on its face: defer instead, so the turn falls through to the
+    composer, which can answer honestly (e.g. "there's no auth ticket in
+    this project yet") rather than fabricating a hand-off.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan) leaves the
+    sixth branch's admission exactly as the gates above already decide it."""
+    return bool(plan is not None and plan.action in _TICKET_ACTION_IDS)
+
+
 def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
     """The specific subject this question is about, when the planner named one.
 
@@ -2642,6 +2683,15 @@ def answer(
         # caller (`ask_job_runner.run_ask_job`) before `answer()` ever runs,
         # so this reads it rather than reordering anything below.
         and not _defers_to_report_pipeline(plan)
+        # Yield to the composer when the planner has ALREADY resolved this
+        # turn to a ticket-ownership/authoring action ("assign the auth
+        # ticket to David" in a ticketless project): `is_project_tool_
+        # request`'s "assign/send X to Y" regex is object-blind between a
+        # ticket and a person, but the delegate loop has no ticket-
+        # assignment tool and would fabricate a delegation row rather than
+        # decline. `"delegate"` itself is excluded from the deferred set —
+        # see `_defers_to_ticket_action`'s docstring.
+        and not _defers_to_ticket_action(plan)
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
