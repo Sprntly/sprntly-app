@@ -74,7 +74,7 @@ import { getPendingJob, insightScope } from "../../../lib/jobResume"
 import { pickDefaultDetailKey } from "../../../lib/brief-adapter"
 import type { DetailState, PrdState, PrdContent } from "../../../types/content"
 import { useBriefPrototypeMap } from "../../design-agent/useBriefPrototypeMap"
-import { prototypePath } from "../../../lib/routes"
+import { prototypePath, projectPath } from "../../../lib/routes"
 import { documentPath } from "../../../(app)/artifacts/doc/DocumentRoute"
 import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatTranscript, type ChatTranscriptTurn } from "../../shared/ChatTranscript"
@@ -754,20 +754,34 @@ export function ChatScreen() {
   const { content, setContent } = useContent()
   // A PRD generated in the main chat auto-forks into a project (server-side,
   // `maybe_auto_create_project_for_prd`), which returns the project id on the
-  // generate response. We DON'T navigate away (the entry-flow reshape): the
-  // page stays on `/`, the just-generated PRD stays open in the content panel,
-  // and we simply RECORD the forked project id on the shared content state so
-  // the panel can surface a project-menu affordance in its header. Because we
-  // stay put we WANT the normal `?prd=…` reflect (no `skipArtifactReflectOnNavRef`
-  // — that guard only existed to suppress the reflect during the old away-nav).
+  // generate response. We always RECORD the forked project id on the shared
+  // content state so the header's project-menu affordance stays correct even
+  // when the auto-nav below is skipped.
+  //
+  // Client decision D1 (2026-09-02): the entry-flow reshape used to stop at
+  // recording — the user stayed on `/` and had to click the header pill to
+  // reach the project. Now a successful PRD create takes the user SEAMLESSLY
+  // into the project with that PRD already open: `/` and `/projects` share
+  // the same `(app)` layout, so `router.push` is an SPA transition (no full
+  // reload, no white flash) and the persistent `ContentPanel` keeps the PRD
+  // on screen across it. Busy-user guard: never yank someone who is actively
+  // typing — same `document.activeElement` TEXTAREA/INPUT check
+  // `memberAddedLanding.ts`'s caller uses for the analogous "added to a
+  // project" landing. Busy → fall back to the old record-only behavior; the
+  // header pill remains the manual way in.
+  //
   // Best-effort: no id (an unbound generate, or an older backend) → no-op, the
   // panel renders exactly as it always has.
   const bindActiveProject = useCallback(
-    (projectId: number | null | undefined) => {
+    (projectId: number | null | undefined, justCreatedPrdId?: number | null) => {
       if (projectId == null) return
       setContent({ activeProjectId: projectId })
+      const el = typeof document !== "undefined" ? document.activeElement : null
+      const busy = !!el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT")
+      if (busy) return
+      router.push(projectPath(projectId, { chat: "individual", prd: justCreatedPrdId ?? undefined }))
     },
-    [setContent],
+    [setContent, router],
   )
   // Action dispatch is UNCONDITIONAL: one backend call (POST /v1/chat/intent,
   // backed by the Ask Planner — history-aware, sees the open PRD, the connected
@@ -1839,9 +1853,9 @@ export function ChatScreen() {
             settleCommandAck(tabId, seedTurn.id, commandAckReply(req))
           }
           // The PRD came from the main chat and forked a project — carry the
-          // user into that project's private chat to continue (no-op when
-          // nothing forked). Last, so all local state settled first.
-          bindActiveProject(autoProjectId)
+          // user into that project's private chat, PRD open, to continue
+          // (no-op when nothing forked). Last, so all local state settled first.
+          bindActiveProject(autoProjectId, result.prd.prd_id)
         } else if (!(result as { clarify?: boolean }).clarify) {
           // (The clarify outcome already cleared its own spinner and posted the
           // questions — it is a handled stop, not a failure.)
@@ -1989,7 +2003,7 @@ export function ChatScreen() {
           // — same summary the typed command gets.
           postSummaryRef.current?.(activeTabId, "prd", result.prd.prd_id)
           // Same main-chat PRD fork continuity as the typed command.
-          bindActiveProject(start.project_id ?? null)
+          bindActiveProject(start.project_id ?? null, result.prd.prd_id)
         } else {
           setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, prdGenerating: false } : t))
           setContent({ prdGenerating: false, prdPartialHtml: null })
@@ -2966,7 +2980,7 @@ export function ChatScreen() {
         // tasks) — post the chat summary of what got built.
         postSummaryRef.current?.(targetTabId, "prd", result.prd.prd_id)
         // Same main-chat PRD fork continuity as the typed/Generate-button paths.
-        bindActiveProject(start.project_id ?? null)
+        bindActiveProject(start.project_id ?? null, result.prd.prd_id)
       },
       onFailure: (message) => {
         setTabs((prev) => prev.map((t) => t.id === targetTabId ? { ...t, prdGenerating: false } : t))

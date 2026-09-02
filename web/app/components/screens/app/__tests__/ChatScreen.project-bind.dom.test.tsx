@@ -1,13 +1,16 @@
 // @vitest-environment jsdom
 //
-// ChatScreen — the main-chat PRD-fork project binding (Regression, the
-// hardening for LOAD-BEARING RISK #1). A main-chat PRD generation that forks a
+// ChatScreen — the main-chat PRD-fork project binding (client decision D1,
+// 2026-09-02: seamless landing). A main-chat PRD generation that forks a
 // project (server returns `project_id`) must RECORD that id onto shared
-// content state (`content.activeProjectId`) so the content panel can surface a
-// project-menu affordance — and must NOT navigate away from the current
-// route. This supersedes the old away-nav mechanism (`router.push` guarded by
-// `NavigationContext.skipArtifactReflectOnNavRef`): the entry-flow reshape
-// keeps the user on `/` with the just-generated PRD open in the panel.
+// content state (`content.activeProjectId`, so the content panel can surface
+// a project-menu affordance even when the nav below is skipped) AND — unless
+// the user is actively typing (busy-guard) — navigate the user straight into
+// that project with the just-created PRD open (`/projects?id=<id>&prd=<id>
+// &chat=individual`). `/` and `/projects` share the same `(app)` layout, so
+// this is an SPA transition (`router.push`), not a full reload — this
+// supersedes the OLDER entry-flow reshape, which deliberately stayed put and
+// left the header pill as the only way in.
 import * as React from "react"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
@@ -182,16 +185,33 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); localStorage.clear(); protoMap.clear() })
 
-describe("ChatScreen — main-chat PRD-fork project binding (Regression — LOAD-BEARING #1)", () => {
-  it("test_fork_binds_active_project_no_navigation — a fork (project_id set) records content.activeProjectId and never navigates", async () => {
-    generateFromTask.mockResolvedValue({
-      prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3", project_id: 555,
-    })
+describe("ChatScreen — main-chat PRD-fork project binding + seamless landing (D1)", () => {
+  it("test_fork_binds_active_project_and_navigates — a fork (project_id set) records content.activeProjectId AND navigates into the project with the PRD open, when the user is NOT sitting focused in the composer", async () => {
+    // ChatComposer auto-focuses itself on mount (`composerRef.current?.focus()`
+    // in `ChatComposer.tsx`) and nothing in the send flow blurs it — so a
+    // deferred generate (resolved manually below) is needed to land an
+    // explicit blur BEFORE the success chain runs, proving the "not busy"
+    // branch for real rather than relying on the default focus state.
+    let resolveGenerate!: (v: { prd_id: number; title: string; status: string; variant: string; project_id: number | null }) => void
+    generateFromTask.mockImplementation(
+      () => new Promise((resolve) => { resolveGenerate = resolve }),
+    )
 
     renderChat()
     await typeAndSend("generate a PRD for dark mode on mobile")
-
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+
+    // The user looks away from the composer while the PRD generates (a
+    // realistic wait-and-watch state — the panel is streaming the draft).
+    await act(async () => { (document.querySelector(".cx-input") as HTMLTextAreaElement).blur() })
+    expect(document.activeElement?.tagName).not.toBe("TEXTAREA")
+
+    await act(async () => {
+      resolveGenerate({
+        prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3", project_id: 555,
+      })
+    })
+
     // The success chain (resumePrdGeneration resolving → the synchronous
     // success block → bindActiveProject) contains NO further `await` — a
     // short-timeout waitFor is the regression proof: a reverted async/
@@ -199,14 +219,14 @@ describe("ChatScreen — main-chat PRD-fork project binding (Regression — LOAD
     // time out and fail.
     await waitFor(() => expect(activeProjectValue()).toBe("555"), { timeout: 100 })
 
-    // The entry-flow reshape stays PUT — no push, no away-navigation of any
-    // kind (ChatScreen's own pre-existing, unrelated `?new=1`-stripping
-    // replace(`/`) is untouched by this change and is not asserted here).
-    expect(pushSpy).not.toHaveBeenCalled()
-    expect(replaceSpy).not.toHaveBeenCalledWith(expect.stringContaining("/projects"))
+    // D1 (2026-09-02): the fork now navigates the user straight into the
+    // project with the just-generated PRD open — an SPA transition
+    // (`router.push`, no reload) since `/` and `/projects` share the `(app)`
+    // layout.
+    expect(pushSpy).toHaveBeenCalledWith("/projects?id=555&chat=individual&prd=501")
   })
 
-  it("test_null_project_id_no_bind — a null project_id never sets activeProjectId and never navigates", async () => {
+  it("test_null_project_id_no_bind_no_nav — a null project_id never sets activeProjectId and never navigates", async () => {
     generateFromTask.mockResolvedValue({
       prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3", project_id: null,
     })
@@ -226,16 +246,43 @@ describe("ChatScreen — main-chat PRD-fork project binding (Regression — LOAD
     expect(activeProjectValue()).toBe("null")
   })
 
-  it("no navigation call remains in bindActiveProject's own definition (source scan — a router.push/replace here is a stop-ship)", () => {
+  it("test_busy_composer_suppresses_autonav — a fork still records activeProjectId while the composer is focused, but the auto-nav is suppressed (never yank someone sitting in the composer)", async () => {
+    generateFromTask.mockResolvedValue({
+      prd_id: 501, title: "Dark mode on mobile", status: "generating", variant: "v3", project_id: 555,
+    })
+
+    renderChat()
+    const textarea = document.querySelector(".cx-input") as HTMLTextAreaElement
+    expect(textarea).toBeTruthy()
+    await act(async () => { fireEvent.change(textarea, { target: { value: "generate a PRD for dark mode on mobile" } }) })
+    const sendBtn = within(document.querySelector(".cx") as HTMLElement).getByLabelText("Send")
+    await act(async () => { fireEvent.click(sendBtn) })
+
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+    // The composer auto-focuses on mount (`ChatComposer.tsx`) and nothing in
+    // this flow blurs it, so a (possibly freshly-mounted, for the new command
+    // tab) composer textarea is STILL the focused element by the time
+    // generation resolves — the realistic default state for anyone who has
+    // not deliberately looked away (the "not busy" test above is the one
+    // that explicitly blurs). Re-query rather than reuse the pre-send
+    // `textarea` reference: sending opens a new command tab with its own
+    // composer DOM node. Re-asserting the focus here just documents the
+    // precondition this test relies on.
+    expect(document.activeElement?.tagName).toBe("TEXTAREA")
+
+    await waitFor(() => expect(activeProjectValue()).toBe("555"), { timeout: 100 })
+    expect(pushSpy).not.toHaveBeenCalled()
+  })
+
+  it("bindActiveProject's own definition reads document.activeElement for the busy-guard and calls router.push (source scan — proves the new invariant is wired, not silently dropped)", () => {
     const src = readFileSync(join(__dirname, "../ChatScreen.tsx"), "utf8")
     const start = src.indexOf("const bindActiveProject")
     expect(start).toBeGreaterThan(-1)
     // Scope the scan to the callback's own definition (a generous window —
     // the function body is short), not the whole file, which legitimately
     // uses router.push/replace elsewhere for unrelated navigation.
-    const callbackBlock = src.slice(start, start + 400)
-    expect(callbackBlock).not.toContain("router.push")
-    expect(callbackBlock).not.toContain("router.replace")
-    expect(callbackBlock).not.toContain("setTimeout")
+    const callbackBlock = src.slice(start, start + 700)
+    expect(callbackBlock).toContain("document.activeElement")
+    expect(callbackBlock).toContain("router.push")
   })
 })

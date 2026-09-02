@@ -832,6 +832,14 @@ export function ProjectDetailScreen({
   // tab. Waits for the project shell to be ready so the panel opens over a live
   // surface; accepts both the canonical `public_id` (uuid) and the still-valid
   // legacy bare-integer id, exactly as `useArtifactUrlSync` does.
+  //
+  // No-flash fast path (client decision D1, 2026-09-02): the seamless
+  // auto-nav into a just-created PRD lands here with `content.prd` ALREADY
+  // holding that exact PRD (set by the main-chat generate success path before
+  // it navigated). Refetching it via `GET /v1/prd/{id}` anyway is a network
+  // round-trip that reads as a flash + delay for zero benefit — skip it and
+  // just make sure the panel is open. Only a cold deep-link/refresh (no
+  // matching `content.prd` yet) falls through to the real fetch below.
   const restoredPrdRef = useRef(false)
   useEffect(() => {
     if (restoredPrdRef.current) return
@@ -842,6 +850,10 @@ export function ProjectDetailScreen({
       return
     }
     restoredPrdRef.current = true
+    if (content.prd && (String(content.prd.prd_id) === raw || content.prd.public_id === raw)) {
+      openContentPanel("prd")
+      return
+    }
     const asInt = Number(raw)
     if (Number.isInteger(asInt) && asInt > 0) {
       openPrdInPanelById(asInt)
@@ -854,7 +866,7 @@ export function ProjectDetailScreen({
         // Unknown/foreign public_id — no content, no crash (mirrors
         // useArtifactUrlSync's own 404 handling).
       })
-  }, [state.status, openPrdInPanelById])
+  }, [state.status, openPrdInPanelById, content.prd, openContentPanel])
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
   // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
