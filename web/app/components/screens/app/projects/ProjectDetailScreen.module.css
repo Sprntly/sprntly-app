@@ -299,6 +299,23 @@
   min-height: 0;
   min-width: 380px;
   background: var(--surface);
+  /* CLIP the leak. The mounted ChatShell (`.od-center`) bounds itself to this
+     column and scrolls internally (`.od-center-scroll`, overflow:auto). But in
+     THIS flex chain — unlike main chat, whose ChatShell sits in `.od-layout`'s
+     rigid grid `1fr` cell — the ChatShell's scroll-content height leaks past the
+     bounded `.od-center` up through the `overflow:visible` wrappers
+     (`.host`/`.threadHost`/`.main`/`.body`/`.shell`), inflating the app's
+     `.main-column` (overflow:auto) scrollHeight to ~full-transcript height DURING
+     the answer render. That makes `.main-column` scrollable, and an auto-scroll
+     then shifts the whole column up — the composer floats above a dead-space band
+     for the entire "Working" state, snapping back only when the answer settles.
+     `overflow: hidden` here clips that phantom overflow at this bounded column
+     (the visible chat all lives inside `.od-center`'s own height, so nothing real
+     is hidden), so `.body`/`.shell`/`.main-column` stay bounded and the composer
+     stays pinned throughout. Not a user scroller (no wheel/scrollbar) — distinct
+     from the outer `overflow-y:auto` the composer-pin fix removed from
+     `.threadHost`. */
+  overflow: hidden;
 }
 
 .chatNote {

@@ -429,6 +429,13 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     expect(rule).toMatch(/grid-template-rows:\s*minmax\(0,\s*1fr\)/)
     expect(rule).toMatch(/min-height:\s*0/)
   })
+
+  it("test_main_clips_so_composer_stays_pinned_during_working — .main is overflow:hidden so the mounted ChatShell's scroll-content height can't leak past this bounded column up to the app's .main-column (overflow:auto) during the answer render. Without the clip, .main-column's scrollHeight inflated to ~full-transcript height, became scrollable, and an auto-scroll shifted the whole column up — the composer floated above dead space for the entire 'Working' state (measured live: .main-column 20180/855 → 855/855 after the clip)", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    const rule = css.match(/^\.main\s*\{[^}]*\}/m)?.[0] ?? ""
+    expect(rule).toMatch(/overflow:\s*hidden/)
+    expect(rule).toMatch(/min-height:\s*0/)
+  })
 })
 
 describe("ProjectDetailView — top-bar tasks trigger removed", () => {
