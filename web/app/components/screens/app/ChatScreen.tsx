@@ -904,6 +904,18 @@ export function ChatScreen() {
   // active, so it never stomps a tab the user has since switched to.
   const activeTabIdRef = useRef<string | null>(activeTabId)
   activeTabIdRef.current = activeTabId
+  // Set for the synchronous window in which a COMMAND is dispatched onto the tab
+  // it was typed in while the user is looking at a DIFFERENT tab. The planner
+  // round-trip is seconds long, and switching tabs during it used to hand the
+  // generation to whatever tab happened to be active when the envelope landed —
+  // a PRD asked for in one chat appeared in, and took over, another (a blank tab
+  // opened during the wait was hijacked, conversation and all). The engine now
+  // pins the target tab (see `rollbackOptimistic`) and sets this flag, which
+  // tells `openPrdInTab` to do its work WITHOUT stealing focus, the composer
+  // draft, or the shared panel. Refocusing the tab restores the panel by the
+  // ordinary route — the reconcile below reopens a `prdGenerating`/`prd` tab's
+  // document on every switch back.
+  const commandInBackgroundRef = useRef(false)
   // The panel's live tab, for the async auto-opens: a render-time closure reads
   // whatever was open when the effect fired, which is the wrong answer several
   // hundred milliseconds later when a fetch comes back.
@@ -1517,6 +1529,11 @@ export function ChatScreen() {
   // the consumer can persist a seeded command turn against it.
   const openPrdInTab = useCallback((req: LocalPrdTabRequest): string => {
     const { title, source } = req
+    // Landing a command on a tab the user is not looking at: everything that
+    // writes to the TAB still runs (thread turn, prdGenerating, the generation
+    // itself), everything that writes to the SCREEN — active tab, composer
+    // draft, the global panel — does not.
+    const background = commandInBackgroundRef.current
     const meta = source.kind === "generateIdeation" || source.kind === "importDoc" || source.kind === "generateTask"
       ? null : source.meta
     // Same-tab generation: a pinned `inTabId` (a PRD command typed in a plain
@@ -1599,7 +1616,7 @@ export function ChatScreen() {
       source.kind === "generateTask" ||
       ((source.kind === "resume" || source.kind === "load") && !!req.seedQuery)
     if (existing) {
-      setActiveTabId(existing.id)
+      if (!background) setActiveTabId(existing.id)
       // Backfill the insight body onto an already-open tab that lacks one (e.g. a
       // tab created before this field existed, or opened via a path that didn't
       // carry it) so reopening the insight surfaces its content, not just a title.
@@ -1625,9 +1642,9 @@ export function ChatScreen() {
         prdInFlow,
         ...(seedTurn && prdInFlow ? { prdFlowTurnId: seedTurn.id } : {}),
       }])
-      setActiveTabId(tabId)
+      if (!background) setActiveTabId(tabId)
     }
-    setDraft("")
+    if (!background) setDraft("")
     // A "generate a PRD for X" command may be answered with QUESTIONS rather
     // than a document — the clarify-first gate runs before any generation.
     // Opening the rail now would park an EMPTY PRD panel beside those questions,
@@ -1636,7 +1653,7 @@ export function ChatScreen() {
     // kind waits: the panel opens the moment generation actually starts, either
     // straight after the gate passes (below) or when the user answers.
     const clarifyFirst = source.kind === "generateTask"
-    if (!clarifyFirst) setPrdPanelPending(source.kind === "evidence" ? "evidence" : "prd")
+    if (!clarifyFirst && !background) setPrdPanelPending(source.kind === "evidence" ? "evidence" : "prd")
 
     // ── Evidence-first open ──────────────────────────────────────────────────
     // A Top Insights card's "View Evidence" opens the finding as its own chat tab
@@ -1653,7 +1670,7 @@ export function ChatScreen() {
       setTabs((prev) => prev.map((t) => t.id === tabId
         ? { ...t, evidenceOnly: true, evidenceDetail: source.detail }
         : t))
-      setContent({
+      if (!background) setContent({
         detail: source.detail,
         prd: existing?.prd ?? null,
         prdMeta: source.meta,
@@ -1678,7 +1695,7 @@ export function ChatScreen() {
     // Reuse a PRD already cached on this tab (unless the caller handed us a fresh
     // one) — don't regenerate/re-fetch an already-open PRD.
     if (existing?.prd && source.kind !== "ready") {
-      setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
+      if (!background) setContent({ prd: existing.prd, prdMeta: existing.briefMeta, prdGenerating: false })
       // No ack settling here, deliberately. This return is upstream of the turn
       // ever being registered (seedCommandTurn runs after openPrdInTab), so a
       // settle would write the thread and skip persistence entirely. `ackInline`
@@ -1689,7 +1706,7 @@ export function ChatScreen() {
     // Caller already holds the PRD — show it immediately, no async work.
     if (source.kind === "ready") {
       setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, prd: source.prd, prdId: source.prd.prd_id, briefMeta: source.meta } : t))
-      setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
+      if (!background) setContent({ prd: source.prd, prdMeta: source.meta, prdGenerating: false })
       return tabId
     }
     // generate | generateIdeation | load | resume — kick off, show the panel's
@@ -1711,7 +1728,7 @@ export function ChatScreen() {
     // `clarifyFirst` holds the generating state back too — the card would
     // otherwise read "Generating PRD…" while the agent is still asking what to
     // build. Both flip on together once the gate passes.
-    if (!clarifyFirst) setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
+    if (!clarifyFirst && !background) setContent({ prd: null, prdMeta: meta, prdGenerating: true, prdPartialHtml: null })
     void (async () => {
       // Live preview: forward the accumulating Part A HTML (throttled inside
       // runPrdGeneration) into shared content so PrdPanelContent renders the
@@ -4057,6 +4074,7 @@ export function ChatScreen() {
       busy,
       viewerAttachmentOpen: Boolean(viewerAttachment),
       setActiveTabId,
+      commandInBackgroundRef,
       resolveSendTarget,
       interceptBeforeIntent,
       importPrdCommandFlow,
