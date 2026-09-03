@@ -2333,6 +2333,7 @@ def answer(
     on_delta=None,
     constraints: dict | None = None,
     on_phase: Callable[[str], None] | None = None,
+    wants_report: bool | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
 
@@ -2370,7 +2371,25 @@ def answer(
     already do inside `build_corpus`: an empty KG still answers from calls, and
     calls that could not be fetched still answer from the KG — saying so."""
     window = _planned_window(constraints) or parse_window(question)
-    query_mode = is_voc_query(question)
+    # DOCUMENT OR ANSWER — the planner's verdict when it has one, this
+    # module's regex when it does not.
+    #
+    # `wants_report` is `ask_planner.Plan.wants_report`: the model was asked
+    # outright whether the user requested a DOCUMENT, having read the whole
+    # sentence. `is_voc_query` is the same decision inferred from surface
+    # words, and it is kept — unchanged — for every caller with no plan (the
+    # regex ladder in `qa_agent.answer`, the scheduled runs, the tests). What
+    # it cannot do is generalise: each phrasing that means "answer me" had to
+    # be found and added, and until it was, the default was a multi-minute
+    # document. Two were added on 2026-09-03 alone (a summary ask, then a
+    # table ask), each after a reader watched a Reports panel fill with
+    # something they had not asked for.
+    #
+    # The two agree on the ordinary cases; where they disagree the plan wins,
+    # because it read the sentence and this reads its words.
+    query_mode = (
+        not wants_report if wants_report is not None else is_voc_query(question)
+    )
     compare_boundary: str | None = None
     if query_mode and _VOC_COMPARATIVE.search(question):
         # A trend/comparison needs the PRIOR period too: extend the fetch

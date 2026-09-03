@@ -521,14 +521,64 @@ def test_the_planner_verdict_wins_when_it_returns_one(monkeypatch):
 
 
 def test_a_report_pipeline_is_flagged_on_the_envelope():
+    """A report pipeline AND a plan that says a document was asked for.
+
+    `wants_report` is the planner's own verdict (v18) and it is what decides
+    this now — see `_is_report_pipeline`. The pipeline alone no longer implies
+    a document: it says what gets READ, not where the answer is written."""
     for pipeline in ("voice-of-customer-report", "competitive-intelligence-review"):
         envelope = ci._plan_to_envelope(
             _plan("answer", pipeline_id=pipeline, action_confidence=0.95,
-                  confidence=0.85, reason="wants a VoC report"),
+                  confidence=0.85, wants_report=True, reason="wants a VoC report"),
             prd_id=None,
         )
         assert envelope["intent"] == "answer", pipeline
         assert envelope["report"] is True, pipeline
+
+
+def test_a_report_pipeline_the_user_did_not_ask_a_document_of_is_not_a_report():
+    """THE REPORTED BUG (2026-09-03): "look at all customer conversation in the
+    last month and show me what product features users are asking for" opened a
+    report. The question needs the pipeline's GATHERING — every call in the
+    window — and wants the answer in the thread. The pipeline still runs; only
+    the destination changes."""
+    for pipeline in ("voice-of-customer-report", "call-digest",
+                     "public-feedback-report", "market-intelligence-report"):
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id=pipeline, action_confidence=0.95,
+                  confidence=0.85, wants_report=False, reason="a question"),
+            prd_id=None,
+            question=(
+                "look at all customer conversation in the last month and show "
+                "me what product features users are asking for"
+            ),
+        )
+        assert envelope["intent"] == "answer", pipeline
+        assert envelope["report"] is False, pipeline
+
+
+def test_the_planner_verdict_beats_the_words_in_both_directions():
+    """The plan wins over the regex, and it has to win BOTH ways or it is not
+    the decision — only a veto. A question that happens to contain "report"
+    ("what did the report say about churn?") is still an answer, and a document
+    ask the regex cannot recognise is still a document."""
+    said_report_meant_question = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="voice-of-customer-report",
+              action_confidence=0.95, confidence=0.85, wants_report=False,
+              reason="asking about a report, not for one"),
+        prd_id=None,
+        question="what does the customer report say about churn?",
+    )
+    assert said_report_meant_question["report"] is False
+
+    asked_for_one = ci._plan_to_envelope(
+        _plan("answer", pipeline_id="voice-of-customer-report",
+              action_confidence=0.95, confidence=0.85, wants_report=True,
+              reason="asked for the document"),
+        prd_id=None,
+        question="put together the customer voice piece for the board",
+    )
+    assert asked_for_one["report"] is True
 
 
 def test_an_ordinary_answer_is_not_a_report():
@@ -555,6 +605,8 @@ def test_the_flag_reads_the_dispatch_set_itself():
     knew about that the answer path didn't would open a panel over an answer."""
     from app import qa_agent
 
+    # Called with NO `wants_report` — the no-plan fallback, whose rules are
+    # unchanged. Every test below this line exercises that same fallback.
     for pipeline in sorted(qa_agent._REPORT_PIPELINE_IDS):
         assert ci._is_report_pipeline(pipeline) is True, pipeline
     assert ci._is_report_pipeline(None) is False
@@ -612,10 +664,13 @@ def test_a_report_shaped_call_digest_question_is_still_flagged_as_a_report(monke
     ):
         envelope = ci._plan_to_envelope(
             _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
-                  confidence=0.85, reason="a report question"),
+                  confidence=0.85, wants_report=True, reason="a report question"),
             prd_id=None, question=question,
         )
         assert envelope["report"] is True, question
+        # The same verdict from the fallback rules, unchanged — this is what a
+        # caller with no plan still gets.
+        assert ci._is_report_pipeline("call-digest", question) is True, question
     # …and the shapes the answer path answers INLINE do not open the drawer:
     # a summary (the owner's 2026-09-03 rule), a comparative, a count.
     for question in (
@@ -683,9 +738,17 @@ def test_a_non_call_digest_report_pipeline_ignores_question_shape(monkeypatch):
     from app.config import settings
 
     monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
+    # The FALLBACK rules (no `wants_report`), which is what the no-plan callers
+    # take and what this test has always been about.
+    assert ci._is_report_pipeline(
+        "competitive-intelligence-review",
+        "how many competitors raised pricing concerns this month",
+    ) is True
+    # And through the envelope, where the plan now decides.
     envelope = ci._plan_to_envelope(
         _plan("answer", pipeline_id="competitive-intelligence-review",
-              action_confidence=0.9, confidence=0.85, reason="wants a review"),
+              action_confidence=0.9, confidence=0.85, wants_report=True,
+              reason="wants a review"),
         prd_id=None,
         question="how many competitors raised pricing concerns this month",
     )
