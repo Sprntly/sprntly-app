@@ -198,7 +198,10 @@ def test_ingest_no_open_delegation_skips_llm(isolated_settings, monkeypatch):
 
 def test_ingest_no_open_delegation_wrong_conversation_skips_llm(isolated_settings, monkeypatch):
     """An open delegation exists, but was delivered into a DIFFERENT
-    conversation than the one the reply arrived in — still zero LLM calls."""
+    conversation than the one the reply arrived in — still zero LLM calls.
+    (Regression: this is the strict match a real, non-null
+    `delivered_conversation_id` must still enforce — the NULL-linkage
+    relaxation below must never widen THIS case.)"""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
     assignee_id = _seed_assignee(project["id"])
@@ -209,6 +212,106 @@ def test_ingest_no_open_delegation_wrong_conversation_skips_llm(isolated_setting
 
     ingest.maybe_ingest_status(project["id"], conv_id + 999, assignee_id, "working on it")
     assert state["calls"] == []
+
+
+# ── Link-less delegations (`delivered_conversation_id IS NULL`) ──────────
+#
+# Pre-existing gap (found in a later ticket's live-verify, this feature's
+# own scope): a delegation whose delivered conversation row was deleted
+# (FK `on delete set null`) and recreated goes link-less forever under a
+# strict `== conversation_id` match — a real "done" reply then produces
+# ZERO classifier activity, silently. See the module docstring's "Linkage
+# gap" note for the mechanism and why relaxing this one case is safe.
+
+
+def _seed_open_delegation_no_linkage(
+    ctx, project_id, assignee_id, *, task_summary: str = "Draft the pricing page"
+) -> tuple[int, int]:
+    """Same as `_seed_open_delegation`, except the row's
+    `delivered_conversation_id` is NULL — simulating the FK `on delete set
+    null` firing after the originally-delivered-into conversation was
+    deleted. Still returns the assignee's CURRENT individual project chat
+    id, since that is what `ask_job_runner.py` always passes as
+    `conversation_id` for a project-scoped ask."""
+    conv = conversations_db.create_individual_project_chat(project_id, assignee_id)
+    deleg = record_delegation(
+        project_id=project_id,
+        assigner_user_id=ctx.user_id,
+        assignee_user_id=assignee_id,
+        task_summary=task_summary,
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=None,
+        delivered_turn_id=None,
+    )
+    return deleg["id"], conv["id"]
+
+
+def test_ingest_done_explicit_classifies_when_delivered_conversation_id_is_null(
+    isolated_settings, monkeypatch,
+):
+    """The bug this ticket fixes: a real 'done' reply on an open delegation
+    with a link-less `delivered_conversation_id` must still classify and
+    record completion — mirrors `test_ingest_done_explicit_emits_completed`
+    exactly, except the seeded row has no linkage."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation_no_linkage(ctx, project["id"], assignee_id)
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "yes, I've finished it")
+
+    assert len(state["calls"]) == 1, "a link-less open delegation must still reach the classifier"
+    events = delegation_events_db.list_events(deleg_id)
+    assert [e["event"] for e in events] == ["completed"]
+
+
+def test_ingest_fast_path_still_zero_llm_calls_with_no_open_delegation(
+    isolated_settings, monkeypatch,
+):
+    """AC10 regression: the NULL-linkage relaxation must never widen the
+    pre-filter beyond THIS assignee's OPEN rows in THIS project — an
+    assignee with no open delegation at all in this project still short-
+    circuits before any LLM call, exactly like the pre-existing fast path."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    state = _stub_classify_llm(monkeypatch)
+
+    conv = conversations_db.create_individual_project_chat(project["id"], assignee_id)
+    ingest.maybe_ingest_status(project["id"], conv["id"], assignee_id, "yes, I've finished it")
+
+    assert state["calls"] == [], "no open delegation for this assignee -> zero LLM calls"
+
+
+def test_ingest_requester_own_reply_does_not_complete_their_outbound_delegation(
+    isolated_settings, monkeypatch,
+):
+    """No cross-user broadening: a link-less delegation is scoped to the
+    ASSIGNEE by `list_status_for_assignee` (`assignee_user_id == user_id`)
+    — the REQUESTER replying in their own individual project chat must
+    never match it, even though the row has no `delivered_conversation_id`
+    to strictly rule it out by conversation."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, _assignee_conv_id = _seed_open_delegation_no_linkage(ctx, project["id"], assignee_id)
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    requester_conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
+    ingest.maybe_ingest_status(
+        project["id"], requester_conv["id"], ctx.user_id, "yes, I've finished it"
+    )
+
+    assert state["calls"] == [], (
+        "the requester is not the assignee of any open delegation -> zero LLM calls, "
+        "regardless of the assignee's row having a null delivered_conversation_id"
+    )
+    assert delegation_events_db.list_events(deleg_id) == []
 
 
 # ── Application — in_progress (AC11) ─────────────────────────────────────
