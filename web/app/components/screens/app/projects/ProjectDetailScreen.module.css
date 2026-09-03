@@ -229,7 +229,7 @@
 .bodyDrawerOpen {
   grid-template-columns:
     minmax(360px, 1fr)
-    var(--proj-drawer-w, clamp(240px, 20vw, 300px));
+    var(--proj-drawer-w, clamp(240px, 30vw, 450px));
 }
 
 @media (max-width: 1080px) {
@@ -279,7 +279,7 @@
   :global(.app--cpanel-open) .bodyDrawerOpen {
     grid-template-columns:
       minmax(380px, 1fr)
-      var(--proj-drawer-w, clamp(240px, 20vw, 300px));
+      var(--proj-drawer-w, clamp(240px, 30vw, 450px));
   }
 }
 

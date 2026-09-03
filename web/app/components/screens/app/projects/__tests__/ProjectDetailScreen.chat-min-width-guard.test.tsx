@@ -36,10 +36,10 @@ describe("ProjectDetailScreen.module.css — both-drawers-open squeeze guard (B8
   it("the list-drawer column is capped tight so chat + list + content-panel fit without overlap, guarded off the two existing narrower breakpoints", () => {
     const css = moduleCss()
     // The base (single-drawer) rule caps the LIST column tight — a column of
-    // one-line rows reads at ~240-300px; the old 420-600px band was the root
+    // one-line rows reads at ~240-450px; the old 420-600px band was the root
     // cause of the three-panel squeeze.
     expect(css).toMatch(
-      /\.bodyDrawerOpen\s*\{\s*grid-template-columns:\s*\n\s*minmax\(360px,\s*1fr\)\s*\n\s*var\(--proj-drawer-w,\s*clamp\(240px,\s*20vw,\s*300px\)\)/,
+      /\.bodyDrawerOpen\s*\{\s*grid-template-columns:\s*\n\s*minmax\(360px,\s*1fr\)\s*\n\s*var\(--proj-drawer-w,\s*clamp\(240px,\s*30vw,\s*450px\)\)/,
     )
     // The three-panel override only exists nested under BOTH a `min-width`
     // media guard (never overrides the 960px/1080px narrow-viewport rules —
@@ -51,7 +51,7 @@ describe("ProjectDetailScreen.module.css — both-drawers-open squeeze guard (B8
     )?.[0]
     expect(guardedBlock).toBeTruthy()
     expect(guardedBlock).toMatch(/minmax\(380px,\s*1fr\)/)
-    expect(guardedBlock).toMatch(/var\(--proj-drawer-w,\s*clamp\(240px,\s*20vw,\s*300px\)\)/)
+    expect(guardedBlock).toMatch(/var\(--proj-drawer-w,\s*clamp\(240px,\s*30vw,\s*450px\)\)/)
     // The horizontal-scroll last-resort hack is gone — the tight cap makes a
     // clean three-column layout fit, so no `overflow-x` is needed (and it
     // would have forced overflow-y:auto, clipping this surface's menus).
