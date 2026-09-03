@@ -454,6 +454,7 @@ def resolve_recommendation_count(
     *,
     default: int = DEFAULT_RECOMMENDATION_COUNT,
     max_count: int = MAX_DEEP_RECOMMENDED,
+    asked_text: Optional[str] = None,
 ) -> RecommendationCount:
     """David: "somebody might ask 'I want to get a million dollars' … the
     number of projects really has to be in context of the question and what
@@ -473,8 +474,23 @@ def resolve_recommendation_count(
     `ranked_impacts` must already be in the run's own rank order; this
     function only sums and counts, exactly like `rice.py`'s arithmetic, and
     never re-derives an order (I10).
+
+    `asked_text` IS THE FIX FOR A REAL BUG, not a nicety. Chat dispatches the
+    planner's EXTRACTED goal as `goal_text` — "reduce churn" out of "What are
+    three things I can do to reduce churn?" — which is the right string for
+    `goal.resolve` and the KPI-tree match to read (they want the normalised
+    metric, and this function must never become the reason that changes). But
+    it silently drops a count or target the reader phrased in their own
+    words, and nothing downstream could ever see the loss: the report just
+    said "no count or target was named" over a goal that plainly named one.
+    So the count/target regex reads `asked_text` when the caller has one
+    non-blank, and `goal_text` otherwise — a run with no literal text (the
+    direct API, or one started before this field existed) is byte-for-byte
+    unaffected. Still regex over a sentence, never a model (I2): this is
+    WHICH TEXT the same arithmetic reads, not a new decision.
     """
-    named = _named_count(goal_text)
+    count_text = asked_text if asked_text and asked_text.strip() else goal_text
+    named = _named_count(count_text)
     if named is not None:
         n = max(1, min(named, max_count))
         basis = (
@@ -485,7 +501,7 @@ def resolve_recommendation_count(
         )
         return RecommendationCount(n, basis)
 
-    target = _named_target(goal_text)
+    target = _named_target(count_text)
     if target is not None:
         value, unit = target
         sizeable = [imp for imp in ranked_impacts if imp.value is not None]
@@ -945,6 +961,7 @@ def build_deep_recommendations(
     impacts: Sequence[Impact],
     confidences: Sequence[Confidence],
     claims: Sequence[Claim],
+    asked_text: Optional[str] = None,
 ) -> DeepRecommendationResult:
     """The deep pass: AC-1's "what to build, change, or fix" for the top of
     the ranking, sized by AC-2's count arithmetic — for `findings` that
@@ -956,10 +973,17 @@ def build_deep_recommendations(
     three return sequences — the caller is expected to have already zipped
     and filtered them together.
 
+    `asked_text` is passed straight through to `resolve_recommendation_count`
+    — see its own docstring. `goal_text` still goes to the model verbatim
+    below (`_deep_input`'s `GOAL:` line): the LLM call reasons over the
+    normalised goal, exactly as before this field existed.
+
     TOTAL, like `build_recommendations`: a suggestion layer that failed must
     not cost a reader the findings that succeeded.
     """
-    count_info = resolve_recommendation_count(goal_text, impacts)
+    count_info = resolve_recommendation_count(
+        goal_text, impacts, asked_text=asked_text,
+    )
     n = min(count_info.count, MAX_DEEP_RECOMMENDED, len(findings))
     top = list(findings)[:n]
     if not top or _offline():

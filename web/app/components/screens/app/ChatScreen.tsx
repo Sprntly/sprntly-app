@@ -5355,6 +5355,12 @@ export function ChatScreen() {
       }
       const run = await goalAnalysisApi.start(goalText, {
         ...(convId != null ? { conversation_id: convId } : {}),
+        // THE READER'S OWN SENTENCE, sent to the run — not only to this
+        // turn's display. A count or target phrased in it ("what are three
+        // things I can do…") was reaching the transcript above and nothing
+        // else: `goalText` is the planner's extraction, and the run started
+        // from it alone had no way to see a count the extraction dropped.
+        ...(saidText && saidText.trim() ? { asked_text: saidText.trim() } : {}),
       })
       goalRunRef.current = run.id
       // A run is born `resolving_goal` and reaches A GATE a moment later —

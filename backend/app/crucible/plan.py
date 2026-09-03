@@ -106,6 +106,14 @@ class RunPlan:
     goal_text: str
     definition_text: str
     currency: str
+    #: THE READER'S OWN SENTENCE, when the caller has one distinct from
+    #: `goal_text` — chat dispatches the planner's EXTRACTED goal as
+    #: `goal_text` (right for this class's own fields below: the metric and
+    #: the definition genuinely want the normalised words) and this alongside
+    #: it, so the gate can show what was actually typed rather than only its
+    #: normalisation. Empty when there is no literal text to carry — the
+    #: direct API, the `+` menu, or a plan built before this field existed.
+    asked_text: str = ""
     sources: tuple[SourceInventory, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
@@ -187,6 +195,7 @@ class RunPlan:
     def to_json(self) -> dict:
         return {
             "goal_text": self.goal_text,
+            "asked_text": self.asked_text,
             "definition_text": self.definition_text,
             "currency": self.currency,
             "total_signals": self.total_signals,
@@ -365,6 +374,10 @@ def build_plan(
     company_id: str,
     goal_text: str,
     definition_text: str,
+    #: The reader's own sentence, carried alongside `goal_text` — see
+    #: `RunPlan.asked_text`. Empty by default so every existing caller (and
+    #: every stored plan built before this shipped) is unaffected.
+    asked_text: str = "",
     currency: str = "accounts",
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
@@ -411,6 +424,7 @@ def build_plan(
     gaps, produce = derive_gaps_and_promises(kept, hypotheses, framework_choice=choice)
     return RunPlan(
         goal_text=goal_text,
+        asked_text=asked_text,
         definition_text=definition_text,
         currency=currency,
         sources=tuple(kept),

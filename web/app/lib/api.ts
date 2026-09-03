@@ -787,6 +787,13 @@ export type GoalPlanQuestion = {
  *  read. */
 export type GoalRunPlan = {
   goal_text: string
+  /** THE READER'S OWN SENTENCE, when the run has one distinct from
+   *  `goal_text` — chat sends the planner's EXTRACTED goal as `goal_text`
+   *  and this alongside it, so the gate can show what was actually typed,
+   *  not only its normalisation. Empty on a run started with no literal
+   *  text to carry (the direct API, the `+` menu) or on a plan built before
+   *  this field existed. */
+  asked_text?: string
   definition_text: string
   currency: string
   total_signals: number
@@ -997,10 +1004,24 @@ export type GoalReportFork = {
 export const goalAnalysisApi = {
   /** Start a run. Returns immediately — the row is durable before any work,
    *  so this id is safe to poll even if the worker dies. */
-  start: (goal_text: string, opts?: { conversation_id?: number }) =>
+  start: (
+    goal_text: string,
+    opts?: {
+      conversation_id?: number
+      /** THE READER'S OWN SENTENCE, verbatim, when the caller has one
+       *  distinct from `goal_text` — carried alongside the planner's
+       *  EXTRACTED goal so a count or target the reader phrased in their own
+       *  words ("what are three things…") is not silently dropped by that
+       *  extraction. Omitted (not sent empty) when the caller has no raw
+       *  text — the `+` menu, where the two are the same thing — and the
+       *  server falls back to `goal_text`, exactly as before this existed. */
+      asked_text?: string
+    },
+  ) =>
     api.post<GoalRun>("/v1/crucible", {
       goal_text,
       ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
+      ...(opts?.asked_text ? { asked_text: opts.asked_text } : {}),
     }),
   list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
   get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),

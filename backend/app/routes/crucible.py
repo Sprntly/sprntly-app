@@ -68,6 +68,16 @@ _inflight: set = set()
 class StartRun(BaseModel):
     goal_text: str = Field(min_length=3, max_length=2000)
     conversation_id: Optional[int] = None
+    #: THE READER'S OWN SENTENCE, when the caller has one distinct from
+    #: `goal_text` — chat dispatches the planner's EXTRACTED goal as
+    #: `goal_text` (right for `goal.resolve` and the KPI-tree match, which
+    #: want the normalised words) and this alongside it, so a count or target
+    #: phrased in the reader's own words ("what are three things…") is not
+    #: silently dropped by that extraction. Optional and backward-compatible:
+    #: a caller with nothing to add (the direct API, an older client) omits
+    #: it and every downstream reader falls back to `goal_text`, exactly as
+    #: before this field existed.
+    asked_text: Optional[str] = Field(default=None, max_length=2000)
 
 
 class ConfirmGoal(BaseModel):
@@ -118,10 +128,11 @@ async def start(
         goal_text=body.goal_text,
         conversation_id=body.conversation_id,
         created_by=company.user_id,
+        asked_text=body.asked_text,
     )
 
     kwargs = dict(run_id=row["id"], company_id=company.company_id,
-                  goal_text=body.goal_text)
+                  goal_text=body.goal_text, asked_text=body.asked_text)
     if "pytest" in sys.modules:
         # The TestClient does not keep the loop alive between requests, so a
         # fire-and-forget task would never run and a polling test would spin
@@ -193,7 +204,12 @@ async def confirm(
     kwargs = dict(run_id=run_id, company_id=company.company_id,
                   goal_text=claimed.get("goal_text") or "",
                   definition_text=body.definition_text,
-                  confirmed_by=company.user_id)
+                  confirmed_by=company.user_id,
+                  # READ BACK OFF THE ROW, not resupplied by this body —
+                  # `create()` is the only place `asked_text` is ever
+                  # written, and this endpoint's own request shape
+                  # (`ConfirmGoal`) never carried it.
+                  asked_text=_row_meta(claimed).get("asked_text"))
     if "pytest" in sys.modules:
         await asyncio.to_thread(execute_run, **kwargs)
     else:
@@ -766,6 +782,8 @@ async def approve(
         answered=answered,
         excluded_sources=tuple(body.excluded_sources),
         hypotheses=tuple(body.hypotheses),
+        # READ BACK OFF THE ROW — see the `/confirm` handler's own comment.
+        asked_text=_row_meta(claimed).get("asked_text"),
     )
     if "pytest" in sys.modules:
         await asyncio.to_thread(execute_run, **kwargs)
@@ -791,6 +809,12 @@ def execute_run(
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
     answered: Optional[dict] = None,
+    #: THE READER'S OWN SENTENCE — see `StartRun.asked_text`. Threaded through
+    #: to the plan (so the gate can show it) and to the deep-recommendation
+    #: count (so a count phrased in it is not lost to `goal_text`'s
+    #: extraction). Never reaches `resolve()`/`_convention_definition` below —
+    #: the metric definition stays sourced from `goal_text` alone (I9).
+    asked_text: Optional[str] = None,
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -897,6 +921,13 @@ def execute_run(
                         resolution.definition.definition_source_ref
                         if resolution.definition is not None else None
                         ),
+                        # A WHOLESALE REPLACE, not a merge — this write used
+                        # to drop `asked_text` that `create()` had already
+                        # stored, because nothing here read it back before
+                        # overwriting the blob. Threaded through explicitly
+                        # so `/confirm`'s own re-read of the row still finds
+                        # it.
+                        "asked_text": asked_text or "",
                         # Carried, never resolved: two authoritative systems
                         # disagreeing about what a metric means is worth more than
                         # either answer, and picking one silently is the failure.
@@ -949,6 +980,7 @@ def execute_run(
             plan = build_plan(
                 company_id=company_id,
                 goal_text=goal_text,
+                asked_text=asked_text or "",
                 definition_text=definition_text,
                 currency="accounts",
                 definition_source=definition_source,
@@ -1334,7 +1366,7 @@ def execute_run(
             run_id=run_id, company_id=company_id, goal_text=goal_text,
             definition_text=definition_text, findings=result.findings,
             impacts=result.impacts, confidences=result.confidences,
-            claims=claims,
+            claims=claims, asked_text=asked_text,
         )
         # DOWN IN THE SAME WRITE THAT PUBLISHES THE RESULTS. Clearing it
         # separately leaves a window where the panel has stopped polling and
@@ -1359,6 +1391,7 @@ def execute_run(
 def _run_enrichment(
     *, run_id: int, company_id: str, goal_text: str, definition_text: str,
     findings: list, impacts: list, confidences: list, claims: list,
+    asked_text: Optional[str] = None,
 ) -> dict:
     """Stages 9-10: which findings bear on the goal, and what to do about the
     ones that do. Returns the `prioritisation` fields this stage contributes;
@@ -1484,6 +1517,7 @@ def _run_enrichment(
             impacts=relevant_impacts,
             confidences=relevant_confidences,
             claims=claims,
+            asked_text=asked_text,
         )
         deep = deep_result.by_id
         recommendation_basis = deep_result.count.basis
@@ -1682,6 +1716,10 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
                 run_id=run_id, company_id=company_id, goal_text=goal_text,
                 definition_text=definition_text, findings=findings,
                 impacts=impacts, confidences=confidences, claims=claims,
+                # `meta` is this same run's own blob, already read above —
+                # `create()` is the only writer of `asked_text`, so it is
+                # still there to read back.
+                asked_text=meta.get("asked_text"),
             )
             meta.update(enrichment_meta)
             outcome = "completed_by_sweep"
@@ -1821,11 +1859,12 @@ def _seconds_between(a, b) -> Optional[float]:
     return abs((parsed[0] - parsed[1]).total_seconds())
 
 
-def _meta_of(run_id: int, company_id: str) -> dict:
-    """The run's meta blob. `prioritisation` is the run's own framing — the
-    Stage 0 ask, and now the plan — so it is read-modify-written rather than
-    replaced, or approving a plan would erase the question that produced it."""
-    row = runs_db.get(run_id, company_id) or {}
+def _row_meta(row: dict) -> dict:
+    """The `prioritisation` blob off an ALREADY-FETCHED row — same tolerant
+    string-or-dict parsing `_meta_of` applies when it fetches the row itself,
+    reused here for a caller that already has one (`claimed`, from
+    `claim_for_confirmation`/`claim_for_approval`) so it does not cost a
+    second read to see what `create()` stored at `asked_text`."""
     meta = row.get("prioritisation") or {}
     if isinstance(meta, str):
         import json
@@ -1835,6 +1874,13 @@ def _meta_of(run_id: int, company_id: str) -> dict:
         except Exception:  # noqa: BLE001
             meta = {}
     return meta if isinstance(meta, dict) else {}
+
+
+def _meta_of(run_id: int, company_id: str) -> dict:
+    """The run's meta blob. `prioritisation` is the run's own framing — the
+    Stage 0 ask, and now the plan — so it is read-modify-written rather than
+    replaced, or approving a plan would erase the question that produced it."""
+    return _row_meta(runs_db.get(run_id, company_id) or {})
 
 
 def _progress(run_id: int, company_id: str, **fields) -> None:
