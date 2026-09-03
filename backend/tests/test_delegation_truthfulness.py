@@ -5,7 +5,7 @@ Mutation-proof, deterministic (FakeSupabaseClient, brief LLM stubbed). The
 string that overrides the model's free text, so the reply can only be truthful
 if the underlying rows were ACTUALLY written. These pin exactly that:
 
-  (a) a `delegate_task` that reports "Sent the brief" has, at that point,
+  (a) a `delegate_task` that reports "Assigned to" has, at that point,
       already written a `project_delegations` row, delivered the brief turn into
       the assignee's own individual chat, and recorded the genesis `assigned`
       event — the "promised but never invoked" (Malina) bug would return the
@@ -89,7 +89,7 @@ def test_delegate_confirmation_only_follows_real_row_and_delivery(isolated_setti
 
     result = _delegate(project, ctx.user_id, assignee="Fortune", task="Draft the pricing page")
     # The authoritative confirmation.
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     # 1) The FACT row was written (the delegate_task was actually invoked, not
     #    merely narrated).
@@ -153,8 +153,8 @@ def test_non_member_assignee_declines_and_writes_nothing(isolated_settings, monk
     project, _assignee_id = _seed_project_with_assignee(ctx)
 
     result = _delegate(project, ctx.user_id, assignee="Nonexistent Person", task="do a thing")
-    # A DECLINE — never a false "Sent the brief".
-    assert "Sent the brief" not in result
+    # A DECLINE — never a false "Assigned to".
+    assert "Assigned to" not in result
     assert "don't see" in result.lower() or "who did you mean" in result.lower()
     # And NO fact row was written.
     assert pd_db.list_delegations_for_project(project["id"]) == []

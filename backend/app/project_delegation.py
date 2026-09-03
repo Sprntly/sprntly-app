@@ -748,8 +748,21 @@ def handle_delegate_task(
                 "delegation_create_event_publish_prep_failed delegation_id=%s error_class=%s",
                 deleg["id"], type(exc).__name__,
             )
-        first = (assignee.get("name") or "").split()[0] if assignee.get("name") else "their"
-        return f"Sent the brief to {first}'s chat."
+        # Richer confirmation, emitted ONLY here — after the delegation row
+        # (`deleg["id"]`) is persisted and the brief delivered above. This is
+        # still the SAME grounded handler string the anti-confabulation gate
+        # relies on (never LLM-composed, never emitted without a real row); only
+        # the wording is enriched. Echo the assignee + the actual task, and keep
+        # the completion promise (now genuinely backed by the completion
+        # email/notice + realtime). Flatten whitespace and cap the echoed task
+        # so a huge task_summary can't blow up the one-line confirmation.
+        assignee_name = (assignee.get("name") or "").strip() or "your teammate"
+        task_flat = " ".join(task.split())
+        task_echo = task_flat if len(task_flat) <= 120 else task_flat[:119].rstrip() + "…"
+        return (
+            f'Assigned to {assignee_name} — "{task_echo}". '
+            "I'll let you know when they've marked it done."
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
         logger.warning(
             "delegation_failed project_id=%s error=%s", project_id, type(exc).__name__
