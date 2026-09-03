@@ -417,6 +417,56 @@ describe("ChatScreen — same-tab treatment across the other PRD command shapes"
   })
 })
 
+
+// ── A report promised and not delivered takes its panel back down ────────────
+// `/v1/chat/intent` decides `report` BEFORE the answer path runs, so the two
+// can disagree: a report pipeline declines (no connected call source), or the
+// question turns out to be one its query mode answers inline. The client opened
+// a Reports panel on the promise, and clearing the "generating" flag left it on
+// screen reading "No reports in this chat" beside a finished answer.
+//
+// Reported as: "it's actually returning an answer, but it opens the panel
+// also… the panel says no reports in the chat".
+describe("ChatScreen — a report run that answers in the thread instead", () => {
+  it("closes the Reports panel when no report was produced", async () => {
+    resolveIntent.mockResolvedValueOnce({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "a calls question", source: "planner", prd_id: null, prd_title: null,
+      report: true,
+    })
+    renderChat()
+
+    await typeAndSend("give me summary on last week's customer conversations")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+
+    // The answer landed in the thread and carried no `_report`…
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+    // …so the panel the promise opened is gone, rather than sitting empty.
+    await waitFor(() =>
+      expect(screen.getByTestId("panel-probe").textContent).toBe("closed"))
+  })
+
+  it("keeps the panel when the answer IS the report", async () => {
+    resolveIntent.mockResolvedValueOnce({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "a report request", source: "planner", prd_id: null, prd_title: null,
+      report: true,
+    })
+    runAskGeneration.mockResolvedValueOnce({
+      answer: "## Voice of customer", sources: [], follow_ups: [], key_points: [],
+      citations: [], confidence: 1, unanswered: "", _report: true,
+    })
+    renderChat()
+
+    await typeAndSend("give me a voice of customer report for last week")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Voice of customer"))
+
+    expect(screen.getByTestId("panel-probe").textContent).toBe("reports")
+  })
+})
+
 // ── The reader wandered off while the planner was thinking ──────────────────
 // The intent round-trip is SECONDS long (a real one has been measured at 13s
 // with a PDF folded in). Switching tabs inside that window used to hand the

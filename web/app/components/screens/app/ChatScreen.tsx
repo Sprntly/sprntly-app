@@ -4069,6 +4069,7 @@ export function ChatScreen() {
       postSummary: (key, kind, artifactId) => { postSummaryRef.current?.(key, kind, artifactId) },
       setContent,
       openContentPanel,
+      closeContentPanel,
       content,
       composer,
       busy,

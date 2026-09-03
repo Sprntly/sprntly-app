@@ -255,9 +255,15 @@ def _route_voc(monkeypatch):
 
 
 # A question that declines EVERY pre-routing interceptor (asserted in the test
-# below, not assumed) and is report-shaped for the digest, so it reaches the
-# VoC dispatch and then the streaming report pass.
-_UNPINNED_REPORT_Q = "what are the themes in customer feedback"
+# below, not assumed) and NAMES THE ARTIFACT, so it reaches the VoC dispatch
+# and then the streaming report pass.
+#
+# It used to be "what are the themes in customer feedback". "themes" became a
+# summary shape on 2026-09-03 (the owner's rule: asking for a summary is not
+# asking for a report), so that phrasing now answers in the thread and never
+# reaches the pass these tests drive. Naming the document is what selects the
+# report path from here on.
+_UNPINNED_REPORT_Q = "produce the voice-of-customer write-up for last week"
 
 
 # ── the routes that MUST stream ──────────────────────────────────────────────
@@ -298,11 +304,15 @@ def test_unpinned_voc_dispatch_publishes_the_answer_as_it_generates(gateway, mon
 
 
 def test_call_digest_interception_publishes_the_answer_as_it_generates(gateway, monkeypatch):
-    """"summarize the customer calls from last week" — the pre-routing
-    interception, a different call site from the VoC dispatch above. A sink
-    dropped at any ONE site is a route that spins with no preview, so each is
-    driven separately."""
-    question = "summarize the customer calls from last week"
+    """"digest the customer calls from last week" — the
+    pre-routing interception, a different call site from the VoC dispatch
+    above. A sink dropped at any ONE site is a route that spins with no
+    preview, so each is driven separately.
+
+    The phrasing was "summarize the customer calls from last week" until
+    2026-09-03, when a summary ask became a thread answer (owner's rule). The
+    call site under test is unchanged — only the sentence that reaches it."""
+    question = "digest the customer calls from last week"
     assert sr.is_call_digest(question) is True
     assert cd.is_voc_query(question) is False
 
@@ -641,7 +651,7 @@ def test_call_digest_answer_without_a_sink_is_unchanged(gateway, monkeypatch):
     """
     _stub_live_calls(monkeypatch)
 
-    out = cd.answer(enterprise_id="co", question="summarize customer calls")
+    out = cd.answer(enterprise_id="co", question="give me a customer calls report")
 
     assert gateway.purposes == ["voc_report"], (
         f"report call never ran; saw {gateway.purposes}"

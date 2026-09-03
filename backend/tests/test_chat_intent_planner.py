@@ -589,10 +589,16 @@ def test_a_mapreducible_count_question_is_not_flagged_as_a_report(monkeypatch):
 
 
 def test_a_report_shaped_call_digest_question_is_still_flagged_as_a_report(monkeypatch):
-    """The carve-out is narrow: an ordinary call-digest question — report-
-    shaped, or query-shaped but not count-eligible — keeps opening the
-    Reports drawer exactly as before. Only the count engine's own subset is
-    excluded."""
+    """The carve-out is exactly `call_digest.is_voc_query` — the fork the
+    answer path itself takes — so a question that NAMES the document keeps
+    opening the Reports drawer, and one that will be answered in the thread no
+    longer does.
+
+    The comparative case moved sides on 2026-09-03 and that is the point of the
+    widening: "did complaints increase" was always answered inline
+    (`is_voc_query` claims it), while this endpoint promised a report — so the
+    drawer opened over an answer that arrived as chat text. Only an artifact
+    ask survives here now."""
     # Imported fresh, matching exactly what `_is_report_pipeline` itself
     # reads (a lazy `from app.config import settings`) — NOT
     # `app.call_digest.settings`, whose own module-level binding predates
@@ -602,8 +608,7 @@ def test_a_report_shaped_call_digest_question_is_still_flagged_as_a_report(monke
     monkeypatch.setattr(settings, "voc_count_engine_enabled", True)
     for question in (
         "give me a voice of customer report for this month",
-        "did complaints about exports increase this week?",  # comparative,
-        # excluded from count eligibility by `is_mapreducible_count` itself
+        "write last week's calls up as a one-pager",
     ):
         envelope = ci._plan_to_envelope(
             _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
@@ -611,23 +616,44 @@ def test_a_report_shaped_call_digest_question_is_still_flagged_as_a_report(monke
             prd_id=None, question=question,
         )
         assert envelope["report"] is True, question
+    # …and the shapes the answer path answers INLINE do not open the drawer:
+    # a summary (the owner's 2026-09-03 rule), a comparative, a count.
+    for question in (
+        "give me summary on last week's customer conversations",
+        "did complaints about exports increase this week?",
+        "how many calls raised product issues this month",
+    ):
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
+                  confidence=0.85, reason="a calls question"),
+            prd_id=None, question=question,
+        )
+        assert envelope["report"] is False, question
 
 
-def test_the_carve_out_never_fires_when_the_engine_flag_is_off(monkeypatch):
-    """Dark-ship discipline: the frontend must not stop opening the drawer
-    for a count-shaped question while the engine itself is still off (the
-    answer path would run the untouched query/report pass, which IS a
-    report-eligible answer)."""
+def test_the_carve_out_no_longer_depends_on_the_count_engine_flag(monkeypatch):
+    """The dark-ship coupling is gone, and removing it is a fix rather than a
+    relaxation.
+
+    The old carve-out was `is_mapreducible_count` AND the engine flag, because
+    with the engine off a count question fell through to the QUERY pass — and
+    the reasoning at the time read that pass as report-eligible. It is not: the
+    query pass returns `_report: False` and writes no document, so the drawer
+    opened over an inline answer whenever the flag was off. Keying on
+    `is_voc_query` — which both branches of that fallback satisfy — makes the
+    verdict independent of the flag, exactly as the answer path's own
+    behaviour is."""
     from app.config import settings
 
-    monkeypatch.setattr(settings, "voc_count_engine_enabled", False)
-    envelope = ci._plan_to_envelope(
-        _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
-              confidence=0.85, reason="a count question"),
-        prd_id=None,
-        question="how many calls raised product issues this month",
-    )
-    assert envelope["report"] is True
+    for flag in (False, True):
+        monkeypatch.setattr(settings, "voc_count_engine_enabled", flag)
+        envelope = ci._plan_to_envelope(
+            _plan("answer", pipeline_id="call-digest", action_confidence=0.9,
+                  confidence=0.85, reason="a count question"),
+            prd_id=None,
+            question="how many calls raised product issues this month",
+        )
+        assert envelope["report"] is False, flag
 
 
 def test_the_carve_out_never_fires_with_no_question_supplied(monkeypatch):

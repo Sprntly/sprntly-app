@@ -134,6 +134,9 @@ export interface MainConversationAdapter {
   postSummary: (key: string, kind: "prd" | "evidence" | "prototype" | "ticket_set", artifactId: number) => void
   setContent: (patch: Partial<AppContentState>) => void
   openContentPanel: (tab: ContentPanelTab) => void
+  /** Take the panel down. Used by the report path when a run that opened it
+   *  turns out not to have produced a document. */
+  closeContentPanel: () => void
   content: AppContentState
 
   // ── Composer (the whole useComposer return; wrapper-owned so the tab
@@ -299,6 +302,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postSummary,
     setContent,
     openContentPanel,
+    closeContentPanel,
     content,
     composer,
     busy,
@@ -428,13 +432,32 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   // and the deltas render there instead of scrolling through the chat the
   // document is about to appear beside. `null` ends the run: settled, failed or
   // stopped, all of which mean the panel stops writing.
-  const onReportStream = useCallback((markdown: string | null) => {
-    setContent(
-      markdown === null
-        ? { reportGenerating: false, reportPartialMd: null }
-        : { reportPartialMd: markdown },
-    )
-  }, [setContent])
+  const onReportStream = useCallback((markdown: string | null, produced?: boolean) => {
+    if (markdown !== null) {
+      setContent({ reportPartialMd: markdown })
+      return
+    }
+    setContent({ reportGenerating: false, reportPartialMd: null })
+    // THE RUN PROMISED A REPORT AND PRODUCED NONE. Clearing the generating flag
+    // was never enough on its own: the panel this send opened stays on screen,
+    // now reading "No reports in this chat" beside an answer that is sitting
+    // complete in the thread. Reported exactly that way ("it's actually
+    // returning an answer, but it opens the panel also… the panel says no
+    // reports in the chat").
+    //
+    // The panel is only ever open here because `reportRun` opened it a moment
+    // ago, so closing it takes back this turn's own claim and nothing else. A
+    // report that DID land keeps its panel, which is the whole point of the
+    // distinction.
+    //
+    // This is the client's half of a two-sided guarantee, and it holds even
+    // when the server's half is wrong: `chat_intent` decides `report` before
+    // the answer path runs, so any disagreement between the two — a declined
+    // pipeline, a question its query mode claims, a shape rule the endpoint
+    // has not learned yet — ends as a panel that closes rather than an empty
+    // one the reader has to dismiss.
+    if (produced === false) closeContentPanel()
+  }, [setContent, closeContentPanel])
 
   const onAnswer = useCallback((res: AskResponse) => {
     if (res._report) setContent({ reportsRefreshKey: Date.now() })
