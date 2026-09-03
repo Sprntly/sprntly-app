@@ -373,6 +373,57 @@ def _recommendation_basis_section(basis: str) -> str:
     )
 
 
+#: `citations[]` rows a synthesized recommendation renders. Mirrors
+#: `recommend.MAX_SYNTHESIS_CITATIONS` — not imported, for the same reason
+#: `MAX_DEEP_CHANGES` below is not: this renders a STORED row and must bound
+#: it even for one written before the constant existed or changed value.
+MAX_SYNTHESIS_CITATIONS_RENDERED = 6
+
+
+def _synthesized_recommendation_section(synth: dict) -> str:
+    """The single, top-line recommendation for the whole report (item 1) —
+    narrated across the per-finding deep recommendations `_findings_section`
+    still renders below, never a replacement for them.
+
+    RENDERED BEFORE THE RANKING MECHANICS (`_framework_section`) in
+    `render_report_html`'s own assembly order — the answer leads, and how it
+    was ranked is supporting detail underneath it, not the other way round.
+
+    Silent when there is nothing to show: a run with zero or exactly one kept
+    deep recommendation (see `recommend.build_synthesized_recommendation`'s
+    own "only when there is more than one" rule), or one whose call/citation
+    gate produced nothing usable. The card reads exactly as it did before
+    this existed, which is a document that says nothing it cannot stand
+    behind.
+    """
+    action = (synth.get("action") or "").strip()
+    because = (synth.get("because") or "").strip()
+    if not action or not because:
+        return ""
+    out = ["<h2>The recommendation</h2>"]
+    out.append(_p(
+        f"<strong>Recommended.</strong> "
+        f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
+    ))
+    out.append(_p(
+        f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
+    ))
+    citations = [
+        c for c in _as_list(synth.get("citations"))
+        if isinstance(c, dict) and (c.get("evidence") or "").strip()
+    ]
+    if citations:
+        out.append("<p><strong>Drawn from.</strong></p>")
+        out.append(_ul(
+            f"{_esc_clipped(c.get('evidence'), MAX_STATEMENT_CHARS)} "
+            f"<em>— from: “"
+            f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
+            f"”</em>"
+            for c in citations[:MAX_SYNTHESIS_CITATIONS_RENDERED]
+        ))
+    return "".join(out)
+
+
 def _framework_section(findings: list[dict], plan: dict) -> str:
     """Dispatch to the ranking table for whichever framework this run
     actually used — RICE or MoSCoW (`app.crucible.framework.
@@ -1887,6 +1938,16 @@ def render_report_html(
     relevance_gate_ran = bool(prioritisation.get("relevance_gate_ran"))
     relevance_judged_info = _as_dict(prioritisation.get("relevance_judged"))
 
+    # THE ONE RECOMMENDATION FOR THE WHOLE REPORT (item 1). Read straight off
+    # the run's own JSON — computed once, upstream, by
+    # `recommend.build_synthesized_recommendation` — and rendered by
+    # `_assemble` below BEFORE the ranking mechanics (`_framework_section`):
+    # the answer leads, and how it was ranked is supporting detail
+    # underneath it, not competing with it for attention.
+    synthesized_recommendation = _as_dict(
+        prioritisation.get("synthesized_recommendation")
+    )
+
     def _assemble(full_cap: int, overflow_cap: int) -> str:
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
@@ -1894,6 +1955,7 @@ def render_report_html(
             _what_was_read_section(run, plan),
             _stat_strip(plan, findings, kept),
             _decision_section(plan, kept),
+            _synthesized_recommendation_section(synthesized_recommendation),
             _funnel_section(len(findings), len(kept)),
             _relevance_coverage_section(relevance_judged_info),
             _framework_section(kept, plan),

@@ -1524,3 +1524,316 @@ def build_deep_recommendations(
     return DeepRecommendationResult(
         by_id=kept, count=count_info, attempted_ids=attempted_ids,
     )
+
+
+# ── ONE RECOMMENDATION FOR THE WHOLE DOCUMENT ─────────────────────────────────
+#
+# David's reference memo names ONE recommendation for the whole memo
+# ("Option 1"). `build_deep_recommendations` above still writes one full
+# write-up PER finding — that detail stays, it is not replaced — but nothing
+# combined them into the single top-line answer the memo actually opens with.
+#
+# THIS IS A NARRATION PASS, NOT A SECOND RANKING (I2). `_DEEP_SYSTEM` already
+# says it once, for the per-finding pass: "You are not scoring, ordering or
+# selecting anything — every finding you are shown gets exactly one deep
+# recommendation, and the order they are shown in is already final." The same
+# boundary is restated in `_SYNTHESIS_SYSTEM` below, because this call reads
+# the per-finding recommendations that pass already produced and frozen-ranked
+# — never the findings, never the scores — and it narrates them into one
+# recommendation. It cannot re-rank what it is never shown a rank to change.
+#
+# THE SAME ANTI-FABRICATION GATE, REUSED RATHER THAN REBUILT. Every claim this
+# pass makes must trace to a `claim_id` one of the per-finding deep
+# recommendations it is synthesizing ALREADY cited — `_synthesis_acceptable`
+# below reuses `_grounded_in` (the exact lexical-overlap check
+# `_deep_acceptable` uses) and `lint_claim`, rather than inventing a second
+# citation mechanism for the same job.
+
+#: `citations[]` entries the synthesis may make. Bounded for the same
+#: reading-limit reason as `MAX_CHANGES_PER_DEEP`: a "single recommendation"
+#: that cites ten things reads as a list wearing a singular's clothes.
+MAX_SYNTHESIS_CITATIONS = 6
+
+
+@dataclass(frozen=True)
+class SynthesizedCitation:
+    """One claim the synthesis rests on — always one a per-finding deep
+    recommendation already cited (see `build_synthesized_recommendation`'s
+    `allowed_claim_ids` gate). `cited_claim` carries the CLAIM'S OWN assertion
+    text, exactly like `DeepChange.cited_claim`, so the renderer shows the
+    reader the actual evidence rather than a paraphrase that may have drifted
+    from it."""
+    claim_id: str
+    evidence: str
+    cited_claim: str
+
+
+@dataclass(frozen=True)
+class SynthesizedRecommendation:
+    """The single, top-line recommendation for the whole report — narrates
+    and combines the deep, per-finding recommendations `build_deep_
+    recommendations` already produced. Additive, never a replacement: the
+    per-finding write-ups still render exactly as they did before this
+    existed."""
+    action: str
+    because: str
+    citations: tuple[SynthesizedCitation, ...]
+
+
+SYNTHESIS_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["action", "because", "citations"],
+    "properties": {
+        "action": {
+            "type": "string", "minLength": 8, "maxLength": 300,
+            "description": (
+                "The one thing to DO, in the imperative — synthesized across "
+                "the recommendations shown below, not a new one of your own."
+            ),
+        },
+        "because": {
+            "type": "string", "minLength": 8, "maxLength": 600,
+            "description": (
+                "Why this is the single recommendation, argued ONLY from "
+                "what the recommendations shown already said. Cite what "
+                "they said, not new reasoning of your own."
+            ),
+        },
+        "citations": {
+            "type": "array", "minItems": 1, "maxItems": MAX_SYNTHESIS_CITATIONS,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["claim_id", "evidence"],
+                "properties": {
+                    "claim_id": {
+                        "type": "string",
+                        "description": (
+                            "The exact claim id, copied from the brackets in "
+                            "front of a claim already cited below. Never "
+                            "invent one and never cite one not shown."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "string", "minLength": 8, "maxLength": 250,
+                        "description": (
+                            "Restate, in your own words, ONLY what that one "
+                            "claim says. Add nothing beyond it."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+}
+
+_SYNTHESIS_SYSTEM = """You read a small set of already-written, already-\
+ranked recommendations — one per finding, shown in their final rank order — \
+and write ONE recommendation that synthesizes them into a single decision \
+for the whole report.
+
+You are not scoring, ordering or selecting anything — every recommendation \
+you are shown has already been decided by frozen, deterministic ranking, and \
+the order they are shown in is already final. Your job is to narrate and \
+combine what has already been decided, never to re-rank, re-score, or \
+choose which one matters most.
+
+Rules, all of them hard:
+- `action` and `because` follow the same rules as the recommendations shown: \
+an imperative action, justified ONLY from what those recommendations already \
+say, no figure, no promised outcome.
+- Every item in `citations` names the exact claim id (copied from the \
+brackets before a claim already cited below) it rests on. Never invent a \
+claim id and never cite one that was not already cited by one of the \
+recommendations shown.
+- `evidence` in each citation is a restatement of what that ONE claim says — \
+nothing more.
+- Do not introduce a new priority, a new action, or a new justification that \
+none of the recommendations shown already made. You are combining what is \
+already there into one coherent recommendation, not adding to it.
+
+Write for a product manager who has to defend this single recommendation to \
+their leadership from the same evidence, and nothing else."""
+
+
+def _synthesis_input(
+    goal_text: str, definition_text: str,
+    ranked: Sequence[tuple[Finding, DeepRecommendation]],
+) -> str:
+    lines = [
+        f"GOAL: {goal_text}",
+        f"THE READER'S OWN DEFINITION OF THE METRIC: {definition_text}",
+        "",
+        "RECOMMENDATIONS, ALREADY RANKED AND WRITTEN — do not reorder or "
+        "re-select them. Combine them into ONE recommendation for the whole "
+        "report, citing only the claim ids already shown in brackets below.",
+        "",
+    ]
+    for rank, (f, rec) in enumerate(ranked, start=1):
+        label = (f.label or f.statement).strip()
+        lines.append(f"--- rank {rank}: finding_id: {f.id} — {label}")
+        lines.append(f"action: {rec.action}")
+        lines.append(f"because: {rec.because}")
+        for c in rec.changes:
+            lines.append(f"  - [{c.claim_id}] {c.cited_claim}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _synthesis_acceptable(
+    rec: dict, strength: str, allowed_claim_ids: set[str],
+    claims_by_id: dict[str, Claim],
+) -> Optional[SynthesizedRecommendation]:
+    """Every check `_deep_acceptable` runs on `action`/`because`, plus the
+    same citation gate, restricted to the claim ids the per-finding
+    recommendations being synthesized ALREADY cited — never the finding's
+    full claim set, and never a claim id this call invents.
+
+    A synthesis whose citations all fail — no valid claim id, or cited but
+    not grounded in what that claim says — is dropped entirely, the same
+    "all or nothing" rule `_deep_acceptable` applies to a deep
+    recommendation: a synthesis with nothing it can actually stand behind is
+    not more useful than no synthesis at all, and the per-finding
+    recommendations (computed separately) still render regardless.
+    """
+    action = (rec.get("action") or "").strip()
+    because = (rec.get("because") or "").strip()
+    if not action or not because:
+        return None
+    both = f"{action} {because}"
+    if _FIGURE.search(both):
+        logger.info("crucible: dropped a synthesized recommendation quoting a figure")
+        return None
+    if _PROMISE.search(both):
+        logger.info(
+            "crucible: dropped a synthesized recommendation promising an outcome"
+        )
+        return None
+    if not lint_claim(action, strength).ok or not lint_claim(because, strength).ok:
+        logger.info(
+            "crucible: dropped a synthesized recommendation that failed the lint"
+        )
+        return None
+
+    citations: list[SynthesizedCitation] = []
+    for item in rec.get("citations") or []:
+        if not isinstance(item, dict):
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        claim_id = (item.get("claim_id") or "").strip()
+        if not evidence or not claim_id:
+            continue
+        # THE SAME GATE `_deep_acceptable` APPLIES TO `shown_claim_ids`, ONE
+        # LEVEL UP: a claim id this call cites must be one a per-finding deep
+        # recommendation already cited, not merely one that was shown to the
+        # model for some finding. Citing something never cited by any of the
+        # recommendations being synthesized would be a claim this synthesis
+        # is making on its own, which is exactly what it is not allowed to do.
+        if claim_id not in allowed_claim_ids:
+            logger.info(
+                "crucible: dropped a synthesis citation not already cited by "
+                "a per-finding recommendation"
+            )
+            continue
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            continue
+        if _FIGURE.search(evidence) or _PROMISE.search(evidence):
+            continue
+        if not lint_claim(evidence, strength).ok:
+            continue
+        if not _grounded_in(evidence, claim.assertion):
+            logger.info(
+                "crucible: dropped a synthesis citation whose evidence did "
+                "not overlap the claim it cited"
+            )
+            continue
+        citations.append(SynthesizedCitation(
+            claim_id=claim_id, evidence=evidence, cited_claim=claim.assertion,
+        ))
+    if not citations:
+        return None
+
+    return SynthesizedRecommendation(
+        action=action, because=because, citations=tuple(citations),
+    )
+
+
+def build_synthesized_recommendation(
+    *,
+    enterprise_id: str,
+    goal_text: str,
+    definition_text: str,
+    findings: Sequence[Finding],
+    deep_by_id: dict[str, DeepRecommendation],
+    claims: Sequence[Claim],
+) -> Optional[SynthesizedRecommendation]:
+    """One top-line recommendation, synthesized across the deep per-finding
+    recommendations that survived `build_deep_recommendations` — or `None`
+    when there is nothing to synthesize, or the call/citation gate produced
+    nothing usable.
+
+    `findings` MUST be in the run's own rank order (I10) — the same contract
+    `build_deep_recommendations` takes; this reads only the subset whose id
+    is a key in `deep_by_id`, in that order, and never re-sorts.
+
+    ONLY WHEN THERE IS MORE THAN ONE KEPT DEEP RECOMMENDATION. With exactly
+    one, that recommendation already IS "the" recommendation for the report —
+    synthesizing a single item with itself would spend a model call to
+    restate what already exists rather than combine anything. With zero,
+    there is nothing to synthesize.
+
+    TOTAL, like `build_deep_recommendations`: a synthesis that failed must
+    not cost a reader the per-finding recommendations that already
+    succeeded — this is additive, never a replacement, and the caller wraps
+    this the same way it wraps the flat and deep passes (see
+    `routes/crucible.py`).
+    """
+    ranked = [(f, deep_by_id[f.id]) for f in findings if f.id in deep_by_id]
+    if len(ranked) <= 1 or _offline():
+        return None
+
+    claims_by_id = {c.id: c for c in claims}
+    # THE POOL A SYNTHESIS CITATION MAY DRAW FROM: every claim id one of the
+    # per-finding deep recommendations being combined already cited. Nothing
+    # wider — not the finding's full claim set, not the corpus — because a
+    # citation this call did not inherit from an already-accepted
+    # recommendation is a claim it is making on its own (I2's boundary,
+    # applied to citations rather than to rank).
+    allowed_claim_ids: set[str] = {
+        change.claim_id for _, rec in ranked for change in rec.changes
+    }
+    if not allowed_claim_ids:
+        return None
+    strengths = [
+        claims_by_id[cid].strength for cid in allowed_claim_ids
+        if cid in claims_by_id
+    ]
+    strength = min(strengths, key=_STRENGTH_ORDER.index) if strengths else "reported"
+
+    started = time.monotonic()
+    try:
+        from app.graph.gateway import llm_call
+
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="crucible",
+            purpose="recommend_synthesis",
+            prompt_version="crucible-recommend-synthesis-v1",
+            system=_SYNTHESIS_SYSTEM,
+            input=_synthesis_input(goal_text, definition_text, ranked),
+            json_schema=SYNTHESIS_SCHEMA,
+            max_tokens=2000,
+        )
+        out = result.output
+    except Exception:  # noqa: BLE001 — the suggestion layer never kills a run
+        logger.exception("crucible: synthesized recommendation call failed")
+        return None
+
+    if not isinstance(out, dict):
+        return None
+    if time.monotonic() - started > DEADLINE_SECONDS:
+        logger.warning("crucible: synthesized recommendation exceeded its deadline")
+
+    return _synthesis_acceptable(out, strength, allowed_claim_ids, claims_by_id)
