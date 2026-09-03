@@ -1364,19 +1364,25 @@ def _list_pricing(findings: list[dict]) -> Optional[tuple[float, float, int]]:
     and account counts are NOT summed here — the same price quoted in two
     findings would be counted twice — so the only count reported is one this
     function can be sure of: how many findings carry pricing at all.
+
+    THE ARITHMETIC IS SHARED, not reimplemented here: `aggregate_price_range`
+    (`app.crucible.recommend`) is the one place the min-of-mins/max-of-maxes
+    rule is coded, so this document and the live panel's own list-pricing
+    line (`recommend.quoted_list_pricing_basis`) can never independently
+    drift on the numbers, only ever read them from the same place. This
+    function's own job is just adapting the dict shape a stored finding row
+    carries into the `(min, max)` pairs that rule takes.
     """
-    mins: list[float] = []
-    maxes: list[float] = []
+    from app.crucible.recommend import aggregate_price_range
+
+    pairs: list[tuple[float, float]] = []
     for f in findings:
         units = _as_dict(_as_dict(f.get("impact")).get("native_units"))
         lo = units.get("commercial_list_price_min")
         hi = units.get("commercial_list_price_max")
         if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
-            mins.append(float(lo))
-            maxes.append(float(hi))
-    if not mins:
-        return None
-    return min(mins), max(maxes), len(mins)
+            pairs.append((float(lo), float(hi)))
+    return aggregate_price_range(pairs)
 
 
 def _findings_section(

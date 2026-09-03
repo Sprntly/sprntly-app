@@ -290,6 +290,11 @@ export function GoalAnalysisReport({
   // computed from the goal's own ask, never a bare number. Mirrors
   // `report.py`'s `_recommendation_basis_section`, same placement.
   const recommendationBasis = (run.prioritisation?.recommendation_basis || "").trim()
+  // Corpus-wide list pricing, in the exported document's own words — see
+  // `report.py`'s `_list_pricing`/`_findings_section`. UNCONDITIONAL, unlike
+  // `recommendationBasis` above: that one only answers a money target the
+  // reader named, this renders whenever any finding carries pricing units.
+  const listPricingBasis = (run.prioritisation?.list_pricing_basis || "").trim()
   // Whether `judge_relevance` actually ran on this run — turns the
   // "these findings were not selected"/"were filtered" branch below. Never
   // guessed from `setAside.length`: a gate that judged everything `true`
@@ -880,6 +885,21 @@ export function GoalAnalysisReport({
         <p className="ga-doc-note" data-testid="goal-recommendation-basis">
           <strong>How many got a full recommendation.</strong>{" "}
           {recommendationBasis}
+        </p>
+      ) : null}
+
+      {/* A RANGE, IN ITS OWN PARAGRAPH, NEVER BESIDE THE COMMITTED FIGURE
+          ABOVE. One is a sum of money people agreed to; the other is a rate
+          card quoted to whoever asked, whose total is meaningless — a
+          $30,000 tier quoted sixteen times is not $480,000. Kept as its own
+          block, never merged into `recommendationBasis`'s paragraph or any
+          other, so a reader is never shown a range and a sum close enough
+          together to be tempted to add them. Mirrors `report.py`'s
+          `_findings_section`, which places its own list-pricing paragraph
+          the same way. */}
+      {listPricingBasis ? (
+        <p className="ga-doc-note" data-testid="goal-list-pricing-basis">
+          {listPricingBasis}
         </p>
       ) : null}
 

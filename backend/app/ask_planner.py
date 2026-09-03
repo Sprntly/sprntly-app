@@ -220,7 +220,14 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     knowledge graph with a synced Jira board. Exclusive on v7's rule for the
 #     read flag (the block is the whole grounding) and widening on v4's rule
 #     both ways, so v15 and v16 rows must not be pooled.
-_PROMPT_VERSION = "ask-planner-v16"
+#   v17: the create_artifact rules gained "AN ATTACHED DOCUMENT IS THE
+#     SUBJECT". Staging, 2026-09-03: "generate a report for me" + a PDF planned
+#     create_artifact correctly and then wrote task: "", so the gate dropped it
+#     to a generic answer over the PDF. A v17 row is told to write the brief
+#     FROM the attachment (and `_gate_action` now keeps the action with the
+#     attached text as the brief when it still does not); a v16 row was never
+#     asked, so the two must not be pooled.
+_PROMPT_VERSION = "ask-planner-v17"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -436,6 +443,9 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     # only ask that about a stated goal. With no task there is nothing to ask
     # about, so this degrades to `answer` — which can ask what they meant.
     ACTION_ANALYSE_GOAL,
+    # ONE EXCEPTION, applied in `_gate_action`: with a document ATTACHED and
+    # the brief empty, `create_artifact` is kept and the attached text becomes
+    # the brief — see `_attached_document_brief`. Every other member degrades.
     # A document with no brief is a blank page with a title. Unlike
     # `generate_prd` — which has a chat surface that asks "what should it
     # cover?" and waits — there is no such prompt for an arbitrary document
@@ -1125,6 +1135,13 @@ Rules that decide the close calls:
 - The task brief must be self-contained and drawn from the WHOLE conversation.
   If the thread spent twenty turns specifying a feature and the last message is
   "draft it up", the brief describes the feature, not the words "draft it up".
+- AN ATTACHED DOCUMENT IS THE SUBJECT. When the message carries an
+  `[Attached files]` block and asks for a report or any other document
+  without naming what it should cover, the attached document is what it
+  should cover: write the brief FROM it — what the document is about, what a
+  report on it would say — and set `artifact_kind` to what they called it.
+  Never leave `task` empty for create_artifact when a file is attached; a
+  brief you are unsure of beats a request thrown away.
 
 === DEDICATED PIPELINES ===
 
@@ -2098,11 +2115,58 @@ def _clean_str(value: Any) -> Optional[str]:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
+#: The literals the composer / router put in front of attached-document text.
+#: `[Attached files]` is what ChatScreen.tsx `submitAsk` inlines (the exact
+#: constant is `qa_agent._ATTACHED_FILES_MARKER`); `[Attached document names]`
+#: is what `qa_agent._routing_text_with_filenames` appends for the router's
+#: filenames-only view. Checked as bare tokens so whitespace reshaping upstream
+#: cannot hide an attachment. An established convention, not a new coupling —
+#: `db/asks.py` and `routes/ask.py` already reason about the same literal.
+_ATTACHMENT_MARKERS: tuple[str, ...] = ("[Attached files]", "[Attached document names]")
+
+
+def _attached_document_brief(question: Any) -> str:
+    """The brief `create_artifact` falls back to when the model left `task`
+    empty but the user ATTACHED a document — or "" when nothing was attached.
+
+    Seen on staging (2026-09-03): "generate a report for me" + a PDF. The
+    planner chose `create_artifact` / `artifact_kind: "report"` — correctly —
+    but wrote `task: ""`, reasoning the request was "unresolvable without
+    clarification", and `_NEEDS_TASK` then dropped it to a generic `answer`.
+    The user got a 66-second Q&A over the PDF instead of a report, and no one
+    asked them anything: the planner has no clarify action, so an empty brief
+    is its only way to say "not sure", and the gate read that as "nothing to
+    build".
+
+    With a document attached, the subject is not missing — it is the document.
+    So the fallback brief is the user's own words plus the attached text as
+    they sent it (the `question` `plan()` receives carries the whole inlined
+    block; only the log line is clamped), cut to `_TASK_CHARS` like every
+    model-written brief. The generator (`custom_artifact_generate`) tolerates
+    a thin brief, takes the conversation as `context`, and grounds a thin one
+    by retrieval, so this is real material, not a title on a blank page.
+
+    Deliberately NOT applied when nothing is attached: a bare "generate a
+    report" with no subject anywhere in the thread really is a blank page,
+    and `answer` — which can ask what they meant — stays the right landing.
+    Newlines are kept (a document's structure is signal); only length is
+    bounded."""
+    text = question.strip() if isinstance(question, str) else ""
+    if not text or not any(marker in text for marker in _ATTACHMENT_MARKERS):
+        return ""
+    return text[:_TASK_CHARS]
+
+
+def _gate_action(
+    raw: Any, task: Any, instruction: Any, *, fallback_task: str = ""
+) -> tuple[str, str, str]:
     """`(action, task, instruction)`, with an unusable action degraded to
     `answer` rather than dispatched.
 
-    Two rules, both of them "fail towards answering":
+    Two rules, both of them "fail towards answering" — with one exception,
+    `create_artifact` when `fallback_task` is non-empty (a document was
+    attached; see `_attached_document_brief`), which fails towards BUILDING
+    from the attachment instead:
 
       * An action outside the known set is the model improvising. `answer` is
         the safe landing — it is what every message did before the planner
@@ -2129,6 +2193,12 @@ def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
     )
 
     if action in _NEEDS_TASK and not task_text:
+        if action == "create_artifact" and fallback_task:
+            logger.info(
+                "[planner] create_artifact kept with an empty brief: a document "
+                "is attached, using it as the subject"
+            )
+            return action, fallback_task, instruction_text
         logger.info("[planner] %s dropped to answer: no task brief", action)
         return ACTION_ANSWER, "", ""
     if action in _NEEDS_INSTRUCTION and not instruction_text:
@@ -2262,6 +2332,7 @@ def apply_gates(
     connected: list[str],
     known_documents: Optional[set[str]] = None,
     templates: Optional[list[dict]] = None,
+    question: str = "",
 ) -> Plan:
     """Turn one raw model payload into a gated `Plan`. Never raises.
 
@@ -2273,8 +2344,12 @@ def apply_gates(
     and `_gate_template` — see there. Both are optional so every existing caller
     and test keeps its exact behaviour; only `plan()`, which has already read
     both catalogs to build the prompt, supplies them."""
+    # `question` is optional for the same reason `known_documents` and
+    # `templates` are: only `plan()` has it. Without it there is no attachment
+    # to fall back to and the gate behaves exactly as before.
     action, task, instruction = _gate_action(
-        out.get("action"), out.get("task"), out.get("instruction")
+        out.get("action"), out.get("task"), out.get("instruction"),
+        fallback_task=_attached_document_brief(question),
     )
     # GOAL ANALYSIS IS ENTITLEMENT-GATED, and the gate belongs HERE rather than
     # only on the route it dispatches to. The route's `require_crucible_module`
@@ -2568,6 +2643,7 @@ def plan(
         connected=connected,
         known_documents=known_documents,
         templates=templates,
+        question=question,
     )
 
 

@@ -17,6 +17,7 @@ import { ChatArtifactActions } from "../../shared/chat-shell/ChatArtifactActions
 import { useNextPrompts, type NextPromptsAdapter } from "../../shared/chat-shell/useNextPrompts"
 import { openArtifactDestination } from "../../shared/chat-shell/openArtifactDestination"
 import type { ChatHomeCard, ConversationRow } from "../../../types/content"
+import { CreateProjectModal } from "./projects/CreateProjectModal"
 import { buildHomeChips, DEFAULT_HOME_CHIPS } from "../../../lib/homeChips"
 import { AppLayout } from "./AppLayout"
 import { BriefChat, isPrdCommand, isPrdEditCommand, isTicketsCommand, mentionsPrd, prdCommandTask } from "../../shared/BriefChat"
@@ -854,6 +855,11 @@ export function ChatScreen() {
   // would now only choose between "the planner decides" and "nothing decides".
   const { activeCompany } = useCompany()
   const [railExpanded, setRailExpanded] = useState(false)
+  // The home landing's "Create a project" chip opens the SAME modal Projects →
+  // "New project" does (it routes to the new project itself, then calls
+  // onClose) — so creating a project from the landing costs no detour through
+  // the Projects screen. See DEFAULT_HOME_STARTER_CARDS.
+  const [createProjectOpen, setCreateProjectOpen] = useState(false)
   const [activeConv, setActiveConv] = useState<number | null>(null)
   // Per-tab chat state is SESSION-scoped: it lives in sessionStorage, not
   // localStorage. So a fresh open (new browser tab/window, or reopening the app
@@ -5664,6 +5670,11 @@ export function ChatScreen() {
   }
 
   const handleHomeCard = (c: ChatHomeCard) => {
+    // Not a navigation and not a prompt: this card starts something.
+    if (c.target === "create-project") {
+      setCreateProjectOpen(true)
+      return
+    }
     if (c.target === "ondemand" && c.prompt) {
       setPendingOndemandDraft(c.prompt)
       return
@@ -6678,6 +6689,10 @@ export function ChatScreen() {
       {viewerAttachment ? (
         <AttachmentViewer attachment={viewerAttachment} onClose={() => setViewerAttachment(null)} />
       ) : null}
+      <CreateProjectModal
+        open={createProjectOpen}
+        onClose={() => setCreateProjectOpen(false)}
+      />
     </AppLayout>
   )
 }

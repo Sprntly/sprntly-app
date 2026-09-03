@@ -494,9 +494,11 @@ describe("the plan leads with the approach, not the form", () => {
     expect(approach.textContent).toMatch(/This is the approach I am going to use/i)
     const steps = approach.querySelectorAll("li")
     expect(steps.length).toBeGreaterThanOrEqual(4)
-    // Step one is what gets read, in the reader's words and with the total.
-    expect(steps[0].textContent).toContain("calls and customer tickets")
-    expect(steps[0].textContent).toContain("412")
+    // The plan carries a definition, so step one confirms it; the "what gets
+    // read" step — in the reader's words, with the total — follows it.
+    const sourcesStep = [...steps].find((s) => (s.textContent ?? "").startsWith("Read "))!
+    expect(sourcesStep.textContent).toContain("calls and customer tickets")
+    expect(sourcesStep.textContent).toContain("412")
   })
 
   it("sits above the controls, so the account is read before the form", () => {
