@@ -683,6 +683,18 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # falls through to `answer` — where the chat, knowing the product has
     # projects, replies that it made one and nothing exists.
     "create_project",
+    # CHANGE the backlog — add an idea, move one to done / in progress /
+    # dismissed, or re-sequence it. The client resolves the sentence against
+    # the live backlog (POST /v1/ideation/chat-plan) and asks through the
+    # question popup when a phrase fits several ideas or a new idea's type is
+    # unstated; the envelope's `instruction` is the whole argument.
+    #
+    # Listed here for exactly the reason create_artifact's comment records:
+    # THIS SET IS THE WIRE. An action missing from it falls through to
+    # `answer` — and the answer path now CARRIES THE BACKLOG BLOCK, which
+    # tells the model the product can add and complete ideas, so the reply
+    # would confidently describe a change nothing had made.
+    "backlog_action",
 }
 #: `delegate` is DELIBERATELY ABSENT from the set above, unlike every other
 #: action this module's comments warn about. It is not a missed wire — see

@@ -1827,6 +1827,50 @@ def _planned_projects_context(
         return ""
 
 
+def _planned_backlog_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """This company's backlog, when the PLAN asked for it.
+
+    Fourth of the own-records thunks (`_planned_library_context`,
+    `_planned_team_context`, `_planned_projects_context`), same shape and same
+    wave. Scoped by COMPANY alone, because `ideation_items` is
+    (`db/ideation.py`) — it takes no workspace and no caller.
+
+    Never raises — `backlog_block` swallows its own read failure — but wrapped
+    anyway, on the rule every gather leg here follows."""
+    if not enterprise_id or not plan.include_backlog:
+        return ""
+    try:
+        from app.backlog_context import backlog_block
+
+        block = backlog_block(enterprise_id)
+        logger.info(
+            "[planner] exec backlog company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a backlog read degrades, never breaks chat
+        logger.exception("[planner] backlog block failed for %s", enterprise_id)
+        return ""
+
+
+def _backlog_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the backlog and about
+    nothing else — the fourth twin of `_library_only_plan`.
+
+    The contamination it excludes is the word again, and here it is worse than
+    for projects: every connected tracker HAS a backlog, and a model asked
+    "what's in my backlog" with Jira beside the real list will answer with
+    Jira's — which is the exact failure this block exists to close."""
+    return bool(
+        plan is not None
+        and plan.include_backlog
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
 def _projects_only_plan(plan) -> bool:
     """THE PLAN'S OWN VERDICT that the question is about projects and about
     nothing else — the third twin of `_library_only_plan`.
@@ -3479,6 +3523,7 @@ def answer(
         library_context_fn = None
         team_context_fn = None
         projects_context_fn = None
+        backlog_context_fn = None
         # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
         # With the connector refresh on a 10-minute cadence, the knowledge
         # graph already holds near-live connector data — so the per-question
@@ -3579,19 +3624,26 @@ def answer(
             projects_context_fn = lambda: _planned_projects_context(  # noqa: E731
                 enterprise_id, plan
             )
+            # And the backlog, on both branches for the same reason: "is this
+            # already on the backlog" is asked from beside a PRD constantly.
+            backlog_context_fn = lambda: _planned_backlog_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
             library_context_fn=library_context_fn,
             team_context_fn=team_context_fn,
             projects_context_fn=projects_context_fn,
-            # One flag, three blocks: each is an exhaustive read of Sprntly's
+            backlog_context_fn=backlog_context_fn,
+            # One flag, four blocks: each is an exhaustive read of Sprntly's
             # own records, and a question about any of them is narrowed away
             # from the corpus/KG/document index identically.
             library_only=(
                 _library_only_plan(plan)
                 or _team_only_plan(plan)
                 or _projects_only_plan(plan)
+                or _backlog_only_plan(plan)
             ),
             on_delta=on_delta,
             # Real pipeline-leg phases on the COMMON direct-answer path — the

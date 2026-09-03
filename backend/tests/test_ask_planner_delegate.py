@@ -155,5 +155,9 @@ def test_the_prompt_version_reflects_the_widening():
     """`_PROMPT_VERSION` pools rows for routing-accuracy queries — a pre-
     `delegate` row answers a question ("is this a hand-off, not a ticket
     reassignment") no post-`delegate` row was ever asked, so the two must
-    not be pooled. See the file's own versioned-comment ledger."""
-    assert ap._PROMPT_VERSION == "ask-planner-v15"
+    not be pooled. See the file's own versioned-comment ledger.
+
+    `delegate` was v15. The pin moves with every later bump because the rule it
+    encodes is about POOLING, not about `delegate`: v16 added `backlog_action`
+    and `include_backlog`, which a v15 row could not name either."""
+    assert ap._PROMPT_VERSION == "ask-planner-v16"

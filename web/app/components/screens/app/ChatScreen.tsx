@@ -38,6 +38,7 @@ import {
   type PendingShareState,
 } from "../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../shared/chat-shell/conversation/useAssignCompletion"
+import { useBacklogCompletion } from "../../shared/chat-shell/conversation/useBacklogCompletion"
 import { askAgain } from "../../shared/chat-shell/conversation/askAgain"
 import { runClarifiedGeneration as runSharedClarifiedGeneration } from "../../shared/chat-shell/conversation/clarifiedGeneration"
 import {
@@ -56,7 +57,7 @@ import { DRAFT_MAX_CHARS, DRAFT_MIN_CHARS, type PinnedSkill } from "../../shared
 import { buildQuotedMessage, normalizeQuote, splitQuotedSuffix } from "../../../lib/chatQuote"
 import {
   type ChatIntentEnvelope,
-  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type PersistedTurnReply, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
+  ApiError, apiErrorMessage, artifactsApi, askApi, attachmentsApi, chatSuggestionsApi, goalAnalysisApi, storiesApi, type AskResponse, type BacklogPlanQuestion, type ChatArtifactItem, type GoalRunDetail, type OpenArtifactCandidate, type OpenArtifactResult, type PersistedTurnReply, type ReportSummary, type SlackSharePreview, type SlackShareTargetRef, type TicketAssignQuestion,
 } from "../../../lib/api"
 import { createChatPersistence, replyToText } from "../../../lib/chatPersistence"
 import { addToSet, isComposerBusy, removeFromSet } from "../../../lib/chatAskState"
@@ -349,6 +350,22 @@ export type ChatTab = {
     questions: TicketAssignQuestion[]
     /** Human lines for the pairs the PLAN already applied (the explicit ones,
      *  written before the popup opened) — they lead the final summary. */
+    applied: string[]
+    /** The flow's turn, so the summary lands on the same conversation entry. */
+    turnId: string
+  }
+  /** Backlog (chat): the plan's OPEN questions while the dock's popup steps
+   *  through them — which idea did you mean, or what type is this new one.
+   *  Exactly `pendingAssign`'s posture one surface over: picks stay local
+   *  until the LAST question settles, then completeBacklog applies every
+   *  resolved operation through the same ideation routes the Backlog screen
+   *  uses and posts the summary. Transient — never persisted; a reload drops
+   *  the open questions and the user re-asks. */
+  pendingBacklog?: {
+    questions: BacklogPlanQuestion[]
+    /** Human lines for the operations the PLAN already applied (the
+     *  unambiguous ones, written before the popup opened) — they lead the
+     *  final summary. */
     applied: string[]
     /** The flow's turn, so the summary lands on the same conversation entry. */
     turnId: string
@@ -3368,6 +3385,29 @@ export function ChatScreen() {
     finalizeTurn: assignFinalizeTurn,
   })
 
+  // The BACKLOG batch's one landing, the same shape one surface over: the
+  // popup collected every pick, and `useBacklogCompletion` applies the
+  // resolved operations through the ordinary ideation routes. Three of the
+  // four seams are the assign ones verbatim (busy, summary turn, finalize) —
+  // they are about the ACTIVE TAB, not about what was being asked — so they
+  // are reused rather than re-declared; only the pending-state pair differs.
+  const backlogGetPending = useCallback(
+    () => tabsRef.current.find((t) => t.id === activeTabIdRef.current)?.pendingBacklog,
+    [],
+  )
+  const backlogClearPending = useCallback(
+    () => setTabs((prev) => prev.map((t) =>
+      t.id === activeTabIdRef.current ? { ...t, pendingBacklog: undefined } : t)),
+    [],
+  )
+  const { completeBacklog, cancelBacklog } = useBacklogCompletion({
+    getPendingBacklog: backlogGetPending,
+    clearPendingBacklog: backlogClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
+
   // Same-tab generation: a PRD command typed in a REGULAR chat tab generates the
   // PRD in THAT tab's artifacts panel — the conversation that motivated it stays
   // on screen next to the document — instead of spawning a new tab. Only a
@@ -5804,12 +5844,21 @@ export function ChatScreen() {
   // command, and the PRD's input items keep until both are done.
   const pendingAssignState = activeTab?.pendingAssign
   const assignPopupOpen = !clarifyPopupOpen && !!pendingAssignState?.questions.length
-  // The share question queues behind both, on the same precedence rule: a
-  // clarify gate decides whether a generation even starts, an assign batch is
-  // a command already in flight, and a share is waiting on the user either way.
+  // The backlog batch sits at the same level as the assign batch — both are a
+  // command the user issued and neither can be in flight at once (one send,
+  // one action) — so it only has to queue behind the clarify gate and behind
+  // an assign batch that somehow outlived its send.
+  const pendingBacklogState = activeTab?.pendingBacklog
+  const backlogPopupOpen =
+    !clarifyPopupOpen && !assignPopupOpen && !!pendingBacklogState?.questions.length
+  // The share question queues behind all of them, on the same precedence rule:
+  // a clarify gate decides whether a generation even starts, an assign or
+  // backlog batch is a command already in flight, and a share is waiting on
+  // the user either way.
   const pendingShareState = activeTab?.pendingShare
   const sharePopupOpen =
-    !clarifyPopupOpen && !assignPopupOpen && !!pendingShareState?.options.length
+    !clarifyPopupOpen && !assignPopupOpen && !backlogPopupOpen
+    && !!pendingShareState?.options.length
 
   // ── Insight/PRD card + clarifying questions, as reusable nodes ──────────────
   // Same markup, two placements: a HEADER open (brief insight / ideation /
@@ -6497,6 +6546,10 @@ export function ChatScreen() {
                 setClarifyPopupDismissed={setClarifyPopupDismissed}
                 assignPopupOpen={assignPopupOpen}
                 pendingAssignState={pendingAssignState}
+                backlogPopupOpen={backlogPopupOpen}
+                pendingBacklogState={pendingBacklogState}
+                completeBacklog={completeBacklog}
+                cancelBacklog={cancelBacklog}
                 activeTabId={activeTabId}
                 completeAssign={completeAssign}
                 cancelAssign={cancelAssign}
