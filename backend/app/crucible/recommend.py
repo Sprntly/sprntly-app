@@ -527,16 +527,52 @@ def _quoted_money_toward_target(
     # committed total is small and a named target will often not be reached.
     # That is the honest answer, and the shortfall wording already carries
     # it.
+    # EVERY COMMITTED FIGURE, WITH NO EARLY EXIT — and that is the fix for a
+    # real over-claim, not an optimisation removed.
+    #
+    # This loop used to `break` as soon as the running total crossed the
+    # target, and the sentence built from it said the money was "stated in
+    # this corpus". Those are two different quantities. On a live run the
+    # first finding carried $150,000 against a $100,000 target, the loop
+    # stopped there, and the report claimed corpus scope for one finding's
+    # subtotal — while three further findings carried another $48,000 that
+    # the sentence implicitly denied existed.
+    #
+    # The wording and the value came from different places, which is exactly
+    # how it drifted. Now there is ONE number: the corpus total. How many
+    # findings it took to reach the target is tracked separately, and is a
+    # count, never a sum.
+    # DEDUPLICATED ACROSS FINDINGS THE SAME WAY IT IS WITHIN ONE.
+    #
+    # Exact-identity matching was already here, and it was half the rule. The
+    # other half — an anonymous amount already attributed to some account is
+    # the same money, seen once with its customer named and once without —
+    # existed only inside a finding. Across findings it did not, so twelve
+    # rows describing eight distinct commercial events summed as twelve: one
+    # $10,000 payment counted twice, one $9,000 quote twice, one $5,000 PoC
+    # three times. A 7% inflation of a client-facing total.
+    #
+    # Two passes, because the rule needs to know every attributed amount
+    # before it can judge an anonymous one — a single pass would keep or drop
+    # depending on which finding happened to rank first.
+    attributed_amounts = {
+        figure.amount
+        for imp in ranked_impacts
+        for figure in imp.grounded_figures
+        if figure.committed and figure.account_key
+    }
     seen: set[tuple[str, float]] = set()
     counted: list[GroundedFigure] = []
-    findings_used = 0
+    findings_with_money = 0
+    findings_needed = 0
     running = 0.0
     for imp in ranked_impacts:
-        if running >= target:
-            break
         contributed = False
         for figure in imp.grounded_figures:
             if not figure.committed:
+                continue
+            if not figure.account_key and figure.amount in attributed_amounts:
+                # The same money, in a row that did not name the customer.
                 continue
             identity = (figure.account_key, figure.amount)
             if identity in seen:
@@ -546,12 +582,15 @@ def _quoted_money_toward_target(
             running += figure.amount
             contributed = True
         if contributed:
-            findings_used += 1
+            findings_with_money += 1
+            if not findings_needed and running >= target:
+                findings_needed = findings_with_money
 
     if not counted:
         return None
 
-    n = max(1, min(findings_used or 1, max_count))
+    # THE COUNT IS "how many findings it took", never "how many there are".
+    n = max(1, min(findings_needed or findings_with_money or 1, max_count))
     named_accounts = len({f.account_key for f in counted if f.account_key})
     reached = running >= target
     target_text = _money_phrase(target)
@@ -565,6 +604,20 @@ def _quoted_money_toward_target(
     derived_total = sum(f.amount for f in counted if f.derived)
     verified_total = running - derived_total
     figures_text = _figures_phrase(counted)
+
+    # ONE NUMBER, ONE SCOPE WORD, USED BY EVERY BRANCH.
+    #
+    # `total_text` is the corpus total and nothing else, and every sentence
+    # below says "in this corpus" about it. The previous version had one
+    # branch saying "on the top finding alone" over a value that had just
+    # become corpus-wide — the wording and the number came from different
+    # places, which is how the over-claim appeared in the first place. The
+    # reach of the number is now a property of the number, not a choice each
+    # sentence makes.
+    #
+    # Statements about how FEW findings were needed are made about the
+    # COUNT, which is a count, never a sum.
+    scope = "in this corpus"
 
     if reached and not verified_total:
         # NOTHING HERE IS VERIFIED, SO NOTHING HERE SAYS "MEETS".
@@ -584,42 +637,42 @@ def _quoted_money_toward_target(
         # the sentence names what would actually settle it rather than
         # leaving the reader with a number to discount by an unknown amount.
         basis = (
-            f"you named a target of {target_text}; figures totalling "
-            f"{total_text}{across} were stated in this corpus "
-            f"({figures_text}), enough to reach it — but not one of them is "
-            f"matched to a verified quote. Every figure here was read back "
-            f"from a written summary, so your target is reachable on "
-            f"unverified figures rather than met. Checking them against the "
-            f"source text they were summarised from is what would settle it."
-        )
-    elif reached and findings_used == 1:
-        # SAID PLAINLY RATHER THAN PADDED. One finding covering the whole
-        # target is a strong claim resting entirely on the accuracy of the
-        # figures behind it, so those figures are shown rather than
-        # summarised — a reader who can see "$60,000 + $50,000" can judge it
-        # in a way that "$110,000" does not allow.
-        basis = (
-            f"you named a target of {target_text}; quoted figures on the top "
-            f"finding alone total {total_text}{across} ({figures_text}), which "
-            f"meets it on its own. These are figures people actually stated, "
-            f"added up — not a projection."
+            f"you named a target of {target_text}; committed figures {scope} "
+            f"total {total_text}{across} ({figures_text}), enough to reach "
+            f"it — but not one of them is matched to a verified quote. Every "
+            f"figure here was read back from a written summary, so your "
+            f"target is reachable on unverified figures rather than met. "
+            f"Checking them against the source text they were summarised "
+            f"from is what would settle it."
         )
     elif reached:
+        # SAID PLAINLY RATHER THAN PADDED, and said about the COUNT. One
+        # finding covering the whole target is a strong claim resting
+        # entirely on the accuracy of the figures behind it, so the figures
+        # are shown — a reader who can see "$60,000 + $50,000" can judge it
+        # in a way that "$110,000" does not allow. What must not happen is
+        # the earlier mistake of describing the corpus total as belonging to
+        # that one finding.
+        enough = (
+            "the top finding carries enough on its own"
+            if findings_needed == 1 else
+            f"the top {n} findings carry enough between them"
+        )
         basis = (
-            f"you named a target of {target_text}; quoted figures across the "
-            f"top {n} finding{'' if n == 1 else 's'} total {total_text}"
-            f"{across}, which meets it. These are figures people actually "
-            f"stated, added up — not a projection."
+            f"you named a target of {target_text}; committed figures {scope} "
+            f"total {total_text}{across} ({figures_text}), which meets it — "
+            f"{enough}. These are figures people actually stated, added up — "
+            f"not a projection."
         )
     else:
         # Not reached. "Quoted" would be the same overstatement in miniature
         # when nothing is verified, so the noun follows the evidence.
         noun = "quoted figure" if verified_total else "stated figure"
         basis = (
-            f"you named a target of {target_text}; every {noun} in "
-            f"this corpus totals {total_text}{across} — short of it. Nothing "
-            f"here is projected to close the gap; these are only the figures "
-            f"people actually stated."
+            f"you named a target of {target_text}; every {noun} {scope} "
+            f"totals {total_text}{across} — short of it. Nothing here is "
+            f"projected to close the gap; these are only the figures people "
+            f"actually stated."
         )
 
     if derived_total and verified_total:
