@@ -33,22 +33,29 @@ describe("ProjectDetailScreen.module.css — both-drawers-open squeeze guard (B8
     expect(rule).toMatch(/min-width:\s*380px/)
   })
 
-  it("the list-drawer clamp tightens specifically when the content panel is ALSO open, guarded off the two existing narrower breakpoints", () => {
+  it("the list-drawer column is capped tight so chat + list + content-panel fit without overlap, guarded off the two existing narrower breakpoints", () => {
     const css = moduleCss()
-    // The base (single-drawer) rule is untouched — same clamp as before.
+    // The base (single-drawer) rule caps the LIST column tight — a column of
+    // one-line rows reads at ~240-300px; the old 420-600px band was the root
+    // cause of the three-panel squeeze.
     expect(css).toMatch(
-      /\.bodyDrawerOpen\s*\{\s*grid-template-columns:\s*\n\s*minmax\(360px,\s*1fr\)\s*\n\s*var\(--proj-drawer-w,\s*clamp\(420px,\s*42vw,\s*600px\)\)/,
+      /\.bodyDrawerOpen\s*\{\s*grid-template-columns:\s*\n\s*minmax\(360px,\s*1fr\)\s*\n\s*var\(--proj-drawer-w,\s*clamp\(240px,\s*20vw,\s*300px\)\)/,
     )
-    // The new override only exists nested under BOTH a `min-width` media
-    // guard (never overrides the 960px/1080px narrow-viewport rules — those
-    // stay a plain class selector, which the override's higher specificity
-    // would otherwise always win against) AND the global cpanel-open class.
+    // The three-panel override only exists nested under BOTH a `min-width`
+    // media guard (never overrides the 960px/1080px narrow-viewport rules —
+    // those stay a plain class selector, which the override's higher
+    // specificity would otherwise always win against) AND the global
+    // cpanel-open class.
     const guardedBlock = css.match(
       /@media \(min-width: 1081px\) \{\s*:global\(\.app--cpanel-open\) \.bodyDrawerOpen \{[^}]*\}\s*\}/,
     )?.[0]
     expect(guardedBlock).toBeTruthy()
     expect(guardedBlock).toMatch(/minmax\(380px,\s*1fr\)/)
-    expect(guardedBlock).toMatch(/var\(--proj-drawer-w,\s*clamp\(360px,\s*26vw,\s*420px\)\)/)
+    expect(guardedBlock).toMatch(/var\(--proj-drawer-w,\s*clamp\(240px,\s*20vw,\s*300px\)\)/)
+    // The horizontal-scroll last-resort hack is gone — the tight cap makes a
+    // clean three-column layout fit, so no `overflow-x` is needed (and it
+    // would have forced overflow-y:auto, clipping this surface's menus).
+    expect(guardedBlock).not.toMatch(/overflow-x/)
   })
 
   it("main chat's own content-panel reflow rule in globals.css is byte-identical — this fix never touches the hot file", () => {
