@@ -117,6 +117,29 @@ describe("ProjectInviteModal — open (empty query) fetches workspace non-member
     await waitFor(() => expect(onInvited).toHaveBeenCalledTimes(1))
     expect(screen.getByTestId("project-invite-affordance").textContent).toContain("added to the project")
   })
+
+  it("test_invite_modal_add_flips_row_to_added — after a t_workspace add, that candidate's row optimistically renders 'Added' (not 'Add'), and stays 'Added' across the refetch even if it still returns the row as a non-member", async () => {
+    // Refetch (triggered by the add) returns the SAME workspace row — the
+    // optimistic addedUserIds set must still keep it "Added", proving the flip
+    // does not depend on the backend having already promoted them to member.
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" }],
+      pending_invites: [],
+    })
+    tagCandidateMock.mockResolvedValue({ tier: "t_workspace", added: true })
+    renderModal({})
+    await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
+
+    const addBtn = await screen.findByTestId("project-invite-add")
+    await act(async () => {
+      fireEvent.click(addBtn)
+    })
+
+    const added = await screen.findByTestId("project-invite-added")
+    expect(added.textContent).toBe("Added")
+    // The "Add" button for that row is gone — it does not revert.
+    expect(screen.queryByTestId("project-invite-add")).toBeNull()
+  })
 })
 
 describe("ProjectInviteModal — typed query: typeahead + email invite path still present", () => {
