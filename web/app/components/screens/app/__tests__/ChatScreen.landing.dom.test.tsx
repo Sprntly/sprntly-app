@@ -14,7 +14,8 @@
 //      affordance (nor its concrete labels).
 //   2. The curated home chips render under the composer on the empty landing,
 //      and are gone once a tab has a thread (the THREAD composer state).
-//   3. Clicking a curated home chip sends its prompt as an ask (send path fires).
+//   3. Clicking the revenue chip FILLS Ask with its prompt (no auto-send);
+//      clicking the project chip opens project creation and sends nothing.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -101,12 +102,22 @@ vi.mock("../../../design-agent/useBriefPrototypeMap", () => ({
   useBriefPrototypeMap: () => ({ entriesByInsight: {}, refetch: vi.fn() }),
 }))
 
+// The real modal drags in its own hooks + routing; a marker is enough to prove
+// the landing chip opens it.
+vi.mock("../projects/CreateProjectModal", () => ({
+  CreateProjectModal: (props: { open: boolean }) =>
+    props.open ? React.createElement("div", { "data-testid": "create-project-modal" }) : null,
+}))
+
 import { NavigationProvider } from "../../../../context/NavigationContext"
 import { ContentProvider } from "../../../../context/ContentContext"
 import { ChatScreen } from "../ChatScreen"
 
-// The curated home chip (under the composer) that fires an ask when clicked.
-const FEEDBACK_CHIP = "Give me summary on last week's customer conversations"
+// The two curated home chips under the composer (spec §14, 2026-09-03). They
+// replaced "Show me this week's top insights" and "Give me summary on last
+// week's customer conversations" — see DEFAULT_HOME_STARTER_CARDS.
+const REVENUE_CHIP = "What should I do to drive revenue"
+const PROJECT_CHIP = "Create a project and collaborate with my team"
 
 function renderScreen() {
   return render(
@@ -169,34 +180,66 @@ describe("ChatScreen landing", () => {
     expect(screen.queryByText("Generate a PRD")).toBeNull()
   })
 
-  it("renders the curated home chips under the composer on the landing", () => {
+  it("renders the two curated home chips under the composer on the landing", () => {
     searchString = "new=1"
     renderScreen()
-    expect(screen.getByText(FEEDBACK_CHIP)).toBeTruthy()
+    expect(screen.getByText(REVENUE_CHIP)).toBeTruthy()
+    expect(screen.getByText(PROJECT_CHIP)).toBeTruthy()
+  })
+
+  it("no longer offers the top-insights or customer-conversations chips", () => {
+    // Replaced, not added to — the row is still exactly two chips.
+    searchString = "new=1"
+    renderScreen()
+    expect(screen.queryByText(/this week's top insights/i)).toBeNull()
+    expect(screen.queryByText(/customer conversations/i)).toBeNull()
+    expect(document.querySelectorAll(".home-chip").length).toBe(2)
   })
 
   it("does NOT render the landing chips once a tab has a thread", () => {
     seedThreadTab()
     renderScreen()
     expect(screen.getByText("first question")).toBeTruthy()
-    expect(screen.queryByText(FEEDBACK_CHIP)).toBeNull()
+    expect(screen.queryByText(REVENUE_CHIP)).toBeNull()
+    expect(screen.queryByText(PROJECT_CHIP)).toBeNull()
   })
 
-  it("pre-fills the composer with the chip's prompt when a curated chip is clicked", async () => {
+  it("pre-fills the composer with the revenue chip's prompt when clicked", async () => {
     searchString = "new=1"
     renderScreen()
     const composer = screen.getByPlaceholderText(/Ask Sprntly anything/i) as HTMLTextAreaElement
     expect(composer.value).toBe("")
 
-    const btn = screen.getByText(FEEDBACK_CHIP).closest("button") as HTMLButtonElement
+    const btn = screen.getByText(REVENUE_CHIP).closest("button") as HTMLButtonElement
     expect(btn).toBeTruthy()
     await act(async () => {
       fireEvent.click(btn)
     })
-    // The curated "feedback" chip fills Ask (does not auto-send), so the
-    // composer draft is populated with the chip's prompt for the user to send.
+    // Fills Ask (does not auto-send) — same mechanics the old feedback chip
+    // had, so the question can be edited before it goes.
     await waitFor(() => {
-      expect(composer.value).toContain("customer conversations")
+      expect(composer.value).toContain("drive revenue")
     })
+    expect(screen.queryByTestId("create-project-modal")).toBeNull()
+  })
+
+  it("opens project creation — and sends nothing — when the project chip is clicked", async () => {
+    // The one home card that is neither a prompt nor a navigation: it starts
+    // something. Same modal as Projects → "New project".
+    searchString = "new=1"
+    renderScreen()
+    const composer = screen.getByPlaceholderText(/Ask Sprntly anything/i) as HTMLTextAreaElement
+    expect(screen.queryByTestId("create-project-modal")).toBeNull()
+
+    const btn = screen.getByText(PROJECT_CHIP).closest("button") as HTMLButtonElement
+    expect(btn).toBeTruthy()
+    await act(async () => {
+      fireEvent.click(btn)
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId("create-project-modal")).toBeTruthy()
+    })
+    // Nothing was typed into Ask and nothing was sent.
+    expect(composer.value).toBe("")
   })
 })
