@@ -19,6 +19,7 @@ import pytest
 
 from app.crucible.figure_class import (
     CHUNK,
+    PROPERTY_KEY,
     CLASSIFY_SCHEMA,
     FIGURE_CLASSES,
     RANGE_CLASS,
@@ -256,6 +257,111 @@ def test_apply_classes_touches_only_the_claims_it_has_an_answer_for():
     assert out[1] is claims[1]
     assert out[0].magnitude == 1000.0
     assert out[0].assertion == "first"
+
+
+# ── Classify once. The same corpus must yield the same number. ─────────────
+#
+# A model call is a DRAW, not a lookup. Two draws over an identical corpus
+# returned `deal_value` counts of 14 and 12, with one $24,000 row flipping
+# between them — the same evidence producing two different committed totals.
+# A reader running the same analysis twice would be shown two numbers.
+
+
+def test_a_row_that_already_has_a_class_is_never_re_sent(monkeypatch):
+    """THE REPRODUCIBILITY CLAIM. If someone reintroduces per-run
+    classification this fails loudly."""
+    import app.crucible.figure_class as mod
+
+    monkeypatch.setattr(mod, "_offline", lambda: False)
+    sent: list[list[str]] = []
+
+    def _capture(*, enterprise_id, candidates):
+        sent.append([c.id for c in candidates])
+        return {}
+
+    monkeypatch.setattr(mod, "_classify_chunk", _capture)
+    claims = [
+        a_claim("already judged", 50_000.0, cid="stored",
+                figure_class="compensation"),
+        a_claim("not yet judged", 60_000.0, cid="fresh"),
+    ]
+    classify_figures(claims, enterprise_id="co")
+    assert sent == [["fresh"]], "a stored class must never be re-drawn"
+
+
+def test_a_fully_classified_corpus_costs_nothing_and_calls_nothing(monkeypatch):
+    import app.crucible.figure_class as mod
+
+    monkeypatch.setattr(mod, "_offline", lambda: False)
+
+    def _explode(**kwargs):
+        raise AssertionError("no call should be made")
+
+    monkeypatch.setattr(mod, "_classify_chunk", _explode)
+    claims = [a_claim("judged", 1000.0, cid=f"c{i}", figure_class="deal_value")
+              for i in range(5)]
+    assert classify_figures(claims, enterprise_id="co") == {}
+    assert estimate_cost(claims)["candidates"] == 0
+    assert estimate_cost(claims)["calls"] == 0
+
+
+def test_the_second_run_over_identical_input_produces_the_identical_answer(
+    monkeypatch,
+):
+    """END TO END, and the property that actually matters: run once against
+    a model that answers differently each time, store the result, and the
+    second run must reuse the stored class rather than take the new draw."""
+    import app.crucible.figure_class as mod
+
+    monkeypatch.setattr(mod, "_offline", lambda: False)
+    draws = iter(["deal_value", "compensation"])
+
+    def _flaky(*, enterprise_id, candidates):
+        verdict = next(draws)
+        return {c.id: verdict for c in candidates}
+
+    monkeypatch.setattr(mod, "_classify_chunk", _flaky)
+
+    claims = [a_claim("a figure", 24_000.0, cid="row")]
+    first = classify_figures(claims, enterprise_id="co")
+    assert first == {"row": "deal_value"}
+
+    # The class is now stored on the row, exactly as `persist_classes` would
+    # have written it and `project_signal` would have read it back.
+    stored = apply_classes(claims, first)
+    second = classify_figures(stored, enterprise_id="co")
+
+    assert second == {}, "the stored class must be reused, not re-drawn"
+    assert stored[0].figure_class == "deal_value"
+
+
+def test_a_stored_class_is_read_back_off_the_signal():
+    """The read half of the round trip, through the real projection."""
+    from app.crucible.claims import project_signal
+
+    claim = project_signal({
+        "id": "s-1", "kind": "commercial_term", "source_type": "revenue",
+        "content": "a figure", "valid_at": "2026-08-01T12:00:00+00:00",
+        "properties": {"amount": 24000, "currency": "USD",
+                        PROPERTY_KEY: "compensation"},
+    }, {})
+    assert claim is not None
+    assert claim.figure_class == "compensation"
+
+
+def test_a_stored_class_outside_the_vocabulary_is_ignored():
+    """Validated on read rather than trusted, so a hand-edited or legacy
+    value cannot reach the consequence table."""
+    from app.crucible.claims import project_signal
+
+    claim = project_signal({
+        "id": "s-1", "kind": "commercial_term", "source_type": "revenue",
+        "content": "a figure", "valid_at": "2026-08-01T12:00:00+00:00",
+        "properties": {"amount": 24000, "currency": "USD",
+                        PROPERTY_KEY: "definitely_a_deal"},
+    }, {})
+    assert claim is not None
+    assert claim.figure_class is None
 
 
 # ── Costing a run before paying for it ─────────────────────────────────────

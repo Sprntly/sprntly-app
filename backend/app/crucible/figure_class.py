@@ -207,13 +207,20 @@ def _offline() -> bool:
 
 
 def _candidates(claims: Sequence[Claim]) -> list[Claim]:
-    """The claims worth spending a call on: the ones carrying a figure.
+    """The claims worth spending a call on: those carrying a figure that has
+    not already been classified.
+
+    ALREADY-CLASSIFIED ROWS ARE NEVER RE-SENT, and that is a correctness
+    rule before it is a cost one. See `classify_figures`.
 
     Everything else in the corpus has no amount to classify, so it is not
-    sent — this is what keeps the cost proportional to figures rather than
-    to corpus size.
+    sent either — which is what keeps the cost proportional to figures rather
+    than to corpus size.
     """
-    return [c for c in claims if c.magnitude is not None]
+    return [
+        c for c in claims
+        if c.magnitude is not None and c.figure_class is None
+    ]
 
 
 def _input(candidates: Sequence[Claim]) -> str:
@@ -270,7 +277,29 @@ def _classify_chunk(
 def classify_figures(
     claims: Sequence[Claim], *, enterprise_id: str,
 ) -> dict[str, str]:
-    """`claim id -> figure class` for every claim carrying a figure.
+    """`claim id -> figure class` for every UNCLASSIFIED claim carrying a
+    figure.
+
+    CLASSIFY ONCE. TAKE THE FIRST SAMPLE AND KEEP IT.
+    ------------------------------------------------
+    A model call is a draw, not a lookup. Two draws over an identical corpus
+    returned `deal_value` counts of 14 and 12, with one $24,000 row flipping
+    between them — so the same evidence produced two different committed
+    totals, and a reader running the same analysis twice would be shown two
+    different numbers. For a figure a client repeats in a meeting that is
+    disqualifying, however accurate either draw was.
+
+    So a class is drawn ONCE per row and then stored beside the amount
+    (`persist_classes`). Later runs read it back and never re-draw. That
+    buys reproducibility, no repeat spend, and per-row auditability — before
+    this, nothing recorded what class a row had received, so the only way to
+    inspect a past decision was to make a new one and hope it matched.
+
+    NEVER RE-ROLL A STORED CLASS TO CHECK IT. Re-classifying and comparing
+    is not verification; it is a second sample, and taking the better of two
+    samples is how a number becomes a function of how many times you looked.
+    Re-classification is a deliberate operation with its own trigger, never
+    a side effect of running an analysis.
 
     A claim the model did not answer for, or one in a chunk whose call
     failed, is simply absent from the result. That is deliberate and is what
@@ -319,6 +348,60 @@ def apply_classes(
         replace(c, figure_class=classified[c.id]) if c.id in classified else c
         for c in claims
     ]
+
+
+#: The `kg_signal.properties` key a stored class lives under, beside
+#: `amount`/`currency`/`certainty`.
+PROPERTY_KEY = "figure_class"
+
+
+def persist_classes(
+    classified: dict[str, str], *, company_id: str,
+) -> int:
+    """Write each class beside its own signal's amount. Returns how many rows
+    were written.
+
+    WHY IT IS STORED AT ALL: so the next run reads a fact instead of taking
+    a second sample. See `classify_figures`.
+
+    TENANT-SCOPED ON EVERY WRITE, and the id filter alone is not treated as
+    sufficient: the update names `enterprise_id` as well, the same posture
+    the backfill sweep uses, because this runs against a shared database and
+    a predicate that is merely correct today is not a boundary.
+
+    ONLY THE ONE KEY MOVES. The existing `properties` are read and rewritten
+    with `figure_class` set; nothing else in the dict is touched, so an
+    ingest-time amount, currency or certainty passes through unchanged.
+    """
+    if not classified or not company_id:
+        return 0
+    from app.db.client import require_client
+
+    client = require_client()
+    written = 0
+    for signal_id, figure_class in classified.items():
+        if figure_class not in FIGURE_CLASSES:
+            continue
+        rows = (
+            client.table("kg_signal").select("id, properties")
+            .eq("enterprise_id", company_id).eq("id", signal_id)
+            .execute().data or []
+        )
+        if not rows:
+            continue
+        props = dict(rows[0].get("properties") or {})
+        props[PROPERTY_KEY] = figure_class
+        (
+            client.table("kg_signal").update({"properties": props})
+            .eq("enterprise_id", company_id).eq("id", signal_id)
+            .execute()
+        )
+        written += 1
+    logger.info(
+        "crucible_figure_classes_persisted company_id=%s written=%s",
+        company_id, written,
+    )
+    return written
 
 
 def estimate_cost(

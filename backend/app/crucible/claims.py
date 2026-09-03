@@ -363,6 +363,14 @@ def _artifact_id(signal: Mapping) -> str:
     return str(signal.get("source_id") or "")
 
 
+def _stored_figure_class(props: Mapping[str, Any]) -> Optional[str]:
+    """The class a previous run drew for this row, if any and if valid."""
+    from app.crucible.figure_class import FIGURE_CLASSES, PROPERTY_KEY
+
+    value = props.get(PROPERTY_KEY)
+    return value if value in FIGURE_CLASSES else None
+
+
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
@@ -422,6 +430,12 @@ def project_signal(
         # population size, so it is populated when one is present.
         population_value=None,
         magnitude=grounded_amount,
+        # READ BACK, NEVER RE-DRAWN. A class stored on a previous run is a
+        # fact about that row; recomputing it would make the committed total
+        # a function of how many times the analysis was run. Validated
+        # against the closed vocabulary here rather than trusted, so a
+        # hand-edited or legacy value cannot reach the consequence table.
+        figure_class=_stored_figure_class(props),
         direction="neutral",
         raw=dict(signal.get("properties") or {}),
     )

@@ -10,6 +10,8 @@ No network, no DB, no LLM.
 """
 from __future__ import annotations
 
+from dataclasses import replace
+
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -536,6 +538,40 @@ def test_a_commercial_term_with_a_positive_signal_is_still_committed():
     ]
     units = run(claims).impacts[0].native_units
     assert units["commercial_committed_usd"] == 174000.0
+
+
+def test_the_classifier_may_never_promote_a_priced_row_to_committed():
+    """A PROBABILISTIC LABEL MAY NOT OVERTURN A DETERMINISTIC ONE IN THE
+    DIRECTION THAT INFLATES A TOTAL.
+
+    Live: "internal annual license is priced at $24,000 with a 20% discount
+    applied", `kind = pricing`, phrasing "priced at" — and the classifier
+    called it `deal_value`, putting discounted list price into the committed
+    total. The extractor had already judged the row a price."""
+    claims = _priced(
+        "p", "alpha", pairs=[("Northwind", 24000.0), ("Acme", 12000.0)],
+        kind="pricing", text="internal annual license is priced at this rate",
+    )
+    claims = [replace(c, figure_class="deal_value") for c in claims]
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+    assert units["commercial_list_price_min"] == 12000.0
+
+
+def test_the_classifier_may_still_move_a_figure_out_of_the_sum():
+    """The safe direction stays open: a `commercial_term` row the classifier
+    calls compensation is refused, which is the whole point of having it."""
+    claims = [
+        replace(claim(f"c{i}", subject="alpha", days_ago=5 + 45 * i,
+                      accounts=(a,), ctype="magnitude", source="revenue",
+                      magnitude=m, raw={"currency": "USD"},
+                      artifact_type="commercial_term",
+                      assertion="the deal closed at this value"),
+                figure_class="compensation")
+        for i, (a, m) in enumerate([("Northwind", 260000.0), ("Acme", 150000.0)])
+    ]
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
 
 
 def test_the_pricing_line_never_carries_a_total():

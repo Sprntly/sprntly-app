@@ -384,9 +384,11 @@ def test_one_finding_covering_the_whole_target_says_so_and_shows_its_figures():
         asked_text="how do we drive $100,000 in revenue?",
     )
     assert result.count == 1
-    assert "top finding alone" in result.basis
+    assert "the top finding carries enough on its own" in result.basis
     assert "$60,000 + $50,000" in result.basis
-    assert "meets it on its own" in result.basis
+    # The SUM is corpus-scoped even when one finding is enough — the count
+    # is what "alone" describes, never the number.
+    assert "committed figures in this corpus total $110,000" in result.basis
 
 
 def test_falling_short_says_so_and_never_projects_the_gap_closed():
@@ -505,6 +507,115 @@ def test_a_fully_quoted_target_carries_no_hedge_at_all():
 
 
 # ── The money target answers from COMMITTED money only ──────────────────────
+
+def test_the_corpus_total_is_the_corpus_total_not_where_counting_stopped():
+    """THE LIVE OVER-CLAIM, reproduced. The loop used to stop as soon as the
+    running total crossed the target, and the sentence built from it said
+    the money was "stated in this corpus". On a real run the first finding
+    carried $150,000 against a $100,000 target, counting stopped there, and
+    the report claimed corpus scope for one finding's subtotal — while three
+    further findings held another $48,000 the sentence implicitly denied.
+    """
+    impacts = [
+        _figure_only(_money(150000.0, account="a")),
+        _figure_only(_money(24000.0, account="b")),
+        _figure_only(_money(19000.0, account="c")),
+        _figure_only(_money(5000.0, account="d")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$198,000" in basis, "every committed figure must be counted"
+    assert "$150,000 were stated in this corpus" not in basis
+    assert "committed figures in this corpus total $198,000" in basis
+
+
+def test_the_count_says_how_many_were_needed_not_how_many_exist():
+    """The count is the only thing that may describe a subset. Four findings
+    carry committed money; one of them is enough."""
+    impacts = [
+        _figure_only(_money(150000.0, account="a")),
+        _figure_only(_money(24000.0, account="b")),
+        _figure_only(_money(19000.0, account="c")),
+    ]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert result.count == 1
+    assert "the top finding carries enough on its own" in result.basis
+
+
+def test_no_sentence_describes_the_total_as_belonging_to_one_finding():
+    """Scope is a property of the number now, not a choice each branch
+    makes. Whichever branch runs, the sum is corpus-scoped."""
+    for asked, impacts in (
+        ("how do we drive $100,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a")),
+          _figure_only(_money(24000.0, account="b"))]),
+        ("how do we drive $10,000,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a"))]),
+        ("how do we drive $100,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a", derived=True))]),
+    ):
+        basis = resolve_recommendation_count(
+            "grow revenue", impacts, asked_text=asked,
+        ).basis
+        assert "in this corpus" in basis, basis
+        for forbidden in ("on the top finding alone",
+                          "across the top 1 findings total",
+                          "quoted figures on the top finding"):
+            assert forbidden not in basis, basis
+
+
+def test_the_same_event_named_once_and_unnamed_once_is_counted_once():
+    """CROSS-FINDING DEDUP, the half that was missing. Twelve rows described
+    eight distinct commercial events — one $10,000 payment counted twice, a
+    $9,000 quote twice, a $5,000 PoC three times — because a row naming the
+    customer and a row that did not were different identities. Within a
+    finding that rule already existed; across findings it did not."""
+    impacts = [
+        _figure_only(_money(10000.0, account="acct-a")),
+        _figure_only(_money(10000.0, account="")),
+        _figure_only(_money(9000.0, account="acct-b")),
+        _figure_only(_money(9000.0, account="")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$19,000" in basis
+    assert "$38,000" not in basis
+
+
+def test_two_accounts_at_the_same_amount_are_still_two_events():
+    """The control. Named accounts are distinct identities; only the
+    anonymous restatement collapses."""
+    impacts = [
+        _figure_only(_money(10000.0, account="acct-a")),
+        _figure_only(_money(10000.0, account="acct-b")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$20,000" in basis
+
+
+def test_the_dedup_does_not_depend_on_which_finding_ranks_first():
+    """Two passes, not one: the rule needs every attributed amount before it
+    can judge an anonymous one, or the answer would depend on ordering."""
+    named = _figure_only(_money(10000.0, account="acct-a"))
+    unnamed = _figure_only(_money(10000.0, account=""))
+    for order in ([named, unnamed], [unnamed, named]):
+        basis = resolve_recommendation_count(
+            "grow revenue", order,
+            asked_text="how do we drive $100,000 in revenue?",
+        ).basis
+        assert "$10,000" in basis
+        assert "$20,000" not in basis
+
 
 def test_a_list_price_never_answers_a_money_target():
     """A $30,000 tier quoted to sixteen accounts is sixteen genuine mentions

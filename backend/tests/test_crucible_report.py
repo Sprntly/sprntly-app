@@ -273,7 +273,7 @@ def test_the_derived_hedge_names_transcription_risk_not_invention():
         assert overstatement not in html.lower(), overstatement
 
 
-# ── The two money lines must not be addable ─────────────────────────────────
+# ── The two money statements must not be addable ────────────────────────────
 
 def _both_moneys():
     return render_report_html(_run(), [_finding(impact={
@@ -288,72 +288,100 @@ def _both_moneys():
     })])
 
 
+def test_list_pricing_renders_even_when_no_finding_gets_a_full_write_up():
+    """THE RENDERING BUG. This sentence used to live inside a finding's own
+    write-up, and only the top handful of findings get one — so on a live run
+    twelve findings carried correctly-shaped pricing units and the line
+    rendered for none of them, because not one was in the top ten.
+
+    Hoisted to the corpus, it renders regardless of where pricing lands in
+    the ranking. Asserting its ABSENCE is how the bug hid for a whole
+    release, so this asserts presence under the condition that used to
+    suppress it."""
+    findings = [_finding(label=f"reach-{i}") for i in range(12)]
+    findings.append(_finding(label="priced", impact={
+        "native_units": {"commercial_list_price_min": 2000.0,
+                          "commercial_list_price_max": 100000.0,
+                          "commercial_list_price_distinct": 8.0},
+    }))
+    html = render_report_html(_run(), findings, [])
+    assert "List pricing was quoted in" in html
+    assert "$2,000–$100,000" in html
+
+
 def test_list_pricing_is_rendered_as_a_range_and_never_totalled():
     html = _both_moneys()
     assert "$30,000–$50,000" in html
-    assert "across 16 accounts" in html
-    assert "not added together" in html
-    # A $30,000 tier quoted sixteen times is not $480,000, and no arithmetic
-    # over these numbers may appear anywhere.
+    assert "never added together" in html
+    # A $30,000 tier quoted sixteen times is not $480,000.
     for forbidden in ("$480,000", "$195,000", "$640,000"):
         assert forbidden not in html, forbidden
 
 
-def test_the_committed_line_and_the_pricing_line_share_no_figure():
-    """THE HARD REQUIREMENT. Each sentence carries one kind of money and says
-    which kind it is; neither contains the other's numbers, so there is no
-    clause in which a reader is invited to add them."""
+def test_the_corpus_range_is_a_min_of_mins_and_a_max_of_maxes():
+    """Exact, and the only aggregate that is. Per-finding distinct-price and
+    account counts are deliberately NOT summed — the same price quoted in two
+    findings would be counted twice — so the only count reported is how many
+    findings carry pricing at all."""
+    findings = [
+        _finding(label="a", impact={"native_units": {
+            "commercial_list_price_min": 5000.0,
+            "commercial_list_price_max": 30000.0,
+            "commercial_list_price_distinct": 4.0,
+            "commercial_list_price_accounts": 9.0}}),
+        _finding(label="b", impact={"native_units": {
+            "commercial_list_price_min": 2000.0,
+            "commercial_list_price_max": 47500.0,
+            "commercial_list_price_distinct": 3.0,
+            "commercial_list_price_accounts": 7.0}}),
+    ]
+    html = render_report_html(_run(), findings, [])
+    assert "$2,000–$47,500" in html
+    assert "2 of the findings below" in html
+    # Neither count is aggregated, because neither can be without
+    # double-counting a price quoted in both findings.
+    assert "7 distinct" not in html and "16 account" not in html
+
+
+def test_the_pricing_statement_says_how_many_findings_it_speaks_for():
+    one = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_list_price_min": 30000.0,
+                          "commercial_list_price_max": 30000.0}})], [])
+    assert "quoted in one finding below" in one
+    assert "$30,000." in one
+    assert "$30,000–$30,000" not in one
+
+
+def test_the_committed_line_and_the_pricing_statement_share_no_figure():
+    """THE HARD REQUIREMENT. Each carries one kind of money and says which;
+    neither contains the other's numbers, and they are separate paragraphs,
+    so there is no clause in which a reader is invited to add them."""
     html = _both_moneys()
     committed = html[html.find("Customers named"):]
     committed = committed[:committed.find("</p>")]
-    pricing = html[html.find("List pricing quoted here"):]
+    pricing = html[html.find("List pricing was quoted"):]
     pricing = pricing[:pricing.find("</p>")]
 
     assert "$165,000" in committed
     assert "$30,000" not in committed and "$50,000" not in committed
-
     assert "$30,000" in pricing and "$50,000" in pricing
     assert "$165,000" not in pricing
-
-    # Separate paragraphs, never one clause with both numbers in it.
     assert committed != pricing
-    assert "</p>" in html[html.find("Customers named"):html.find("List pricing")]
 
 
-def test_each_money_line_says_which_kind_of_money_it_is():
-    """Labelled rather than left to inference — a reader should not have to
-    work out from the number which of the two they are looking at."""
+def test_each_money_statement_says_which_kind_of_money_it_is():
     html = _both_moneys()
     assert "Customers named this evidence" in html
-    assert "List pricing quoted here" in html
+    assert "List pricing was quoted in" in html
     assert "what was quoted, not what was agreed" in html
-
-
-def test_a_single_list_price_renders_as_one_figure_not_a_degenerate_range():
-    html = render_report_html(_run(), [_finding(impact={
-        "native_units": {
-            "commercial_list_price_min": 30000.0,
-            "commercial_list_price_max": 30000.0,
-            "commercial_list_price_distinct": 1.0,
-            "commercial_list_price_accounts": 16.0,
-        },
-    })])
-    assert "$30,000 across 16 accounts" in html
-    assert "$30,000–$30,000" not in html
-    assert "distinct price points" not in html
 
 
 def test_a_finding_with_only_list_pricing_makes_no_committed_claim():
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {
-            "commercial_list_price_min": 30000.0,
-            "commercial_list_price_max": 30000.0,
-            "commercial_list_price_distinct": 1.0,
-            "commercial_list_price_accounts": 16.0,
-        },
-    })])
+        "native_units": {"commercial_list_price_min": 30000.0,
+                          "commercial_list_price_max": 30000.0}})], [])
     assert "Customers named" not in html
-    assert "List pricing quoted here" in html
+    assert "List pricing was quoted in" in html
 
 
 def test_no_grounded_figure_means_no_commercial_evidence_line():

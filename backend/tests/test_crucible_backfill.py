@@ -26,6 +26,7 @@ from app.crucible.backfill import (
     SKIP_BOUNDED_QUANTITY,
     SKIP_COMPANY_SCALE,
     SKIP_NO_DEAL_VALUE_STATED,
+    SKIP_PERSONAL_TRACK_RECORD,
     SKIP_STATED_AS_A_RANGE,
     SKIP_IMPLAUSIBLE_MAGNITUDE,
     SKIP_NON_DEAL_CONTEXT,
@@ -432,6 +433,48 @@ def test_the_range_reason_is_counted_in_the_funnel(backfill_env, isolated_settin
     assert run["skipped_counts"][SKIP_STATED_AS_A_RANGE] == 2
 
 
+# ── A backstop under the classifier, for one figure that did damage ────────
+
+@pytest.mark.parametrize("text", [
+    "the candidate directly influenced $3.7M TCV with a 43% close rate",
+    "they influenced $3,700,000 in total contract value at their last role",
+    "closed $2,000,000 TCV last year",
+])
+def test_a_personal_sales_record_is_refused_deterministically(text):
+    """NOT THE SIXTH PATTERN THE HEADER WARNS ABOUT — a permanent floor UNDER
+    a probabilistic component.
+
+    This figure is currently kept out of both the sum and the range by a
+    per-run model call. That means one unlucky draw puts a job candidate's
+    $3.7M personal track record back into a client-facing number. A
+    deterministic refusal cannot have an unlucky draw."""
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (), text
+    assert SKIP_PERSONAL_TRACK_RECORD in scan.skips, text
+
+
+def test_the_backstop_does_not_eat_ordinary_deal_language():
+    """The same control every family here gets. "Influenced" and "close" are
+    common words; the refusal must key on the track-record shape, not on
+    business vocabulary generally."""
+    for text, expected in (
+        ("they quoted $75,000 for the full rollout", 75_000.0),
+        ("the deal closed at $120,000", 120_000.0),
+        ("a $9,000 quote was issued", 9_000.0),
+    ):
+        assert find_dollar_figures(text) == [expected], text
+
+
+def test_the_backstop_has_its_own_reason_in_the_funnel():
+    """A refusal that exists as a backstop should be legible as one, not
+    hidden inside another category's count."""
+    assert SKIP_PERSONAL_TRACK_RECORD not in (
+        SKIP_COMPANY_SCALE, SKIP_NO_DEAL_VALUE_STATED, SKIP_BOUNDED_QUANTITY,
+    )
+    scan = scan_dollar_figures("influenced $3.7M TCV with a 43% close rate")
+    assert scan.skips == (SKIP_PERSONAL_TRACK_RECORD,)
+
+
 # ── The control: a stop-list that eats real quotes is worse than the disease
 
 def test_a_genuine_estimated_cost_is_not_refused():
@@ -574,7 +617,7 @@ def test_the_pattern_version_moved_so_old_runs_are_never_compared():
     comparable, and the version string is how a reader can tell."""
     from app.crucible.backfill import PATTERN_VERSION
 
-    assert PATTERN_VERSION == "dollar-v5"
+    assert PATTERN_VERSION == "dollar-v6"
 
 
 def test_a_large_but_plausible_deal_figure_still_parses():

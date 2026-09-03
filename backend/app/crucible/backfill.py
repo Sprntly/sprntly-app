@@ -105,10 +105,14 @@ logger = logging.getLogger(__name__)
 #: was worse than its tail: $4.5M of a $5.17M total was a competitor's
 #: pricing, a revenue target and the company's own ARR bound.
 #:
+#: `dollar-v6` adds a permanent refusal for a personal sales record
+#: ("$3.7M TCV with a 43% close rate"), as a backstop under the classifier
+#: rather than as a replacement for it.
+#:
 #: `dollar-v5` refuses ranges. "~$100-150k/year" was being stored as $100 —
 #: a 1,000x DOWNWARD error, and the only one of these defects that
 #: manufactures a wrong number rather than importing one.
-PATTERN_VERSION = "dollar-v5"
+PATTERN_VERSION = "dollar-v6"
 
 #: The sentinel `certainty` value a backfilled row carries. Deliberately NOT
 #: a member of `extractor._COMMERCIAL_CERTAINTY_VALUES` — see module docstring.
@@ -320,6 +324,33 @@ _COMPANY_SCALE = re.compile(
 #: [subject] is $300,000" is a real, usable figure; the word modifies "cost"
 #: several words earlier and does not bound the number. Adjacency is what
 #: keeps that quote alive — see the control test.
+#: A PERSON'S SALES RECORD AT A FORMER EMPLOYER. Not a deal, not a price,
+#: and not this company's money at all.
+#:
+#: THIS IS DEFENCE-IN-DEPTH, NOT THE SIXTH PATTERN THE HEADER WARNS ABOUT,
+#: and the distinction is worth stating because the two look identical from
+#: a diff. The header above is about using phrase-matching AS THE
+#: CLASSIFIER — chasing each new genre with another regex instead of
+#: building the thing that generalises. That argument was won: the
+#: classifier exists and it is what decides categories now.
+#:
+#: What this adds is a permanent floor UNDER a probabilistic component, for
+#: one figure that has already done damage. "$3.7M TCV with a 43% close
+#: rate" is a job candidate's personal track record; it is currently kept
+#: out of both the sum and the range by a per-run model call, which means a
+#: single unlucky draw puts a $3.7M personal sales record back into a
+#: client-facing number. A deterministic refusal cannot have an unlucky
+#: draw.
+#:
+#: The rule for whether the NEXT one of these belongs here is not "did the
+#: classifier miss it" — that is the argument for improving the classifier.
+#: It is "would a wrong answer here be unrecoverable", which is true of very
+#: few figures and was true of this one.
+_PERSONAL_TRACK_RECORD = re.compile(
+    r"\bTCV\b|\bclose\s+rate\b|\binfluenced\b",
+    re.IGNORECASE,
+)
+
 _BOUNDED_QUANTITY_BEFORE = re.compile(
     r"\b(?:less\s+than|under|below|above|over|approximately|around|roughly)"
     r"\s*$",
@@ -389,6 +420,9 @@ SKIP_BOUNDED_QUANTITY = "bounded_quantity"
 #: Its own reason so the funnel shows how many rows this was silently
 #: corrupting — the shape that was storing $100 for a $100-150k/year deal.
 SKIP_STATED_AS_A_RANGE = "stated_as_a_range"
+#: Its own reason, so a refusal that exists as a backstop under the
+#: classifier is legible as one rather than hidden in a category count.
+SKIP_PERSONAL_TRACK_RECORD = "personal_track_record"
 
 #: A single dollar figure, `$`-prefixed only.
 #:
@@ -501,6 +535,9 @@ def scan_dollar_figures(text: str) -> FigureScan:
         if _COMPANY_SCALE.search(window):
             skips.append(SKIP_COMPANY_SCALE)
             continue
+        if _PERSONAL_TRACK_RECORD.search(window):
+            skips.append(SKIP_PERSONAL_TRACK_RECORD)
+            continue
         # ADJACENCY, NOT THE WINDOW — see `_BOUNDED_QUANTITY_BEFORE`. Only
         # the text immediately in front of the figure can bound it.
         if _BOUNDED_QUANTITY_BEFORE.search(text[:m.start()]):
@@ -586,6 +623,7 @@ class BackfillCounts:
     skipped_company_scale: int = 0
     skipped_bounded_quantity: int = 0
     skipped_stated_as_a_range: int = 0
+    skipped_personal_track_record: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -599,6 +637,7 @@ class BackfillCounts:
             SKIP_COMPANY_SCALE: self.skipped_company_scale,
             SKIP_BOUNDED_QUANTITY: self.skipped_bounded_quantity,
             SKIP_STATED_AS_A_RANGE: self.skipped_stated_as_a_range,
+            SKIP_PERSONAL_TRACK_RECORD: self.skipped_personal_track_record,
         }
 
     @property
@@ -614,6 +653,7 @@ class BackfillCounts:
             + self.skipped_company_scale
             + self.skipped_bounded_quantity
             + self.skipped_stated_as_a_range
+            + self.skipped_personal_track_record
         )
 
 
@@ -628,6 +668,7 @@ class SignalDecision:
     #: | SKIP_IMPLAUSIBLE_MAGNITUDE | SKIP_BELOW_DEAL_FLOOR
     #: | SKIP_NO_DEAL_VALUE_STATED | SKIP_COMPANY_SCALE
     #: | SKIP_BOUNDED_QUANTITY | SKIP_STATED_AS_A_RANGE
+    #: | SKIP_PERSONAL_TRACK_RECORD
     outcome: str
     new_properties: Optional[dict[str, Any]] = None
 
@@ -665,6 +706,8 @@ def decide_for_signal(properties: dict[str, Any] | None, content: str) -> Signal
             return SignalDecision(signal_id="", outcome=SKIP_NON_DEAL_CONTEXT)
         if SKIP_COMPANY_SCALE in scan.skips:
             return SignalDecision(signal_id="", outcome=SKIP_COMPANY_SCALE)
+        if SKIP_PERSONAL_TRACK_RECORD in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_PERSONAL_TRACK_RECORD)
         if SKIP_STATED_AS_A_RANGE in scan.skips:
             return SignalDecision(signal_id="", outcome=SKIP_STATED_AS_A_RANGE)
         if SKIP_BOUNDED_QUANTITY in scan.skips:
@@ -763,6 +806,8 @@ def run_backfill(*, company_id: str, apply: bool, limit: Optional[int] = None) -
                     counts.skipped_no_deal_value_stated += 1
                 elif decision.outcome == SKIP_COMPANY_SCALE:
                     counts.skipped_company_scale += 1
+                elif decision.outcome == SKIP_PERSONAL_TRACK_RECORD:
+                    counts.skipped_personal_track_record += 1
                 elif decision.outcome == SKIP_BOUNDED_QUANTITY:
                     counts.skipped_bounded_quantity += 1
                 elif decision.outcome == SKIP_STATED_AS_A_RANGE:
