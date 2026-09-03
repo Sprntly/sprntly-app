@@ -58,7 +58,7 @@ figure a deal fact?" is made by the model under a prompt contract, and only
 then is `amount` attached. A regex cannot ask that question, and the first
 revision of this module did not try to — it kept the transcription and
 dropped the classification, which is how market sizes and valuations were
-read as customer-stated deal values. The three gates in
+read as customer-stated deal values. The four gates in
 `scan_dollar_figures` are a deliberate, lossy approximation of the missing
 half, and each one refuses with a recorded reason rather than adjusting a
 number: this module may decline to write a figure, but it never writes a
@@ -87,7 +87,12 @@ logger = logging.getLogger(__name__)
 #: to ask on its own. See `_NON_DEAL_CONTEXT`, `_NON_DEAL_SCALE` and
 #: `_MAX_PLAUSIBLE_DEAL_USD`. Runs on either side of this line are not
 #: comparable and the version string is how a reader can tell.
-PATTERN_VERSION = "dollar-v2"
+#:
+#: `dollar-v3` added the floor (`_MIN_PLAUSIBLE_DEAL_USD`). The first live
+#: run under v2 recovered a headline sum whose bottom five addends were
+#: $500, $400, $200, $100 and $25 — noise being laundered into a figure a
+#: reader would quote.
+PATTERN_VERSION = "dollar-v3"
 
 #: The sentinel `certainty` value a backfilled row carries. Deliberately NOT
 #: a member of `extractor._COMMERCIAL_CERTAINTY_VALUES` — see module docstring.
@@ -147,6 +152,40 @@ _NON_DEAL_SCALE: frozenset[str] = frozenset({"b", "billion"})
 #: what it was set from.
 _MAX_PLAUSIBLE_DEAL_USD: float = 100_000_000.0
 
+#: The smallest figure this sweep will accept as a stated DEAL value.
+#:
+#: THE CEILING'S SIBLING, AND DERIVED THE SAME WAY — from the distribution
+#: the sweep actually produced rather than from a round number that felt
+#: right. One finding's twenty-one recovered figures, in full:
+#:
+#:     3,000,000  1,000,000  500,000  160,000  150,000  100,000  75,000
+#:        50,000     47,500   30,000   25,000   10,000    9,000   5,000
+#:         3,500      3,000      500      400      200      100      25
+#:
+#: The largest multiplicative gap anywhere in that distribution is between
+#: 3,000 and 500 — a 6.0x step, wider than any gap in the head (the biggest
+#: there is 3.1x, from 500,000 to 160,000). That break is the evidence: the
+#: bottom five figures are a different population from the rest, not the
+#: thin end of one.
+#:
+#: They also carry no weight. Those five are 24% of the figures and 0.024%
+#: of the money. A quarter of the addends contributing a four-hundredth of
+#: one percent is the whole argument: each one is another chance to be
+#: wrong, and none of them can change the answer.
+#:
+#: WHY THE BOTTOM OF THE GAP RATHER THAN THE TOP. Any floor from 501 to
+#: 3,000 removes exactly the same five figures here, so this corpus cannot
+#: choose between them — and where the evidence is silent, the smaller
+#: filter is the honest one. $1,000 is the SMALLEST floor that captures the
+#: entire observed noise cluster; anything higher discards no additional
+#: noise here while starting to eat real four-figure deals on some other
+#: tenant. A three-figure amount reads as a line item, a credit or a
+#: per-unit price; a four-figure one is a plausible small deal or pilot.
+#:
+#: Corpus-calibrated, not universal, and one line to move — same posture as
+#: the ceiling above.
+_MIN_PLAUSIBLE_DEAL_USD: float = 1_000.0
+
 #: Words whose presence near a `$` figure says the figure is about the
 #: MARKET, the COMPANY or its FUNDRAISING rather than about a deal.
 #:
@@ -182,6 +221,11 @@ _CONTEXT_WINDOW_CHARS = 80
 #: row persists, so a run's funnel stays comparable across invocations.
 SKIP_IMPLAUSIBLE_MAGNITUDE = "implausible_magnitude"
 SKIP_NON_DEAL_CONTEXT = "non_deal_context"
+#: Its OWN reason rather than sharing the ceiling's. A figure refused for
+#: being too small and one refused for being a market size are different
+#: facts about the corpus, and collapsing them would hide how much the floor
+#: is actually removing behind a count that already means something else.
+SKIP_BELOW_DEAL_FLOOR = "below_deal_floor"
 
 #: A single dollar figure, `$`-prefixed only.
 #:
@@ -235,7 +279,7 @@ def scan_dollar_figures(text: str) -> FigureScan:
     """Read every `$` figure in `text`, resolve the ones that can be a stated
     deal value, and record why each of the others was refused.
 
-    Three gates, applied in this order to each match:
+    Four gates, applied in this order to each match:
 
     1. **Context** — a stop-word near the figure says it is about the market,
        the company's valuation or a funding round rather than a deal. Checked
@@ -243,8 +287,11 @@ def scan_dollar_figures(text: str) -> FigureScan:
        refused for being a book of business, not for being large, and the
        recorded reason should say so.
     2. **Scale word** — a billions figure is never a deal here.
-    3. **Magnitude** — a plainly-written figure above the plausible ceiling
+    3. **Ceiling** — a plainly-written figure above the plausible maximum
        (no scale word to catch it, e.g. "$4,000,000,000") is refused too.
+    4. **Floor** — a figure below the plausible minimum is a line item, a
+       credit or a per-unit price rather than a deal value. Refused here at
+       SWEEP time, so junk is never written and then filtered on read.
 
     Surviving figures are order-preserving and de-duplicated by resolved
     value: the same figure mentioned twice ("the deal is $50,000... so
@@ -280,6 +327,13 @@ def scan_dollar_figures(text: str) -> FigureScan:
         amount = round(num * mult, 2)
         if amount > _MAX_PLAUSIBLE_DEAL_USD:
             skips.append(SKIP_IMPLAUSIBLE_MAGNITUDE)
+            continue
+        if amount < _MIN_PLAUSIBLE_DEAL_USD:
+            # AT SWEEP TIME, so the junk is never stored rather than stored
+            # and filtered later. A figure this small is a line item, a
+            # credit or a per-unit price, and laundering it into a headline
+            # sum is exactly what the floor exists to stop.
+            skips.append(SKIP_BELOW_DEAL_FLOOR)
             continue
         if amount not in seen:
             seen.add(amount)
@@ -331,6 +385,7 @@ class BackfillCounts:
     skipped_ambiguous_multiple_figures: int = 0
     skipped_non_deal_context: int = 0
     skipped_implausible_magnitude: int = 0
+    skipped_below_deal_floor: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -339,6 +394,7 @@ class BackfillCounts:
             "ambiguous_multiple_figures": self.skipped_ambiguous_multiple_figures,
             SKIP_NON_DEAL_CONTEXT: self.skipped_non_deal_context,
             SKIP_IMPLAUSIBLE_MAGNITUDE: self.skipped_implausible_magnitude,
+            SKIP_BELOW_DEAL_FLOOR: self.skipped_below_deal_floor,
         }
 
     @property
@@ -349,6 +405,7 @@ class BackfillCounts:
             + self.skipped_ambiguous_multiple_figures
             + self.skipped_non_deal_context
             + self.skipped_implausible_magnitude
+            + self.skipped_below_deal_floor
         )
 
 
@@ -360,7 +417,7 @@ class SignalDecision:
     signal_id: str
     #: "enriched" | "already_has_amount" | "no_figure_found"
     #: | "ambiguous_multiple_figures" | SKIP_NON_DEAL_CONTEXT
-    #: | SKIP_IMPLAUSIBLE_MAGNITUDE
+    #: | SKIP_IMPLAUSIBLE_MAGNITUDE | SKIP_BELOW_DEAL_FLOOR
     outcome: str
     new_properties: Optional[dict[str, Any]] = None
 
@@ -396,6 +453,8 @@ def decide_for_signal(properties: dict[str, Any] | None, content: str) -> Signal
             return SignalDecision(signal_id="", outcome=SKIP_NON_DEAL_CONTEXT)
         if SKIP_IMPLAUSIBLE_MAGNITUDE in scan.skips:
             return SignalDecision(signal_id="", outcome=SKIP_IMPLAUSIBLE_MAGNITUDE)
+        if SKIP_BELOW_DEAL_FLOOR in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_BELOW_DEAL_FLOOR)
         return SignalDecision(signal_id="", outcome="no_figure_found")
     if len(figures) > 1:
         return SignalDecision(signal_id="", outcome="ambiguous_multiple_figures")
@@ -480,6 +539,8 @@ def run_backfill(*, company_id: str, apply: bool, limit: Optional[int] = None) -
                     counts.skipped_non_deal_context += 1
                 elif decision.outcome == SKIP_IMPLAUSIBLE_MAGNITUDE:
                     counts.skipped_implausible_magnitude += 1
+                elif decision.outcome == SKIP_BELOW_DEAL_FLOOR:
+                    counts.skipped_below_deal_floor += 1
                 elif decision.outcome == "enriched":
                     counts.enriched += 1
                     minted.append(float((decision.new_properties or {})["amount"]))

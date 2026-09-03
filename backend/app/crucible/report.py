@@ -1516,9 +1516,7 @@ def _findings_section(
         beyond = len(rest) - len(listed)
         if beyond > 0:
             out.append(_p(
-                f"A further {beyond} findings are on the run and are not "
-                f"listed here, because this document has a size limit. They "
-                f"were not dropped from the analysis."
+                _further_findings_sentence(beyond)
             ))
     return "".join(out)
 
@@ -1711,6 +1709,28 @@ def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
             "had none — only that it predates the step that states them."
         ))
     return "".join(out)
+
+
+def _further_findings_sentence(beyond: int) -> str:
+    """The overflow disclosure, agreeing with itself in the singular.
+
+    A HELPER RATHER THAN AN INLINE f-STRING because the singular branch is
+    otherwise only reachable by landing exactly one finding past a size
+    budget — a boundary too fragile to hold in a test, which is why this
+    sentence's sibling ("None of the 1 met the citation bar") reached a live
+    report before anyone saw it.
+    """
+    if beyond == 1:
+        return (
+            "A further finding is on the run and is not listed here, because "
+            "this document has a size limit. It was not dropped from the "
+            "analysis."
+        )
+    return (
+        f"A further {beyond} findings are on the run and are not listed "
+        f"here, because this document has a size limit. They were not "
+        f"dropped from the analysis."
+    )
 
 
 def render_report_html(

@@ -1793,6 +1793,23 @@ def test_the_findings_past_the_cap_are_still_listed_and_counted():
     assert "What the evidence says (60)" in html
 
 
+def test_the_further_findings_sentence_agrees_in_the_singular():
+    """Sibling of "None of the 1 met the citation bar", found by sweeping for
+    the shape rather than waiting for it in a report. Tested through a helper
+    because the singular branch is otherwise only reachable by landing
+    exactly one finding past a size budget."""
+    from app.crucible.report import _further_findings_sentence
+
+    one = _further_findings_sentence(1)
+    assert "A further 1 findings" not in one
+    assert one.startswith("A further finding is on the run and is not listed")
+    assert "It was not dropped" in one
+
+    many = _further_findings_sentence(50)
+    assert many.startswith("A further 50 findings are on the run")
+    assert "They were not dropped" in many
+
+
 def test_the_overflow_does_not_blame_a_size_limit_it_did_not_hit():
     # 60 findings fits every budget: the reason the rest are one-liners is the
     # editorial cap, not size. Saying "size limit" here would be a lie.
