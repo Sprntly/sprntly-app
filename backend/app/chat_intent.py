@@ -699,12 +699,22 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
     on, so it is the one read here — a second list would drift and the drift
     would be invisible until a report printed itself into a chat thread.
 
-    ONE carve-out: `call-digest` is the machinery id EVERY calls-shaped ask
-    resolves to — the full voice-of-customer report, the pointed query answered
-    from the corpus, and the map-reduce count engine alike. The planner
-    classifies by question SHAPE ("is this about the calls?") before the answer
-    path has decided which of the three it will run, so one pipeline id has to
+    ONE carve-out, over `call_digest.VOC_PIPELINE_IDS`: the voice-of-customer
+    machinery is reached by TWO pipeline ids — "call-digest" (the calls-shaped
+    pick) and "voice-of-customer-report" (the skill id the planner picks for a
+    VoC question that never says "calls") — and both run the same `answer`,
+    which serves the full report, the pointed query and the map-reduce count
+    from one entry point. The planner classifies by question SHAPE before that
+    function has decided which of the three it will run, so the ids have to
     cover all of them.
+
+    KEYED ON THE SET, NEVER THE STRING. Testing `pipeline_id == "call-digest"`
+    is what let this fire for half the traffic it was written for: a table ask
+    ("a list of the features clients asked for … in a form of a table") plans
+    as "voice-of-customer-report", so the carve-out was skipped, the client
+    opened a Reports panel, and the answer path returned a query answer to the
+    thread — the reported bug, one pipeline id over from the one it was
+    supposed to be fixed in.
 
     `call_digest.is_voc_query` IS that decision — the same function
     `call_digest.answer` forks on (`query_mode`), so this cannot drift from what
@@ -738,11 +748,10 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
 
         if pipeline_id not in _REPORT_PIPELINE_IDS:
             return False
-        if pipeline_id == "call-digest":
-            from app.call_digest import is_voc_query
+        from app.call_digest import VOC_PIPELINE_IDS, is_voc_query
 
-            if is_voc_query(question):
-                return False
+        if pipeline_id in VOC_PIPELINE_IDS and is_voc_query(question):
+            return False
         return True
     except Exception:  # noqa: BLE001 — never break the verdict over a hint
         logger.exception("report-pipeline check failed for %s", pipeline_id)

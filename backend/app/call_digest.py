@@ -75,6 +75,20 @@ from app.kg_ingest.pullers.zoom import parse_vtt
 logger = logging.getLogger(__name__)
 
 _VOC_SKILL = "voice-of-customer-report"
+
+#: EVERY pipeline id whose turn ends up in this module's `answer` — and
+#: therefore every id whose report-vs-thread verdict is `is_voc_query`.
+#:
+#: There are two of them and that is the whole point of naming them here.
+#: "call-digest" is the machinery id the regex interceptor and the planner's
+#: calls-shaped pick use; `_VOC_SKILL` is the SKILL id the planner picks for a
+#: voice-of-customer question that never mentions calls ("a list of the
+#: features clients asked for, as a table"). Both run this code, so a caller
+#: reasoning about one and not the other gets the answer right half the time —
+#: which is exactly what `chat_intent._is_report_pipeline` did while it tested
+#: `pipeline_id == "call-digest"` literally: the answer path returned a query
+#: answer while the client opened, and kept, a Reports panel.
+VOC_PIPELINE_IDS: frozenset[str] = frozenset({"call-digest", _VOC_SKILL})
 ANSWER_MODEL = "claude-sonnet-4-6"
 _DEFAULT_WINDOW_DAYS = 7
 # When the question names NO explicit window ("recent feedback", bare "voice of

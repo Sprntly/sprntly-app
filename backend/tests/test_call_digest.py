@@ -3014,3 +3014,47 @@ def test_a_customer_talking_about_a_table_is_not_a_formatting_instruction():
     from app.call_digest import is_voc_query
 
     assert not is_voc_query("customers complained the table view is slow")
+
+
+# ── both VoC pipeline ids, or the fix only works half the time ───────────────
+# The table ask above was STILL generating a report after the shape rule landed,
+# and the logs said why: it plans as `voice-of-customer-report`, not
+# `call-digest`. The carve-out tested the literal string, so it never fired —
+# the answer path ran its query pass (llm:voc_query in the log) while the client
+# opened a Reports panel and kept it.
+
+
+def test_both_ids_that_reach_this_module_are_named():
+    """`VOC_PIPELINE_IDS` is the whole guard against that class of bug: one
+    place says which ids run this code, and everything reasoning about the VoC
+    verdict reads it instead of hard-coding a string."""
+    from app.call_digest import VOC_PIPELINE_IDS
+
+    assert VOC_PIPELINE_IDS == {"call-digest", "voice-of-customer-report"}
+
+
+def test_the_skill_id_gets_the_same_verdict_as_the_machinery_id():
+    """The reported turn, by its REAL pipeline id."""
+    import app.chat_intent as ci
+
+    for pipeline_id in ("call-digest", "voice-of-customer-report"):
+        assert ci._is_report_pipeline(pipeline_id, _TABLE_ASK) is False, pipeline_id
+        assert ci._is_report_pipeline(
+            pipeline_id, "Give me summary on last week's customer conversations"
+        ) is False, pipeline_id
+        # …and the artifact is still the artifact under either id.
+        assert ci._is_report_pipeline(
+            pipeline_id, "give me a voice of customer report for last month"
+        ) is True, pipeline_id
+
+
+def test_a_report_pipeline_that_is_not_voc_is_untouched():
+    """The carve-out is scoped to the two VoC ids. A competitive-intelligence
+    review is a report whatever shape the question takes — it has no query mode
+    to fall back to, so silencing its panel would leave a real document with
+    nothing on screen."""
+    import app.chat_intent as ci
+
+    assert ci._is_report_pipeline(
+        "competitive-intelligence-review", "summarize what Acme shipped as a table"
+    ) is True
