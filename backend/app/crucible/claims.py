@@ -82,30 +82,31 @@ DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 # is a different, stronger kind of evidence, and is reclassified per-CLAIM
 # below rather than per-kind.
 #
-# `pricing` IS IN THIS SET, AND THE GATE THAT MAKES IT SAFE IS `basis`, NOT
-# `kind`. The write side attaches a figure to `commercial_term` AND
-# `pricing` (`app.graph.extractor._AMOUNT_ELIGIBLE_KINDS`); this read side
-# used to admit only the first, so the majority of the figures the extractor
-# captured were enriched and then discarded. The obvious fix — "a price is
-# not a deal value" — cannot be made on `kind`, because the distinction is
-# not in `kind`: it is one LLM judgement over a taxonomy whose own prose
-# blurs the two, and asking a model to be reliable about it is asking for a
-# decision, not a candidate.
+# BOTH KINDS ARE ADMITTED, AND THEY FEED DIFFERENT LINES. They are not
+# better and worse; they hold different things, and the report needs both.
 #
-# The distinction lives in `basis`, a field of the SAME grounded shape and a
-# closed vocabulary the extractor's validator enforces. A price with a
-# `total-contract` or `one-off` basis is a figure that means the same thing
-# a deal value means: this is what it costs, in total, once. A `per-seat`
-# price is a rate, and a rate without a seat count is not a sum — summing it
-# would be a projection wearing a quoted figure's clothes, which is exactly
-# what the grounded-figure evidence exists NOT to be. `per-year` is
-# excluded for the same reason: it is a rate over a term nobody stated.
+#   * `commercial_term` carries COMMITTED money — an issued quote, a
+#     contract value, a named deal. Summable, and the only population a
+#     money target may be answered from. Measured at 55% precision on a real
+#     sample, and the junk is refused by the phrase families in
+#     `app.crucible.backfill` rather than by excluding the kind, because the
+#     genuine rows here are exactly the ones a reader most needs.
+#   * `pricing` carries LIST PRICES — a rate card. Measured at 93%
+#     precision, but its rows are the same handful of values repeated: one
+#     "$30,000 for 50 users" tier appeared across sixteen different
+#     accounts. Reported as a range, never summed, because the total of a
+#     rate card is meaningless.
 #
-# `commercial_term` is not basis-gated, and the asymmetry is deliberate: it
-# is the taxonomy's own name for a deal fact, so a figure on it is already
-# the thing `basis` is being used to establish about a price.
-_SUM_ELIGIBLE_BASIS: frozenset[str] = frozenset({"total-contract", "one-off"})
-_BASIS_GATED_KINDS: frozenset[str] = frozenset({"pricing"})
+# NO BASIS GATE ANY MORE, and the reason it existed is the reason it can go.
+# It was admitting a `pricing` amount only with a sum-eligible basis
+# (`total-contract`/`one-off`), because "a per-seat rate without a stated
+# seat count is not a sum". That is still true — and nothing sums a list
+# price now. `pipeline._figure_is_committed` keeps priced figures out of the
+# committed total by construction, so the arithmetic the gate was protecting
+# against can no longer happen, while the gate itself was excluding almost
+# every priced row on a historical corpus (the backfill never writes
+# `basis`, so those rows have none) and emptying the pricing line it now
+# feeds.
 _GROUNDED_MAGNITUDE_KINDS: frozenset[str] = frozenset({"commercial_term", "pricing"})
 
 
@@ -129,13 +130,11 @@ def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional
     zero") has to hold here even if some other writer ever puts a literal
     `0` in `properties["amount"]`.
 
-    `pricing` additionally requires a SUM-ELIGIBLE `basis` — see
-    `_SUM_ELIGIBLE_BASIS`. A price with no basis is not admitted: an absent
-    basis is unmeasured, and unmeasured is never assumed favourably (I3).
+    Both eligible kinds are admitted here; whether a figure may be ADDED UP
+    is a separate question answered downstream by
+    `pipeline._figure_is_committed`, not by refusing to read it.
     """
     if kind not in _GROUNDED_MAGNITUDE_KINDS:
-        return None
-    if kind in _BASIS_GATED_KINDS and props.get("basis") not in _SUM_ELIGIBLE_BASIS:
         return None
     amount = props.get("amount")
     if isinstance(amount, bool) or not isinstance(amount, (int, float)):
@@ -364,6 +363,14 @@ def _artifact_id(signal: Mapping) -> str:
     return str(signal.get("source_id") or "")
 
 
+def _stored_figure_class(props: Mapping[str, Any]) -> Optional[str]:
+    """The class a previous run drew for this row, if any and if valid."""
+    from app.crucible.figure_class import FIGURE_CLASSES, PROPERTY_KEY
+
+    value = props.get(PROPERTY_KEY)
+    return value if value in FIGURE_CLASSES else None
+
+
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
@@ -423,6 +430,12 @@ def project_signal(
         # population size, so it is populated when one is present.
         population_value=None,
         magnitude=grounded_amount,
+        # READ BACK, NEVER RE-DRAWN. A class stored on a previous run is a
+        # fact about that row; recomputing it would make the committed total
+        # a function of how many times the analysis was run. Validated
+        # against the closed vocabulary here rather than trusted, so a
+        # hand-edited or legacy value cannot reach the consequence table.
+        figure_class=_stored_figure_class(props),
         direction="neutral",
         raw=dict(signal.get("properties") or {}),
     )

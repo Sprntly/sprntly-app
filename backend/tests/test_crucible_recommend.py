@@ -278,10 +278,20 @@ def test_named_target_reads_dollars_and_accounts_and_percent():
 # ranked at the top of the same report.
 
 
-def _money(amount, *, account="acct-a", derived=False):
+def _money(amount, *, account="acct-a", derived=False, committed=True):
+    """COMMITTED by default in these fixtures, because these tests are about
+    the money-target path and that path reads committed money only. The
+    production default on `GroundedFigure` is the opposite — a figure nothing
+    has positively identified stays out of the sum."""
     from app.crucible.types import GroundedFigure
 
-    return GroundedFigure(account_key=account, amount=amount, derived=derived)
+    return GroundedFigure(account_key=account, amount=amount, derived=derived,
+                          committed=committed)
+
+
+def _list_price(amount, *, account="acct-a"):
+    """A rate-card entry: real, quoted, and not summable."""
+    return _money(amount, account=account, committed=False)
 
 
 def _occurrences(haystack, needle):
@@ -299,7 +309,7 @@ def _figure_only(*figures):
     account, so no measured reach, so `value` is honestly None."""
     return Impact(value=None, currency="accounts", affected_population=None,
                   movable_gap=None, value_per_unit=None,
-                  native_units={"commercial_grounded_usd":
+                  native_units={"commercial_committed_usd":
                                 sum(f.amount for f in figures)},
                   grounded_figures=tuple(figures))
 
@@ -374,9 +384,11 @@ def test_one_finding_covering_the_whole_target_says_so_and_shows_its_figures():
         asked_text="how do we drive $100,000 in revenue?",
     )
     assert result.count == 1
-    assert "top finding alone" in result.basis
+    assert "the top finding carries enough on its own" in result.basis
     assert "$60,000 + $50,000" in result.basis
-    assert "meets it on its own" in result.basis
+    # The SUM is corpus-scoped even when one finding is enough — the count
+    # is what "alone" describes, never the number.
+    assert "committed figures in this corpus total $110,000" in result.basis
 
 
 def test_falling_short_says_so_and_never_projects_the_gap_closed():
@@ -494,6 +506,297 @@ def test_a_fully_quoted_target_carries_no_hedge_at_all():
     assert "Without those" not in basis
 
 
+# ── The money target answers from COMMITTED money only ──────────────────────
+
+def test_the_corpus_total_is_the_corpus_total_not_where_counting_stopped():
+    """THE LIVE OVER-CLAIM, reproduced. The loop used to stop as soon as the
+    running total crossed the target, and the sentence built from it said
+    the money was "stated in this corpus". On a real run the first finding
+    carried $150,000 against a $100,000 target, counting stopped there, and
+    the report claimed corpus scope for one finding's subtotal — while three
+    further findings held another $48,000 the sentence implicitly denied.
+    """
+    impacts = [
+        _figure_only(_money(150000.0, account="a")),
+        _figure_only(_money(24000.0, account="b")),
+        _figure_only(_money(19000.0, account="c")),
+        _figure_only(_money(5000.0, account="d")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$198,000" in basis, "every committed figure must be counted"
+    assert "$150,000 were stated in this corpus" not in basis
+    assert "committed figures in this corpus total $198,000" in basis
+
+
+def test_the_count_says_how_many_were_needed_not_how_many_exist():
+    """The count is the only thing that may describe a subset. Four findings
+    carry committed money; one of them is enough."""
+    impacts = [
+        _figure_only(_money(150000.0, account="a")),
+        _figure_only(_money(24000.0, account="b")),
+        _figure_only(_money(19000.0, account="c")),
+    ]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert result.count == 1
+    assert "the top finding carries enough on its own" in result.basis
+
+
+def test_no_sentence_describes_the_total_as_belonging_to_one_finding():
+    """Scope is a property of the number now, not a choice each branch
+    makes. Whichever branch runs, the sum is corpus-scoped."""
+    for asked, impacts in (
+        ("how do we drive $100,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a")),
+          _figure_only(_money(24000.0, account="b"))]),
+        ("how do we drive $10,000,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a"))]),
+        ("how do we drive $100,000 in revenue?",
+         [_figure_only(_money(150000.0, account="a", derived=True))]),
+    ):
+        basis = resolve_recommendation_count(
+            "grow revenue", impacts, asked_text=asked,
+        ).basis
+        assert "in this corpus" in basis, basis
+        for forbidden in ("on the top finding alone",
+                          "across the top 1 findings total",
+                          "quoted figures on the top finding"):
+            assert forbidden not in basis, basis
+
+
+def test_the_same_event_named_once_and_unnamed_once_is_counted_once():
+    """CROSS-FINDING DEDUP, the half that was missing. Twelve rows described
+    eight distinct commercial events — one $10,000 payment counted twice, a
+    $9,000 quote twice, a $5,000 PoC three times — because a row naming the
+    customer and a row that did not were different identities. Within a
+    finding that rule already existed; across findings it did not."""
+    impacts = [
+        _figure_only(_money(10000.0, account="acct-a")),
+        _figure_only(_money(10000.0, account="")),
+        _figure_only(_money(9000.0, account="acct-b")),
+        _figure_only(_money(9000.0, account="")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$19,000" in basis
+    assert "$38,000" not in basis
+
+
+def test_two_accounts_at_the_same_amount_are_still_two_events():
+    """The control. Named accounts are distinct identities; only the
+    anonymous restatement collapses."""
+    impacts = [
+        _figure_only(_money(10000.0, account="acct-a")),
+        _figure_only(_money(10000.0, account="acct-b")),
+    ]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$20,000" in basis
+
+
+def test_the_dedup_does_not_depend_on_which_finding_ranks_first():
+    """Two passes, not one: the rule needs every attributed amount before it
+    can judge an anonymous one, or the answer would depend on ordering."""
+    named = _figure_only(_money(10000.0, account="acct-a"))
+    unnamed = _figure_only(_money(10000.0, account=""))
+    for order in ([named, unnamed], [unnamed, named]):
+        basis = resolve_recommendation_count(
+            "grow revenue", order,
+            asked_text="how do we drive $100,000 in revenue?",
+        ).basis
+        assert "$10,000" in basis
+        assert "$20,000" not in basis
+
+
+def test_a_list_price_never_answers_a_money_target():
+    """A $30,000 tier quoted to sixteen accounts is sixteen genuine mentions
+    of one rate-card entry. Deduplication cannot touch them — they really are
+    different accounts — and they are not $480,000 of anything."""
+    impacts = [_figure_only(*[
+        _list_price(30000.0, account=f"acct-{i}") for i in range(16)
+    ])]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$480,000" not in result.basis
+    assert "$30,000" not in result.basis
+    # No committed money at all, so the money path declines and the honest
+    # refusal stands.
+    assert result.target_unsizeable
+
+
+def test_only_committed_money_is_summed_toward_the_target():
+    impacts = [_figure_only(
+        _money(165000.0, account="a"),
+        _money(9000.0, account="b"),
+        *[_list_price(30000.0, account=f"p{i}") for i in range(16)],
+    )]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$174,000" in basis
+    assert "$654,000" not in basis, "list pricing must not enter the sum"
+    assert "$30,000" not in basis
+
+
+def test_a_committed_total_short_of_the_target_says_so():
+    """EXPECTED ON THIS CORPUS. Committed money is a small fraction of what
+    the sweep recovers, so a named target will often not be reached — that is
+    the honest answer, and the shortfall wording carries it."""
+    impacts = [_figure_only(
+        _money(165000.0, account="a", derived=True),
+        _money(20000.0, account="b", derived=True),
+        *[_list_price(30000.0, account=f"p{i}") for i in range(16)],
+    )]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $1,000,000 in revenue?",
+    )
+    assert result.target_unsizeable
+    assert "$185,000" in result.basis
+    assert "short of it" in result.basis
+    assert "meets" not in result.basis
+
+
+# ── The four defects the first live run exposed ─────────────────────────────
+
+
+def test_the_inline_figure_list_is_capped_and_the_tail_is_counted():
+    """The live report put TWENTY-ONE addends in one sentence. Show the
+    contributors that matter, then say honestly how many are left — a
+    truncation a reader cannot detect would be worse than the wall of
+    numbers."""
+    amounts = [3000000.0, 1000000.0, 500000.0, 160000.0, 150000.0, 100000.0,
+               75000.0, 50000.0, 47500.0, 30000.0, 25000.0]
+    impacts = [_figure_only(*[
+        _money(a, account=f"acct-{i}") for i, a in enumerate(amounts)
+    ])]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+
+    assert "$3,000,000 + $1,000,000 + $500,000 + $160,000 + $150,000" in basis
+    assert "and 6 smaller figures" in basis
+    # The figures beyond the cap are summarised, never itemised...
+    assert "$25,000" not in basis
+    # ...but every one of them still counts toward the total.
+    assert f"${sum(amounts):,.0f}" in basis
+
+
+def test_a_single_figure_beyond_the_cap_is_described_in_the_singular():
+    amounts = [90000.0, 80000.0, 70000.0, 60000.0, 50000.0, 40000.0]
+    impacts = [_figure_only(*[
+        _money(a, account=f"acct-{i}") for i, a in enumerate(amounts)
+    ])]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "and 1 smaller figure" in basis
+    assert "and 1 smaller figures" not in basis
+
+
+def test_a_short_figure_list_is_not_summarised_at_all():
+    impacts = [_figure_only(_money(60000.0, account="a"),
+                            _money(50000.0, account="b"))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$60,000 + $50,000" in basis
+    assert "smaller figure" not in basis
+
+
+# ── Defect 4: no "meets" when nothing is verified ───────────────────────────
+#
+# The first version let derived figures declare a target met and retracted it
+# one sentence later ("…which meets it on its own. … Without those, the
+# quoted figures total $0"). "Which meets it" is the sentence a reader
+# remembers; the retraction is the one they skim.
+
+
+def test_a_target_reached_only_on_unverified_figures_never_says_meets():
+    """THE REGRESSION GUARD. If someone reintroduces the strong verb here,
+    this must fail loudly."""
+    impacts = [_figure_only(
+        _money(60000.0, account="a", derived=True),
+        _money(50000.0, account="b", derived=True),
+    )]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "meets" not in result.basis
+    assert "meet" not in result.basis
+    assert "reachable on unverified figures rather than met" in result.basis
+    assert "not one of them is matched to a verified quote" in result.basis
+
+
+def test_the_unverified_wording_names_what_would_settle_it():
+    """A reader told a claim is weak needs to know what would make it
+    strong, or the disclosure is just a shrug."""
+    impacts = [_figure_only(_money(150000.0, account="a", derived=True))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "source text they were summarised from" in basis
+
+
+def test_the_arithmetic_is_unchanged_when_nothing_is_verified():
+    """The claim got weaker; the counting did not. This corpus is entirely
+    derived today, so dropping those figures would switch the feature off
+    rather than make it honest."""
+    impacts = [_figure_only(
+        _money(60000.0, account="a", derived=True),
+        _money(50000.0, account="b", derived=True),
+    )]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$110,000" in result.basis
+    assert result.count == 1
+    assert not result.target_unsizeable
+
+
+def test_a_partly_verified_target_keeps_the_existing_disclosure_shape():
+    """Preserved deliberately: when SOMETHING is verified, "meets" plus the
+    subtraction is the right shape and was already agreed."""
+    impacts = [_figure_only(_money(30000.0, account="a"),
+                            _money(80000.0, account="b", derived=True))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "which meets it" in basis
+    assert "Without those, the quoted figures total $30,000" in basis
+
+
+def test_a_wholly_unverified_shortfall_does_not_call_them_quoted():
+    """The same overstatement in miniature: nothing here is a quoted figure,
+    so the noun follows the evidence."""
+    impacts = [_figure_only(_money(20000.0, account="a", derived=True))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "every stated figure in this corpus" in basis
+    assert "every quoted figure" not in basis
+
+
 def test_default_recommendation_count_is_two():
     """Apurva's own baseline, absent any other signal."""
     result = resolve_recommendation_count("Help the business grow", [])
@@ -598,6 +901,114 @@ def test_build_deep_recommendations_threads_asked_text_into_the_count():
     assert deep.count.basis == (
         "you asked for 3, so the top 3 get a full recommendation."
     )
+
+
+# ── Defect 3: the count of one ─────────────────────────────────────────────
+#
+# The live report read "None of the 1 met the citation bar … still stands for
+# each". A count of one is the COMMON case on a corpus with few sizeable
+# findings, not a rare edge, and this is the shape that makes a reader
+# distrust every other number on the page.
+
+
+def _deep_with_no_survivors(monkeypatch, result, *, n_findings, asked):
+    """Drive `build_deep_recommendations` far enough to reach the shortfall
+    sentence: online (so it does not short-circuit) and returning a
+    well-formed response with nothing in it, so `kept` is empty and the
+    citation-bar branch is the one that runs."""
+    import app.crucible.recommend as rec_mod
+
+    monkeypatch.setattr(rec_mod, "_offline", lambda: False)
+
+    class _Result:
+        output = {"deep_recommendations": []}
+
+    monkeypatch.setattr(
+        "app.graph.gateway.llm_call", lambda **kw: _Result(), raising=False,
+    )
+    return rec_mod.build_deep_recommendations(
+        enterprise_id="co",
+        goal_text="reduce churn",
+        definition_text="LOGO churn",
+        findings=result.findings[:n_findings],
+        impacts=result.impacts[:n_findings],
+        confidences=result.confidences[:n_findings],
+        claims=[],
+        asked_text=asked,
+    )
+
+
+def test_the_shortfall_sentence_reads_correctly_for_a_single_candidate(monkeypatch):
+    """THE REPORTED BUG: "None of the 1 met the citation bar … still stands
+    for each"."""
+    _, result = _build_two()
+    deep = _deep_with_no_survivors(
+        monkeypatch, result, n_findings=1,
+        asked="what is the 1 thing I can do about churn?",
+    )
+    basis = deep.count.basis
+    assert deep.count.count == 1
+    assert not deep.by_id, "the shortfall branch must be the one under test"
+    assert "None of the 1" not in basis
+    assert "none of the 1" not in basis
+    assert "for each" not in basis, "one finding is not 'each'"
+    assert "The one finding did not meet the citation bar" in basis
+    assert "it is not shown below" in basis
+    assert "still stands for it" in basis
+
+
+def test_the_plural_shortfall_sentence_is_unchanged(monkeypatch):
+    """The fix must be a singular BRANCH, not a rewrite of the common case."""
+    _, result = _build_two()
+    deep = _deep_with_no_survivors(
+        monkeypatch, result, n_findings=2,
+        asked="what are the 2 things I can do about churn?",
+    )
+    basis = deep.count.basis
+    assert deep.count.count == 2
+    assert "None of the 2 met the citation bar" in basis
+    assert "none are shown below" in basis
+    assert "still stands for each" in basis
+
+
+def test_the_named_count_sentence_agrees_in_the_singular():
+    """Third site with the same shape, found by sweeping rather than by
+    waiting for it to be reported: "the top 1 get a full recommendation"."""
+    one = resolve_recommendation_count(
+        "reduce churn", [], asked_text="what is the 1 thing I can do?",
+    )
+    assert one.count == 1
+    assert "the top 1 get" not in one.basis
+    assert one.basis == (
+        "you asked for 1, so the top finding gets a full recommendation."
+    )
+    two = resolve_recommendation_count(
+        "reduce churn", [], asked_text="what are the 2 things I can do?",
+    )
+    assert two.basis == (
+        "you asked for 2, so the top 2 get a full recommendation."
+    )
+
+
+def test_the_reach_target_sentence_agrees_in_the_singular():
+    """Sibling of the same shape: "even the 1 best-sized findings here only
+    sum to" — checked because the instruction was to sweep for the pattern,
+    not only fix the one that was reported."""
+    impacts = [
+        Impact(value=5.0, currency="accounts", affected_population=None,
+               movable_gap=None, value_per_unit=None),
+    ]
+    short = resolve_recommendation_count(
+        "grow accounts", impacts, asked_text="I want to activate 40 accounts",
+    )
+    assert "1 best-sized findings" not in short.basis
+    assert "best-sized finding here only sums to" in short.basis
+
+    met = resolve_recommendation_count(
+        "grow accounts", impacts, asked_text="I want to activate 4 accounts",
+    )
+    assert "1 findings by reach sum to" not in met.basis
+    assert "1 finding by reach sums to" in met.basis
 
 
 def test_named_target_sums_impacts_in_rank_order_until_met():

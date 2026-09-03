@@ -164,11 +164,37 @@ class GroundedFigure(NamedTuple):
     captured against a verified verbatim quote. The failure mode there is
     transcription error, not invention — so it is a reason to hedge the
     wording proportionately, never a reason to hide the figure.
+
+    `committed` IS THE FIELD THAT DECIDES WHETHER A FIGURE MAY BE ADDED UP,
+    and it exists because deduplication was solving the wrong problem. A
+    sample of the real corpus found one list price — "$30,000 for 50 users" —
+    quoted to SIXTEEN different accounts across sixteen different sales
+    calls. Those are not duplicates: they are sixteen genuine prospects and
+    sixteen genuine mentions, so nothing about deduplication touches them.
+    They are also not $480,000 of anything. Summing was the wrong OPERATION,
+    not merely the wrong rows.
+
+    So a committed figure (an issued quote, a contract value, a named deal)
+    is summable and answers a money target. A list price is a RATE CARD:
+    reported as a range across the accounts it was quoted to, never totalled,
+    because the total means nothing.
+
+    DEFAULTS TO FALSE — the non-additive side. Every failure in this feature's
+    history has been over-claiming, so a figure nothing has positively
+    identified as committed stays out of the sum.
     """
 
     account_key: str
     amount: float
     derived: bool
+    committed: bool = False
+    #: May this figure appear in the non-additive pricing range? A THIRD
+    #: STATE: a figure can be neither summed nor ranged — a salary, a
+    #: competitor's fee, a hypothetical — and before the classifier existed
+    #: everything that failed the committed test silently became a price,
+    #: which is how a candidate's career track record became a pricing
+    #: maximum.
+    list_price: bool = False
 
 
 #: How many ordinal bands a size is REPORTED in. Quartiles: enough to
@@ -394,6 +420,17 @@ class Claim:
     magnitude: Optional[float] = None
     direction: Literal["positive", "negative", "neutral"] = "neutral"
     subject_cluster_id: Optional[str] = None
+    #: WHAT KIND OF MONEY `magnitude` IS — one of
+    #: `app.crucible.figure_class.FIGURE_CLASSES`, or `None` when nothing
+    #: classified it (the model was not run, or did not answer for this
+    #: claim). `None` is not a category and never means "assume the good
+    #: one": the pipeline falls back to its deterministic phrase families,
+    #: which admit money to a sum only on a positive signal.
+    #:
+    #: A CATEGORY, NEVER A DECISION (I2). The consequence of each class —
+    #: summed, ranged, or refused — is a fixed table in `pipeline`, not
+    #: anything the classifier returns.
+    figure_class: Optional[str] = None
     raw: Any = None           # original payload, always retained
 
     def __post_init__(self) -> None:

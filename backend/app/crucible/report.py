@@ -1121,7 +1121,7 @@ def _finding_block(
     # `pipeline`/`routes.crucible` into `native_units` first — a real
     # follow-up, not something to guess at render time.
     commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
-    commercial_usd = commercial.get("commercial_grounded_usd")
+    commercial_usd = commercial.get("commercial_committed_usd")
     if isinstance(commercial_usd, (int, float)):
         accounts_n = commercial.get("commercial_grounded_accounts")
         accounts_txt = (
@@ -1141,7 +1141,7 @@ def _finding_block(
         # unreliable" would overstate it — and saying nothing at all would
         # let a derived figure wear a quoted figure's credibility, which is
         # the promise this line was making and not keeping.
-        derived_usd = commercial.get("commercial_grounded_usd_derived")
+        derived_usd = commercial.get("commercial_committed_usd_derived")
         derived_usd = (
             float(derived_usd) if isinstance(derived_usd, (int, float)) else 0.0
         )
@@ -1343,6 +1343,42 @@ _SHED_LADDER = (
 )
 
 
+def _list_pricing(findings: list[dict]) -> Optional[tuple[float, float, int]]:
+    """Corpus-wide list pricing: the two ends of the range, and how many
+    findings carry one. `None` when no finding does.
+
+    HOISTED TO THE CORPUS, AND THAT IS THE FIX FOR A REAL RENDERING BUG. This
+    sentence used to live inside a finding's own write-up — and only the top
+    handful of findings get one, while list pricing sits on whichever
+    findings the pricing conversations happened to cluster into. On a live
+    run twelve findings carried correctly-shaped pricing units and the line
+    rendered for none of them, because not one of the twelve was in the top
+    ten.
+
+    It also belongs here on the merits. A rate card is not a property of one
+    theme; it is what the product costs, and it turns up wherever pricing was
+    discussed.
+
+    ONLY WHAT CAN BE AGGREGATED WITHOUT DOUBLE COUNTING. The two ends are a
+    min of mins and a max of maxes, which is exact. Per-finding distinct-price
+    and account counts are NOT summed here — the same price quoted in two
+    findings would be counted twice — so the only count reported is one this
+    function can be sure of: how many findings carry pricing at all.
+    """
+    mins: list[float] = []
+    maxes: list[float] = []
+    for f in findings:
+        units = _as_dict(_as_dict(f.get("impact")).get("native_units"))
+        lo = units.get("commercial_list_price_min")
+        hi = units.get("commercial_list_price_max")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            mins.append(float(lo))
+            maxes.append(float(hi))
+    if not mins:
+        return None
+    return min(mins), max(maxes), len(mins)
+
+
 def _findings_section(
     findings: list[dict],
     # The EDITORIAL cap is the default, so a future caller that forgets to pass
@@ -1473,6 +1509,44 @@ def _findings_section(
             for name, basis in shared_assumptions[:MAX_ASSUMED_PARAMS]
         ))
 
+    # LIST PRICING: A RANGE, IN ITS OWN PARAGRAPH, WITH NO TOTAL.
+    #
+    # THE READER MUST NOT BE ABLE TO ADD THIS TO A COMMITTED FIGURE. One is a
+    # sum of money people agreed to; the other is a rate card quoted to
+    # whoever asked, whose total is meaningless — a $30,000 tier quoted
+    # sixteen times is not $480,000. Three things keep them apart, all
+    # deliberate:
+    #
+    #   * a RANGE and a SUM are structurally non-additive, so the arithmetic
+    #     a reader might attempt has no obvious form;
+    #   * this is its own paragraph in its own place, never a clause beside a
+    #     committed figure — two numbers in one sentence is an invitation to
+    #     add them;
+    #   * each says which KIND of money it is in its own words, rather than
+    #     leaving a reader to infer it from the number.
+    #
+    # No total is printed here, and none should be added later.
+    pricing = _list_pricing(findings)
+    if pricing is not None:
+        low, high, carrying = pricing
+        span = (
+            f"${low:,.0f}" if low == high else f"${low:,.0f}–${high:,.0f}"
+        )
+        # SAYS HOW MANY IT SPEAKS FOR, the same way the assumptions hoist
+        # above does — a hoisted sentence that overstates its own scope is
+        # the failure this whole pass has been correcting.
+        where = (
+            "one finding below"
+            if carrying == 1 else
+            f"{carrying} of the findings below"
+        )
+        out.append(_p(
+            f"<strong>List pricing was quoted in {where}.</strong> {span}. "
+            f"This is what was quoted, not what was agreed — the same price "
+            f"offered to several accounts is one rate card, so these are "
+            f"never added together or added to any figure above."
+        ))
+
     full = findings[:full_cap]
     rest = findings[full_cap:]
     out.extend(
@@ -1516,9 +1590,7 @@ def _findings_section(
         beyond = len(rest) - len(listed)
         if beyond > 0:
             out.append(_p(
-                f"A further {beyond} findings are on the run and are not "
-                f"listed here, because this document has a size limit. They "
-                f"were not dropped from the analysis."
+                _further_findings_sentence(beyond)
             ))
     return "".join(out)
 
@@ -1711,6 +1783,28 @@ def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
             "had none — only that it predates the step that states them."
         ))
     return "".join(out)
+
+
+def _further_findings_sentence(beyond: int) -> str:
+    """The overflow disclosure, agreeing with itself in the singular.
+
+    A HELPER RATHER THAN AN INLINE f-STRING because the singular branch is
+    otherwise only reachable by landing exactly one finding past a size
+    budget — a boundary too fragile to hold in a test, which is why this
+    sentence's sibling ("None of the 1 met the citation bar") reached a live
+    report before anyone saw it.
+    """
+    if beyond == 1:
+        return (
+            "A further finding is on the run and is not listed here, because "
+            "this document has a size limit. It was not dropped from the "
+            "analysis."
+        )
+    return (
+        f"A further {beyond} findings are on the run and are not listed "
+        f"here, because this document has a size limit. They were not "
+        f"dropped from the analysis."
+    )
 
 
 def render_report_html(

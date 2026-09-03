@@ -33,6 +33,11 @@ from app.crucible.claims import project_signals
 from app.crucible.cluster import assign_clusters, parse_embedding
 from app.crucible.kg_themes import assign_themes, load_theme_map
 from app.crucible.goal import KpiTreeSource, confirm as confirm_goal, resolve
+from app.crucible.figure_class import (
+    apply_classes,
+    classify_figures,
+    persist_classes,
+)
 from app.crucible.pipeline import build_findings
 from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
@@ -1179,6 +1184,34 @@ def execute_run(
             for slot, claim in zip(unthemed_idx, regrouped):
                 claims[slot] = claim
             cluster_stats.update(embed_stats)
+
+        # WHAT KIND OF MONEY EACH FIGURE IS — its own stage, deliberately
+        # BEFORE the pipeline, because `pipeline` contains no LLM call
+        # anywhere and that property is what makes a run reproducible. The
+        # model returns a category per figure; the pipeline reads it as an
+        # ordinary deterministic input and decides the consequence itself.
+        #
+        # Degrades rather than fails: any claim the classifier does not
+        # answer for keeps `figure_class=None` and falls back to the
+        # deterministic phrase families, which admit money to a sum only on
+        # a positive signal.
+        # Rows already carrying a stored class are not re-sent, so this
+        # call shrinks to nothing once a corpus has been classified — and,
+        # more importantly, the answer stops moving between runs.
+        newly_classified = classify_figures(claims, enterprise_id=company_id)
+        if newly_classified:
+            # PERSISTED BEFORE USE, so a run that crashes after classifying
+            # does not throw away the draw and take a different one next
+            # time. A write failure is logged and the run continues on the
+            # in-memory classes.
+            try:
+                persist_classes(newly_classified, company_id=company_id)
+            except Exception:  # noqa: BLE001 — analysis outlives a write
+                logger.exception(
+                    "crucible: could not persist figure classes for %s",
+                    company_id,
+                )
+        claims = apply_classes(claims, newly_classified)
 
         runs_db.update(run_id, company_id, claim_count=len(claims))
         # EXACT COUNTS ONLY. `themed`/`unthemed` are measured; the number of
