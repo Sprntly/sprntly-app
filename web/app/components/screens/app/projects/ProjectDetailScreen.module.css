@@ -214,6 +214,14 @@
      rail any more. The only second column the grid ever gets is the
      in-place artifact drawer (`.bodyDrawerOpen` below). */
   grid-template-columns: minmax(0, 1fr);
+  /* A single GROWING row (mirrors main chat's `.od-layout` `grid-template-rows:
+     auto 1fr` growing track). Without it the row defaults to `auto` = content
+     height, so `.main` (a grid item — `flex` on it is inert) collapses to the
+     transcript's height with a SHORT chat, leaving the composer floating above
+     empty space. `minmax(0, 1fr)` fills the bounded `.body` height and lets the
+     `min-height:0` chain below scroll internally, so `.od-center-scroll` always
+     fills and `.bc-dock` pins to the bottom regardless of content length. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
 /* AD-HOC (live-rig): artifact drawer open — [ chat | list-drawer ] side-by-side.

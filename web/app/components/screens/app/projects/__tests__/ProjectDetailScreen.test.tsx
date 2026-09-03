@@ -421,6 +421,14 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     expect(rule).not.toMatch(/align-items/)
     expect(rule).not.toMatch(/justify-content/)
   })
+
+  it("test_body_grid_grows_so_short_chat_composer_stays_pinned — .body carries a filling grid row (minmax(0,1fr)) so the chat column (.main, a grid ITEM whose own flex is inert) fills the viewport height even when the transcript is SHORTER than the view; without it the row is auto/content-sized and the composer floats above dead space (project-scroll fix, short-content case)", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    const rule = css.match(/\.body\s*\{[^}]*\}/)?.[0] ?? ""
+    expect(rule).toMatch(/display:\s*grid/)
+    expect(rule).toMatch(/grid-template-rows:\s*minmax\(0,\s*1fr\)/)
+    expect(rule).toMatch(/min-height:\s*0/)
+  })
 })
 
 describe("ProjectDetailView — top-bar tasks trigger removed", () => {
