@@ -189,6 +189,38 @@ def test_a_finding_that_kept_its_deep_recommendation_gets_no_shortfall_note():
     assert "in line for a full write-up" not in html
 
 
+# ─── The synthesized recommendation (item 1) ────────────────────────────────
+
+def test_a_synthesized_recommendation_renders_above_the_per_finding_ones():
+    run = _run(prioritisation={
+        "plan": _plan(),
+        "synthesized_recommendation": {
+            "action": "Repair the export path and cut onboarding together",
+            "because": "Both top findings point at the same renewal risk",
+            "citations": [
+                {"claim_id": "c1", "evidence": "exports return empty files",
+                 "cited_claim": "exports return empty files"},
+            ],
+        },
+    })
+    html = render_report_html(run, [
+        _finding(recommendation={"action": "Fix the export path",
+                                 "because": "three accounts named it"}),
+    ])
+    assert "The recommendation" in html
+    assert "Repair the export path and cut onboarding together" in html
+    # The per-finding detail is still there, below the top-line answer.
+    assert html.index("The recommendation") < html.index("Fix the export path")
+
+
+def test_no_synthesized_recommendation_means_no_section():
+    """Silent when there is nothing to synthesize (0 or 1 kept deep
+    recommendation) or the call/citation gate produced nothing usable — the
+    card reads exactly as it did before this existed."""
+    html = render_report_html(_run(), [_finding()])
+    assert "The recommendation" not in html
+
+
 def test_a_grounded_commercial_figure_is_named_as_evidence_not_a_projection():
     """A real, transcript-stated dollar figure — carried on
     `impact.native_units` (see `pipeline._grounded_commercial_native_units`)

@@ -1566,6 +1566,42 @@ def _run_enrichment(
     except Exception:  # noqa: BLE001
         logger.exception("crucible: deep recommendations skipped for run %s", run_id)
 
+    # ONE RECOMMENDATION FOR THE WHOLE REPORT, SYNTHESIZED ACROSS THE DEEP
+    # PASS ABOVE.
+    #
+    # Per-finding detail (`deep`) stays exactly as it was — this adds a single
+    # top-line recommendation for the whole memo, narrated from what
+    # `build_deep_recommendations` already decided (I2), never a second
+    # ranking. TOTAL, same reasoning as both passes above: a failed or
+    # malformed synthesis must not cost a reader the per-finding
+    # recommendations that already succeeded.
+    synthesized_recommendation: dict = {}
+    try:
+        from app.crucible.recommend import build_synthesized_recommendation
+
+        synthesis = build_synthesized_recommendation(
+            enterprise_id=company_id,
+            goal_text=goal_text,
+            definition_text=definition_text,
+            findings=relevant,
+            deep_by_id=deep,
+            claims=claims,
+        )
+        if synthesis is not None:
+            synthesized_recommendation = {
+                "action": synthesis.action,
+                "because": synthesis.because,
+                "citations": [
+                    {"claim_id": c.claim_id, "evidence": c.evidence,
+                     "cited_claim": c.cited_claim}
+                    for c in synthesis.citations
+                ],
+            }
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "crucible: synthesized recommendation skipped for run %s", run_id
+        )
+
     # LIST PRICING, FOR THE LIVE PANEL — computed UNCONDITIONALLY, unlike
     # `recommendation_basis` above. That one only exists to answer a money
     # target somebody named, so it lives inside the money-target branch of
@@ -1666,6 +1702,11 @@ def _run_enrichment(
     }
     return {
         "recommendation_basis": recommendation_basis,
+        # The one recommendation for the whole report (item 1 above) — empty
+        # exactly when there was nothing to synthesize (0 or 1 kept deep
+        # recommendation) or the call/citation gate produced nothing usable.
+        # `report.py`'s `_synthesized_recommendation_section` reads this.
+        "synthesized_recommendation": synthesized_recommendation,
         # Sibling of `recommendation_basis` above, same panel-parity purpose:
         # `GoalAnalysisReport.tsx` reads this straight off the run's
         # `prioritisation` dict and renders it verbatim, the same way it
