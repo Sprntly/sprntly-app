@@ -189,56 +189,35 @@ def test_a_commercial_term_without_a_grounded_amount_stays_a_mechanism_claim():
 # grounded shape with a closed vocabulary the extractor's validator enforces.
 
 
-def test_the_sum_eligible_bases_are_real_members_of_the_extractors_vocabulary():
-    """Drift guard. These strings are declared here rather than imported, so
-    a rename on the write side must not leave this gate silently matching
-    nothing and discarding every price."""
-    from app.crucible.claims import _SUM_ELIGIBLE_BASIS
-    from app.graph.extractor import _COMMERCIAL_BASIS_VALUES
+def test_both_eligible_kinds_are_admitted_because_they_feed_different_lines():
+    """They are not better and worse. `commercial_term` carries committed
+    money and is summable; `pricing` carries a rate card and is reported as
+    a range. Excluding either would drop a line the report needs."""
+    from app.crucible.claims import _GROUNDED_MAGNITUDE_KINDS
+    from app.graph.extractor import _AMOUNT_ELIGIBLE_KINDS
 
-    assert _SUM_ELIGIBLE_BASIS
-    assert _SUM_ELIGIBLE_BASIS <= _COMMERCIAL_BASIS_VALUES
+    assert _GROUNDED_MAGNITUDE_KINDS == {"commercial_term", "pricing"}
+    # The read side admits exactly what the write side attaches a figure to.
+    assert _GROUNDED_MAGNITUDE_KINDS == _AMOUNT_ELIGIBLE_KINDS
 
 
-@pytest.mark.parametrize("basis", ["total-contract", "one-off"])
-def test_a_priced_figure_with_a_sum_eligible_basis_votes_on_size(basis):
-    """A total-contract or one-off price means what a deal value means: this
-    is what it costs, in total, once."""
+@pytest.mark.parametrize("basis", ["total-contract", "one-off", "per-seat",
+                                   "per-year", None, ""])
+def test_a_priced_figure_is_read_whatever_its_basis(basis):
+    """THE BASIS GATE IS GONE, and the reason it existed is the reason it
+    could go: it admitted a price only with a sum-eligible basis, because a
+    per-seat rate without a seat count is not a sum. Nothing sums a list
+    price now — `pipeline._figure_is_committed` keeps them out of the
+    committed total by construction — so the arithmetic it guarded cannot
+    happen, while the gate itself emptied the pricing line on any historical
+    corpus, where the backfill never writes `basis` at all."""
     claim = project_signal(sig(
         kind="pricing", source_type="revenue",
-        properties={"amount": 120000, "currency": "USD", "basis": basis,
-                    "certainty": "quoted"},
+        properties={"amount": 12000, "currency": "USD", "basis": basis},
     ), {})
     assert claim is not None
+    assert claim.magnitude == 12000.0
     assert claim.type == "magnitude"
-    assert claim.magnitude == 120000.0
-
-
-@pytest.mark.parametrize("basis", ["per-seat", "per-year", None, "", "invented"])
-def test_a_rate_is_never_summed_as_a_deal_value(basis):
-    """`per-seat` without a stated seat count is a rate, not a sum; `per-year`
-    is a rate over a term nobody stated; a missing basis is UNMEASURED, and
-    unmeasured is never assumed favourably (I3)."""
-    claim = project_signal(sig(
-        kind="pricing", source_type="revenue",
-        properties={"amount": 120000, "currency": "USD", "basis": basis},
-    ), {})
-    assert claim is not None
-    assert claim.magnitude is None
-    assert claim.type == "mechanism"
-
-
-def test_a_commercial_term_figure_is_not_basis_gated():
-    """The asymmetry is deliberate: `commercial_term` is the taxonomy's own
-    name for a deal fact, so a figure on it already IS what `basis` is being
-    used to establish about a price."""
-    claim = project_signal(sig(
-        kind="commercial_term", source_type="revenue",
-        properties={"amount": 120000, "currency": "USD"},
-    ), {})
-    assert claim is not None
-    assert claim.type == "magnitude"
-    assert claim.magnitude == 120000.0
 
 
 @pytest.mark.parametrize("bad_amount", ["a lot", True, float("nan"), float("inf"), None, [1]])

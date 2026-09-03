@@ -458,6 +458,37 @@ def _money_phrase(amount: float) -> str:
     return f"${amount:,.0f}"
 
 
+#: How many individual figures the basis sentence names before summarising
+#: the rest.
+#:
+#: The first live run put TWENTY-ONE addends in a single sentence
+#: ("$3,000,000 + $1,000,000 + $500,000 + …"), which is not a sentence
+#: anybody reads. Five because on that run the top five carried 93% of the
+#: total and the top three carried 87% — enough that a reader sees the
+#: figures actually driving the number, few enough to scan in one pass.
+#:
+#: A RENDERING CAP, NOT A DATA CHANGE. Every figure still counts toward the
+#: sum and the full set stays on `Impact.grounded_figures`, structured, for
+#: anything that wants to enumerate them.
+MAX_INLINE_FIGURES = 5
+
+
+def _figures_phrase(figures: Sequence[GroundedFigure]) -> str:
+    """`$3,000,000 + $1,000,000 + $500,000 + $160,000 + $150,000, and 16
+    smaller figures` — the contributors that matter, then an honest count of
+    the tail rather than a truncation a reader cannot detect."""
+    ordered = sorted(figures, key=lambda f: -f.amount)
+    shown = ordered[:MAX_INLINE_FIGURES]
+    remainder = len(ordered) - len(shown)
+    text = " + ".join(_money_phrase(f.amount) for f in shown)
+    if remainder > 0:
+        text += (
+            f", and {remainder} smaller figure"
+            f"{'' if remainder == 1 else 's'}"
+        )
+    return text
+
+
 def _quoted_money_toward_target(
     ranked_impacts: Sequence[Impact], target: float, *, max_count: int,
 ) -> Optional["RecommendationCount"]:
@@ -485,6 +516,17 @@ def _quoted_money_toward_target(
     single number, and only correct because they were deduplicated within a
     finding first.
     """
+    # COMMITTED MONEY ONLY, and this is the load-bearing line of the whole
+    # function. A list price quoted to sixteen accounts is sixteen genuine
+    # mentions of one rate-card entry — not duplicates, so deduplication
+    # never touched them, and not $480,000 of anything either. Summing was
+    # the wrong OPERATION for that population, so it is excluded here rather
+    # than deduplicated harder. See `types.GroundedFigure.committed`.
+    #
+    # The consequence is intended: on a corpus that is mostly rate card, the
+    # committed total is small and a named target will often not be reached.
+    # That is the honest answer, and the shortfall wording already carries
+    # it.
     seen: set[tuple[str, float]] = set()
     counted: list[GroundedFigure] = []
     findings_used = 0
@@ -494,6 +536,8 @@ def _quoted_money_toward_target(
             break
         contributed = False
         for figure in imp.grounded_figures:
+            if not figure.committed:
+                continue
             identity = (figure.account_key, figure.amount)
             if identity in seen:
                 continue
@@ -518,13 +562,42 @@ def _quoted_money_toward_target(
         if named_accounts else ""
     )
 
-    if reached and findings_used == 1:
+    derived_total = sum(f.amount for f in counted if f.derived)
+    verified_total = running - derived_total
+    figures_text = _figures_phrase(counted)
+
+    if reached and not verified_total:
+        # NOTHING HERE IS VERIFIED, SO NOTHING HERE SAYS "MEETS".
+        #
+        # An earlier revision let derived figures declare a target met and
+        # then retracted it one sentence later ("…which meets it on its own.
+        # … Without those, the quoted figures total $0"). Real output showed
+        # why that fails: "which meets it" is the sentence a reader
+        # remembers, and the retraction is the one they skim. Asserting and
+        # withdrawing a claim in the same paragraph is worse than either
+        # half alone, so when NOT ONE figure is matched to a verified quote
+        # the strong verb is not available at all.
+        #
+        # The arithmetic is unchanged and every figure still counts — this
+        # corpus is entirely derived today, so excluding them would switch
+        # the feature off. What changes is the strength of the claim, and
+        # the sentence names what would actually settle it rather than
+        # leaving the reader with a number to discount by an unknown amount.
+        basis = (
+            f"you named a target of {target_text}; figures totalling "
+            f"{total_text}{across} were stated in this corpus "
+            f"({figures_text}), enough to reach it — but not one of them is "
+            f"matched to a verified quote. Every figure here was read back "
+            f"from a written summary, so your target is reachable on "
+            f"unverified figures rather than met. Checking them against the "
+            f"source text they were summarised from is what would settle it."
+        )
+    elif reached and findings_used == 1:
         # SAID PLAINLY RATHER THAN PADDED. One finding covering the whole
         # target is a strong claim resting entirely on the accuracy of the
         # figures behind it, so those figures are shown rather than
         # summarised — a reader who can see "$60,000 + $50,000" can judge it
         # in a way that "$110,000" does not allow.
-        figures_text = " + ".join(_money_phrase(f.amount) for f in counted)
         basis = (
             f"you named a target of {target_text}; quoted figures on the top "
             f"finding alone total {total_text}{across} ({figures_text}), which "
@@ -534,38 +607,43 @@ def _quoted_money_toward_target(
     elif reached:
         basis = (
             f"you named a target of {target_text}; quoted figures across the "
-            f"top {n} findings total {total_text}{across}, which meets it. "
-            f"These are figures people actually stated, added up — not a "
-            f"projection."
+            f"top {n} finding{'' if n == 1 else 's'} total {total_text}"
+            f"{across}, which meets it. These are figures people actually "
+            f"stated, added up — not a projection."
         )
     else:
+        # Not reached. "Quoted" would be the same overstatement in miniature
+        # when nothing is verified, so the noun follows the evidence.
+        noun = "quoted figure" if verified_total else "stated figure"
         basis = (
-            f"you named a target of {target_text}; every quoted figure in "
+            f"you named a target of {target_text}; every {noun} in "
             f"this corpus totals {total_text}{across} — short of it. Nothing "
             f"here is projected to close the gap; these are only the figures "
             f"people actually stated."
         )
 
-    derived_total = sum(f.amount for f in counted if f.derived)
-    if derived_total:
+    if derived_total and verified_total:
         # PROPORTIONATE, AND SPECIFIC ABOUT WHICH RISK. A figure recovered
         # from a written summary came from text that was itself written under
         # a grounding gate, so the exposure is transcription error, not
         # invention — a blanket "this may be unreliable" would overstate it,
         # and saying nothing would understate a materially weaker claim.
+        #
+        # Only when SOMETHING is verified. With a verified total of zero the
+        # branch above has already said so in its own sentence, and repeating
+        # it here would read as a footnote to a claim that was never made.
         basis += (
             f" {_money_phrase(derived_total)} of that was read back from "
             f"written summaries rather than matched to a verified quote."
         )
-        without_derived = running - derived_total
-        if reached and without_derived < target:
-            # The target is met ONLY because of the hedged figures. Stated
+        if reached and verified_total < target:
+            # The target is met only because of the hedged figures. Stated
             # outright: "your target is covered" is a much stronger claim
             # than "a figure was named", and a reader must not have to do
             # this subtraction themselves to discover it.
             basis += (
                 f" Without those, the quoted figures total "
-                f"{_money_phrase(without_derived)}, which would not meet your "
+                f"{_money_phrase(verified_total)}, which would not meet your "
                 f"target."
             )
 
@@ -636,6 +714,11 @@ def resolve_recommendation_count(
     if named is not None:
         n = max(1, min(named, max_count))
         basis = (
+            # Third site with the same singular defect: "the top 1 get a full
+            # recommendation" — swept for rather than waiting to be reported.
+            f"you asked for {named}, so the top finding gets a full "
+            f"recommendation."
+            if n == named == 1 else
             f"you asked for {named}, so the top {n} get a full recommendation."
             if n == named else
             f"you asked for {named}, capped at {n} so the recommendation "
@@ -697,13 +780,18 @@ def resolve_recommendation_count(
         if reached:
             basis = (
                 f"you named a target of {value:,.0f} {unit_word}; the top "
-                f"{n} findings by reach sum to {running:,.0f} {unit_word}, "
+                f"{n} finding{'' if n == 1 else 's'} by reach sum"
+                f"{'s' if n == 1 else ''} to {running:,.0f} {unit_word}, "
                 f"which meets it."
             )
         else:
             basis = (
                 f"you named a target of {value:,.0f} {unit_word}; even the "
+                f"best-sized finding here only sums to "
+                if n == 1 else
+                f"you named a target of {value:,.0f} {unit_word}; even the "
                 f"{n} best-sized findings here only sum to "
+            ) + (
                 f"{running:,.0f} {unit_word} — short of your target. There "
                 f"is not enough sized evidence in this corpus to reach it."
             )
@@ -1264,14 +1352,27 @@ def build_deep_recommendations(
     # count`, the citation gate, and a total failure never disagree about
     # which count they printed.
     if len(kept) < n:
+        # SINGULAR IS NOT A COSMETIC CASE HERE. With one candidate these
+        # sentences read "None of the 1 met the citation bar … still stands
+        # for each", which is the shape that makes a reader distrust every
+        # other number on the page. A count of one is the COMMON case on a
+        # corpus with few sizeable findings, not a rare edge.
+        one = n == 1
         if fail_reason is not None:
-            gate_note = (
-                f" {fail_reason[0].upper()}{fail_reason[1:]}, so none of "
-                f"the {n} are shown below — the flat recommendation above "
-                f"still stands for each."
+            tail = (
+                "the one finding is not shown below — the flat "
+                "recommendation above still stands for it."
+                if one else
+                f"none of the {n} are shown below — the flat recommendation "
+                f"above still stands for each."
             )
+            gate_note = f" {fail_reason[0].upper()}{fail_reason[1:]}, so {tail}"
         elif not kept:
             gate_note = (
+                " The one finding did not meet the citation bar for a full "
+                "recommendation, so it is not shown below — the flat "
+                "recommendation above still stands for it."
+                if one else
                 f" None of the {n} met the citation bar for a full "
                 f"recommendation, so none are shown below — the flat "
                 f"recommendation above still stands for each."

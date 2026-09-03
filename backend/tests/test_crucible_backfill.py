@@ -22,6 +22,11 @@ import pytest
 
 from app.crucible.backfill import (
     BACKFILL_CERTAINTY,
+    SKIP_BELOW_DEAL_FLOOR,
+    SKIP_BOUNDED_QUANTITY,
+    SKIP_COMPANY_SCALE,
+    SKIP_NO_DEAL_VALUE_STATED,
+    SKIP_STATED_AS_A_RANGE,
     SKIP_IMPLAUSIBLE_MAGNITUDE,
     SKIP_NON_DEAL_CONTEXT,
     amount_distribution,
@@ -81,14 +86,32 @@ def test_ignores_a_bare_digit_with_no_dollar_sign():
     assert find_dollar_figures("about 3k accounts churned") == []
 
 
-def test_the_parser_itself_still_reports_a_stated_zero():
-    """`find_dollar_figures` finds "$0" as a real parse — the zero-is-not-a-
-    real-amount guard lives in the shared extractor validator
-    (`decide_for_signal` -> `_grounded_amount_properties`), not here. Keeping
-    the parse boundary and the amount-validity boundary separate is what
-    lets `decide_for_signal`'s zero-skip test prove it goes through the same
-    gate ingest does, rather than a private re-implementation."""
-    assert find_dollar_figures("it came down to $0 after the credit") == [0.0]
+def test_a_stated_zero_is_refused_by_the_floor_that_now_subsumes_it():
+    """A stated $0 used to reach `decide_for_signal` and be refused there by
+    the SHARED extractor validator. The deal floor now catches it earlier,
+    which is correct — $0 is below any plausible deal value — but it means
+    that path no longer proves the shared gate is wired.
+
+    So the proof moved rather than disappeared: see
+    `test_the_zero_guard_is_still_the_shared_extractor_validators`, which
+    asserts the same property directly instead of through a figure the floor
+    would reject anyway."""
+    scan = scan_dollar_figures("it came down to $0 after the credit")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_BELOW_DEAL_FLOOR,)
+
+
+def test_the_zero_guard_is_still_the_shared_extractor_validators():
+    """THE PROPERTY THE ZERO CASE WAS REALLY PROTECTING: this module must not
+    privately re-implement "is this a real amount". It reuses the same
+    validator ingest does, so the two can never drift about what counts."""
+    from app.graph.extractor import _grounded_amount_properties
+
+    assert _grounded_amount_properties({"amount": 0, "currency": "USD"}) == {}
+    assert _grounded_amount_properties({"amount": 0.0, "currency": "USD"}) == {}
+    assert "amount" in _grounded_amount_properties(
+        {"amount": 5000, "currency": "USD"}
+    )
 
 
 def test_a_malformed_comma_grouping_never_yields_a_clipped_wrong_number():
@@ -108,8 +131,9 @@ def test_dedupes_the_same_figure_mentioned_twice():
 
 
 def test_returns_every_distinct_figure_present():
-    text = "it's $500 a month on the starter plan or $10,000 for the enterprise tier"
-    assert find_dollar_figures(text) == [500.0, 10000.0]
+    text = ("it's $4,000 a month on the starter plan or $10,000 for the "
+            "enterprise tier")
+    assert find_dollar_figures(text) == [4000.0, 10000.0]
 
 
 def test_no_dollar_figure_in_plain_prose():
@@ -224,6 +248,335 @@ def test_a_plainly_written_figure_above_the_ceiling_is_refused():
     assert scan.skips == (SKIP_IMPLAUSIBLE_MAGNITUDE,)
 
 
+# ── The head of the same sum was worse than its tail ────────────────────────
+#
+# The six figures below are the REAL paraphrase phrasings from the live run,
+# and between them they were $4.5M of a $5.17M headline total. Every one is
+# arithmetically valid and semantically wrong: money paid to a competitor, a
+# revenue aspiration, an upper bound stored as a point value, and a
+# client-size threshold. None of them is a deal.
+#
+# These are the fourth patch on one wound. See the header comment above
+# `_NO_DEAL_VALUE_STATED` before adding a fifth.
+
+
+def test_a_figure_the_paragraph_itself_disclaims_is_refused():
+    """The highest-precision signal: the text says outright that no deal
+    value is present, and the sweep read a number out of the same sentence
+    anyway."""
+    scan = scan_dollar_figures(
+        "Customers currently pay around $3,000,000 to a competing vendor. "
+        "No specific contract value or pricing for the integration is stated."
+    )
+    assert scan.figures == ()
+    assert SKIP_NO_DEAL_VALUE_STATED in scan.skips
+
+
+def test_a_fee_disclaimer_refuses_a_client_size_threshold():
+    scan = scan_dollar_figures(
+        "they focus on clients above $250K in assets, monetised through a "
+        "revenue share rather than a direct fee"
+    )
+    assert scan.figures == ()
+    assert SKIP_NO_DEAL_VALUE_STATED in scan.skips
+
+
+@pytest.mark.parametrize("text", [
+    "the company is growing with a target of $1M by end of year",
+    "they set a revenue target of $1,000,000 for the year",
+])
+def test_a_revenue_aspiration_is_not_an_agreement(text):
+    """A target is by definition a number nobody has agreed to yet."""
+    scan = scan_dollar_figures(text)
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_COMPANY_SCALE,)
+
+
+@pytest.mark.parametrize("text,bound", [
+    ("the business is at less than $500K ARR today", 500_000.0),
+    ("they focus on clients above $250K in assets", 250_000.0),
+    ("customers currently pay around $3,000,000 to another vendor", 3_000_000.0),
+    ("the deal is under $50,000", 50_000.0),
+    ("revenue is over $2,000,000 annually", 2_000_000.0),
+    ("it came to approximately $75,000", 75_000.0),
+    ("roughly $40,000 was discussed", 40_000.0),
+    ("somewhere below $30,000", 30_000.0),
+])
+def test_a_bound_or_an_estimate_is_not_a_stated_amount(text, bound):
+    """A CORRECTNESS BUG IN ITS OWN RIGHT, independent of category: the sweep
+    was silently converting inequalities into precise numbers. "less than
+    $500K" is not $500,000 — it is not any number."""
+    scan = scan_dollar_figures(text)
+    assert bound not in scan.figures, text
+    assert scan.figures == (), text
+    assert scan.skips, text
+
+
+def test_every_figure_from_the_live_run_that_was_wrong_is_now_refused():
+    """All six, together, as they actually appeared. This is the regression
+    that matters: $4.5M of a $5.17M total."""
+    live_wrong = [
+        "Customers currently pay around $3,000,000 to a competing vendor. "
+        "No specific contract value or pricing for the integration is stated.",
+        "the company is growing with a target of $1M by end of year",
+        "they are tracking to a target of $1,000,000 by December",
+        "the business is at less than $500K ARR today",
+        "currently less than $500,000 ARR",
+        "they focus on clients above $250K in assets, monetised through a "
+        "revenue share rather than a direct fee",
+    ]
+    for text in live_wrong:
+        scan = scan_dollar_figures(text)
+        assert scan.figures == (), text
+        assert scan.skips, text
+
+
+# ── A range is not a point value, and the parser was inventing one ─────────
+#
+# THE HIGHEST-SEVERITY DEFECT IN THIS FILE'S HISTORY, and the only one that
+# manufactures a wrong number rather than importing a real number from the
+# wrong category. In "~$100-150k/year" the pattern matched `$100`, the dash
+# blocked the scale group, `150k` was discarded, and the `k` never applied —
+# a hundred-thousand-a-year engagement stored as ONE HUNDRED DOLLARS.
+#
+# Same class as the `billion` defect: a scale word silently dropped, leaving
+# a bare number that looks like clean data.
+
+
+@pytest.mark.parametrize("text", [
+    "the engagement runs ~$100–150k/year",          # en dash, the live row
+    "budget is $100-150k for the year",             # plain hyphen
+    "the contract was $100—150k annually",          # em dash
+    "they quoted $100 to $150k a year",             # the word "to"
+    "pricing lands at $50,000-$75,000 depending on scope",
+    "the range was $20,000–30,000",
+])
+def test_a_range_is_refused_rather_than_collapsed_to_an_endpoint(text):
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (), text
+    assert SKIP_STATED_AS_A_RANGE in scan.skips, text
+
+
+def test_neither_endpoint_is_taken_and_the_range_is_never_averaged():
+    """"$100-150k" is not $100, not $150,000, and not $125,000. It is a
+    range, and this module may decline to write a figure but never writes a
+    figure other than the one the text states."""
+    scan = scan_dollar_figures("budget is $100-150k for the year")
+    for wrong in (100.0, 150_000.0, 125_000.0, 100_000.0):
+        assert wrong not in scan.figures
+    assert scan.figures == ()
+
+
+def test_the_right_hand_endpoint_is_refused_too():
+    """Catching only the left end would have PROMOTED the right one: before
+    this, "$50,000-$75,000" was merely ambiguous; refusing just the first
+    figure would have turned it into a confidently-stored $75,000."""
+    scan = scan_dollar_figures("pricing lands at $50,000-$75,000 for the year")
+    assert 75_000.0 not in scan.figures
+    assert 50_000.0 not in scan.figures
+    assert scan.figures == ()
+
+
+def test_the_live_row_is_refused_as_a_range_not_as_a_small_number():
+    """THE FUNNEL HONESTY POINT. The floor happens to refuse $100 as well, so
+    without its own gate this row would be counted under "below the deal
+    floor" — reporting a magnitude problem for a figure whose real fault is
+    that it was never a point value, and hiding how many rows the range bug
+    was corrupting."""
+    text = "reselling to sub-$250M revenue customers (~100 exercises, ~$100–150k/year)"
+    decision = decide_for_signal({}, text)
+    assert decision.outcome == SKIP_STATED_AS_A_RANGE
+    assert decision.new_properties is None
+
+
+def test_a_range_that_clears_the_floor_was_silently_enriched_before():
+    """The shapes the floor could never have caught: both endpoints are well
+    above it, so these were stored as confident point values."""
+    for text in ("they quoted $100 to $150k a year",
+                 "the range was $20,000–30,000"):
+        decision = decide_for_signal({}, text)
+        assert decision.outcome == SKIP_STATED_AS_A_RANGE, text
+        assert decision.new_properties is None, text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("a two-year contract for $30,000", 30_000.0),
+    ("the fee is $30,000 — the annual figure", 30_000.0),
+    ("a 12-month deal worth $45,000", 45_000.0),
+    ("they signed a multi-year $90,000 agreement", 90_000.0),
+])
+def test_a_hyphen_that_is_not_a_range_leaves_the_figure_alone(text, expected):
+    """A DIGIT ON THE FAR SIDE is what separates a range from ordinary
+    punctuation or a hyphenated word. Without that requirement this gate
+    would eat every "two-year contract for $X" in the corpus."""
+    assert find_dollar_figures(text) == [expected], text
+
+
+def test_the_range_reason_is_counted_in_the_funnel(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-range"
+    _insert_signal(client, company_id=company_id,
+                   content="budget is $100-150k for the year")
+    _insert_signal(client, company_id=company_id,
+                   content="they quoted $100 to $150k a year")
+    _insert_signal(client, company_id=company_id, content="closed at $30,000")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 1
+    assert result["skipped"][SKIP_STATED_AS_A_RANGE] == 2
+    run = (
+        client.table("crucible_backfill_runs").select("*")
+        .eq("company_id", company_id).execute().data[0]
+    )
+    assert run["skipped_counts"][SKIP_STATED_AS_A_RANGE] == 2
+
+
+# ── The control: a stop-list that eats real quotes is worse than the disease
+
+def test_a_genuine_estimated_cost_is_not_refused():
+    """THE CONTROL, and the reason the bounded-quantity family is anchored to
+    the figure rather than searched in a window.
+
+    "Estimated" modifies "solution cost" several words earlier; it does not
+    bound the number. This is a real, usable figure and the sweep must keep
+    it — `estimated` is deliberately absent from the bounded-quantity
+    vocabulary, and adjacency is what stops the family reaching back to it.
+    """
+    text = ("Estimated solution cost for the integration is $300,000, "
+            "largely driven by compliance overhead")
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (300_000.0,)
+    assert scan.skips == ()
+    assert decide_for_signal({}, text).outcome == "enriched"
+
+
+def test_a_hedge_word_far_from_the_figure_does_not_bound_it():
+    """WHY ADJACENCY AND NOT THE WINDOW. Searched in the same +/-80 character
+    window the topic families use, "under" here would refuse a perfectly good
+    quote. The word bounds the figure it stands in front of, and nothing
+    else."""
+    text = ("revenue is under pressure this quarter, but the renewal still "
+            "closed at $50,000")
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (50_000.0,)
+    assert scan.skips == ()
+
+
+def test_ordinary_deal_phrasings_still_survive_all_the_families():
+    """The families are lossy by design; they must not be lossy about the
+    thing the feature exists to capture."""
+    for text, expected in (
+        ("they quoted $75,000 for the full rollout", 75_000.0),
+        ("the annual contract is $120,000", 120_000.0),
+        ("closed at $1.5 million ARR", 1_500_000.0),
+        ("renewed at $12M for three years", 12_000_000.0),
+        ("they pay $50,000 to us annually", 50_000.0),
+    ):
+        assert find_dollar_figures(text) == [expected], text
+
+
+# ── The floor: the tail of a real headline sum was noise ────────────────────
+#
+# A live run recovered a finding whose grounded sum was rendered as
+# twenty-one addends ending "+ $500 + $400 + $200 + $100 + $25". Those five
+# were 24% of the figures and 0.024% of the money — a quarter of the addends
+# that could not change the answer, each one another chance to be wrong.
+
+def test_a_three_figure_amount_is_refused_as_below_the_deal_floor():
+    """A line item, a credit or a per-unit price — not a deal value."""
+    for text, amount in (
+        ("a credit of $25 was applied", 25.0),
+        ("they were billed $100 for the overage", 100.0),
+        ("the adjustment came to $500", 500.0),
+    ):
+        scan = scan_dollar_figures(text)
+        assert scan.figures == (), text
+        assert scan.skips == (SKIP_BELOW_DEAL_FLOOR,), text
+        assert amount not in scan.figures
+
+
+def test_the_floor_sits_inside_the_gap_the_real_distribution_showed():
+    """DERIVED, NOT PICKED. The largest multiplicative gap anywhere in the
+    live distribution was 3,000 -> 500 (6.0x, wider than any gap in the
+    head). The floor has to sit inside that break: above every figure in the
+    noise cluster and below every figure in the body."""
+    assert find_dollar_figures("the pilot was $3,000") == [3_000.0]
+    assert find_dollar_figures("renewed at $3,500") == [3_500.0]
+    assert scan_dollar_figures("a $500 credit").figures == ()
+    assert scan_dollar_figures("a $400 charge").figures == ()
+
+
+def test_the_smallest_accepted_figure_is_four_digits():
+    """The boundary itself, both sides. A four-figure amount is a plausible
+    small deal or pilot; a three-figure one is not."""
+    assert find_dollar_figures("the deal was $1,000") == [1_000.0]
+    scan = scan_dollar_figures("the deal was $999")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_BELOW_DEAL_FLOOR,)
+
+
+def test_the_floor_applies_at_sweep_time_so_junk_is_never_stored(
+    backfill_env, isolated_settings,
+):
+    """NOT A READ-TIME FILTER. Storing a figure and then declining to read it
+    leaves junk in the graph for anything else that queries it, and makes the
+    stored data disagree with the rendered data. The sweep simply never
+    writes it."""
+    client = isolated_settings["supabase"]
+    company_id = "company-floor"
+    sig_id = _insert_signal(
+        client, company_id=company_id, content="a credit of $25 was applied",
+    )
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 0
+    assert result["skipped"][SKIP_BELOW_DEAL_FLOOR] == 1
+    assert _get_signal(client, sig_id)["properties"].get("amount") is None
+
+
+def test_the_floor_skip_is_counted_in_the_funnel_not_silently_dropped(
+    backfill_env, isolated_settings,
+):
+    """A filter whose losses are invisible reads as "this never happens"."""
+    client = isolated_settings["supabase"]
+    company_id = "company-floor-funnel"
+    _insert_signal(client, company_id=company_id, content="a $25 credit")
+    _insert_signal(client, company_id=company_id, content="a $400 adjustment")
+    _insert_signal(client, company_id=company_id, content="closed at $30,000")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 1
+    assert result["skipped"][SKIP_BELOW_DEAL_FLOOR] == 2
+    assert result["total_skipped"] == 2
+    run = (
+        client.table("crucible_backfill_runs").select("*")
+        .eq("company_id", company_id).execute().data[0]
+    )
+    assert run["skipped_counts"][SKIP_BELOW_DEAL_FLOOR] == 2
+
+
+def test_the_floor_has_its_own_reason_distinct_from_the_ceilings():
+    """Too small and "that is a market size" are different facts about the
+    corpus. Collapsing them would hide how much the floor removes behind a
+    count that already means something else."""
+    assert SKIP_BELOW_DEAL_FLOOR != SKIP_IMPLAUSIBLE_MAGNITUDE
+    small = scan_dollar_figures("a $25 credit")
+    huge = scan_dollar_figures("the contract came to $2 billion")
+    assert small.skips == (SKIP_BELOW_DEAL_FLOOR,)
+    assert huge.skips == (SKIP_IMPLAUSIBLE_MAGNITUDE,)
+
+
+def test_the_pattern_version_moved_so_old_runs_are_never_compared():
+    """A run under the old pattern and one under this one are not
+    comparable, and the version string is how a reader can tell."""
+    from app.crucible.backfill import PATTERN_VERSION
+
+    assert PATTERN_VERSION == "dollar-v5"
+
+
 def test_a_large_but_plausible_deal_figure_still_parses():
     """The control. The ceiling must not be so low that it eats the real
     eight-figure shapes the corpus actually contains."""
@@ -290,9 +643,19 @@ def test_a_surviving_figure_is_still_enriched_when_another_match_was_refused():
 
 
 def test_a_bare_figure_with_no_scale_word_is_never_inflated():
-    """THE NEGATIVE CASE THAT MATTERS MOST: a bare `$5` must stay 5, never
-    become 5,000 or larger just because a scale vocabulary exists."""
-    assert find_dollar_figures("it came to $5 total") == [5.0]
+    """THE NEGATIVE CASE THAT MATTERS MOST: a bare `$5` must never become
+    5,000 or larger just because a scale vocabulary exists.
+
+    The deal floor now refuses `$5` outright, and the assertion is written so
+    that the floor CANNOT hide a regression here: an inflated 5,000 would sit
+    comfortably above the floor and be enriched, so asserting the inflated
+    values are absent still fails loudly if the scale handling ever breaks.
+    Asserting only `figures == ()` would pass either way."""
+    scan = scan_dollar_figures("it came to $5 total")
+    assert 5_000.0 not in scan.figures
+    assert 5_000_000.0 not in scan.figures
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_BELOW_DEAL_FLOOR,)
 
 
 def test_a_trailing_word_starting_with_a_scale_letter_is_never_consumed_as_a_scale():
@@ -302,9 +665,18 @@ def test_a_trailing_word_starting_with_a_scale_letter_is_never_consumed_as_a_sca
     boundary, so a partial-word match ("m" out of "monthly") is rejected and
     the pattern falls back to no scale at all — never a 1,000x-or-more
     inflation from a word that was never a scale suffix."""
-    assert find_dollar_figures("billed at $50 monthly") == [50.0]
-    assert find_dollar_figures("cost $50 Kubernetes nodes") == [50.0]
-    assert find_dollar_figures("due $5 by March") == [5.0]
+    for text, inflated in (
+        ("billed at $50 monthly", 50_000_000.0),
+        ("cost $50 Kubernetes nodes", 50_000.0),
+        ("due $5 by March", 5_000_000_000.0),
+    ):
+        scan = scan_dollar_figures(text)
+        # The 1,000x-or-more inflation is what this guards, and an inflated
+        # value would clear the deal floor — so its absence is the real
+        # assertion, not the empty result the floor also produces.
+        assert inflated not in scan.figures, text
+        assert scan.figures == (), text
+        assert scan.skips == (SKIP_BELOW_DEAL_FLOOR,), text
 
 
 def test_the_clipping_guard_still_refuses_a_malformed_group_with_a_scale_word_nearby():
@@ -342,20 +714,19 @@ def test_skips_when_no_figure_is_found():
 
 def test_skips_ambiguous_multiple_distinct_figures():
     decision = decide_for_signal(
-        {}, "either $500 a month or $10,000 up front, they hadn't decided",
+        {}, "either $5,000 a month or $10,000 up front, they hadn't decided",
     )
     assert decision.outcome == "ambiguous_multiple_figures"
     assert decision.new_properties is None
 
 
 def test_a_stated_figure_of_zero_is_skipped_not_written():
-    """A parsed "$0" must never be written as a real amount — same exclusion
-    the shared extractor validator applies at ingest (a stated figure of
-    zero is not a real quoted amount, only ever a defaulted-looking
-    placeholder). Reaches `_grounded_amount_properties`'s own `_is_number`
-    zero-guard, not a check this module reimplements."""
+    """A parsed "$0" must never be written as a real amount. It is now
+    refused by the deal floor rather than by the shared validator downstream
+    — an earlier, cheaper refusal of the same figure, for a reason that is
+    also true. What must not change is that nothing is written."""
     decision = decide_for_signal({}, "the discount brought it down to $0 this month")
-    assert decision.outcome == "no_figure_found"
+    assert decision.outcome == SKIP_BELOW_DEAL_FLOOR
     assert decision.new_properties is None
 
 
@@ -549,7 +920,7 @@ def test_ambiguous_signal_is_left_untouched_and_counted(backfill_env, isolated_s
     company_id = "company-g"
     sig_id = _insert_signal(
         client, company_id=company_id,
-        content="either $500 monthly or $10,000 annually, undecided",
+        content="either $5,000 monthly or $10,000 annually, undecided",
     )
 
     result = backfill_env.run_backfill(company_id=company_id, apply=True)
@@ -570,7 +941,7 @@ def test_a_stated_zero_is_never_written_even_in_apply_mode(backfill_env, isolate
     result = backfill_env.run_backfill(company_id=company_id, apply=True)
 
     assert result["enriched"] == 0
-    assert result["skipped"]["no_figure_found"] == 1
+    assert result["skipped"][SKIP_BELOW_DEAL_FLOOR] == 1
     row = _get_signal(client, sig_id)
     assert row["properties"].get("amount") is None
 

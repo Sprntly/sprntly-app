@@ -31,12 +31,12 @@ def claim(
     cid: str, *, subject="export latency", days_ago=1, accounts=("Northwind",),
     authoritative=True, strength="reported", ctype="mechanism",
     source="customer_voice", direction="neutral", assertion=None,
-    artifact_id="a", magnitude=None, raw=None,
+    artifact_id="a", magnitude=None, raw=None, artifact_type="t",
 ) -> Claim:
     return Claim(
         id=cid, assertion=(f"claim {cid}" if assertion is None else assertion),
         type=ctype, subject=subject,
-        source_id=source, artifact_id=artifact_id, artifact_type="t",
+        source_id=source, artifact_id=artifact_id, artifact_type=artifact_type,
         strength=strength, observed_at=NOW - timedelta(days=days_ago),
         authoritative=authoritative,
         population=PopulationFilter(
@@ -173,7 +173,7 @@ def test_grounded_commercial_amounts_are_summed_into_native_units():
     out = run(claims)
     assert len(out.findings) == 1
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 150000.0
+    assert units["commercial_committed_usd"] == 150000.0
     assert units["commercial_grounded_accounts"] == 2.0
     assert units["commercial_grounded_claims"] == 2.0
 
@@ -201,7 +201,7 @@ def test_grounded_amounts_never_change_the_scored_impact_value():
     assert out_plain.impacts[0].movable_gap == out_grounded.impacts[0].movable_gap
     assert out_plain.impacts[0].value_per_unit == out_grounded.impacts[0].value_per_unit
     assert out_plain.impacts[0].native_units == {}
-    assert out_grounded.impacts[0].native_units["commercial_grounded_usd"] == 100000.0
+    assert out_grounded.impacts[0].native_units["commercial_committed_usd"] == 100000.0
 
 
 def test_a_non_usd_grounded_figure_is_counted_but_excluded_from_the_dollar_sum():
@@ -215,7 +215,7 @@ def test_a_non_usd_grounded_figure_is_counted_but_excluded_from_the_dollar_sum()
     ]
     out = run(claims)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 100000.0
+    assert units["commercial_committed_usd"] == 100000.0
     assert units["commercial_grounded_claims"] == 2.0
 
 
@@ -262,7 +262,7 @@ def test_the_same_amount_from_two_accounts_is_two_real_figures():
               source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
     ]
     out = run(claims)
-    assert out.impacts[0].native_units["commercial_grounded_usd"] == 100000.0
+    assert out.impacts[0].native_units["commercial_committed_usd"] == 100000.0
 
 
 def test_a_restated_figure_never_inflates_the_sum_across_accounts():
@@ -279,7 +279,7 @@ def test_a_restated_figure_never_inflates_the_sum_across_accounts():
             ))
     out = run(claims)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 80000.0
+    assert units["commercial_committed_usd"] == 80000.0
     # The CLAIM count is deliberately still the raw count: it is a statement
     # about the evidence, not about the money, and a reader must be able to
     # reconcile it against the claim list.
@@ -300,7 +300,7 @@ def test_an_anonymous_restatement_of_an_attributed_figure_is_dropped():
               source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
     ]
     out = run(claims)
-    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+    assert out.impacts[0].native_units["commercial_committed_usd"] == 80000.0
 
 
 def test_two_anonymous_statements_of_the_same_amount_are_one_figure():
@@ -311,7 +311,7 @@ def test_two_anonymous_statements_of_the_same_amount_are_one_figure():
               source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
     ]
     out = run(claims)
-    assert out.impacts[0].native_units["commercial_grounded_usd"] == 50000.0
+    assert out.impacts[0].native_units["commercial_committed_usd"] == 50000.0
 
 
 def test_distinct_anonymous_amounts_are_all_summed():
@@ -322,7 +322,7 @@ def test_distinct_anonymous_amounts_are_all_summed():
               source="revenue", magnitude=30000.0, raw={"currency": "USD"}),
     ]
     out = run(claims)
-    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+    assert out.impacts[0].native_units["commercial_committed_usd"] == 80000.0
 
 
 def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
@@ -344,9 +344,172 @@ def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
                     ctype="magnitude", source="revenue", magnitude=amount,
                     raw={"currency": "USD"},
                 ))
-        return run(claims).impacts[0].native_units["commercial_grounded_usd"]
+        return run(claims).impacts[0].native_units["commercial_committed_usd"]
 
     assert sum_for(1) == sum_for(2) == sum_for(5) == 80000.0
+
+
+# ── Committed money and list pricing are different things ───────────────────
+#
+# A 61-row sample of the real corpus found ONE list price — "$30,000 for 50
+# users" — quoted to SIXTEEN different accounts across sixteen sales calls.
+# Those are not duplicates: sixteen genuine prospects, sixteen genuine
+# mentions, so deduplication never touched them. They are also not $480,000
+# of anything. Summing was the wrong OPERATION for that population.
+
+
+def _priced(prefix, subject, *, pairs, kind="pricing", text="a price"):
+    """Claims of a given extractor kind, one per (account, amount)."""
+    return [
+        claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i,
+              accounts=(account,), ctype="magnitude", source="revenue",
+              magnitude=amount, raw={"currency": "USD"},
+              assertion=text, artifact_type=kind)
+        for i, (account, amount) in enumerate(pairs)
+    ]
+
+
+def test_one_price_quoted_to_many_accounts_is_never_summed():
+    """THE DEFECT, in its real shape. Sixteen accounts, one $30,000 tier."""
+    claims = _priced(
+        "p", "alpha",
+        pairs=[(f"Prospect {i}", 30000.0) for i in range(16)],
+    )
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+    assert units["commercial_list_price_min"] == 30000.0
+    assert units["commercial_list_price_max"] == 30000.0
+    assert units["commercial_list_price_accounts"] == 16.0
+    # The number that must never exist anywhere.
+    assert 480000.0 not in units.values()
+
+
+def test_a_list_price_never_reaches_the_committed_sum_however_often_quoted():
+    for repeats in (3, 8, 16):
+        claims = _priced(
+            "p", "alpha",
+            pairs=[(f"Prospect {i}", 30000.0) for i in range(repeats)],
+        )
+        units = run(claims).impacts[0].native_units
+        assert "commercial_committed_usd" not in units, repeats
+        assert units["commercial_list_price_max"] == 30000.0, repeats
+
+
+def test_the_committed_figures_from_the_sample_are_summed():
+    """The genuine `commercial_term` rows: an issued quote, an updated
+    contract value, and a named pair of deals."""
+    claims = [
+        claim("c1", subject="alpha", days_ago=5, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=9000.0,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion="A $9,000 quote was issued"),
+        claim("c2", subject="alpha", days_ago=60, accounts=("Acme",),
+              ctype="magnitude", source="revenue", magnitude=165000.0,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion="deals nearing closure with two accounts, together "
+                        "valued at $165k"),
+    ]
+    units = run(claims).impacts[0].native_units
+    assert units["commercial_committed_usd"] == 174000.0
+    assert "commercial_list_price_min" not in units
+
+
+def test_a_price_and_a_deal_in_one_finding_stay_in_separate_lines():
+    """THE HARD REQUIREMENT: the two numbers must not be addable. The
+    committed line must not contain the price and the price line must not
+    contain the deal."""
+    claims = [
+        claim("c1", subject="alpha", days_ago=5, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=165000.0,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion="deals valued at $165k"),
+    ] + _priced("p", "alpha",
+                pairs=[(f"Prospect {i}", 30000.0) for i in range(4)])
+    units = run(claims).impacts[0].native_units
+    assert units["commercial_committed_usd"] == 165000.0
+    assert units["commercial_list_price_min"] == 30000.0
+    # No key anywhere holds the two added together.
+    assert 195000.0 not in units.values()
+
+
+def test_modality_overrides_the_kind_when_a_price_wears_the_wrong_label():
+    """The one signal that generalises to a tenant whose phrasing we have
+    never seen: three or more distinct accounts quoted the identical figure
+    is a rate card, whatever the extractor called it."""
+    claims = _priced(
+        "p", "alpha",
+        pairs=[(f"Prospect {i}", 30000.0) for i in range(4)],
+        kind="commercial_term", text="the figure came up",
+    )
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+    assert units["commercial_list_price_max"] == 30000.0
+
+
+def test_two_accounts_at_the_same_figure_are_still_committed_deals():
+    """The control on modality: two negotiated deals landing on the same
+    round number is a plausible coincidence, and the threshold is set above
+    it deliberately."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=5 + 45 * i,
+              accounts=(acct,), ctype="magnitude", source="revenue",
+              magnitude=30000.0, raw={"currency": "USD"},
+              artifact_type="commercial_term", assertion="deal closed")
+        for i, acct in enumerate(("Northwind", "Acme"))
+    ]
+    units = run(claims).impacts[0].native_units
+    assert units["commercial_committed_usd"] == 60000.0
+    assert "commercial_list_price_min" not in units
+
+
+def test_a_list_price_phrase_beats_the_kind_for_a_single_mention():
+    """Where modality is thin — a value seen once could be either — the
+    phrase decides. This is the majority of distinct list prices in the
+    sample: twelve of about thirteen were quoted exactly once."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=5 + 45 * i, accounts=(a,),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion=t)
+        for i, (a, m, t) in enumerate([
+            ("Northwind", 12000.0, "the annual subscription starts at $12,000"),
+            ("Acme", 400.0 * 25, "billed per seat on the standard plan"),
+        ])
+    ]
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+    assert units["commercial_list_price_min"] == 10000.0
+
+
+def test_an_unclassifiable_figure_stays_out_of_the_sum():
+    """Ties go to NOT committed. Every failure in this feature's history has
+    been over-claiming, and a figure wrongly left out understates a total
+    where one wrongly added invents money."""
+    claims = _priced("p", "alpha",
+                     pairs=[("Northwind", 12000.0), ("Acme", 8000.0)],
+                     kind="pricing", text="a figure was mentioned")
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+    assert units["commercial_list_price_min"] == 8000.0
+    assert units["commercial_list_price_max"] == 12000.0
+    assert units["commercial_list_price_distinct"] == 2.0
+
+
+def test_the_pricing_line_never_carries_a_total():
+    """No total is printed and none may be computed from what is stored: two
+    ends, a count of prices and a count of accounts cannot be recombined into
+    a sum that means anything."""
+    claims = _priced("p", "alpha",
+                     pairs=[(f"P{i}", 10000.0 + 1000 * i) for i in range(5)])
+    units = run(claims).impacts[0].native_units
+    price_keys = {k for k in units if "list_price" in k}
+    assert price_keys == {
+        "commercial_list_price_min", "commercial_list_price_max",
+        "commercial_list_price_distinct", "commercial_list_price_accounts",
+    }
+    figures = run(claims).impacts[0].grounded_figures
+    assert sum(f.amount for f in figures) not in units.values()
 
 
 # ── Provenance rides with the figure ─────────────────────────────────────────
@@ -372,8 +535,8 @@ def test_a_figure_read_back_from_a_summary_is_marked_derived():
                             derived=True)
     out = run(claims)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 340000.0
-    assert units["commercial_grounded_usd_derived"] == 340000.0
+    assert units["commercial_committed_usd"] == 340000.0
+    assert units["commercial_committed_usd_derived"] == 340000.0
     assert all(f.derived for f in out.impacts[0].grounded_figures)
 
 
@@ -384,8 +547,8 @@ def test_a_quoted_figure_carries_no_derived_portion_at_all():
     claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0])
     out = run(claims)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 340000.0
-    assert "commercial_grounded_usd_derived" not in units
+    assert units["commercial_committed_usd"] == 340000.0
+    assert "commercial_committed_usd_derived" not in units
 
 
 def test_only_the_derived_portion_of_a_mixed_sum_is_marked():
@@ -399,8 +562,8 @@ def test_only_the_derived_portion_of_a_mixed_sum_is_marked():
     )]
     out = run(quoted + derived)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 340000.0
-    assert units["commercial_grounded_usd_derived"] == 90000.0
+    assert units["commercial_committed_usd"] == 340000.0
+    assert units["commercial_committed_usd_derived"] == 90000.0
 
 
 def test_the_same_figure_seen_both_ways_keeps_the_stronger_provenance():
@@ -420,8 +583,8 @@ def test_the_same_figure_seen_both_ways_keeps_the_stronger_provenance():
     ]
     out = run(claims)
     units = out.impacts[0].native_units
-    assert units["commercial_grounded_usd"] == 80000.0
-    assert "commercial_grounded_usd_derived" not in units
+    assert units["commercial_committed_usd"] == 80000.0
+    assert "commercial_committed_usd_derived" not in units
 
 
 # ── Cross-finding identity: the reason figures travel as identities ─────────
@@ -435,7 +598,7 @@ def test_the_figures_behind_the_sum_travel_with_the_impact():
     figures = out.impacts[0].grounded_figures
     assert sorted(f.amount for f in figures) == [90000.0, 250000.0]
     assert sum(f.amount for f in figures) == (
-        out.impacts[0].native_units["commercial_grounded_usd"]
+        out.impacts[0].native_units["commercial_committed_usd"]
     )
 
 
@@ -612,8 +775,8 @@ def test_the_band_is_identical_for_a_figure_stated_once_and_repeatedly():
     found = _by_label(out)
     quiet_i, loud_i = found["alpha"][1], found["beta"][1]
     # Same money, three times the agreement about it.
-    assert quiet_i.native_units["commercial_grounded_usd"] == 30000.0
-    assert loud_i.native_units["commercial_grounded_usd"] == 30000.0
+    assert quiet_i.native_units["commercial_committed_usd"] == 30000.0
+    assert loud_i.native_units["commercial_committed_usd"] == 30000.0
     assert quiet_i.native_units["commercial_grounded_claims"] == 2.0
     assert loud_i.native_units["commercial_grounded_claims"] == 6.0
     assert quiet_i.size_band == loud_i.size_band
@@ -632,8 +795,8 @@ def test_a_bigger_sum_bands_above_a_louder_one():
     out = run(big_quiet + small_loud)
     found = _by_label(out)
     big, small = found["alpha"][1], found["beta"][1]
-    assert big.native_units["commercial_grounded_usd"] == 900000.0
-    assert small.native_units["commercial_grounded_usd"] == 1100.0
+    assert big.native_units["commercial_committed_usd"] == 900000.0
+    assert small.native_units["commercial_committed_usd"] == 1100.0
     assert big.native_units["commercial_grounded_claims"] == 2.0
     assert small.native_units["commercial_grounded_claims"] == 6.0
     assert big.size_band > small.size_band
@@ -657,7 +820,7 @@ def test_a_figure_only_finding_is_banded_and_still_honestly_unsized():
     assert impact.value is None
     assert impact.affected_population is None
     assert impact.size_band is not None
-    assert impact.native_units["commercial_grounded_usd"] == 340000.0
+    assert impact.native_units["commercial_committed_usd"] == 340000.0
 
 
 def test_each_finding_is_banded_against_its_own_currencys_peers():

@@ -116,11 +116,113 @@ AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 #: dollar sum. Named once so the code that WRITES the sum and the code that
 #: BANDS on it can never read different keys — a silent typo there would mean
 #: no dollar finding ever bands, and nothing would fail.
-GROUNDED_USD_UNIT = "commercial_grounded_usd"
+#: The SUMMABLE money: issued quotes, contract values, named deals. This is
+#: the only figure a money target may be answered from.
+COMMITTED_USD_UNIT = "commercial_committed_usd"
+#: How much of that came off a paraphrase rather than a verified quote.
+COMMITTED_USD_DERIVED_UNIT = "commercial_committed_usd_derived"
 
-#: How much of that sum came off a paraphrase rather than a verified quote.
-#: A separate key rather than a flag so a renderer can hedge in proportion.
-GROUNDED_USD_DERIVED_UNIT = "commercial_grounded_usd_derived"
+#: LIST PRICING IS A RANGE, NEVER A SUM, and it is reported in parts that
+#: cannot be added back into one: the two ends, how many distinct prices
+#: there were, and how many accounts heard them. There is deliberately no
+#: total here — a rate card quoted to sixteen accounts has no total.
+LIST_PRICE_MIN_UNIT = "commercial_list_price_min"
+LIST_PRICE_MAX_UNIT = "commercial_list_price_max"
+LIST_PRICE_DISTINCT_UNIT = "commercial_list_price_distinct"
+LIST_PRICE_ACCOUNTS_UNIT = "commercial_list_price_accounts"
+
+#: How many DISTINCT accounts must be quoted the identical figure before it
+#: is treated as a rate card rather than a coincidence.
+#:
+#: MEASURED, AND ITS LIMITS MEASURED TOO. On a 61-row stratified sample the
+#: dominant list price appeared across 16 distinct accounts, so any
+#: threshold from 2 to 4 catches it identically. Three is chosen because two
+#: accounts agreeing on a round number is a plausible coincidence between
+#: negotiated deals and three is not.
+#:
+#: WHAT THIS SIGNAL CANNOT DO. In that same sample it fires on ONE of ~13
+#: distinct list prices — the other twelve were each quoted once, where
+#: repetition says nothing at all. So modality is an OVERRIDE that catches a
+#: rate card wearing the wrong kind; it is not the classifier. See
+#: `_figure_is_committed`.
+LIST_PRICE_MIN_ACCOUNTS = 3
+
+#: Phrases that mark a figure as money someone has actually committed to.
+#: Taken from the genuine rows in the sample: "A $9,000 quote was issued",
+#: "contract value was updated to $2,000", "deals nearing closure with two
+#: accounts, together valued at $165k".
+_COMMITTED_PHRASE = re.compile(
+    r"\bquote\b|\bquoted\b|\bcontract\s+value\b|\bvalued\s+at\b"
+    r"|\bdeal\b|\bclosed\b|\bsigned\b|\brenewed\b",
+    re.IGNORECASE,
+)
+
+#: Phrases that mark a figure as a rate card entry.
+_LIST_PRICE_PHRASE = re.compile(
+    r"\bstarts\s+at\b|\bstarting\s+at\b|\bannual\s+subscription\b"
+    r"|\bper\s+hour\b|\bper\s+seat\b|\bper\s+user\b"
+    r"|\bone[-\s]time\s+fee\b|\blist\s+price\b|\bprice\s+list\b",
+    re.IGNORECASE,
+)
+
+#: The extractor kind that means "a price", as opposed to "a term of a
+#: deal". This is the ROUTER, because it is the only signal with an opinion
+#: about every row: the extraction pass already judged what the signal is.
+_LIST_PRICE_KIND = "pricing"
+
+
+def repeated_amounts(claims: Sequence[Claim]) -> frozenset[float]:
+    """Amounts quoted to `LIST_PRICE_MIN_ACCOUNTS` or more DISTINCT accounts
+    anywhere in the corpus — a rate card, not a set of coincidences.
+
+    CORPUS-WIDE ON PURPOSE, not per finding. The sixteen mentions of one
+    price were sixteen separate sales calls and land in whatever clusters
+    their subjects put them; counting only within a finding would miss the
+    pattern precisely when it is most pronounced.
+    """
+    accounts_by_amount: defaultdict[float, set[str]] = defaultdict(set)
+    for c in claims:
+        if c.magnitude is None:
+            continue
+        for account in c.population.segments.get("accounts", ()) or ("",):
+            accounts_by_amount[float(c.magnitude)].add(account)
+    return frozenset(
+        amount for amount, accounts in accounts_by_amount.items()
+        if len({a for a in accounts if a}) >= LIST_PRICE_MIN_ACCOUNTS
+    )
+
+
+def _figure_is_committed(
+    claim: Claim, amount: float, list_price_amounts: frozenset[float],
+) -> bool:
+    """Is this money someone has agreed to, or a price on a rate card?
+
+    THREE SIGNALS, IN THE ORDER THE EVIDENCE SUPPORTS.
+
+    1. MODALITY OVERRIDES EVERYTHING, because a figure quoted to three or
+       more distinct accounts is a rate card whatever it is labelled. This
+       is the one signal that generalises to a tenant whose phrasing we have
+       never seen — but it was measured firing on only one of ~13 distinct
+       list prices in the sample, so it cannot be asked to do the job alone.
+    2. PHRASES, where the text says outright which it is.
+    3. KIND AS THE ROUTER. The extraction pass already judged whether the
+       signal is a `pricing` fact or a `commercial_term`, and unlike the
+       other two it has an opinion about every row. It is the default rather
+       than the decider: measured at 93% precision on `pricing` and 55% on
+       `commercial_term`, which is why the phrase refusals upstream exist.
+
+    Ties go to NOT committed. Every failure in this feature's history has
+    been over-claiming, and a figure wrongly left out of the sum understates
+    a total, where one wrongly added invents money.
+    """
+    if amount in list_price_amounts:
+        return False
+    text = claim.assertion or ""
+    if _LIST_PRICE_PHRASE.search(text):
+        return False
+    if _COMMITTED_PHRASE.search(text):
+        return True
+    return claim.artifact_type != _LIST_PRICE_KIND
 
 #: The `certainty` marker a figure recovered from a written summary carries
 #: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
@@ -149,7 +251,10 @@ def _account_key(accounts: Sequence[str]) -> str:
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
-def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ...]:
+def deduped_grounded_figures(
+    group: Sequence[Claim],
+    list_price_amounts: frozenset[float] = frozenset(),
+) -> tuple[GroundedFigure, ...]:
     """The DISTINCT transcript-stated dollar figures among this finding's
     claims — the single source of truth for the grounded sum, which is simply
     these added up.
@@ -199,6 +304,9 @@ def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ..
         derived = raw.get("certainty") == BACKFILL_CERTAINTY_MARKER
         figure = GroundedFigure(
             account_key=key, amount=float(c.magnitude), derived=derived,
+            committed=_figure_is_committed(
+                c, float(c.magnitude), list_price_amounts,
+            ),
         )
         if accounts:
             existing = attributed.get((key, figure.amount))
@@ -207,10 +315,19 @@ def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ..
             # money, and hedging it as derived would understate what we know.
             if existing is None or (existing.derived and not derived):
                 attributed[(key, figure.amount)] = figure
+            elif existing.committed and not figure.committed:
+                # Same money seen both ways: the rate-card reading wins, for
+                # the same reason ties do. Calling it committed would put it
+                # in a sum on the strength of the weaker evidence.
+                attributed[(key, figure.amount)] = existing._replace(
+                    committed=False,
+                )
         else:
             existing = anonymous.get(figure.amount)
             if existing is None or (existing.derived and not derived):
                 anonymous[figure.amount] = figure
+            elif existing.committed and not figure.committed:
+                anonymous[figure.amount] = existing._replace(committed=False)
 
     attributed_amounts = {amount for _key, amount in attributed}
     out = list(attributed.values()) + [
@@ -221,7 +338,10 @@ def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ..
     return tuple(sorted(out, key=lambda f: (-f.amount, f.account_key)))
 
 
-def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float]:
+def _grounded_commercial_native_units(
+    group: Sequence[Claim],
+    list_price_amounts: frozenset[float] = frozenset(),
+) -> dict[str, float]:
     """Real, transcript-stated dollar figures among THIS finding's claims —
     additive evidence carried alongside Impact on `native_units`, never
     folded into `value` (never `affected_population`, `movable_gap` or
@@ -251,7 +371,7 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     for c in grounded:
         accounts_named.update(c.population.segments.get("accounts", ()))
 
-    figures = deduped_grounded_figures(group)
+    figures = deduped_grounded_figures(group, list_price_amounts)
 
     # STILL THE RAW CLAIM COUNT, deliberately. This is a statement about the
     # evidence ("N claims carried a figure"), not about the money, and it is
@@ -259,15 +379,30 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     # claim list. It is also why nothing downstream may size a finding from
     # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
-    if figures:
-        units[GROUNDED_USD_UNIT] = float(sum(f.amount for f in figures))
-        derived_total = sum(f.amount for f in figures if f.derived)
+    list_prices = [f for f in figures if not f.committed]
+    if list_prices:
+        # A RANGE AND ITS SHAPE, WITH NO TOTAL ANYWHERE. The parts are chosen
+        # so they cannot be recombined into a sum: two ends, a count of
+        # distinct prices, and a count of accounts. Multiplying any of them
+        # together would be meaningless and looks it, which is the point.
+        amounts = sorted({f.amount for f in list_prices})
+        units[LIST_PRICE_MIN_UNIT] = amounts[0]
+        units[LIST_PRICE_MAX_UNIT] = amounts[-1]
+        units[LIST_PRICE_DISTINCT_UNIT] = float(len(amounts))
+        accounts = {f.account_key for f in list_prices if f.account_key}
+        if accounts:
+            units[LIST_PRICE_ACCOUNTS_UNIT] = float(len(accounts))
+
+    committed = [f for f in figures if f.committed]
+    if committed:
+        units[COMMITTED_USD_UNIT] = float(sum(f.amount for f in committed))
+        derived_total = sum(f.amount for f in committed if f.derived)
         if derived_total:
             # The portion of the sum that came off a written summary rather
             # than a verified quote. Carried as a NUMBER rather than a flag
             # so a renderer can hedge in proportion — "$X of that" reads very
             # differently from a blanket disclaimer over the whole figure.
-            units[GROUNDED_USD_DERIVED_UNIT] = float(derived_total)
+            units[COMMITTED_USD_DERIVED_UNIT] = float(derived_total)
     if accounts_named:
         units["commercial_grounded_accounts"] = float(len(accounts_named))
     return units
@@ -353,7 +488,7 @@ def _size_ranks(
     reach_values: list[float] = []
     per_finding: list[tuple[Optional[float], Optional[float]]] = []
     for finding, impact in zip(findings, provisional):
-        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        usd = finding.impact_inputs.native_units.get(COMMITTED_USD_UNIT)
         usd = float(usd) if isinstance(usd, (int, float)) else None
         reach = impact.value
         if usd is not None:
@@ -401,7 +536,7 @@ def _log_size_bands(
         band = _band_for_rank(rank)
         if band is None:
             continue
-        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        usd = finding.impact_inputs.native_units.get(COMMITTED_USD_UNIT)
         if isinstance(usd, (int, float)):
             dollars_by_band[band].append(float(usd))
         else:
@@ -613,6 +748,10 @@ def build_findings(
     way would render a number that carries no information.
     """
     claims = list(claims)
+    # CORPUS-WIDE, BEFORE CLUSTERING. A rate card quoted to sixteen accounts
+    # scatters across whatever clusters those calls' subjects produce, so the
+    # repetition is only visible from here.
+    list_price_amounts = repeated_amounts(claims)
     clusters = _cluster(claims)
 
     findings: list[Finding] = []
@@ -725,10 +864,14 @@ def build_findings(
                 movable_gap=1.0 if accounts else None,
                 value_per_unit=None,
                 assumed_params=assumed,
-                native_units=_grounded_commercial_native_units(group),
+                native_units=_grounded_commercial_native_units(
+                    group, list_price_amounts,
+                ),
                 # The identities behind that sum, so anything summing ACROSS
                 # findings can deduplicate the same money one more time.
-                grounded_figures=deduped_grounded_figures(group),
+                grounded_figures=deduped_grounded_figures(
+                    group, list_price_amounts,
+                ),
             ),
             confidence_inputs=ConfidenceInputs(
                 strengths=tuple(c.strength for c in group),
