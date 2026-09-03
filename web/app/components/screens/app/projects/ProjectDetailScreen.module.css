@@ -247,12 +247,53 @@
   }
 }
 
+/* AD-HOC (live-rig, both-drawers-open squeeze): the fixed-overlay content
+   panel (Evidence/PRD/Tickets — `ContentPanel`) reflows the page by putting
+   `padding-right: clamp(420px, 35vw, 60vw)` on `.main-column` (globals.css,
+   never edited here) — the ANCESTOR of this whole `.body` grid. That padding
+   shrinks the box `.body` has to lay out in, but `--proj-drawer-w`'s own
+   clamp is sized off the VIEWPORT (`vw`), not that now-smaller container, so
+   on a ~1280-1440px laptop the list drawer kept demanding its full viewport-
+   relative width and the chat column — which has nowhere left to shrink
+   below its own min-width — had its text clipped instead of just reflowing.
+   Scoped to the global `.app--cpanel-open` ancestor class (set by AppLayout
+   ONLY while the content panel is open, never by this drawer alone) so a
+   single drawer open (already fine — see `.bodyDrawerOpen` above) is
+   untouched, and main chat's own `.main-column` reflow (no second drawer,
+   one grid column) is byte-identical since it never carries `.bodyDrawerOpen`
+   at all. Guarded to `min-width: 1081px` — the two narrower breakpoints
+   above already collapse the drawer to full-width-no-chat (960px) or a
+   fixed 380-520px band (1080px), and this override must never outrank
+   either of those (a bare `:global()`+class selector has HIGHER specificity
+   than a plain media-scoped class selector, so without the guard it would
+   win regardless of source order and undo the narrow-viewport handling). */
+@media (min-width: 1081px) {
+  :global(.app--cpanel-open) .bodyDrawerOpen {
+    grid-template-columns:
+      minmax(380px, 1fr)
+      var(--proj-drawer-w, clamp(360px, 26vw, 420px));
+    /* Belt-and-braces: on the rare viewport where chat(min) + drawer(min)
+       still don't both fit even after the tightened clamp above, the row
+       scrolls horizontally within its own box instead of clipping the
+       chat's text — the chat column keeps its full min-width and wraps
+       normally, it's just not all on screen without a scroll. Scoped to
+       this same both-open state only (not the base `.body`/`.bodyDrawerOpen`
+       rules above): `overflow-x` forces `overflow-y`'s computed value from
+       `visible` to `auto` too (CSS's cross-axis interaction), which would
+       risk clipping this surface's absolutely-positioned dropdowns/menus if
+       left on at all times — containing it to the one squeeze state this
+       ticket targets keeps that risk off the common case. */
+    overflow-x: auto;
+  }
+}
+
 /* ── Main pane (chat host + composer shell — AD-P13: no bespoke bubbles) */
 
 .main {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 380px;
   background: var(--surface);
 }
 
