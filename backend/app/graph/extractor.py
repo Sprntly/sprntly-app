@@ -803,8 +803,31 @@ _CHECKLIST_SCHEMA = {
                                    "For 'commitment': {\"owner\": \"Jane Doe\", "
                                    "\"due\": \"Friday\", \"status\": \"open\"} where named. "
                                    "For 'timeline': {\"urgency\": \"...\", "
-                                   "\"trigger_date\": \"...\"} where named. Omit/empty "
-                                   "otherwise."},
+                                   "\"trigger_date\": \"...\"} where named. "
+                                   "For 'commercial' or 'partnership_commercial': "
+                                   "{\"amount\": 100000, \"currency\": \"USD\", \"basis\": "
+                                   "\"one-off|per-year|per-seat|total-contract\", "
+                                   "\"certainty\": \"quoted|asked|estimated-by-speaker\"} "
+                                   "where a speaker ACTUALLY STATES a figure. `amount` must "
+                                   "be the real number a speaker said — never invented, and "
+                                   "never computed by multiplying or extrapolating from a "
+                                   "smaller figure they gave (e.g. never turn a per-seat "
+                                   "price into a total by assuming a seat count nobody "
+                                   "stated). If no figure was stated, omit `amount` entirely "
+                                   "— never write 0. "
+                                   "For 'objection', 'sentiment' or 'commitment', "
+                                   "ADDITIONALLY, only when the language actually supports "
+                                   "scoring buying intent: {\"intent_band\": "
+                                   "\"high|medium|low\", \"intent_basis\": \"a short reason "
+                                   "in YOUR OWN WORDS — never copied verbatim from the "
+                                   "transcript\"}. \"high\" = an explicit readiness-to-buy "
+                                   "statement (e.g. 'if I have this, I'll buy tomorrow'); "
+                                   "\"low\" = mild or hedged interest (e.g. 'this would be "
+                                   "nice'); \"medium\" = stated interest with no clear buy/"
+                                   "no-buy signal either way. Leave both fields unset if the "
+                                   "language does not support a call — never guess a band to "
+                                   "fill the slot. "
+                                   "Omit/empty entirely for any category not listed above."},
                 },
                 "required": ["category", "discussed", "content", "verbatim_quote"],
             },
@@ -1024,6 +1047,134 @@ def run_checklist_pass(
     )
 
 
+# ── Structured-properties sanitizer (grounded commercial figures + buying- ──
+# intent bands) ───────────────────────────────────────────────────────────
+#
+# `properties` on a checklist item is a free-form `object` in the schema
+# above (same as the pre-existing 'commitment'/'timeline' shapes) — nothing
+# at the schema level stops a model from ignoring the prose contract and
+# writing something else into it, including a copy of the transcript
+# sentence it was told to use ONLY for `verbatim_quote`. The grounding gate
+# in `_finish_checklist` verifies `verbatim_quote`, not `properties`, so this
+# is the second, code-level line: every property VALUE this pass writes is
+# constrained to a short, closed-vocabulary or numeric shape before it ever
+# reaches a Signal. An item whose `properties` do not fit the shape keeps its
+# grounded `content`/quote-verified core and simply loses the extra
+# structure — never a reason to drop the whole item, and never a reason to
+# fall back to writing the raw value unfiltered.
+
+#: Closed vocabulary for a grounded commercial figure's shape. Closed
+#: rather than free text so a model cannot smuggle a longer string ("roughly,
+#: give or take, they weren't totally sure") into a field this system
+#: renders as a short category.
+_COMMERCIAL_BASIS_VALUES = frozenset({
+    "one-off", "per-year", "per-seat", "total-contract",
+})
+_COMMERCIAL_CERTAINTY_VALUES = frozenset({
+    "quoted", "asked", "estimated-by-speaker",
+})
+#: The two checklist categories a commercial figure can attach to — the
+#: primary one and the partnership/ecosystem sibling, both minted as
+#: `commercial_term` (see `_CHECKLIST_CATEGORIES`).
+_COMMERCIAL_PROPERTY_CATEGORIES = frozenset({"commercial", "partnership_commercial"})
+
+#: Closed vocabulary for the buying-intent band — a three-way split
+#: (explicit readiness / hedged interest / neither).
+_INTENT_BAND_VALUES = frozenset({"high", "medium", "low"})
+#: The three categories buying-intent language actually shows up in — same
+#: set the ticket names, not every checklist category.
+_INTENT_PROPERTY_CATEGORIES = frozenset({"objection", "sentiment", "commitment"})
+
+#: A free-text property value this long has stopped being a short reason
+#: phrase and started being prose — the shape a smuggled transcript sentence
+#: would take. The longest legitimate value today ("estimated-by-speaker")
+#: is 20 characters; this leaves generous room for a real `intent_basis`
+#: while still refusing anything sentence-length.
+_MAX_PROPERTY_TEXT_CHARS = 120
+
+
+def _is_number(value: object) -> bool:
+    """True for a real, finite `int`/`float` — `bool` excluded (Python's
+    `bool` IS an `int`, and a model returning `True` for "amount" must not
+    be coerced into a `1.0` dollar figure), NaN/inf excluded (never a real
+    quoted amount)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))  # NaN != NaN
+
+
+def _is_short_paraphrase(basis: str, text: str) -> bool:
+    """True iff `basis` reads like a short reason phrase rather than a
+    verbatim (or lightly-edited) chunk of the TRANSCRIPT copy-pasted into a
+    different field — a second path into persisting the speech itself,
+    forbidden here exactly as it is for `verbatim_quote`.
+
+    Checked against the FULL transcript, not just this item's own
+    `verbatim_quote` — a smuggled excerpt could be lifted from anywhere in
+    the call, not only the sentence this particular fact was grounded in.
+    Reuses `_quote_is_grounded` itself: if `basis` is "grounded" in that
+    function's sense (a literal or lightly-reformatted match somewhere in
+    the transcript), it is not a paraphrase — it is transcript text.
+    """
+    if len(basis) > _MAX_PROPERTY_TEXT_CHARS:
+        return False
+    return not _quote_is_grounded(basis, text)
+
+
+def _sanitize_checklist_properties(category: str, props: dict, text: str) -> dict:
+    """The code-level half of the `properties` contract — see the module
+    note above. Builds a NEW dict containing only the keys/shapes each
+    category is documented to carry; anything else the model wrote
+    (including a longer free-text value that could be a smuggled quote) is
+    dropped rather than passed through. Never raises.
+
+    ``text``: the FULL transcript (same one the grounding gate checks
+    `verbatim_quote` against) — see `_is_short_paraphrase`.
+    """
+    if not props:
+        return {}
+    out: dict = {}
+
+    if category == "commitment":
+        for key in ("owner", "due", "status"):
+            if key in props:
+                out[key] = props[key]
+    elif category == "timeline":
+        for key in ("urgency", "trigger_date"):
+            if key in props:
+                out[key] = props[key]
+
+    if category in _COMMERCIAL_PROPERTY_CATEGORIES:
+        amount = props.get("amount")
+        # I2/I3: no figure stated -> no `amount` key at all — never a
+        # defaulted 0, and `currency`/`basis`/`certainty` are only ever
+        # written alongside a real number, never on their own (a basis with
+        # no amount behind it is not a grounded figure).
+        if _is_number(amount):
+            out["amount"] = float(amount)
+            currency = props.get("currency")
+            if isinstance(currency, str) and 1 <= len(currency.strip()) <= 8:
+                out["currency"] = currency.strip().upper()
+            basis = props.get("basis")
+            if basis in _COMMERCIAL_BASIS_VALUES:
+                out["basis"] = basis
+            certainty = props.get("certainty")
+            if certainty in _COMMERCIAL_CERTAINTY_VALUES:
+                out["certainty"] = certainty
+
+    if category in _INTENT_PROPERTY_CATEGORIES:
+        band = props.get("intent_band")
+        if band in _INTENT_BAND_VALUES:
+            out["intent_band"] = band
+            basis = props.get("intent_basis")
+            if isinstance(basis, str):
+                basis = basis.strip()
+                if basis and _is_short_paraphrase(basis, text):
+                    out["intent_basis"] = basis
+
+    return out
+
+
 def _checklist_input(doc_name: str, text: str) -> str:
     """The exact `input` string `run_checklist_pass`'s live call sends to
     `llm_call` — factored out so `build_checklist_request` builds identically
@@ -1110,7 +1261,9 @@ def _finish_checklist(
                 category, enterprise_id, doc_name,
             )
             continue
-        props = dict(entry.get("properties") or {})
+        props = _sanitize_checklist_properties(
+            category, dict(entry.get("properties") or {}), text
+        )
         items.append({
             "kind": kind,
             "content": content,

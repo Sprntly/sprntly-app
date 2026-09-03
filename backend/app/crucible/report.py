@@ -359,9 +359,9 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
 
 
 def _recommendation_basis_section(basis: str) -> str:
-    """AC-2: the count of deep recommendations is arithmetic, not a bare
-    number — David: "the number of projects really has to be in context of
-    the question and what the goal is." Silent when there is nothing to say
+    """The count of deep recommendations is arithmetic, not a bare
+    number — the number of projects really has to be in context of the
+    question and what the goal is. Silent when there is nothing to say
     (no deep pass ran, or every finding on the run predates it).
     """
     basis = (basis or "").strip()
@@ -376,11 +376,10 @@ def _recommendation_basis_section(basis: str) -> str:
 def _framework_section(findings: list[dict], plan: dict) -> str:
     """Dispatch to the ranking table for whichever framework this run
     actually used — RICE or MoSCoW (`app.crucible.framework.
-    SUPPORTED_FRAMEWORKS`). ADDITIVE, per the ticket's own constraint on this
-    file: the RICE branch below is `_rice_section`, byte-for-byte the section
-    that already existed, plus one line stating WHY it was chosen (AC-2 —
-    "the reason it was chosen appear[s] in the plan and in the final
-    report"). Only the MoSCoW branch is new.
+    SUPPORTED_FRAMEWORKS`). ADDITIVE: the RICE branch below is
+    `_rice_section`, byte-for-byte the section that already existed, plus
+    one line stating WHY it was chosen — the reason it was chosen appears
+    in the plan and in the final report. Only the MoSCoW branch is new.
     """
     from app.crucible.framework import display_name
 
@@ -1080,6 +1079,29 @@ def _finding_block(
     if claims:
         meta.append(f"{claims} claim{'' if claims == 1 else 's'}")
     out.append(_p(" · ".join(meta)))
+
+    # NAMED EVIDENCE, NEVER A PROJECTION. A grounded dollar figure — a
+    # number a customer actually stated on a call — is sized differently
+    # from `_reach` above: it is a SUM of real, quoted amounts across the
+    # accounts that named one, not the finding's own scored `Impact.value`
+    # (which stays reach-based/unsized exactly as before this evidence
+    # existed). Rendered as its own line, in its own words, so a reader
+    # cannot mistake "customers named $X" for "this is worth $X" — the
+    # distinction the evidence exists to preserve.
+    commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
+    commercial_usd = commercial.get("commercial_grounded_usd")
+    if isinstance(commercial_usd, (int, float)):
+        accounts_n = commercial.get("commercial_grounded_accounts")
+        accounts_txt = (
+            f" across {int(accounts_n)} named account{'' if accounts_n == 1 else 's'}"
+            if isinstance(accounts_n, (int, float)) and accounts_n
+            else ""
+        )
+        out.append(_p(
+            f"<strong>Customers named this evidence.</strong> Customers "
+            f"named ${commercial_usd:,.0f}{accounts_txt} on calls — a sum "
+            f"of figures actually quoted, not a projection."
+        ))
 
     # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.
     #

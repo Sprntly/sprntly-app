@@ -107,6 +107,41 @@ UNGROUPED_STAGE = "ungrouped"
 AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 
 
+def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float]:
+    """Real, transcript-stated dollar figures among THIS finding's claims —
+    additive evidence carried alongside Impact on `native_units`, never
+    folded into `value` (never `affected_population`, `movable_gap` or
+    `value_per_unit`, all left exactly as `_refute`/the caller already set
+    them). Reporting the sum as if it applied to every account in the
+    cluster would be exactly the extrapolation forbidden alongside this: an
+    account that never stated a figure is not assumed to be worth the mean
+    of the ones that did. So this only ever answers "customers named $X
+    across N accounts" — the accounts that actually named one, nothing
+    wider — for the report to render distinctly from any projection.
+
+    Currency-conservative: only claims with no stated currency or an
+    explicit "USD" are summed. A claim naming a different currency is
+    counted (`commercial_grounded_claims`) but excluded from the dollar sum
+    rather than risk silently mixing currencies into one number.
+    """
+    grounded = [c for c in group if c.magnitude is not None]
+    if not grounded:
+        return {}
+    usd_amounts = [
+        c.magnitude for c in grounded
+        if (c.raw or {}).get("currency") in (None, "", "USD")
+    ]
+    accounts_named: set[str] = set()
+    for c in grounded:
+        accounts_named.update(c.population.segments.get("accounts", ()))
+    units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
+    if usd_amounts:
+        units["commercial_grounded_usd"] = float(sum(usd_amounts))
+    if accounts_named:
+        units["commercial_grounded_accounts"] = float(len(accounts_named))
+    return units
+
+
 @dataclass(frozen=True)
 class Rejection:
     """A candidate that did not survive, and why. Never silently dropped —
@@ -411,6 +446,7 @@ def build_findings(
                 movable_gap=1.0 if accounts else None,
                 value_per_unit=None,
                 assumed_params=assumed,
+                native_units=_grounded_commercial_native_units(group),
             ),
             confidence_inputs=ConfidenceInputs(
                 strengths=tuple(c.strength for c in group),

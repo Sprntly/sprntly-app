@@ -1039,7 +1039,7 @@ def execute_run(
                     for src in kept
                 ]
 
-                # AND THE FRAMEWORK, RE-CHOSEN FROM THE KEPT SET TOO (AC-2).
+                # AND THE FRAMEWORK, RE-CHOSEN FROM THE KEPT SET TOO.
                 # `build_plan` picked a framework when analytics was still on
                 # the table; a reader who then unticks the one numeric source
                 # that made RICE derivable must not keep a RICE table with
@@ -1247,6 +1247,13 @@ def execute_run(
                 "impact": {
                     "value": impact.value,
                     "affected_population": impact.affected_population,
+                    # Real, transcript-stated commercial figures (if any of
+                    # this finding's claims carry one) — carried alongside
+                    # `value`, never folded into it, so the report can say
+                    # "customers named $X across N accounts" as evidence
+                    # distinct from any projection. See
+                    # `pipeline._grounded_commercial_native_units`.
+                    "native_units": dict(impact.native_units),
                 },
                 "confidence": {
                     "band": confidence.band,

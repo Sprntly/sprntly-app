@@ -525,6 +525,291 @@ def test_checklist_schema_requires_category_discussed_content_quote():
     assert "properties" not in required, "properties (owner/due/etc) is optional"
 
 
+# ── a stated commercial figure survives extraction as structure ──────────────
+# (not as a paraphrase, and never as the sentence itself).
+
+
+def test_commercial_category_carries_grounded_amount_properties(facade):
+    """A figure a speaker actually states on the call — David's own example,
+    "[Sprntly] is $100,000" — is captured as structure, not just prose."""
+    entries = [_entry(
+        "commercial", content="Sprntly is worth $100,000 to this account",
+        quote="if we had this feature, we can unblock 100,000 dollars",
+        properties={"amount": 100000, "currency": "USD", "basis": "total-contract",
+                    "certainty": "quoted"},
+    )]
+    text = "Buyer: if we had this feature, we can unblock 100,000 dollars in revenue."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "Sprntly is worth $100,000 to this account")
+    assert sig is not None
+    assert sig.kind == "commercial_term"
+    assert sig.properties["amount"] == 100000.0
+    assert sig.properties["currency"] == "USD"
+    assert sig.properties["basis"] == "total-contract"
+    assert sig.properties["certainty"] == "quoted"
+
+
+def test_partnership_commercial_also_carries_grounded_amount(facade):
+    """The partnership/ecosystem sibling category gets the same shape —
+    both 'commercial' and 'partnership_commercial' carry it."""
+    entries = [_entry(
+        "partnership_commercial", content="Meridian referral worth $20k/yr",
+        quote="the Meridian partnership brings in about twenty thousand a year",
+        properties={"amount": 20000, "currency": "USD", "basis": "per-year",
+                    "certainty": "estimated-by-speaker"},
+    )]
+    text = "Rep: the Meridian partnership brings in about twenty thousand a year."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "Meridian referral worth $20k/yr")
+    assert sig is not None
+    assert sig.properties["amount"] == 20000.0
+    assert sig.properties["basis"] == "per-year"
+
+
+def test_commercial_amount_omitted_when_no_figure_was_stated(facade):
+    """I2/I3: no figure named -> no `amount` key at all — never a defaulted
+    0, and no `currency`/`basis`/`certainty` written with no number behind
+    them."""
+    entries = [_entry(
+        "commercial", content="pricing came up but no number was named",
+        quote="pricing came up but we didn't get into specifics",
+        properties={"currency": "USD", "basis": "one-off"},
+    )]
+    text = "Rep: pricing came up but we didn't get into specifics."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "pricing came up but no number was named")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+
+
+def test_commercial_amount_never_defaults_to_zero_when_absent(facade):
+    """Same contract, stated as its own assertion: I3 says unmeasured is
+    `None` and never `0` — an omitted `amount` key must never read as a
+    written `0`."""
+    entries = [_entry(
+        "commercial", content="budget was discussed",
+        quote="we did talk about budget a little",
+    )]
+    text = "Rep: we did talk about budget a little."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "budget was discussed")
+    assert sig is not None
+    assert sig.properties.get("amount", "not zero") != 0
+    assert "amount" not in sig.properties
+
+
+def test_commercial_amount_ignored_when_not_a_real_number(facade):
+    """A model that writes a string, bool or NaN into `amount` gets the
+    property dropped rather than a garbage value persisted."""
+    for bad_amount in ("a lot", True, float("nan"), float("inf")):
+        entries = [_entry(
+            "commercial", content=f"bad amount case {bad_amount!r}",
+            quote="we discussed pricing on the call",
+            properties={"amount": bad_amount, "currency": "USD"},
+        )]
+        text = "Rep: we discussed pricing on the call today."
+        _run_checklist(facade, entries, text)
+        sig = _csig(facade, f"bad amount case {bad_amount!r}")
+        assert sig is not None
+        assert "amount" not in sig.properties, f"should reject amount={bad_amount!r}"
+
+
+def test_commercial_basis_and_certainty_outside_the_closed_vocabulary_are_dropped(facade):
+    """`basis`/`certainty` are closed vocabularies — a value the model
+    invents outside them is dropped, not persisted verbatim; `amount` (a
+    real number) is kept regardless, since it is independently validated."""
+    entries = [_entry(
+        "commercial", content="an odd basis and certainty",
+        quote="they said it would be about fifty thousand a year, roughly",
+        properties={"amount": 50000, "basis": "roughly-guessed",
+                    "certainty": "pretty-sure"},
+    )]
+    text = "Rep: they said it would be about fifty thousand a year, roughly."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "an odd basis and certainty")
+    assert sig is not None
+    assert sig.properties["amount"] == 50000.0
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
+def test_commercial_figure_still_requires_the_grounding_gate(facade):
+    """A structured figure does not loosen the precision contract: a
+    `commercial` entry with a fabricated (ungrounded) quote is dropped
+    ENTIRELY — including its `amount` — exactly like every other category."""
+    entries = [_entry(
+        "commercial", content="invented a $2M deal that was never discussed",
+        quote="this sentence about two million dollars never appears anywhere",
+        properties={"amount": 2000000, "currency": "USD"},
+    )]
+    result = _run_checklist(facade, entries, "Rep: nothing commercial came up on this call.")
+    assert result["signals"] == 0
+    assert _csig(facade, "invented a $2M deal that was never discussed") is None
+
+
+# ── buying-intent band: same mechanism, same pass, never the phrasing ────────
+
+
+def test_objection_category_carries_a_high_intent_band(facade):
+    """David's own example: 'if I have this, then I'll buy tomorrow' reads
+    as high buying intent — captured as a band + a short basis, not the
+    sentence itself."""
+    entries = [_entry(
+        "objection", content="pricing was the last blocker before signing",
+        quote="if I have this feature, I'll buy tomorrow",
+        properties={"intent_band": "high",
+                    "intent_basis": "explicit readiness to buy immediately"},
+    )]
+    text = "Buyer: if I have this feature, I'll buy tomorrow."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "pricing was the last blocker before signing")
+    assert sig is not None
+    assert sig.properties["intent_band"] == "high"
+    assert sig.properties["intent_basis"] == "explicit readiness to buy immediately"
+
+
+def test_sentiment_and_commitment_categories_also_carry_intent_band(facade):
+    """Three categories carry an intent band — 'objection' is covered above;
+    'sentiment' and 'commitment' get the identical shape."""
+    entries = [
+        _entry("sentiment", content="lukewarm interest in the new tier",
+               quote="this would be nice to have I suppose",
+               properties={"intent_band": "low",
+                           "intent_basis": "hedged, non-committal interest"}),
+        _entry("commitment", content="Jane will review pricing by Friday",
+               quote="Jane will look at pricing again by Friday",
+               properties={"owner": "Jane Doe", "due": "Friday",
+                           "intent_band": "medium",
+                           "intent_basis": "engaged but no buy signal yet"}),
+    ]
+    text = (
+        "Buyer: this would be nice to have I suppose.\n"
+        "PM: Jane will look at pricing again by Friday."
+    )
+    _run_checklist(facade, entries, text)
+    sentiment_sig = _csig(facade, "lukewarm interest in the new tier")
+    assert sentiment_sig.properties["intent_band"] == "low"
+    commitment_sig = _csig(facade, "Jane will review pricing by Friday")
+    # commitment keeps ITS existing owner/due shape AND gains intent —
+    # additive, not a replacement of the pre-existing contract.
+    assert commitment_sig.properties["owner"] == "Jane Doe"
+    assert commitment_sig.properties["due"] == "Friday"
+    assert commitment_sig.properties["intent_band"] == "medium"
+
+
+def test_intent_band_outside_high_medium_low_is_dropped(facade):
+    entries = [_entry(
+        "objection", content="ambiguous intent case",
+        quote="we might consider it at some point maybe",
+        properties={"intent_band": "very high indeed", "intent_basis": "unsure"},
+    )]
+    text = "Buyer: we might consider it at some point maybe."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "ambiguous intent case")
+    assert sig is not None
+    assert "intent_band" not in sig.properties
+    assert "intent_basis" not in sig.properties
+
+
+def test_intent_basis_that_is_the_verbatim_quote_is_dropped_not_persisted(facade):
+    """The never-persist-the-speech discipline applied a second time: if a
+    model tries to smuggle the transcript sentence into `intent_basis`
+    instead of `verbatim_quote`, the sanitizer must still catch it.
+    `intent_band` survives (it is a closed-vocabulary classification, not
+    text); `intent_basis` does not."""
+    quote = "if I have this feature working end to end I will buy tomorrow morning"
+    entries = [_entry(
+        "objection", content="strong buy signal on the call",
+        quote=quote,
+        properties={"intent_band": "high", "intent_basis": quote},
+    )]
+    text = f"Buyer: {quote}."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "strong buy signal on the call")
+    assert sig is not None
+    assert sig.properties["intent_band"] == "high"
+    assert "intent_basis" not in sig.properties
+
+
+def test_intent_band_is_not_carried_on_categories_outside_the_named_three(facade):
+    """The intent-band shape is scoped to 'objection'/'sentiment'/
+    'commitment' — a model writing `intent_band` on an unrelated category
+    (e.g. 'timeline') must not have it persisted; that category keeps only
+    its own documented shape."""
+    entries = [_entry(
+        "timeline", content="renewal is tied to fiscal year",
+        quote="we need this before our fiscal year renewal",
+        properties={"urgency": "high", "intent_band": "high"},
+    )]
+    text = "Buyer: we need this before our fiscal year renewal."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "renewal is tied to fiscal year")
+    assert sig is not None
+    assert sig.properties["urgency"] == "high"
+    assert "intent_band" not in sig.properties
+
+
+# ── Proven directly: no transcript text reaches a written Signal ────────────
+
+
+def test_no_property_value_reproduces_the_verbatim_quote(facade):
+    """The precision contract stated as a property test, not just an
+    assertion in prose: for every category shape this ticket adds, sweep
+    every STRING value written into `properties` and confirm none of them
+    is the verbatim quote (or a near-verbatim copy of it) — the exact leak
+    the never-persist-the-speech rule forbids taking a second path through
+    `properties` instead of the already-guarded `verbatim_quote` field."""
+    quote = "if we had this feature we could unblock one hundred thousand dollars"
+    entries = [
+        _entry("commercial", content="value framed at $100k",
+               quote=quote,
+               properties={"amount": 100000, "currency": "USD",
+                           "basis": "total-contract", "certainty": "quoted"}),
+        _entry("objection", content="strong buying signal",
+               quote="if I have this then I will buy tomorrow for sure",
+               properties={"intent_band": "high", "intent_basis": quote}),
+    ]
+    text = (
+        f"Buyer: {quote}.\n"
+        "Buyer: if I have this then I will buy tomorrow for sure."
+    )
+    _run_checklist(facade, entries, text)
+    for content in ("value framed at $100k", "strong buying signal"):
+        sig = _csig(facade, content)
+        assert sig is not None
+        for key, value in sig.properties.items():
+            if isinstance(value, str):
+                assert value.strip().lower() != quote.strip().lower(), (
+                    f"property {key!r} on signal {content!r} reproduced the "
+                    f"verbatim quote"
+                )
+                assert quote.lower() not in value.lower(), (
+                    f"property {key!r} on signal {content!r} contains the "
+                    f"verbatim quote as a substring"
+                )
+
+
+def test_checklist_properties_description_documents_grounded_boundaries():
+    """Content property test on the LLM-facing schema description (the
+    prompt surface a model actually reads): the commercial and buying-intent
+    shapes are documented, and the never-invent / never-extrapolate / never-
+    verbatim boundaries are stated in words, not just enforced in code."""
+    desc = ex._CHECKLIST_SCHEMA["properties"]["checklist"]["items"]["properties"][
+        "properties"]["description"]
+    for token in ("amount", "currency", "basis", "certainty",
+                  "intent_band", "intent_basis",
+                  "one-off", "per-year", "per-seat", "total-contract",
+                  "quoted", "asked", "estimated-by-speaker",
+                  "high", "medium", "low"):
+        assert token in desc, f"properties description should mention {token!r}"
+    assert "never" in desc.lower()
+    assert "extrapolat" in desc.lower()
+    assert "verbatim" in desc.lower() or "own words" in desc.lower()
+    assert len(desc) > 400
+
+
 # ── runner wiring: call providers always process (no per-tenant gate) ─────────
 
 

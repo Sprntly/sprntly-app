@@ -29,7 +29,7 @@ def claim(
     cid: str, *, subject="export latency", days_ago=1, accounts=("Northwind",),
     authoritative=True, strength="reported", ctype="mechanism",
     source="customer_voice", direction="neutral", assertion=None,
-    artifact_id="a",
+    artifact_id="a", magnitude=None, raw=None,
 ) -> Claim:
     return Claim(
         id=cid, assertion=(f"claim {cid}" if assertion is None else assertion),
@@ -41,7 +41,7 @@ def claim(
             segments={"accounts": tuple(accounts), "customer_side": tuple(accounts)},
             estimated_size=len(accounts) or None,
         ),
-        direction=direction,
+        direction=direction, magnitude=magnitude, raw=raw,
     )
 
 
@@ -153,6 +153,75 @@ def test_a_sized_finding_discloses_the_missing_value_per_account():
     out = run(claims)
     names = {p.name for p in out.impacts[0].assumed_params}
     assert "value_per_account" in names
+
+
+# ── Grounded commercial figures ride alongside Impact, never inside it ───────
+# `native_units` carries the evidence; `value`/`affected_population`/
+# `movable_gap`/`value_per_unit` are computed EXACTLY as before this ticket —
+# proving the addition is additive, not a change to how anything is sized.
+
+
+def test_grounded_commercial_amounts_are_summed_into_native_units():
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=100000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert len(out.findings) == 1
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 150000.0
+    assert units["commercial_grounded_accounts"] == 2.0
+    assert units["commercial_grounded_claims"] == 2.0
+
+
+def test_grounded_amounts_never_change_the_scored_impact_value():
+    """The additive guarantee, checked directly: a finding's `value`/
+    `affected_population`/`movable_gap`/`value_per_unit` are BYTE-IDENTICAL
+    whether or not its claims happen to carry a grounded commercial figure —
+    summing named figures across N accounts must never read as sizing the
+    WHOLE finding, which would be exactly the extrapolation this evidence is
+    forbidden from doing."""
+    plain = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+             for i, d in enumerate([5, 60])]
+    grounded = [claim(f"g{i}", days_ago=d, accounts=(f"A{i}",),
+                       ctype="magnitude" if i == 0 else "mechanism",
+                       source="revenue" if i == 0 else "customer_voice",
+                       magnitude=100000.0 if i == 0 else None,
+                       raw={"currency": "USD"} if i == 0 else None)
+                for i, d in enumerate([5, 60])]
+    out_plain = run(plain)
+    out_grounded = run(grounded)
+    assert out_plain.impacts[0].value == out_grounded.impacts[0].value
+    assert (out_plain.impacts[0].affected_population
+            == out_grounded.impacts[0].affected_population)
+    assert out_plain.impacts[0].movable_gap == out_grounded.impacts[0].movable_gap
+    assert out_plain.impacts[0].value_per_unit == out_grounded.impacts[0].value_per_unit
+    assert out_plain.impacts[0].native_units == {}
+    assert out_grounded.impacts[0].native_units["commercial_grounded_usd"] == 100000.0
+
+
+def test_a_non_usd_grounded_figure_is_counted_but_excluded_from_the_dollar_sum():
+    """Currency-conservative: a claim naming a different currency is not
+    silently summed into a USD figure."""
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=100000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=80000.0, raw={"currency": "EUR"}),
+    ]
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 100000.0
+    assert units["commercial_grounded_claims"] == 2.0
+
+
+def test_no_grounded_claims_leaves_native_units_empty():
+    claims = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+              for i, d in enumerate([5, 60])]
+    out = run(claims)
+    assert out.impacts[0].native_units == {}
 
 
 # ── Adjudication ─────────────────────────────────────────────────────────────
