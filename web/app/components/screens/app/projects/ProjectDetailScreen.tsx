@@ -57,7 +57,7 @@ import {
 } from "../../../../lib/api"
 import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
 import { openArtifactCandidateAsItem } from "./artifactCandidates"
-import { ProjectMainThread } from "./ProjectMainThread"
+import { ProjectMainThread, type ProjectChatSubmit, type ProjectChatSubmitRef } from "./ProjectMainThread"
 import { ProjectArtifactsDrawer } from "./ProjectArtifactsDrawer"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { useContent } from "../../../../context/ContentContext"
@@ -144,6 +144,15 @@ function ArtifactsIcon() {
   )
 }
 
+function TasksIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 11l3 3 8-8" />
+      <path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9" />
+    </svg>
+  )
+}
+
 function LockIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -223,6 +232,10 @@ export type ProjectDetailViewProps = {
   artifactsDrawerFilter?: ProjectArtifactType
   /** Closes the artifacts drawer (container's `onCloseRailModal`). */
   onCloseArtifactsDrawer: () => void
+  /** Passed straight into `ProjectMainThread` so the chat publishes its
+   *  `submitAsk` here — the Task-ledger tick completes a task through the
+   *  composer's own submit path (see `TaskModal`'s `onCompleteTask`). */
+  chatSubmitRef?: ProjectChatSubmitRef
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -231,7 +244,7 @@ export function ProjectDetailView({
   project,
   artifacts,
   memory: _memory,
-  ledgerCounts: _ledgerCounts,
+  ledgerCounts,
   ledgerRows: _ledgerRows,
   onOpenArtifacts,
   onOpenArtifactInPlace,
@@ -249,6 +262,7 @@ export function ProjectDetailView({
   artifactsDrawerOpen,
   artifactsDrawerFilter,
   onCloseArtifactsDrawer,
+  chatSubmitRef,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
@@ -324,11 +338,22 @@ export function ProjectDetailView({
 
         <span className={styles.topSpacer} />
 
-        {/* Top-bar "See all tasks" affordance removed — the task ledger is
-            reached conversationally (backend `get_task_ledger`, rendered
-            inline in chat). The `onOpenTasks` → TaskModal open-state chain
-            below is deliberately retained (not orphaned) so the modal stays
-            mountable for a future/other trigger without a re-wire. */}
+        {/* Top-bar task-ledger trigger — opens the "Task ledger" TaskModal via
+            the `onOpenTasks` → `railModal.kind === "tasks"` chain. The badge
+            shows the caller's OPEN tasks (assigned-to-me + waiting-on), a
+            best-effort mirror of the polled counts; the modal is the authority. */}
+        <button
+          type="button"
+          className={styles.railToggle}
+          onClick={onOpenTasks}
+          data-testid="topbar-tasks"
+        >
+          <TasksIcon />
+          Tasks
+          <span className={styles.topbarCount}>
+            {ledgerCounts ? ledgerCounts.assigned_to_me_open + ledgerCounts.waiting_on_open : 0}
+          </span>
+        </button>
         <button
           type="button"
           className={styles.railToggle}
@@ -376,6 +401,7 @@ export function ProjectDetailView({
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}
               openPrdId={openPrdId}
+              submitRef={chatSubmitRef}
             />
           </div>
         </main>
@@ -454,6 +480,18 @@ export function ProjectDetailScreen({
     initialPrdParamRef.current = searchParams?.get("prd") ?? null
   }
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
+  // The chat surface publishes its `submitAsk` here (see `ProjectMainThread`).
+  // The Task-ledger tick sends a completion turn through it so the completion
+  // runs on the composer's ONE ask→persist path (optimistic echo + reply
+  // persist), never the reproduced start→poll→persist that phantom-flashed.
+  const chatSubmitRef = useRef<ProjectChatSubmit | null>(null)
+  const onCompleteTask = useCallback(
+    (text: string): Promise<void> =>
+      chatSubmitRef.current
+        ? chatSubmitRef.current(text)
+        : Promise.reject(new Error("project chat not ready")),
+    [],
+  )
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railModal, setRailModal] = useState<OpenModal>(null)
   // The top-bar gear's "Project settings" modal — `null` = closed, a tab
@@ -1023,6 +1061,7 @@ export function ProjectDetailScreen({
         artifactsDrawerOpen={railModal?.kind === "artifacts"}
         artifactsDrawerFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onCloseArtifactsDrawer={onCloseRailModal}
+        chatSubmitRef={chatSubmitRef}
       />
       <ConfirmDialog
         open={removeTarget != null}
@@ -1059,6 +1098,7 @@ export function ProjectDetailScreen({
         projectId={projectId}
         onClose={onCloseRailModal}
         ledgerVersion={ledgerVersion}
+        onCompleteTask={onCompleteTask}
       />
     </AppLayout>
   )
