@@ -30,6 +30,7 @@ from typing import Iterable, NamedTuple, Optional, Sequence
 from app.crucible.figure_class import RANGE_CLASS, SUMMABLE_CLASS
 from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
+from app.crucible.moscow import type_bucket
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
     SIZE_BANDS,  # noqa: F401  (re-exported: callers read the band vocabulary here)
@@ -1040,7 +1041,28 @@ def _rank(
     *,
     deep_cap: int,
 ) -> list[int]:
-    """Order by size, then by how sure — reading FROZEN scores (I10).
+    """Order by what KIND of claim it is, then by size, then by how sure —
+    reading FROZEN scores (I10).
+
+    THE CLAIM-TYPE BUCKET COMES BEFORE SIZE, and that is the whole reason
+    this key has four terms rather than three. Without it a stated
+    PREFERENCE with more reach outranked a stated BLOCKER with less, and
+    since the single recommendation binds to rank 1 (`recommend.
+    build_synthesized_recommendation`), the memo recommended the preference
+    while the table three sections below labelled the blocker `MUST` — one
+    document saying two different things about the same run. The bucket is
+    `moscow.type_bucket`, the same "strongest claim type wins" rule that
+    NAMES the bucket, imported rather than restated so the label and the
+    position cannot drift.
+
+    WHAT IS NOT IN THE KEY: the `?` on `MUST?`. That flag comes from
+    `moscow.document_count(surfaced_by)`, and `surfaced_by` is one of
+    `types.CORROBORATION_FIELDS` — sorting on it would let a two-account
+    blocker heard in three calls outrank a twenty-account blocker heard in
+    one. Corroboration keeps the place it already has, at the TAIL of this
+    key via `confidences[i].score`, where it can break a tie without ever
+    deciding one. See `moscow.type_bucket` for the same argument at the
+    other end.
 
     Size is read as `size_rank` — the finding's position among its OWN
     currency's peers — and never as the raw `value`. That is the whole
@@ -1079,6 +1101,12 @@ def _rank(
         size_rank = impacts[i].size_rank
         return (
             0 if conflict else 1,
+            # 0 blocker, 1 preference, 2 neither — see `moscow.type_bucket`.
+            # Read off `confidence_inputs` only because that is where the
+            # pipeline already records the claim types (line ~937); the value
+            # is a property of what was SAID, not of how many said it, and
+            # `claim_types` is deliberately not a corroboration field.
+            type_bucket(findings[i].confidence_inputs.claim_types),
             # A real rank is always > 0, so an unranked finding sorting at 0
             # lands behind every ranked one without a sentinel.
             -(size_rank if size_rank is not None else 0.0),
@@ -1099,24 +1127,42 @@ MAX_NAMED_SOURCES = 4
 
 #: `kg_ingest.runner.sync_provider`'s doc_name shape: `<provider>-sync-batch-<n>`.
 #:
-#: THE NUMBER IS AN INGEST CHUNK, NOT A DOCUMENT. A connector sync slices its
-#: pull into arbitrary batches and stamps each with its index, so a finding read
-#: back as
+#: THE NUMBER MEANS TWO DIFFERENT THINGS, AND WHICH ONE DEPENDS ON THE
+#: PROVIDER. `kg_ingest.runner._extraction_units` branches on
+#: `_CALL_PROVIDERS`:
 #:
-#:   fireflies-sync-batch-0 (9) · fireflies-sync-batch-4 (7) ·
-#:   fireflies-sync-batch-10 (4) · fireflies-sync-batch-5 (3) · +1 more documents
+#:   * For every OTHER provider it is an INGEST CHUNK — a char-budget slice of
+#:     the pull, stamped with its index. A finding read back as
 #:
-#: looks like evidence spread across five documents and is one source chopped
-#: five ways. That is worse than unhelpful: breadth across documents is exactly
-#: what a reader uses to judge whether a finding is well-supported, and this
-#: inflates it.
+#:       slack-sync-batch-0 (9) · slack-sync-batch-4 (7) ·
+#:       slack-sync-batch-10 (4) · slack-sync-batch-5 (3) · +1 more documents
 #:
-#: There is no call title to put here instead, and that is a property of the
-#: data rather than of this function: `call_digest` records that KG extraction
-#: is per-BATCH, so `extract_document` stamps only `{"doc": <batch name>}` and
-#: an extracted signal carries no call id to resolve. The provider is the ONLY
-#: real attribution in the string, so the provider is what gets rendered.
+#:     looks like evidence spread across five documents and is one source
+#:     chopped five ways. Breadth across documents is exactly what a reader
+#:     uses to judge whether a finding is well-supported, and this inflates
+#:     it — so these collapse to the provider label and are counted once.
+#:
+#:   * For a CALL provider it is a CALL. `_extraction_units` runs
+#:     `for i, rec in enumerate(fresh)` — one extraction pass per call — so
+#:     `fireflies-sync-batch-7` is one transcript, not a slice of several.
+#:     Collapsing these before counting threw away the only real breadth
+#:     measure a call tenant has (see `_sources_of`).
+#:
+#: There is still no call TITLE to put here, and that is a property of the
+#: data rather than of this function: `extract_document` stamps only
+#: `{"doc": <batch name>}`, so an extracted signal carries no resolvable
+#: title. The provider is the only real attribution in the string, so the
+#: provider is what gets rendered — with the call COUNT beside it.
 _SYNC_BATCH = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
+
+#: Providers whose `-sync-batch-<n>` is one CALL rather than one chunk. Kept
+#: in step with `kg_ingest.runner._CALL_PROVIDERS`, which is the set that
+#: actually decides per-call extraction, and duplicated rather than imported
+#: because importing the ingest runner drags its connector stack into every
+#: Crucible run for a three-element frozenset. If that set gains a provider,
+#: this needs the same entry or that provider silently reverts to being
+#: counted as one document.
+_CALL_PROVIDERS = frozenset({"fireflies", "zoom", "google_meet"})
 
 #: What to call a provider's batches once they are collapsed. Anything not
 #: listed falls back to its own name, title-cased — a new connector reads
@@ -1143,26 +1189,67 @@ def _document_label(doc: str) -> str:
     return _PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
 
 
+#: How a collapsed CALL-provider entry reads. `moscow._CALL_ENTRY_RE` parses
+#: this exact shape back out to grade corroboration on, so the two must be
+#: changed together.
+def _call_source_entry(label: str, calls: int, claims: int) -> str:
+    return (
+        f"{label} (≥ {calls} call{'' if calls == 1 else 's'}, "
+        f"{claims} claim{'' if claims == 1 else 's'})"
+    )
+
+
 def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     """Which documents this finding rests on, most-cited first.
 
     Deterministic: ties break on the document name, so a re-run names the same
     sources in the same order.
+
+    COLLAPSED FOR DISPLAY, COUNTED BEFORE COLLAPSING. Everything a provider
+    contributed still reads as ONE entry — five `slack-sync-batch-*` chunks
+    are one source chopped five ways and must not read as five documents. But
+    the count that entry carries is taken from the RAW `artifact_id`s, not
+    from the label, and for a call provider that distinction is the whole
+    point: `kg_ingest.runner._extraction_units` runs one extraction pass per
+    call, so `fireflies-sync-batch-7` IS one transcript. Labelling first and
+    counting second returned `1` for every finding on a call tenant, which
+    pinned all of them at `MUST?` (`moscow.THIN_EVIDENCE_DOCS` is 2) and made
+    `MUST` unreachable there — document count carried no signal at all.
+
+    THE CALL COUNT IS A FLOOR, AND SAYS SO IN THE OUTPUT (`≥ N calls`).
+    Per-call extraction is recent; anything ingested before it genuinely
+    batched several calls under one `-sync-batch-<n>` name, so a corpus that
+    spans the change under-counts and cannot tell by how much. A floor is the
+    only honest form: it can understate how well-corroborated a finding is,
+    never overstate it, and understating is the direction that costs a reader
+    nothing they were relying on.
+
+    THE DOC NAME ITSELF IS NOT TOUCHED. `call_digest._SYNC_BATCH_DOC` matches
+    on the `-sync-batch-<n>` shape as a double-counting filter; renaming it
+    upstream would break that filter silently. This changes only what gets
+    rendered.
     """
     counts: dict[str, int] = {}
+    # Distinct raw `artifact_id`s behind a CALL-provider label — one per call.
+    # Absent for every other label, which is how the two are told apart below.
+    call_docs: dict[str, set[str]] = {}
     for c in claims:
         doc = (c.artifact_id or "").strip()
-        if doc:
-            # COLLAPSED BEFORE COUNTING, so the count is per SOURCE rather than
-            # per ingest chunk: five batches of one provider become one entry
-            # carrying all five counts, which is the true number of claims that
-            # source contributed.
-            label = _document_label(doc)
-            counts[label] = counts.get(label, 0) + 1
+        if not doc:
+            continue
+        label = _document_label(doc)
+        counts[label] = counts.get(label, 0) + 1
+        m = _SYNC_BATCH.match(doc)
+        if m and m.group(1) in _CALL_PROVIDERS:
+            call_docs.setdefault(label, set()).add(doc)
     if not counts:
         return ()
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    named = tuple(f"{doc} ({n})" for doc, n in ranked[:MAX_NAMED_SOURCES])
+    named = tuple(
+        _call_source_entry(doc, len(call_docs[doc]), n) if doc in call_docs
+        else f"{doc} ({n})"
+        for doc, n in ranked[:MAX_NAMED_SOURCES]
+    )
     if len(ranked) > MAX_NAMED_SOURCES:
         named += (f"+{len(ranked) - MAX_NAMED_SOURCES} more documents",)
     return named

@@ -192,11 +192,38 @@ def test_an_unsized_set_aside_theme_reads_Unsized_not_zero():
     assert "<td>0</td>" not in tail
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Memo §01 names ONE recommendation for the whole memo ('Option 1'). We "
-    "recommend per finding and never synthesise across them."))
 def test_one_recommendation_for_the_whole_document():
-    assert "The recommendation" in _text(_doc())
+    """Memo §01 names ONE recommendation for the whole memo ('Option 1'). A
+    synthesized recommendation (`recommend.build_synthesized_recommendation`)
+    now sits above the per-finding write-ups, narrated from what the deep
+    pass already decided (I2) — never a second ranking, and additive: the
+    per-finding recommendation below is untouched.
+
+    NOT A LITERAL-STRING MATCH on wording nobody chose deliberately — the
+    property is that exactly ONE such section exists, and it reads as
+    distinct from the per-finding "Recommended." cards it sits above.
+    """
+    run = _run_dict()
+    run["prioritisation"]["synthesized_recommendation"] = {
+        "action": "Repair the wide-table export path and fix it before the "
+                  "next renewal cycle",
+        "because": "Both top findings point at the same failure surface, "
+                   "and it is the one already named as the export defect "
+                   "recommendation below.",
+        "citations": [
+            {"claim_id": "c1", "evidence": "exports return empty files",
+             "cited_claim": "exports return empty files"},
+        ],
+    }
+    t = _text(render_report_html(run, _findings(), _DOC_LEDGER))
+    # Exactly one synthesized section — not zero (it must render) and not
+    # duplicated across the document.
+    assert t.count("The recommendation") == 1
+    # It carries the synthesized content, distinct from the per-finding
+    # recommendation's own action text ("Repair the wide-table export path")
+    # that still renders separately below it.
+    assert "fix it before the next renewal cycle" in t
+    assert "Repair the wide-table export path" in t  # the per-finding one
 
 
 # ─── NOT DERIVABLE: the corpus cannot support it ────────────────────────────

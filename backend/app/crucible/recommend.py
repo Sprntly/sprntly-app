@@ -45,6 +45,10 @@ from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 from app.crucible.lint import lint_claim
+from app.crucible.moscow import (
+    TYPE_BUCKET_BLOCKER, TYPE_BUCKET_NEITHER, TYPE_BUCKET_PREFERENCE,
+    document_count, type_bucket,
+)
 from app.crucible.types import (
     Claim,
     Confidence,
@@ -887,14 +891,23 @@ def resolve_recommendation_count(
             named_as = (
                 f"{value:,.0f} {unit}" if unit != "percent" else f"{value:g}%"
             )
+            # THE NEGATION LIVES IN THE OBJECT, NOT IN THE TRAILING CLAUSE.
+            # Written as `sizes findings {corpus_desc}` with `corpus_desc` =
+            # "at all — nothing here could be sized", this rendered "but this
+            # corpus sizes findings at all", which asserts the exact opposite
+            # of what the branch was entered to say. The em-dash clause that
+            # follows contradicted it, so the sentence disagreed with itself
+            # in nine words. Both branches now carry their own object.
             corpus_desc = (
-                f"in {corpus_currency}" if corpus_currency else
-                "at all — nothing here could be sized"
+                f"sizes findings in {corpus_currency}, not in {unit}"
+                if corpus_currency else
+                f"sizes no findings at all — nothing here could be sized, in "
+                f"{unit} or in anything else"
             )
             return RecommendationCount(
                 default,
-                f"you named a target of {named_as}, but this corpus sizes "
-                f"findings {corpus_desc}, not in {unit} — summing toward "
+                f"you named a target of {named_as}, but this corpus "
+                f"{corpus_desc} — summing toward "
                 f"your target would say more than the evidence supports, so "
                 f"this defaults to the top {default}.",
                 target_unsizeable=True,
@@ -1287,6 +1300,28 @@ def _deep_acceptable(
 #: to pick which of two bands is higher.
 _BAND_ORDER = {"low": 0, "medium": 1, "high": 2}
 
+#: What each claim-type bucket is CALLED in the comparison sentence, phrased
+#: to follow "this one" / "that one". Keyed on `moscow.type_bucket`'s own
+#: return values, so a bucket cannot be described as one thing here and
+#: sorted as another there.
+#: The same buckets said of a PAIR, for the sentence that explains why the
+#: bucket did NOT separate two findings. "neither" has no plural form worth
+#: writing here, so it is absent and the caller falls back.
+_BUCKET_PHRASE_PLURAL = {
+    TYPE_BUCKET_BLOCKER: "state blockers",
+    TYPE_BUCKET_PREFERENCE: "state preferences",
+}
+
+_BUCKET_PHRASE = {
+    TYPE_BUCKET_BLOCKER:
+        "states a blocker — something is stopping an account today",
+    TYPE_BUCKET_PREFERENCE:
+        "states a preference — something an account asked for",
+    TYPE_BUCKET_NEITHER:
+        "states neither — it describes the world rather than asking for "
+        "or blocking anything",
+}
+
 
 def _compare(
     top: Finding, second: Finding,
@@ -1295,12 +1330,26 @@ def _compare(
 ) -> str:
     """Why the ranking put `top` before `second` — COMPUTED, never narrated
     by a model (I2). Reads only what `_rank` itself reads: adjudication,
-    `Impact.value`, and `Confidence.band` — never `Confidence.score`, which
-    is internal and never rendered anywhere in this codebase.
+    the claim-type bucket, `Impact.value`, and `Confidence.band` — never
+    `Confidence.score`, which is internal and never rendered anywhere in
+    this codebase.
 
-    Mirrors `pipeline._rank`'s own key order (conflict, then reach, then
-    confidence) so this sentence can never disagree with the ranking it is
-    explaining.
+    Mirrors `pipeline._rank`'s own key order (conflict, then CLAIM-TYPE
+    BUCKET, then reach, then confidence) so this sentence can never disagree
+    with the ranking it is explaining.
+
+    THE BUCKET TERM IS NOT DECORATION — it is the first discriminator most
+    runs actually reach. Before it existed, the reach and band branches both
+    fell through on a document-only corpus (nothing there carries a number,
+    so `value` is `None` on both sides and the bands tie), and every such run
+    printed the same "read it as a position in a list, not as a verdict"
+    disclaimer. Which is to say this sentence had never yet printed a real
+    reason for its own ordering. "A stated blocker outranks a stated
+    preference" is a real reason, and it is the one the ranking used.
+
+    IF `pipeline._rank`'S KEY CHANGES, THIS CHANGES IN THE SAME COMMIT. The
+    failure is silent: the ordering stays correct and the sentence explaining
+    it stops being true, which is worse than printing no sentence at all.
     """
     top_label = (top.label or top.statement).strip()
     second_label = (second.label or second.statement).strip()
@@ -1310,6 +1359,26 @@ def _compare(
             f"Ranked above “{second_label}” because sources "
             f"disagree here — an authoritative conflict is treated as worth "
             f"more than any single-sided claim, regardless of size."
+        )
+
+    # THE CLAIM-TYPE BUCKET — second in the key, exactly as in `_rank`. Read
+    # through `moscow.type_bucket` rather than re-tested here, so the sentence
+    # and the sort cannot disagree about what counts as a blocker.
+    bucket_top = type_bucket(top.confidence_inputs.claim_types)
+    bucket_second = type_bucket(second.confidence_inputs.claim_types)
+    if bucket_top < bucket_second:
+        tail = (
+            " Something stopping an account is treated as worth more than "
+            "something an account would prefer, however many accounts "
+            "prefer it."
+            if bucket_top == TYPE_BUCKET_BLOCKER
+            and bucket_second == TYPE_BUCKET_PREFERENCE
+            else ""
+        )
+        return (
+            f"Ranked above “{second_label}” on what each one IS, before "
+            f"any question of size: this one {_BUCKET_PHRASE[bucket_top]}, "
+            f"and that one {_BUCKET_PHRASE[bucket_second]}.{tail}"
         )
 
     v1, v2 = impact_top.value, impact_second.value
@@ -1333,12 +1402,108 @@ def _compare(
             f"{confidence_top.band} against {confidence_second.band} — "
             f"since neither could be sized apart."
         )
+
+    # ── THE SAME-BUCKET CASE, WHICH IS THE COMMON ONE. ────────────────────
+    #
+    # Putting the bucket first in `pipeline._rank`'s key had a consequence
+    # nobody costed: it CLUSTERS. Adjacent findings now almost always share a
+    # bucket, so the top two are usually both stated blockers and the branch
+    # above that explains the bucket is unreachable for them. Measured on a
+    # real run: rank 1 and rank 2 were both blockers, both unsized, both
+    # medium — every branch fell through and the report printed the same
+    # "read it as a position in a list, not as a verdict" line it printed
+    # before any of this. The ranking fix made the explanation fix
+    # unreachable.
+    #
+    # So when the bucket does not separate them, say what does — and be
+    # careful about the difference between "what decided this" and "a way in
+    # which these two differ". Every value read below is FROZEN and already
+    # accounted for on the page; nothing is scored here (I2), two existing
+    # numbers are compared and the larger is named.
+    #
+    # ONE OF THESE SIGNALS IS CAUSAL AND THE OTHERS ARE NOT, and saying so is
+    # the whole point of the ordering below. At this depth `_rank`'s only
+    # remaining term is `-Confidence.score`, and `scoring.score_confidence`
+    # builds that from five weighted components plus ONE corroboration bonus:
+    #
+    #     corroboration = min(0.15, 0.05 * (independent_authoritative_
+    #                                       source_types - 1))
+    #
+    # That bonus is the ONLY term in the whole score that rewards agreement,
+    # so where the two findings differ on `independent_authoritative_source_
+    # types` and tie on everything earlier in the key, that difference IS the
+    # reason for the order and can carry a causal sentence.
+    #
+    # Document count and claim count cannot. Decomposed on a real run whose
+    # top two tied on every earlier term, the score gap was 0.004467:
+    # corroboration +0.0500 (two authoritative source types against one),
+    # coverage -0.0462, recency +0.0006. Rank 1 had 26 claims to rank 2's 5 —
+    # and claim count is COVERAGE'S DENOMINATOR, so those 26 claims made rank
+    # 1's coverage WORSE (20 of 26 authoritative = 0.769, against 5 of 5 =
+    # 1.00). "More of the corpus is about this one" named a signal that
+    # pushed the other way and presented it as the reason.
+    #
+    # A strict `>` stops the sentence CONTRADICTING the visible order. It does
+    # not stop it asserting a cause that is not the cause, which is a quieter
+    # failure and a worse one: a reader cannot catch it by looking at the
+    # list. So the non-causal branches say "one difference" and name where the
+    # order actually came from, and only the corroboration branch says "what
+    # decides it".
+    same_bucket_lead = (
+        f"Both {_BUCKET_PHRASE_PLURAL[bucket_top]}, so the kind of claim does "
+        f"not separate them"
+        if bucket_top == bucket_second
+        and bucket_top in _BUCKET_PHRASE_PLURAL
+        else "Reach and confidence band do not separate these two"
+    )
+    #: Said after every non-causal difference, so a reader is never invited to
+    #: read one named number as the reason for the ordering.
+    not_the_reason = (
+        "The order itself comes from the run's combined scoring, which this "
+        "report does not print."
+    )
+
+    # THE CAUSAL BRANCH. See above: this is the only corroboration term in the
+    # score, so a difference here is a difference in the thing that sorted.
+    kinds_top = top.confidence_inputs.independent_authoritative_source_types
+    kinds_second = second.confidence_inputs.independent_authoritative_source_types
+    if kinds_top > kinds_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}. What decides "
+            f"it: independent KINDS of authoritative source — "
+            f"{kinds_top} of them raise this one, against {kinds_second} for "
+            f"the other. Agreement across different kinds of source is the "
+            f"one thing the scoring rewards beyond the evidence itself, and "
+            f"here it is what put this first."
+        )
+
+    docs_top = document_count(top.confidence_inputs.surfaced_by)
+    docs_second = document_count(second.confidence_inputs.surfaced_by)
+    if docs_top > docs_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}, and the same "
+            f"kinds of source speak to each. One difference: more of your "
+            f"documents independently raise this one — {docs_top} source "
+            f"document{'' if docs_top == 1 else 's'} against {docs_second}. "
+            f"{not_the_reason}"
+        )
+
+    claims_top, claims_second = len(top.claim_ids), len(second.claim_ids)
+    if claims_top > claims_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}, and the same "
+            f"sources speak to each. One difference: more of the corpus is "
+            f"about this one — {claims_top} claims against {claims_second}. "
+            f"That is volume rather than agreement, and volume is not what "
+            f"the scoring rewards. {not_the_reason}"
+        )
+
     return (
         f"Ranked above “{second_label}” by the run's own scoring. "
-        f"The two are close on what this report shows — reach and "
-        f"confidence band are tied or both unmeasured — so the order here "
-        f"rests on a finer signal this report does not print; read it as a "
-        f"position in a list, not as a verdict on which matters more."
+        f"{same_bucket_lead}, neither could be sized, and the same evidence "
+        f"backs each — so the order here rests on a finer signal this report "
+        f"does not print. Read the gap between these two as narrow; the "
+        f"ranking still put this one first."
     )
 
 
@@ -1523,4 +1688,365 @@ def build_deep_recommendations(
 
     return DeepRecommendationResult(
         by_id=kept, count=count_info, attempted_ids=attempted_ids,
+    )
+
+
+# ── ONE RECOMMENDATION FOR THE WHOLE DOCUMENT ─────────────────────────────────
+#
+# David's reference memo names ONE recommendation for the whole memo
+# ("Option 1"). `build_deep_recommendations` above still writes one full
+# write-up PER finding — that detail stays, it is not replaced — but nothing
+# combined them into the single top-line answer the memo actually opens with.
+#
+# THIS IS A NARRATION PASS, NOT A SECOND RANKING (I2). `_DEEP_SYSTEM` already
+# says it once, for the per-finding pass: "You are not scoring, ordering or
+# selecting anything — every finding you are shown gets exactly one deep
+# recommendation, and the order they are shown in is already final." The same
+# boundary is restated in `_SYNTHESIS_SYSTEM` below, because this call reads
+# the per-finding recommendations that pass already produced and frozen-ranked
+# — never the findings, never the scores — and it narrates them into one
+# recommendation. It cannot re-rank what it is never shown a rank to change.
+#
+# THE SAME ANTI-FABRICATION GATE, REUSED RATHER THAN REBUILT. Every claim this
+# pass makes must trace to a `claim_id` one of the per-finding deep
+# recommendations it is synthesizing ALREADY cited — `_synthesis_acceptable`
+# below reuses `_grounded_in` (the exact lexical-overlap check
+# `_deep_acceptable` uses) and `lint_claim`, rather than inventing a second
+# citation mechanism for the same job.
+
+#: `citations[]` entries the synthesis may make. Bounded for the same
+#: reading-limit reason as `MAX_CHANGES_PER_DEEP`: a "single recommendation"
+#: that cites ten things reads as a list wearing a singular's clothes.
+MAX_SYNTHESIS_CITATIONS = 6
+
+
+@dataclass(frozen=True)
+class SynthesizedCitation:
+    """One claim the synthesis rests on — always one a per-finding deep
+    recommendation already cited (see `build_synthesized_recommendation`'s
+    `allowed_claim_ids` gate). `cited_claim` carries the CLAIM'S OWN assertion
+    text, exactly like `DeepChange.cited_claim`, so the renderer shows the
+    reader the actual evidence rather than a paraphrase that may have drifted
+    from it."""
+    claim_id: str
+    evidence: str
+    cited_claim: str
+
+
+@dataclass(frozen=True)
+class SynthesizedRecommendation:
+    """The single, top-line recommendation for the whole report — narrates
+    and combines the deep, per-finding recommendations `build_deep_
+    recommendations` already produced. Additive, never a replacement: the
+    per-finding write-ups still render exactly as they did before this
+    existed.
+
+    `action` is NOT authored here — it is the rank-1 kept deep
+    recommendation's own action, copied verbatim by
+    `build_synthesized_recommendation`. Choosing what the single
+    recommendation IS is a decision, and I2 leaves decisions to the frozen
+    ranking, never to a model."""
+    action: str
+    because: str
+    citations: tuple[SynthesizedCitation, ...]
+
+
+# NO `action` FIELD, DELIBERATELY. The action is fixed by the frozen ranking
+# (it is the rank-1 kept recommendation's own action, copied verbatim) and is
+# never authored by a model — picking what the single recommendation is would
+# be a decision, and I2 does not let a model return one. Leaving `action` out
+# of the schema entirely, rather than instructing against it in the prompt,
+# makes emitting one structurally impossible instead of merely discouraged.
+SYNTHESIS_SCHEMA: dict = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["because", "citations"],
+    "properties": {
+        "because": {
+            "type": "string", "minLength": 8, "maxLength": 600,
+            "description": (
+                "Why the FIXED action shown to you is the single "
+                "recommendation, argued ONLY from what the recommendations "
+                "shown already said. Cite what they said, not new reasoning "
+                "of your own."
+            ),
+        },
+        "citations": {
+            "type": "array", "minItems": 1, "maxItems": MAX_SYNTHESIS_CITATIONS,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["claim_id", "evidence"],
+                "properties": {
+                    "claim_id": {
+                        "type": "string",
+                        "description": (
+                            "The exact claim id, copied from the brackets in "
+                            "front of a claim already cited below. Never "
+                            "invent one and never cite one not shown."
+                        ),
+                    },
+                    "evidence": {
+                        "type": "string", "minLength": 8, "maxLength": 250,
+                        "description": (
+                            "Restate, in your own words, ONLY what that one "
+                            "claim says. Add nothing beyond it."
+                        ),
+                    },
+                },
+            },
+        },
+    },
+}
+
+_SYNTHESIS_SYSTEM = """You read a small set of already-written, already-\
+ranked recommendations — one per finding, shown in their final rank order — \
+and write the supporting prose for ONE recommendation that stands for the \
+whole report.
+
+THE ACTION IS ALREADY FIXED. You are shown it verbatim: it is the rank-1 \
+recommendation's own action, set by frozen, deterministic ranking. You do \
+not write it, restate it as your own, replace it, soften it, or propose a \
+different one — you write only the prose that supports it. Deciding what the \
+single recommendation is would be a decision, and decisions are not yours to \
+return.
+
+You are not scoring, ordering or selecting anything — every recommendation \
+you are shown has already been decided by that same ranking, and the order \
+they are shown in is already final. Your job is to narrate why the fixed \
+action is the one that carries the report, drawing on what the lower-ranked \
+recommendations already said, never to re-rank, re-score, or choose which \
+one matters most.
+
+Rules, all of them hard:
+- `because` follows the same rules as the recommendations shown: justified \
+ONLY from what those recommendations already say, no figure, no promised \
+outcome.
+- Every item in `citations` names the exact claim id (copied from the \
+brackets before a claim already cited below) it rests on. Never invent a \
+claim id and never cite one that was not already cited by one of the \
+recommendations shown.
+- `evidence` in each citation is a restatement of what that ONE claim says — \
+nothing more.
+- Do not introduce a new priority, a new action, or a new justification that \
+none of the recommendations shown already made. You are combining what is \
+already there into the case for the fixed action, not adding to it.
+
+Write for a product manager who has to defend this single recommendation to \
+their leadership from the same evidence, and nothing else."""
+
+
+def _synthesis_input(
+    goal_text: str, definition_text: str,
+    ranked: Sequence[tuple[Finding, DeepRecommendation]],
+    bound_action: str,
+) -> str:
+    lines = [
+        f"GOAL: {goal_text}",
+        f"THE READER'S OWN DEFINITION OF THE METRIC: {definition_text}",
+        "",
+        # The fixed action goes in first and is named as fixed, so the only
+        # thing left to write is the case for it.
+        f"THE ACTION — ALREADY FIXED BY RANK, NOT YOURS TO WRITE: {bound_action}",
+        "",
+        "RECOMMENDATIONS, ALREADY RANKED AND WRITTEN — do not reorder or "
+        "re-select them. Write the `because` that makes the case for the "
+        "fixed action above, drawing only on these and citing only the claim "
+        "ids already shown in brackets below.",
+        "",
+    ]
+    for rank, (f, rec) in enumerate(ranked, start=1):
+        label = (f.label or f.statement).strip()
+        lines.append(f"--- rank {rank}: finding_id: {f.id} — {label}")
+        lines.append(f"action: {rec.action}")
+        lines.append(f"because: {rec.because}")
+        for c in rec.changes:
+            lines.append(f"  - [{c.claim_id}] {c.cited_claim}")
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _synthesis_acceptable(
+    rec: dict, strength: str, allowed_claim_ids: set[str],
+    claims_by_id: dict[str, Claim], *, bound_action: str,
+) -> Optional[SynthesizedRecommendation]:
+    """Every check `_deep_acceptable` runs on `action`/`because`, plus the
+    same citation gate, restricted to the claim ids the per-finding
+    recommendations being synthesized ALREADY cited — never the finding's
+    full claim set, and never a claim id this call invents.
+
+    `bound_action` is the action, full stop: the rank-1 kept recommendation's
+    own wording, passed in by the caller. Anything the model may have put in
+    `rec["action"]` is ignored outright rather than merged or preferred —
+    the schema does not ask for one, and if one arrives anyway it must not be
+    able to reach a reader, because that would be the model deciding what the
+    recommendation is (I2).
+
+    A synthesis whose citations all fail — no valid claim id, or cited but
+    not grounded in what that claim says — is dropped entirely, the same
+    "all or nothing" rule `_deep_acceptable` applies to a deep
+    recommendation: a synthesis with nothing it can actually stand behind is
+    not more useful than no synthesis at all, and the per-finding
+    recommendations (computed separately) still render regardless.
+    """
+    action = bound_action.strip()
+    because = (rec.get("because") or "").strip()
+    if not action or not because:
+        return None
+    both = f"{action} {because}"
+    if _FIGURE.search(both):
+        logger.info("crucible: dropped a synthesized recommendation quoting a figure")
+        return None
+    if _PROMISE.search(both):
+        logger.info(
+            "crucible: dropped a synthesized recommendation promising an outcome"
+        )
+        return None
+    if not lint_claim(action, strength).ok or not lint_claim(because, strength).ok:
+        logger.info(
+            "crucible: dropped a synthesized recommendation that failed the lint"
+        )
+        return None
+
+    citations: list[SynthesizedCitation] = []
+    for item in rec.get("citations") or []:
+        if not isinstance(item, dict):
+            continue
+        evidence = (item.get("evidence") or "").strip()
+        claim_id = (item.get("claim_id") or "").strip()
+        if not evidence or not claim_id:
+            continue
+        # THE SAME GATE `_deep_acceptable` APPLIES TO `shown_claim_ids`, ONE
+        # LEVEL UP: a claim id this call cites must be one a per-finding deep
+        # recommendation already cited, not merely one that was shown to the
+        # model for some finding. Citing something never cited by any of the
+        # recommendations being synthesized would be a claim this synthesis
+        # is making on its own, which is exactly what it is not allowed to do.
+        if claim_id not in allowed_claim_ids:
+            logger.info(
+                "crucible: dropped a synthesis citation not already cited by "
+                "a per-finding recommendation"
+            )
+            continue
+        claim = claims_by_id.get(claim_id)
+        if claim is None:
+            continue
+        if _FIGURE.search(evidence) or _PROMISE.search(evidence):
+            continue
+        if not lint_claim(evidence, strength).ok:
+            continue
+        if not _grounded_in(evidence, claim.assertion):
+            logger.info(
+                "crucible: dropped a synthesis citation whose evidence did "
+                "not overlap the claim it cited"
+            )
+            continue
+        citations.append(SynthesizedCitation(
+            claim_id=claim_id, evidence=evidence, cited_claim=claim.assertion,
+        ))
+    if not citations:
+        return None
+
+    return SynthesizedRecommendation(
+        action=action, because=because, citations=tuple(citations),
+    )
+
+
+def build_synthesized_recommendation(
+    *,
+    enterprise_id: str,
+    goal_text: str,
+    definition_text: str,
+    findings: Sequence[Finding],
+    deep_by_id: dict[str, DeepRecommendation],
+    claims: Sequence[Claim],
+) -> Optional[SynthesizedRecommendation]:
+    """One top-line recommendation, synthesized across the deep per-finding
+    recommendations that survived `build_deep_recommendations` — or `None`
+    when there is nothing to synthesize, or the call/citation gate produced
+    nothing usable.
+
+    `findings` MUST be in the run's own rank order (I10) — the same contract
+    `build_deep_recommendations` takes; this reads only the subset whose id
+    is a key in `deep_by_id`, in that order, and never re-sorts. That order
+    is load-bearing twice over now: it fixes which recommendation is rank 1,
+    and rank 1's action IS the action returned here, copied verbatim. The
+    model writes the prose and the citations only; it is never asked what the
+    recommendation should be, because that is a decision and I2 keeps
+    decisions in the deterministic ranking (see `SYNTHESIS_SCHEMA`, which has
+    no `action` field at all).
+
+    ONLY WHEN THERE IS MORE THAN ONE KEPT DEEP RECOMMENDATION. With exactly
+    one, that recommendation already IS "the" recommendation for the report —
+    synthesizing a single item with itself would spend a model call to
+    restate what already exists rather than combine anything. With zero,
+    there is nothing to synthesize.
+
+    TOTAL, like `build_deep_recommendations`: a synthesis that failed must
+    not cost a reader the per-finding recommendations that already
+    succeeded — this is additive, never a replacement, and the caller wraps
+    this the same way it wraps the flat and deep passes (see
+    `routes/crucible.py`).
+    """
+    ranked = [(f, deep_by_id[f.id]) for f in findings if f.id in deep_by_id]
+    if len(ranked) <= 1 or _offline():
+        return None
+
+    # THE ACTION, DECIDED BEFORE THE CALL. `findings` arrives in the run's
+    # own frozen rank order (I10), so `ranked[0]` is rank 1 — its action,
+    # verbatim, IS this recommendation's action. The model is asked only for
+    # the prose around it. Letting it author the action would make it the
+    # thing choosing what the single recommendation is, and I2 does not let a
+    # model return a score, a rank, or a decision.
+    bound_action = ranked[0][1].action.strip()
+    if not bound_action:
+        return None
+
+    claims_by_id = {c.id: c for c in claims}
+    # THE POOL A SYNTHESIS CITATION MAY DRAW FROM: every claim id one of the
+    # per-finding deep recommendations being combined already cited. Nothing
+    # wider — not the finding's full claim set, not the corpus — because a
+    # citation this call did not inherit from an already-accepted
+    # recommendation is a claim it is making on its own (I2's boundary,
+    # applied to citations rather than to rank).
+    allowed_claim_ids: set[str] = {
+        change.claim_id for _, rec in ranked for change in rec.changes
+    }
+    if not allowed_claim_ids:
+        return None
+    strengths = [
+        claims_by_id[cid].strength for cid in allowed_claim_ids
+        if cid in claims_by_id
+    ]
+    strength = min(strengths, key=_STRENGTH_ORDER.index) if strengths else "reported"
+
+    started = time.monotonic()
+    try:
+        from app.graph.gateway import llm_call
+
+        result = llm_call(
+            enterprise_id=enterprise_id,
+            agent="crucible",
+            purpose="recommend_synthesis",
+            prompt_version="crucible-recommend-synthesis-v1",
+            system=_SYNTHESIS_SYSTEM,
+            input=_synthesis_input(
+                goal_text, definition_text, ranked, bound_action,
+            ),
+            json_schema=SYNTHESIS_SCHEMA,
+            max_tokens=2000,
+        )
+        out = result.output
+    except Exception:  # noqa: BLE001 — the suggestion layer never kills a run
+        logger.exception("crucible: synthesized recommendation call failed")
+        return None
+
+    if not isinstance(out, dict):
+        return None
+    if time.monotonic() - started > DEADLINE_SECONDS:
+        logger.warning("crucible: synthesized recommendation exceeded its deadline")
+
+    return _synthesis_acceptable(
+        out, strength, allowed_claim_ids, claims_by_id,
+        bound_action=bound_action,
     )

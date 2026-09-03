@@ -993,6 +993,18 @@ export type GoalRunDetail = GoalRun & {
      *  named money target), so it renders on every run that has any pricing
      *  units at all. Absent on a run stored before this shipped. */
     list_pricing_basis?: string
+    /** The single, top-line recommendation for the whole report — narrated
+     *  across the per-finding deep recommendations already shown, never a
+     *  replacement for them. Mirrors `report.py`'s
+     *  `_synthesized_recommendation_section`. Absent (or `action`/`because`
+     *  empty) exactly when there was nothing to synthesize — a run with
+     *  fewer than two kept deep recommendations, or a run stored before this
+     *  shipped. */
+    synthesized_recommendation?: {
+      action: string
+      because: string
+      citations: { claim_id: string; evidence: string; cited_claim: string }[]
+    }
     /** True only when `judge_relevance` completed without raising on THIS
      *  run — never guessed from whether anything ended up set aside, so a
      *  gate that judged everything `true` still reads as having run. Absent
