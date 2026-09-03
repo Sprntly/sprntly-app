@@ -312,7 +312,7 @@ def test_build_deep_recommendations_threads_asked_text_into_the_count():
     """The seam `build_deep_recommendations` actually exposes to its caller
     (`routes/crucible.py`) — offline under pytest, so no model is called, but
     `resolve_recommendation_count` still runs before that check and its basis
-    is what the report renders (AC-2)."""
+    is what the report renders."""
     _, result = _build_two()
     deep = build_deep_recommendations(
         enterprise_id="co",

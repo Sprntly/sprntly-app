@@ -77,8 +77,8 @@ describe("the plan is shown before anything is spent", () => {
   })
 
   it("shows the reader's own sentence beside the goal it was taken to mean", () => {
-    // AC-3: what was asked AND what the metric was taken to mean, both on
-    // screen — a count phrased in the sentence, not only in `goal_text`.
+    // What was asked AND what the metric was taken to mean, both on screen —
+    // a count phrased in the sentence, not only in `goal_text`.
     render(
       <GoalGateCard
         gate={{
