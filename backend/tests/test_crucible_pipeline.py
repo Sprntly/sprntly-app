@@ -19,7 +19,7 @@ from app.crucible.pipeline import (
     MIN_CLAIMS_PER_FINDING,
     NARRATED_DROPS,
     SIZE_BANDS,
-    _quartile_bands,
+    _rank_fractions,
     build_findings,
 )
 from app.crucible.types import Claim, PopulationFilter
@@ -378,10 +378,22 @@ def _dollar_claims(prefix, subject, *, amounts, accounts=None):
 
 
 def _reach_claims(prefix, subject, *, accounts):
+    """One finding's worth of reach claims: ALWAYS exactly two, sharing
+    `accounts` between them.
+
+    Two rather than one-per-account so that a finding's REACH can be varied
+    without also varying how many claims support it. Claim count feeds
+    confidence, and confidence is the final tie-break in ordering — so a
+    fixture that scales accounts and claims together confounds "did reach
+    move this finding" with "did confidence move this finding", and an
+    ordering assertion built on it proves neither.
+    """
+    accounts = tuple(accounts)
+    assert len(accounts) >= 2, "a single-account cluster is refuted, not ranked"
+    half = max(1, len(accounts) // 2)
     return [
-        claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i,
-              accounts=(account,))
-        for i, account in enumerate(accounts)
+        claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i, accounts=group)
+        for i, group in enumerate((accounts[:half], accounts[half:]))
     ]
 
 
@@ -389,39 +401,61 @@ def _by_label(out):
     return {f.label: (f, im) for f, im in zip(out.findings, out.impacts)}
 
 
-# ── The banding function itself ──────────────────────────────────────────────
+# ── The ranking function itself ──────────────────────────────────────────────
 
-def test_an_empty_population_bands_nothing():
-    assert _quartile_bands([]) == {}
+def test_an_empty_population_ranks_nothing():
+    assert _rank_fractions([]) == {}
 
 
-def test_the_only_member_of_a_population_is_its_own_top_band():
+def test_the_only_member_of_a_population_sits_at_the_top_of_it():
     """Deliberate, not a degenerate case: a lone quoted figure IS the largest
-    quoted figure in the run. The band says only that — never that the figure
+    quoted figure in the run. The rank says only that — never that the figure
     is large in absolute terms."""
-    assert _quartile_bands([42.0]) == {42.0: SIZE_BANDS}
+    assert _rank_fractions([42.0]) == {42.0: 1.0}
 
 
-def test_equal_sizes_always_share_a_band():
+def test_equal_sizes_always_share_a_rank():
     """Ordering has to be reproducible run over run, which is the claim this
     engine makes against asking a general model the same question. Two
     findings of identical size must never be separated by an accident of
     iteration order."""
-    bands = _quartile_bands([5.0, 5.0, 5.0, 100.0])
-    assert bands[5.0] == bands[5.0]
-    assert len(set(bands)) == 2
-    assert bands[100.0] == SIZE_BANDS
+    ranks = _rank_fractions([5.0, 5.0, 5.0, 100.0])
+    assert len(set(ranks.values())) == 2
+    assert ranks[5.0] == 0.75
+    assert ranks[100.0] == 1.0
 
 
-def test_the_band_never_falls_as_the_value_rises():
+def test_the_rank_never_falls_as_the_value_rises():
     """Monotonicity is what makes reach-only ordering provably unchanged: if
-    band never disagrees with value, sorting by band then value is the same
-    order as sorting by value alone."""
+    rank never disagrees with value, sorting on rank IS sorting on value for
+    everything measured in the same currency."""
     values = [1.0, 3.0, 7.0, 7.0, 12.0, 40.0, 900.0]
-    bands = _quartile_bands(values)
-    ordered = [bands[v] for v in sorted(set(values))]
+    ranks = _rank_fractions(values)
+    ordered = [ranks[v] for v in sorted(set(values))]
     assert ordered == sorted(ordered)
-    assert min(ordered) >= 1 and max(ordered) == SIZE_BANDS
+    assert min(ordered) > 0.0 and max(ordered) == 1.0
+
+
+def test_the_reported_band_is_the_quartile_of_the_underlying_rank():
+    """The band is DERIVED, never stored beside the rank, so the number a
+    reader sees and the number that sorts cannot drift apart."""
+    from app.crucible.types import ImpactInputs
+
+    def band(rank):
+        return ImpactInputs(currency="accounts", affected_population=None,
+                            movable_gap=None, value_per_unit=None,
+                            size_rank=rank).size_band
+
+    assert band(None) is None
+    assert band(1.0) == SIZE_BANDS
+    assert band(0.76) == 4
+    assert band(0.75) == 3
+    assert band(0.5) == 2
+    assert band(0.25) == 1
+    # Clamped at both ends: a rank of exactly 0 is not band 0, and float
+    # drift just past 1.0 is not band 5.
+    assert band(0.0) == 1
+    assert band(1.0000000001) == SIZE_BANDS
 
 
 # ── I1's sibling: the band reads DEDUPED AMOUNTS, never claim counts ─────────
@@ -609,19 +643,24 @@ def test_ordering_does_not_change_a_single_score(monkeypatch):
     )
 
 
-def test_a_figure_only_finding_sorts_behind_every_sized_finding_in_its_band():
-    """WHERE THE BAND STOPS HELPING, pinned deliberately so the limit is
-    visible rather than discovered on a live run.
+def test_a_figure_only_finding_ranks_by_its_position_not_behind_its_whole_band():
+    """THE ORDERING PROPERTY, AND THE HISTORY BEHIND IT.
 
-    Within a band, ordering falls through to `value`, and a figure-only
-    finding has none — so it sorts behind every finding in the same band that
-    does. The band lifts it out of last place (it is no longer below every
-    finding we could size at all) and leaves it below its whole band.
+    An earlier revision sorted on the QUARTILE and then broke ties on
+    `value`. Measured on a probe corpus of 201 findings, that put a
+    figure-only finding in the top band and then 51st overall — behind every
+    reach finding in its own band — because the tie-break asked `value` to
+    rank "fifty accounts" against "no account measure", and `None` loses that
+    every time. The quartile lifted the finding and the tie-break dropped it,
+    using exactly the cross-currency comparison the quartile existed to
+    avoid.
 
-    Whether that is far enough is a question about real corpora, not about
-    this function: the answer depends entirely on how many findings share the
-    top band, which is a property of the tenant's data. This test records the
-    behaviour; it does not endorse it."""
+    So the quartile became a REPORTING number and ordering moved to the
+    underlying position among a finding's own currency peers. Here the quoted
+    figure is the largest of its population and every reach finding is
+    smaller than the largest of its own, so the figure sorts at the very
+    front rather than behind the pack it was banded with.
+    """
     claims = []
     for n in range(8):
         subject = f"reach-{n}"
@@ -636,14 +675,56 @@ def test_a_figure_only_finding_sorts_behind_every_sized_finding_in_its_band():
     money_at = labels.index("money")
     money_impact = out.impacts[money_at]
 
-    assert money_impact.size_band == SIZE_BANDS
     assert money_impact.value is None
-    # Not last, which is where it sat before the band existed...
-    assert money_at < len(labels) - 1
-    # ...but behind every band-4 finding that carries a value.
-    ahead = out.impacts[:money_at]
-    assert ahead, "the band did not lift it above anything"
-    assert all(i.size_band == SIZE_BANDS and i.value is not None for i in ahead)
+    assert money_impact.size_rank == 1.0
+    assert money_impact.size_band == SIZE_BANDS
+    # Nothing ahead of it may be ranked below it — the ordering is total and
+    # by rank, not by whether a finding happens to carry a `value`.
+    assert all(
+        i.size_rank >= money_impact.size_rank for i in out.impacts[:money_at]
+    )
+    assert money_at <= 1, "the top of its own currency should sort at the front"
+
+
+def test_a_figure_only_finding_does_not_sink_as_its_band_gets_more_crowded():
+    """THE PROPERTY THAT SEPARATES THE TWO DESIGNS, and the one an earlier
+    version of this test failed to actually test.
+
+    Under quartile-then-`value` ordering, a figure-only finding sat behind
+    EVERY valued finding in its band, so its position was a function of how
+    many findings happened to share that band — on a real corpus, a quarter
+    of everything. Ordering on the underlying position instead, only a
+    finding that genuinely ties it can precede it, and with distinct reach
+    values exactly one does.
+
+    So: grow the corpus so the top band holds more findings, and the
+    figure-only finding must not move.
+
+    (The first draft of this test scaled every reach value by 50x and
+    asserted the position was stable. It passed under BOTH designs — because
+    the ranking is relative, scaling everything changes nothing — so it
+    proved neither. Kept as a note: an ordering test that cannot fail on the
+    ordering it replaced is not testing the ordering.)
+    """
+    def money_position(reach_findings: int) -> tuple[int, int]:
+        claims = []
+        for n in range(reach_findings):
+            subject = f"reach-{n}"
+            claims.extend(_reach_claims(
+                subject, subject,
+                accounts=tuple(f"{subject}-a{i}" for i in range(n + 2)),
+            ))
+        claims.extend(_dollar_claims("m", "money", amounts=[250000.0, 90000.0]))
+        out = run(claims)
+        at = [f.label for f in out.findings].index("money")
+        top_band = sum(1 for i in out.impacts if i.size_band == SIZE_BANDS)
+        return at, top_band
+
+    four_at, four_top = money_position(4)
+    eight_at, eight_top = money_position(8)
+
+    assert eight_top > four_top, "the top band must actually have grown"
+    assert four_at == eight_at
 
 
 def test_a_small_quoted_figure_is_not_promoted_for_being_a_figure():

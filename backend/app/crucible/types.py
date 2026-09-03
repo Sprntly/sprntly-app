@@ -144,6 +144,32 @@ ConfidenceBand = Literal["high", "medium", "low"]
 #: Field names that carry "how many sources agree". Impact may never read one.
 #: Enforced by `invariants.assert_no_corroboration_fields`, which is why this is
 #: a data structure rather than a paragraph.
+#: How many ordinal bands a size is REPORTED in. Quartiles: enough to
+#: separate a big finding from a small one, few enough that the output never
+#: implies a precision the underlying evidence cannot support. A percentile
+#: would read as measurement; a quartile reads as what it is, a rough
+#: position among peers.
+#:
+#: A DISPLAY GRANULARITY, NOT AN ORDERING ONE. Ordering reads `size_rank`,
+#: the underlying position at full resolution, because quantising first and
+#: then trying to break the ties would mean comparing findings measured in
+#: different currencies — the exact comparison the band exists to avoid. So
+#: the coarse number is what a reader sees and the fine one is what sorts.
+SIZE_BANDS = 4
+
+
+def _band_for_rank(size_rank: Optional[float]) -> Optional[int]:
+    """A full-resolution position among peers -> the quartile it is reported
+    in. `None` in, `None` out: nothing to rank is not band 1.
+
+    Clamped at both ends so a rank of exactly 0.0 cannot produce a band 0 and
+    floating-point drift just above 1.0 cannot produce a band 5.
+    """
+    if size_rank is None:
+        return None
+    return max(1, min(SIZE_BANDS, math.ceil(SIZE_BANDS * size_rank)))
+
+
 CORROBORATION_FIELDS: frozenset[str] = frozenset({
     "surfaced_by", "source_types", "breadth", "connected_breadth",
     "corroboration", "corroboration_bonus", "agreeing_sources", "source_count",
@@ -390,18 +416,18 @@ class ImpactInputs:
     never measured them yields `None`, which must survive to the output as
     "not measured" rather than collapsing to a confident zero (I3).
 
-    `size_band` IS A CROSS-FINDING COMPARISON, AND IT IS STILL NOT
+    `size_rank` IS A CROSS-FINDING COMPARISON, AND IT IS STILL NOT
     CORROBORATION. Every other field here describes this finding alone; the
-    band describes where its size falls among the other findings in the same
+    rank describes where its size falls among the other findings in the same
     run. That is a legitimate thing for size to depend on and an illegitimate
     thing for size to be computed from at scoring time, so the comparison
     happens in Stage 8 — BEFORE any scoring — and arrives here as an ordinary
     input. `score_impact` still reads this object and nothing else.
 
-    The distinction that keeps I1 intact: the band ranks findings by how much
+    The distinction that keeps I1 intact: the rank orders findings by how much
     money or how many accounts they carry, never by how many claims say so.
-    An amount restated ten times and an amount stated once band identically,
-    because the sum they band on is deduplicated before it is taken (see
+    An amount restated ten times and an amount stated once rank identically,
+    because the sum they rank on is deduplicated before it is taken (see
     `pipeline._grounded_commercial_native_units`). Corroboration cannot reach
     this field, which is why the dedup had to land first.
     """
@@ -411,11 +437,23 @@ class ImpactInputs:
     value_per_unit: Optional[float]
     assumed_params: tuple[AssumedParam, ...] = ()
     native_units: Mapping[str, float] = field(default_factory=dict)
-    #: Ordinal quartile of this finding's size against its OWN currency's
-    #: peers in the same run — dollar findings against dollar findings,
-    #: reach findings against reach findings. 4 is largest. `None` means
-    #: there was nothing to band: no grounded figure and no measured reach.
-    size_band: Optional[int] = None
+    #: Where this finding's size falls among its OWN currency's peers in the
+    #: same run, from just above 0 to 1.0 for the largest — dollar findings
+    #: against dollar findings, reach findings against reach findings.
+    #: `None` means there was nothing to rank: no grounded figure and no
+    #: measured reach.
+    #:
+    #: STORED AT FULL RESOLUTION, RENDERED AS A QUARTILE. `size_band` below
+    #: derives from this rather than sitting beside it as a second field,
+    #: so the number a reader sees and the number that sorts can never
+    #: disagree.
+    size_rank: Optional[float] = None
+
+    @property
+    def size_band(self) -> Optional[int]:
+        """The reportable quartile, 1..4 with 4 largest. Derived, never
+        stored — see `size_rank`."""
+        return _band_for_rank(self.size_rank)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -425,7 +463,7 @@ class ImpactInputs:
     def __hash__(self) -> int:
         return hash((self.currency, self.affected_population, self.movable_gap,
                      self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units), self.size_band))
+                     _hashable(self.native_units), self.size_rank))
 
 
 @dataclass(frozen=True)
@@ -467,10 +505,16 @@ class Impact:
     #: Carried through from `ImpactInputs` unchanged, so ordering can read it
     #: off the FROZEN score without ever recomputing a comparison (I10). A
     #: finding can be unsizeable in the goal's currency (`value is None`) and
-    #: still carry a band, which is the case a quoted figure with no named
+    #: still carry a rank, which is the case a quoted figure with no named
     #: account produces: we did not measure its reach, and saying so is not
     #: the same as saying it is worth nothing.
-    size_band: Optional[int] = None
+    size_rank: Optional[float] = None
+
+    @property
+    def size_band(self) -> Optional[int]:
+        """The reportable quartile, 1..4 with 4 largest. Derived from
+        `size_rank`, never stored alongside it."""
+        return _band_for_rank(self.size_rank)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -480,7 +524,7 @@ class Impact:
     def __hash__(self) -> int:
         return hash((self.value, self.currency, self.affected_population,
                      self.movable_gap, self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units), self.size_band))
+                     _hashable(self.native_units), self.size_rank))
 
 
 @dataclass(frozen=True)

@@ -79,7 +79,7 @@ def score_impact(finding: Finding) -> Impact:
     zero: an unsizeable finding goes in its own section, because "we could not
     size this" and "this is worth nothing" lead to opposite decisions.
 
-    `size_band` PASSES THROUGH AND NEVER ENTERS `value`. A quoted dollar
+    `size_rank` PASSES THROUGH AND NEVER ENTERS `value`. A quoted dollar
     figure is real evidence about size, and folding it into `value` would be
     the worst possible way to use it: `value` is denominated in ACCOUNTS on a
     corpus-only run, so a dollar amount added to it wins by six orders of
@@ -88,7 +88,7 @@ def score_impact(finding: Finding) -> Impact:
     quote numbers are self-selected, so that is the loudest-problem failure
     wearing a currency symbol.
 
-    So the band is ORDINAL and it is computed elsewhere. A finding sized in
+    So the rank is ORDINAL and it is computed elsewhere. A finding sized in
     dollars is ranked against the other findings sized in dollars; one sized
     in accounts against the other findings sized in accounts. This function
     carries the answer onto the frozen `Impact` and computes nothing from it —
@@ -118,7 +118,7 @@ def score_impact(finding: Finding) -> Impact:
         value_per_unit=i.value_per_unit,
         assumed_params=i.assumed_params,
         native_units=i.native_units,
-        size_band=i.size_band,
+        size_rank=i.size_rank,
     )
 
 
