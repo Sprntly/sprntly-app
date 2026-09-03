@@ -139,10 +139,6 @@ def test_money_reaches_the_strip_only_as_the_readers_own_estimate():
     assert "48,000" in t
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Memo headings are CLAIMS — 'We tell customers their export succeeded "
-    "roughly 72,000 times, and it did not'. Ours are labels: 'What the "
-    "evidence says'. The claim is derivable from the top finding."))
 def test_section_headings_are_claims_not_labels():
     # NOT A WORD COUNT. The first version asserted "some heading is longer than
     # six words" and XPASSED against "Considered and set aside for this goal
@@ -152,6 +148,16 @@ def test_section_headings_are_claims_not_labels():
     heads = [re.sub(r"<[^>]+>", "", h) for h in re.findall(r"<h2>(.*?)</h2>", _doc())]
     assert not any(h.startswith("What the evidence says") for h in heads), (
         "the findings heading is still a label; the memo's is a claim"
+    )
+    # NOT JUST "DIFFERENT" — DERIVED. Any different string would satisfy the
+    # assertion above (an empty heading, a typo'd label, anything). The claim
+    # has to actually be about THIS corpus, so this proves it by finding a
+    # fragment of the top finding's own statement inside a rendered heading.
+    assert any(h.strip() for h in heads), "no non-empty h2 headings rendered"
+    assert any("export defect" in h for h in heads), (
+        "the findings heading should carry a fragment of the top finding's "
+        "own statement ('...concern export defect'), proving the claim is "
+        "derived from the corpus rather than any different string"
     )
 
 

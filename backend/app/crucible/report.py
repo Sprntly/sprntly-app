@@ -1385,6 +1385,49 @@ def _list_pricing(findings: list[dict]) -> Optional[tuple[float, float, int]]:
     return aggregate_price_range(pairs)
 
 
+def _findings_heading(findings: list[dict]) -> str:
+    """The findings-section heading: a CLAIM, not a label.
+
+    Apurva's own example memo opens this section with "We tell customers
+    their export succeeded roughly 72,000 times, and it did not" — an
+    assertion about the corpus, not a description of the section
+    ("What the evidence says"). This corpus's assertion already exists: the
+    top-ranked finding's own `statement` is exactly that shape ("N claims
+    across M accounts concern X"), written for the finding's own body text
+    (`_esc_statement`, used throughout `_finding_block`) and reused here
+    rather than generated a second way — one wording convention for what a
+    finding says, not two.
+
+    `findings` arrives already rank-ordered (see `render_report_html`'s own
+    docstring on why re-sorting anywhere downstream would be wrong), so
+    `findings[0]` is the strongest claim in the set without this function
+    doing any ranking of its own.
+
+    STILL A SECTION HEADING, NOT JUST THE TOP FINDING STANDING ALONE. A claim
+    with nothing after it reads as if it were the only finding, which is false
+    on every run with more than one — so a heading for more than one finding
+    names how many more sit under it. Exactly one finding needs no such
+    qualifier: the claim already describes the whole section.
+
+    CUT BEFORE THE FINDING'S OWN QUOTE, not after it. `pipeline.py`'s
+    statement-builder embeds a supporting quote at "— for example,
+    “…”" precisely when a finding has no `label` — and a labelless
+    finding's own `<h3>` card (`_finding_block`) falls back to that SAME
+    statement for ITS heading. Reusing the whole sentence here would put the
+    identical quoted words in two headings back to back, about the same
+    theme — the exact duplication `Finding.label`'s own docstring exists to
+    avoid ("a terrible thing to SCAN"). Cutting at the same clause boundary
+    leaves the claim here and the quote where it already is: in the card
+    below, or in its blockquote.
+    """
+    statement = (findings[0].get("statement") or "").strip()
+    core = statement.split("— for example,", 1)[0].strip()
+    claim = _esc_clipped(core or statement, MAX_STATEMENT_CHARS)
+    if len(findings) > 1:
+        return f"{claim} — the strongest of {len(findings):,} findings below"
+    return claim
+
+
 def _findings_section(
     findings: list[dict],
     # The EDITORIAL cap is the default, so a future caller that forgets to pass
@@ -1394,7 +1437,7 @@ def _findings_section(
 ) -> str:
     if not findings:
         return ""
-    out = [f"<h2>What the evidence says ({len(findings)})</h2>"]
+    out = [f"<h2>{_findings_heading(findings)}</h2>"]
     # THE HEADING HAS TO AGREE WITH THE HEADLINE. Fixing only the summary left
     # one document reading "not ordered by size at all" and, two lines later,
     # "Ranked by reach" — a fix that stopped at its own boundary.
