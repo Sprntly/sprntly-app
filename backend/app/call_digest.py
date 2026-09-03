@@ -1178,10 +1178,46 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
 # comparative shapes divert to a direct answer. Mode selection is consulted
 # only after routing already picked the VoC surface.
 
-_VOC_REPORT_SHAPED = re.compile(
-    r"\b(?:summari[sz]e|recap|digest|rundown|round-?up|overview|report|"
-    r"themes?|takeaways?|voice\s+of(?:\s+the)?\s+customer|voc)\b"
+# ASKING FOR A SUMMARY IS NOT ASKING FOR A REPORT (owner's rule, 2026-09-03).
+# Reported against "Give me summary on last week's customer conversations": the
+# chat opened the Reports panel and showed report-generation copy for a question
+# that wanted a few paragraphs in the thread. "summarize" was in the
+# report-shaped set below, so a summary ask could only ever mean the
+# multi-minute VoC artifact.
+#
+# The set is now split by what the words actually NAME:
+#
+#   * `_VOC_ARTIFACT_NAMED` — the words naming the DOCUMENT ("report",
+#     "voice of customer", "write-up", "one-pager"). Only these mean "build me
+#     the artifact", and they still always win.
+#   * `_VOC_SUMMARY_SHAPED` — the words asking for the CONTENT summarized
+#     ("summarize", "summary", "recap", "overview", "rundown", "catch me up").
+#     These are a question about the calls, answered in the thread from the
+#     same corpus the report is built from.
+#
+# "themes" and "takeaways" moved to the summary side with them: "what were the
+# themes from last week's calls" is the same ask in different words, and nobody
+# typing it is asking for a document. Someone who wants the artifact has an
+# unambiguous way to say so, and it stays one sentence away.
+_VOC_ARTIFACT_NAMED = re.compile(
+    r"\b(?:report|digest|write-?up|one-?pager|deck"
+    r"|voice\s+of(?:\s+the)?\s+customer|voc)\b",
+    re.I,
+)
+
+_VOC_SUMMARY_SHAPED = re.compile(
+    r"\b(?:summari[sz]e[ds]?|summary|recap|rundown|round-?up|overview"
+    r"|themes?|takeaways?)\b"
     r"|\bcatch\s+me\s+up\b|\bbrief\s+me\b",
+    re.I,
+)
+
+#: Kept as the union of the two, because the eligibility rule below reads
+#: "report-shaped" as "not a pointed query" — and a summary is not one of those
+#: either. What changed is only which MODE a summary-shaped ask lands in,
+#: decided in `is_voc_query`.
+_VOC_REPORT_SHAPED = re.compile(
+    _VOC_ARTIFACT_NAMED.pattern + r"|" + _VOC_SUMMARY_SHAPED.pattern,
     re.I,
 )
 
@@ -1216,11 +1252,25 @@ _VOC_COMPARATIVE = re.compile(
 
 
 def is_voc_query(question: str) -> bool:
-    """True when the ask wants a computed answer from the corpus rather than
-    the report artifact. Report-shaped language always wins ("summarize…",
-    "…report", "themes") so the artifact stays one sentence away."""
-    if _VOC_REPORT_SHAPED.search(question):
+    """True when the ask wants an answer in the THREAD rather than the report
+    artifact.
+
+    Three rules, in order:
+
+      1. NAMING THE DOCUMENT WINS. "give me a voice-of-customer report",
+         "write this up as a one-pager" — the artifact is what was asked for,
+         so the report path runs.
+      2. ASKING FOR A SUMMARY DOES NOT. "summarize last week's calls", "recap
+         the customer conversations", "what were the themes" want the content
+         summarized in the chat, not a multi-minute document and a panel. This
+         is the owner's rule (2026-09-03), and it reverses the previous
+         behaviour, where "summarize" was read as naming the report.
+      3. Otherwise the pointed-query shapes decide, unchanged.
+    """
+    if _VOC_ARTIFACT_NAMED.search(question):
         return False
+    if _VOC_SUMMARY_SHAPED.search(question):
+        return True
     return any(p.search(question) for p in _VOC_QUERY_SHAPES)
 
 

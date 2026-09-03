@@ -699,19 +699,34 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
     on, so it is the one read here — a second list would drift and the drift
     would be invisible until a report printed itself into a chat thread.
 
-    ONE carve-out: `call-digest` is the machinery id BOTH the full
-    voice-of-customer pass AND the map-reduce count engine
-    (`app.corpus_mapreduce` via `call_digest.VOC_CALLS_SPEC`) resolve to — the
-    planner classifies by question SHAPE ("is this about the calls?"), before
-    the answer path has decided which of the two it will actually run, so one
-    pipeline id has to cover both. A count-shaped question
-    (`call_digest.is_mapreducible_count`, the SAME eligibility check the
-    answer path itself gates the engine on) answers INLINE, never a report —
-    see `app.corpus_mapreduce`'s module docstring — so it must not open the
-    Reports drawer or show report-generation copy just because it shares a
-    pipeline id with the report it is not writing. Every other
-    `_REPORT_PIPELINE_IDS` member names exactly one shape and needs no such
-    carve-out.
+    ONE carve-out: `call-digest` is the machinery id EVERY calls-shaped ask
+    resolves to — the full voice-of-customer report, the pointed query answered
+    from the corpus, and the map-reduce count engine alike. The planner
+    classifies by question SHAPE ("is this about the calls?") before the answer
+    path has decided which of the three it will run, so one pipeline id has to
+    cover all of them.
+
+    `call_digest.is_voc_query` IS that decision — the same function
+    `call_digest.answer` forks on (`query_mode`), so this cannot drift from what
+    actually happens — and everything it claims answers INLINE with
+    `_report: False`. Such a turn must not open the Reports drawer or show
+    report-generation copy just because it shares a pipeline id with the report
+    it is not writing.
+
+    THE COMMONEST CASE IS A SUMMARY (owner's rule, 2026-09-03). "Give me
+    summary on last week's customer conversations" now answers in the thread —
+    see `call_digest.is_voc_query` — so the panel must not open for it. Before
+    this, the endpoint promised a report, the answer path wrote none, and the
+    reader watched a Reports panel that never filled.
+
+    This supersedes the narrower count-shaped carve-out that stood here:
+    `is_mapreducible_count` requires `is_voc_query`, so the wider check
+    subsumes it, needs no feature-flag read, and closes the same mismatch for
+    every other query shape ("which accounts complained about latency") that
+    was already answering inline under a `report: true` envelope.
+
+    Every other `_REPORT_PIPELINE_IDS` member names exactly one shape and needs
+    no such carve-out.
 
     Imported lazily: `qa_agent` is a heavy module and this endpoint is on the
     send path, which imports `ask_planner` the same way one function below.
@@ -724,10 +739,9 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
         if pipeline_id not in _REPORT_PIPELINE_IDS:
             return False
         if pipeline_id == "call-digest":
-            from app.call_digest import is_mapreducible_count
-            from app.config import settings
+            from app.call_digest import is_voc_query
 
-            if settings.voc_count_engine_enabled and is_mapreducible_count(question):
+            if is_voc_query(question):
                 return False
         return True
     except Exception:  # noqa: BLE001 — never break the verdict over a hint
