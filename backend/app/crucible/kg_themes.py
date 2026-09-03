@@ -56,6 +56,41 @@ _STOPWORDS = frozenset(
 #: ('Prototype Agent' / 'Strategy Agent'), two is a subject.
 _MIN_SHARED_TOKENS = 2
 
+#: Above this many labels, a merged group has stopped being a topic and become
+#: a CATEGORY. On a real tenant the overlap rule below correctly formed a
+#: 15-label go-to-market group — every pair independently qualified — holding
+#: ICP, partnerships, sales, traction, fundraising, beta program, global scale
+#: and pitch strategy. A reader told "your recommendation: go-to-market" learns
+#: nothing; that is a different failure from the shredding this module fixes,
+#: and not obviously a smaller one. Such a group is discarded whole and its
+#: members fall back to exact-label matching.
+#:
+#: A CAP RATHER THAN A STRICTER RULE, deliberately. The mechanism behind those
+#: groups is that a short generic label ('go to market', 'architecture') is a
+#: subset of every longer label containing it, so it donates membership to all
+#: of them. Requiring two words on the subset side would stop that — and would
+#: also stop 'benchmarking' / 'benchmarking & validation' and 'billing' /
+#: 'billing & pricing', which are exactly the merges worth having. The cap is
+#: orthogonal: it does not change which PAIRS qualify, it only declines to act
+#: when the result has outgrown being a topic.
+#:
+#: 9 IS FITTED TO ONE CORPUS AND IS A JUDGEMENT CALL, not a measured constant.
+#: It is the size of the largest group on that tenant a human read as a real
+#: topic — enterprise compliance, which is also the group holding the two deep
+#: findings that motivated this fix. Above it sat ICP fit (10), competitive
+#: landscape (11) and go-to-market (17), all of which read as categories.
+#:
+#: AND THE DIAL SITS DIRECTLY ON THAT BOUNDARY, which is worth knowing before
+#: moving it. Group sizes depend on the order candidates are offered in, and
+#: that order is citation-weighted, so the SAME corpus produces a different
+#: size depending on how much each label was cited: the enterprise compliance
+#: group measures 9 under the weighting this module actually uses and 8 when
+#: every label is counted once. A cap of 8 therefore dissolves it on the real
+#: path and un-merges the exact pair this fix exists for. One member either way
+#: flips it. Treat this as a dial someone chose against one corpus, not a
+#: number the data produced, and re-measure before trusting it on another.
+_MAX_TOPIC_GROUP = 9
+
 #: FAIL SAFE TOWARD NOT MERGING. On a corpus where labels overlap for reasons
 #: we did not anticipate, merging could collapse the whole graph into one
 #: mega-finding — a single "everything" recommendation that is confidently
@@ -327,6 +362,16 @@ def canonicalize_themes(
     # a token set too and the representative speaks for all of them.
     reps = [g[0] for g in groups]
     tokens = {r: content_tokens(labels.get(r, "")) for r in reps}
+    #
+    # GREEDY FIRST FIT, AND THE GROUPS ARE NOT TRANSITIVELY CLOSED. A candidate
+    # joins the first group it fully qualifies for, so two labels that satisfy
+    # the rule with each other can still end up apart: 'benchmarking' joined a
+    # TierMem benchmarking group formed earlier in the order, and
+    # 'benchmarking & validation' — a subset match against it — could not then
+    # clear every member of that group. Do not read the output as "every
+    # qualifying pair is together". It errs toward leaving topics split, which
+    # is the safe direction here, but it is a real property and not an
+    # oversight.
     cliques: list[list[str]] = []
     for rep in reps:                      # already in (most-cited, id) order
         mine = tokens[rep]
@@ -339,6 +384,21 @@ def canonicalize_themes(
                     break
         if not joined:
             cliques.append([rep])
+
+    # THE SIZE CAP, applied before anything is committed to. An oversized group
+    # is dissolved rather than trimmed: keeping an arbitrary 8 of its 15 labels
+    # would be a merge nobody chose, and there is no principled way to pick
+    # which 7 to evict. Its members drop back to their tier-1 groups, which
+    # still hold — case variants stay merged, and only the overlap merges go.
+    oversized = [c for c in cliques if len(c) > _MAX_TOPIC_GROUP]
+    if oversized:
+        logger.info(
+            "crucible: %d theme group(s) exceeded %d labels and were dissolved "
+            "as categories rather than topics (largest %d)",
+            len(oversized), _MAX_TOPIC_GROUP, max(len(c) for c in oversized),
+        )
+        cliques = [c for c in cliques if len(c) <= _MAX_TOPIC_GROUP]
+        cliques.extend([m] for c in oversized for m in c)
 
     # THE SAFE-FAIL CHECK, before anything is applied.
     largest = max((len(c) for c in cliques), default=0)
