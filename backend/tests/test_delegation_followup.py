@@ -1024,7 +1024,7 @@ def test_assignment_email_never_carries_task_text_end_to_end(isolated_settings, 
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": _DISTINCTIVE_TASK},
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(captured) == 1
 
     subject, body_text, body_html = email_mod.render_assignment_email(

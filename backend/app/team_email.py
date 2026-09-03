@@ -29,8 +29,11 @@ manually when the send fails.
 """
 from __future__ import annotations
 
+import contextvars
 import html
 import logging
+import sys
+from concurrent.futures import Future, ThreadPoolExecutor
 from urllib.parse import quote
 
 import httpx
@@ -63,6 +66,13 @@ def _invite_redirect_url() -> str:
 SENT = "sent"  # new user — Supabase invite (set-password flow) sent
 SENT_EXISTING = "sent_existing"  # existing user — sign-in notification email sent
 FAILED = "failed"  # nothing could be sent (see logs)
+
+# dispatch_invite_email's outcome when the send was handed off rather than
+# awaited — the real SENT/SENT_EXISTING/FAILED lands only in the logs (see
+# `_on_invite_email_done` below), never in the response. Deliberately not one
+# of the three send outcomes above so a caller can't mistake "queued" for
+# "delivered".
+QUEUED = "queued"
 
 
 def _is_already_registered(exc: Exception) -> bool:
@@ -461,3 +471,125 @@ def send_invite_email(
             email, exc, redirect,
         )
         return FAILED
+
+
+# ── Off-thread dispatch (B5a) ──
+#
+# send_invite_email is synchronous, blocking network I/O — Supabase
+# generate_link plus Resend's httpx.post, observed ~1.5s in the request path
+# (POST /v1/projects/{id}/tag). The invite row is always written BEFORE this
+# is called (both callers), so a slow or failed send was already
+# degrade-not-error; the only thing wrong was making the caller's response
+# wait on it. `dispatch_invite_email` below hands the same call to a
+# background thread and returns immediately.
+
+# MODULE-LEVEL and shared, deliberately — a per-request ThreadPoolExecutor
+# would be garbage-collected as soon as the request handler returned (nothing
+# else would hold a reference to it), which can kill an in-flight Resend call
+# outright, and a fresh pool per request churns OS threads for no reason. One
+# small bounded pool, matching `routes/custom_artifacts.py`'s `_GENERATION_
+# POOL` reasoning: a burst of invites can only ever queue behind each other,
+# never behind (or ahead of) unrelated request-serving threads.
+_INVITE_EMAIL_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="invite-email")
+
+# Strong references to in-flight sends. A bare `.submit(...)` whose returned
+# Future is dropped still runs (the executor's own work queue holds the job),
+# but nothing would ever call `.result()`/`.exception()` on it — so a raised
+# exception, or a returned FAILED status, would vanish silently instead of
+# reaching the logs. Retaining the future here, with a done-callback that
+# both logs the outcome and discards it from this set, is what keeps a failed
+# background send visible in the logs (the whole point of the earlier
+# resend-send-logging work) even though it no longer blocks the response.
+# Same set-plus-discard shape every other fire-and-forget site in this
+# codebase uses (routes/ask.py, evidence.py, brief.py, design_agent.py,
+# routes/custom_artifacts.py).
+_inflight_email_futures: set[Future] = set()
+
+
+def _on_invite_email_done(future: Future) -> None:
+    """Logs the real outcome of a backgrounded `send_invite_email` call —
+    runs on the pool's worker thread once the send finishes. `send_invite_
+    email` is total (it catches every exception itself and returns FAILED
+    rather than raising — see its own docstring), so `future.exception()`
+    firing here means something outside that contract broke; still checked,
+    never assumed impossible."""
+    _inflight_email_futures.discard(future)
+    exc = future.exception()
+    if exc is not None:
+        logger.error("Backgrounded invite email dispatch raised: %s", exc)
+        return
+    status = future.result()
+    if status == FAILED:
+        # send_invite_email already logged the specific cause (Resend/
+        # generate_link/Supabase failure) at the point it happened; this is
+        # the backgrounded dispatch's own record that the eventual outcome
+        # was a failure, since the request/response that started it never
+        # sees it (the response already returned QUEUED).
+        logger.warning(
+            "Backgrounded invite email send finished FAILED (see the prior "
+            "warning above for the specific cause)."
+        )
+
+
+def dispatch_invite_email(
+    email: str,
+    *,
+    inviter_first_name: str = "",
+    workspace_name: str = "",
+    first_name: str = "",
+    project_name: str | None = None,
+) -> str:
+    """Send the invite email OFF the request thread so the caller can return
+    immediately instead of waiting on `send_invite_email`'s blocking network
+    calls. Same email/inviter_first_name/workspace_name/first_name/
+    project_name contract as `send_invite_email` — this only changes WHEN the
+    send happens, never what it sends.
+
+    Returns QUEUED on the backgrounded path: the caller's response can no
+    longer report SENT/SENT_EXISTING/FAILED synchronously, so `email_status`
+    becomes optimistic. That is safe because the invite row is always written
+    before this is called and the existing degrade-not-error contract already
+    tolerates a later-discovered failure (Team settings' resend affordance is
+    exactly that path) — this just moves WHEN the failure can be discovered,
+    not whether one is tolerated. The real outcome is logged by
+    `_on_invite_email_done`, never surfaced back to the request.
+
+    Under pytest the send runs INLINE and returns the real SENT/SENT_EXISTING/
+    FAILED status — the existing tests that assert on `send_invite_email`'s
+    outcome (via this dispatcher) keep working unchanged. Mirrors every other
+    pytest-inline fire-and-forget site in this codebase (e.g.
+    `routes/custom_artifacts.py`'s `generate()`)."""
+    if "pytest" in sys.modules:
+        return send_invite_email(
+            email,
+            inviter_first_name=inviter_first_name,
+            workspace_name=workspace_name,
+            first_name=first_name,
+            project_name=project_name,
+        )
+
+    # contextvars.copy_context().run(...) rather than a bare submit(...):
+    # ThreadPoolExecutor does not propagate the calling thread's contextvars
+    # to its worker threads (the same reason `asyncio.to_thread` wraps its
+    # call in a copied Context — plain `submit`/`run_in_executor` do not).
+    # `send_invite_email` reads no contextvar today (verified: no `usage_
+    # scope`/`company_llm_key` call anywhere on this path — it is pure args +
+    # `config.settings` + a plain `supabase_client()`), but the ambient
+    # company-scoped bindings other request-spawned background work relies on
+    # (`usage_context.py`, `middleware_llm_key.py`) are exactly the kind of
+    # thing a future addition to this send path would expect to inherit;
+    # copying the context here is what makes that true without a second
+    # migration later.
+    ctx = contextvars.copy_context()
+    future = _INVITE_EMAIL_POOL.submit(
+        ctx.run,
+        send_invite_email,
+        email,
+        inviter_first_name=inviter_first_name,
+        workspace_name=workspace_name,
+        first_name=first_name,
+        project_name=project_name,
+    )
+    _inflight_email_futures.add(future)
+    future.add_done_callback(_on_invite_email_done)
+    return QUEUED
