@@ -14,9 +14,11 @@ fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import sys
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -318,6 +320,123 @@ def _notify_added_to_project(
         logger.warning("project_added_email_failed project_id=%s", project_id)
 
 
+# ── Off-thread post-insert side effects (mirrors app/team_email.py's
+# dispatch_invite_email) ──
+#
+# Both member-add mutation surfaces (`add_member`'s TIER_WORKSPACE/
+# TIER_COMPANY branch, `tag_candidate_route`'s TIER_WORKSPACE branch) run
+# THREE best-effort side effects after the member row is already committed:
+# a realtime publish, the on-join greeting (`project_join_greeting.
+# post_join_greeting` — a narrative LLM call, the dominant cost here), and
+# the "added to project" email. None of the three can change the response or
+# roll back the add (each already swallows its own exceptions), so making the
+# caller's response wait on them only adds latency, never correctness. This
+# hands all three to a background thread so the route returns the moment the
+# insert (+ the required re-asserts) is done.
+
+# MODULE-LEVEL and shared, deliberately — see app/team_email.py's
+# _INVITE_EMAIL_POOL for the same reasoning: a per-request pool would be
+# garbage-collected as soon as the handler returned, which can kill an
+# in-flight side effect outright, and a fresh pool per request churns OS
+# threads for no reason.
+_MEMBER_ADD_POOL = ThreadPoolExecutor(max_workers=4, thread_name_prefix="member-add")
+
+# Strong references to in-flight side-effect runs, discarded by the
+# done-callback below — same shape as app/team_email.py's
+# _inflight_email_futures (a bare `.submit(...)` whose Future is dropped
+# still runs, but nothing would ever surface a raised exception to the logs).
+_inflight_member_add_futures: set[Future] = set()
+
+
+def _on_member_add_side_effects_done(future: Future) -> None:
+    """Logs an unexpected exception from a backgrounded side-effect run.
+    Each of the three calls inside `_run_member_add_side_effects` already
+    swallows its OWN exceptions (AD-P22) — this firing means something
+    outside that contract broke; still checked, never assumed impossible."""
+    _inflight_member_add_futures.discard(future)
+    exc = future.exception()
+    if exc is not None:
+        logger.error("Backgrounded member-add side effects raised: %s", exc)
+
+
+def _run_member_add_side_effects(
+    *,
+    project_id: int,
+    user_id: str,
+    project_name: str | None,
+    dataset: str,
+    company_id: str,
+    email: str | None,
+    recipient_name: str | None,
+) -> None:
+    """The three post-insert, best-effort side effects for a NEW project
+    membership, run either inline (pytest) or off-thread (production) by
+    `_dispatch_member_add_side_effects` below. Order preserved from the
+    pre-deferral code: realtime publish, then the greeting, then the email."""
+    project_delegation._publish_member_added(project_id, user_id, project_name)
+    project_join_greeting.post_join_greeting(
+        project_id, user_id, dataset=dataset, company_id=company_id
+    )
+    _notify_added_to_project(
+        email=email, recipient_name=recipient_name,
+        project_id=project_id, project_name=project_name,
+    )
+
+
+def _dispatch_member_add_side_effects(
+    *,
+    project_id: int,
+    user_id: str,
+    project_name: str | None,
+    dataset: str,
+    company_id: str,
+    email: str | None,
+    recipient_name: str | None,
+) -> None:
+    """Run `_run_member_add_side_effects` off the request thread so
+    `add_member`/`tag_candidate_route` can return immediately after the
+    insert. Under pytest the run is INLINE (`"pytest" in sys.modules`) so
+    the existing tests that assert on the greeting turn / member.added /
+    the notify email — driven through the HTTP route — keep passing
+    unchanged, mirroring every other pytest-inline fire-and-forget site in
+    this codebase (`app/team_email.py::dispatch_invite_email`,
+    `app/routes/custom_artifacts.py::generate`).
+
+    `contextvars.copy_context().run(...)` (not a bare submit): a
+    ThreadPoolExecutor does not propagate the calling thread's contextvars to
+    its worker threads, and `post_join_greeting` makes an LLM call
+    (`app.llm.call_md`) that reads the request's ambient company-scoped
+    bindings — the LLM key bound by `CompanyLLMKeyMiddleware`
+    (`app/middleware_llm_key.py`) and any `usage_scope` (`app/usage_
+    context.py`) opened for this request. A bare `.submit(...)` would run the
+    greeting's LLM call unbound (falling back to the platform key, or
+    failing outright depending on config) instead of the company's own key —
+    copying the context here is what makes the deferred call inherit exactly
+    what the synchronous call would have."""
+    if "pytest" in sys.modules:
+        _run_member_add_side_effects(
+            project_id=project_id, user_id=user_id, project_name=project_name,
+            dataset=dataset, company_id=company_id, email=email,
+            recipient_name=recipient_name,
+        )
+        return
+
+    ctx = contextvars.copy_context()
+    future = _MEMBER_ADD_POOL.submit(
+        ctx.run,
+        _run_member_add_side_effects,
+        project_id=project_id,
+        user_id=user_id,
+        project_name=project_name,
+        dataset=dataset,
+        company_id=company_id,
+        email=email,
+        recipient_name=recipient_name,
+    )
+    _inflight_member_add_futures.add(future)
+    future.add_done_callback(_on_member_add_side_effects_done)
+
+
 @router.post("/{project_id}/members")
 def add_member(
     project_id: int,
@@ -351,24 +470,18 @@ def add_member(
     if tier in (projects_db.TIER_WORKSPACE, projects_db.TIER_COMPANY):
         member = projects_db.add_member(project_id, res["user_id"])
         logger.info("project_member_added project_id=%s user_id=%s", project_id, res["user_id"])
-        # Best-effort live landing on the added person's OWN per-user channel
-        # (AD-TNM5) — mirrors the /tag route's TIER_WORKSPACE branch so BOTH add
-        # paths emit `member.added` and an already-logged-in existing user lands
-        # live in the project. Swallows every failure, never changes this
-        # response or rolls back the add (AD-TNM2/AD-P22).
-        project_delegation._publish_member_added(project_id, res["user_id"], project["name"])
-        # NEW-membership only (the TIER_MEMBER re-add branch returned above):
-        # drop a grounding greeting into this member's private project chat so
-        # they land with context, not a blank thread. Best-effort/non-blocking
-        # (AD-P7) — a greeting failure never breaks or delays the add.
-        project_join_greeting.post_join_greeting(
-            project_id, res["user_id"], dataset=_dataset_for(ctx), company_id=ctx.company_id
-        )
-        # NET-NEW existing-user add → the "added to project X" email (best-effort;
-        # a re-add returned at the TIER_MEMBER branch above, so it never fires).
-        _notify_added_to_project(
-            email=res.get("email"), recipient_name=res.get("name"),
-            project_id=project_id, project_name=project["name"],
+        # Deferred (off the request thread) — the realtime publish, the
+        # on-join greeting (AD-P7), and the "added to project" email are all
+        # best-effort and none can change this response, so the caller does
+        # not wait on them (see `_dispatch_member_add_side_effects` above).
+        _dispatch_member_add_side_effects(
+            project_id=project_id,
+            user_id=res["user_id"],
+            project_name=project["name"],
+            dataset=_dataset_for(ctx),
+            company_id=ctx.company_id,
+            email=res.get("email"),
+            recipient_name=res.get("name"),
         )
         return member
     if tier == projects_db.TIER_REFUSE and res.get("reason") == "other_company":
@@ -520,24 +633,20 @@ def tag_candidate_route(
             raise HTTPException(403, "That person can't be added to this project")
         member = projects_db.add_member(project_id, uid)
         logger.info("project_member_added project_id=%s user_id=%s via=tag", project_id, uid)
-        # Best-effort live landing on the added person's OWN per-user channel
-        # (AD-TNM5); swallows every failure, never changes this response or
-        # rolls back the add (AD-TNM2/AD-P22).
-        project_delegation._publish_member_added(project_id, uid, project["name"])
-        # Same grounding greeting `add_member` drops for a new membership —
-        # this tag-invite branch adds a member too and previously skipped it,
-        # leaving a tag-added member with a blank private chat. Best-effort/
-        # non-blocking (AD-P7) — a greeting failure never breaks or delays
-        # the add.
-        project_join_greeting.post_join_greeting(
-            project_id, uid, dataset=_dataset_for(ctx), company_id=ctx.company_id
-        )
-        # NET-NEW existing-user add → the "added to project X" email (best-effort).
-        # The t_company / t_newuser tiers below already send an invite email, so
-        # only this direct-add branch needs it.
-        _notify_added_to_project(
-            email=res.get("email"), recipient_name=res.get("name"),
-            project_id=project_id, project_name=project["name"],
+        # Deferred (off the request thread) — same three best-effort side
+        # effects `add_member` defers above (realtime publish, on-join
+        # greeting AD-P7, "added to project" email); see
+        # `_dispatch_member_add_side_effects`. The t_company / t_newuser
+        # tiers below already send an invite email via `_invite_carrying_
+        # project`, so only this direct-add branch needs the notify email.
+        _dispatch_member_add_side_effects(
+            project_id=project_id,
+            user_id=uid,
+            project_name=project["name"],
+            dataset=_dataset_for(ctx),
+            company_id=ctx.company_id,
+            email=res.get("email"),
+            recipient_name=res.get("name"),
         )
         return {"tier": tier, "added": member}
 
