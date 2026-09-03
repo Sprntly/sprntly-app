@@ -2811,7 +2811,30 @@ def answer(
         # assignment tool and would fabricate a delegation row rather than
         # decline. `"delegate"` itself is excluded from the deferred set —
         # see `_defers_to_ticket_action`'s docstring.
-        and not _defers_to_ticket_action(plan)
+        #
+        # EXEMPTION: an admitted first-person completion CLAIM overrides this
+        # deferral. Live-verified failure: the ask-planner classifies realistic
+        # completion phrasings ("I'm done with the security review", the ledger
+        # tick's "I've finished this task: '…'. Please mark it complete.") as
+        # `action=update_ticket` at ~0.82–0.85 confidence, so
+        # `_defers_to_ticket_action(plan)` was vetoing the completion branch and
+        # `complete_task` never fired — completion then fell to the
+        # non-deterministic background classifier, which confirmed "done" while
+        # the ledger stayed open. A completion claim must reach `complete_task`
+        # deterministically even when the planner mislabels it `update_ticket`.
+        # Safe: (1) `is_project_completion_request` is tightly scoped — first-
+        # person/declarative claims only, yes/no questions vetoed — so a genuine
+        # ticket-edit ("change the acceptance criteria on the export ticket") is
+        # NOT a completion and still defers; (2) `handle_complete_task` no-ops/
+        # disambiguates when there is no single matching open task; (3) no
+        # double-handling — the ticket-update EXECUTOR (`is_ticket_update`
+        # interceptor, regex-gated on the message's words) never matches a
+        # completion phrasing AND sits far below this branch, which returns
+        # first when it claims the turn.
+        and (
+            not _defers_to_ticket_action(plan)
+            or is_project_completion_request(routing_text, history)
+        )
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,

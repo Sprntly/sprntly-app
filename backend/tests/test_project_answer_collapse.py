@@ -1892,9 +1892,18 @@ def test_sixth_branch_gate_and_ticket_action_defer_use_same_predicate():
     """Symmetry proof (source-level), mirroring `test_sixth_branch_gate_and_
     report_defer_use_same_predicate`: the gate's ticket-action-defer clause
     reads `_defers_to_ticket_action(plan)` — one predicate, one call site, so
-    the mechanism cannot silently drift out of sync with itself."""
+    the mechanism cannot silently drift out of sync with itself. The clause is
+    now guarded by the admitted-completion exemption (a completion claim
+    overrides the deferral), so the exact source shape is the disjunction."""
     src = inspect.getsource(qa.answer)
-    assert "and not _defers_to_ticket_action(plan)" in src
+    # The defer clause is now a disjunction: an admitted completion overrides
+    # the ticket-action deferral. Assert the code shape (whitespace-normalised
+    # so comments/indentation don't make it brittle).
+    normalised = " ".join(src.split())
+    assert (
+        "not _defers_to_ticket_action(plan) or is_project_completion_request(routing_text, history)"
+        in normalised
+    )
 
 
 def test_defers_to_ticket_action_predicate_unit():
@@ -1912,6 +1921,98 @@ def test_defers_to_ticket_action_predicate_unit():
     assert qa._defers_to_ticket_action(Plan()) is False
     # No plan at all.
     assert qa._defers_to_ticket_action(None) is False
+
+
+def test_admitted_completion_overrides_update_ticket_deferral(monkeypatch):
+    """Live-found blocker fix. The ask-planner mislabels a first-person
+    completion CLAIM as `action=update_ticket`; without the exemption
+    `_defers_to_ticket_action(plan)` vetoes the completion branch and
+    `complete_task` never fires (completion falls to the non-deterministic
+    background classifier). With the exemption, an admitted completion
+    overrides the deferral and the sixth branch claims the turn.
+
+    Mutation-proof: neutralising `is_project_completion_request` (the observable
+    effect of deleting the exemption AND the admission disjunct) reproduces the
+    veto — the turn is deferred and the tool loop is never entered (RED)."""
+    question = "I'm done with the security review"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_delegation.COMPLETE_TASK_TOOL),
+    )
+    plan = Plan(action="update_ticket")  # the planner's live misclassification
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Got it — I've marked that task as done on the ledger.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "composer", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""},
+    )
+
+    # Sanity: the planner really does defer this action, so the exemption is
+    # load-bearing (not incidental).
+    assert qa._defers_to_ticket_action(plan) is True
+
+    # GREEN (exemption present): the admitted completion overrides the deferral
+    # → the sixth branch claims the turn and reaches complete_task.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"].startswith("Got it")
+
+    # RED (mutation: neutralise the completion predicate — both the exemption
+    # and the admission disjunct go False, reproducing the pre-fix veto).
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "is_project_completion_request", lambda *a, **k: False)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0  # deferred — the tool loop was never entered
+    assert out["answer"] == "composer"
+
+
+def test_genuine_update_ticket_edit_still_defers_not_hijacked(monkeypatch):
+    """The exemption must NOT hijack a genuine ticket-edit. "change the
+    acceptance criteria on the export ticket" is NOT a completion claim, so
+    `is_project_completion_request` is False and the exemption disjunct stays
+    False — the ticket-action deferral still governs and the turn falls through
+    to the composer/ticket path, never the completion tool loop."""
+    from app.skill_router import is_project_completion_request
+
+    question = "change the acceptance criteria on the export ticket"
+    # The guard that makes the exemption safe: a ticket edit is not a completion.
+    assert is_project_completion_request(question) is False
+
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_delegation.COMPLETE_TASK_TOOL),
+    )
+    plan = Plan(action="update_ticket")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "SHOULD NOT REACH THE COMPLETION LOOP", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "There's no export ticket to edit yet.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""},
+    )
+
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0  # the completion loop was NOT hijacked
+    assert out["answer"] == "There's no export ticket to edit yet."
 
 
 # ── Lexical-gate veto vs planner-approved delegation (fix part B) ──────────
