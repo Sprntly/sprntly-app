@@ -627,7 +627,7 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     # the `backlog_action` action, neither of which any earlier version could
     # name. The version is pinned here rather than merely compared to itself
     # because pooling rows across versions would pool two different menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v16"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v17"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -687,7 +687,10 @@ def test_the_schema_property_order_is_load_bearing():
         "sources", "include_knowledge_graph", "include_library", "include_team",
         # The backlog is the fourth own-records flag and sits with the other
         # three, after the skill/pipeline choice it cannot influence.
-        "include_projects", "include_backlog", "web_search", "documents",
+        # …and the fifth: what Sprntly has LEARNED, as opposed to what it can
+        # retrieve about a topic. Same family, same place in the order.
+        "include_projects", "include_knowledge_base", "include_backlog",
+        "web_search", "documents",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
@@ -717,8 +720,9 @@ def test_the_schema_property_order_is_load_bearing():
     assert "include_team" in ap._PLANNER_SCHEMA["required"]
     assert "include_projects" in ap._PLANNER_SCHEMA["required"]
     assert "include_backlog" in ap._PLANNER_SCHEMA["required"]
+    assert "include_knowledge_base" in ap._PLANNER_SCHEMA["required"]
     assert "action_confidence" in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 15
+    assert len(ap._PLANNER_SCHEMA["required"]) == 16
 
 
 # ── the action fork (v3) ─────────────────────────────────────────────────────

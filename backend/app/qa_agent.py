@@ -1855,6 +1855,58 @@ def _planned_backlog_context(
         return ""
 
 
+def _planned_knowledge_base_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """What Sprntly has LEARNED for this company, when the PLAN asked for it.
+
+    Fifth of the own-records thunks, same shape and same wave as the four
+    above it. What it answers is the one thing none of them — and none of the
+    retrieval paths — could: not "what do we know about X", which the graph
+    bundle serves, but "what do you know at all", which needs counts.
+
+    Never raises — `knowledge_base_block` swallows every read failure and
+    degrades to zero rather than to a number it invented — but wrapped anyway,
+    on the rule every gather leg here follows: no context block is worth an
+    answer."""
+    if not enterprise_id or not plan.include_knowledge_base:
+        return ""
+    try:
+        from app.knowledge_base_context import knowledge_base_block
+
+        block = knowledge_base_block(enterprise_id)
+        logger.info(
+            "[planner] exec knowledge-base company=%s chars=%d",
+            enterprise_id, len(block),
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a memory read degrades, never breaks chat
+        logger.exception(
+            "[planner] knowledge base block failed for %s", enterprise_id
+        )
+        return ""
+
+
+def _knowledge_base_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the memory itself and
+    about nothing else — the fifth twin of `_library_only_plan`.
+
+    What it excludes is subtler than the other four, because the contamination
+    is not another system's word: it is this system's own content. Asked "what
+    do you know about us" with a retrieved bundle of signals beside the counts,
+    a model answers with the handful of topics it can see rather than with what
+    is actually there — a confident, specific, wrong answer to a question about
+    scale. The counts are the whole grounding, and `include_knowledge_graph`
+    being false is the plan saying so."""
+    return bool(
+        plan is not None
+        and plan.include_knowledge_base
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
 def _backlog_only_plan(plan) -> bool:
     """THE PLAN'S OWN VERDICT that the question is about the backlog and about
     nothing else — the fourth twin of `_library_only_plan`.
@@ -3594,6 +3646,7 @@ def answer(
         team_context_fn = None
         projects_context_fn = None
         backlog_context_fn = None
+        knowledge_base_context_fn = None
         # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
         # With the connector refresh on a 10-minute cadence, the knowledge
         # graph already holds near-live connector data — so the per-question
@@ -3699,6 +3752,13 @@ def answer(
             backlog_context_fn = lambda: _planned_backlog_context(  # noqa: E731
                 enterprise_id, plan
             )
+            # And what Sprntly has learned, on both branches too: "what do you
+            # actually know about us" is asked from beside a PRD as readily as
+            # from the main chat, and it is a question about the memory as a
+            # whole rather than about the PRD on screen.
+            knowledge_base_context_fn = lambda: _planned_knowledge_base_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
@@ -3706,7 +3766,8 @@ def answer(
             team_context_fn=team_context_fn,
             projects_context_fn=projects_context_fn,
             backlog_context_fn=backlog_context_fn,
-            # One flag, four blocks: each is an exhaustive read of Sprntly's
+            knowledge_base_context_fn=knowledge_base_context_fn,
+            # One flag, five blocks: each is an exhaustive read of Sprntly's
             # own records, and a question about any of them is narrowed away
             # from the corpus/KG/document index identically.
             library_only=(
@@ -3714,6 +3775,7 @@ def answer(
                 or _team_only_plan(plan)
                 or _projects_only_plan(plan)
                 or _backlog_only_plan(plan)
+                or _knowledge_base_only_plan(plan)
             ),
             on_delta=on_delta,
             # Real pipeline-leg phases on the COMMON direct-answer path — the
