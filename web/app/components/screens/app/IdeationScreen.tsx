@@ -478,7 +478,7 @@ function ProposedContent({
             <polyline points="12 8 12 12 14 14" />
           </svg>
           <span>
-            <strong>{ideas.length} ideas</strong>{" "}
+            <strong>{ideas.length} backlog item{ideas.length === 1 ? "" : "s"}</strong>{" "}
             shortlisted from your data — re-prioritized each week when your
             brief generates, so only the strongest ideas show. Drag rows to
             re-rank or change a type inline.
@@ -854,9 +854,7 @@ export function IdeationScreen() {
   const [isSyncing, setIsSyncing]           = useState(false)
   const [reloadKey, setReloadKey]           = useState(0)
   const [busy, setBusy]                     = useState<null | "prd" | "prototype" | "done">(null)
-  const [chatValue, setChatValue]           = useState("")
   const [selectedIdea, setSelectedIdea]     = useState<IdeationIdea | null>(null)
-  const textareaRef                         = useRef<HTMLTextAreaElement>(null)
   // Bridges to ProposedContent's handlers without lifting its ideas state.
   const addHandlerRef = useRef<((title: string, type: IdeaType) => void) | null>(null)
   const resequenceHandlerRef = useRef<(() => void) | null>(null)
@@ -937,16 +935,6 @@ export function IdeationScreen() {
     }
   }, [showToast])
 
-  const handleChat = (e: React.FormEvent) => {
-    e.preventDefault()
-    if (!chatValue.trim()) return
-    // Free-text re-prioritization (natural-language re-ranking) isn't wired yet;
-    // the concrete "Re-sequence" chip below performs a real, persisted re-order.
-    showToast("Not yet available", "Use “Re-sequence” to re-order by impact — free-text re-prioritization is coming soon.")
-    setChatValue("")
-    if (textareaRef.current) textareaRef.current.style.height = "auto"
-  }
-
   return (
     <AppLayout mainClassName="main--ideation">
       <div className="bl-shell">
@@ -957,7 +945,7 @@ export function IdeationScreen() {
             <h1 className="bl-title">Backlog</h1>
             <span className="bl-count-badge">
               {tab === "proposed"
-                ? `${proposedCount ?? 0} ideas`
+                ? `${proposedCount ?? 0} backlog item${proposedCount === 1 ? "" : "s"}`
                 : `${completedCount ?? 0} shipped`}
             </span>
             <div className="bl-tabs">
@@ -1013,7 +1001,7 @@ export function IdeationScreen() {
           )}
         </div>
 
-        {/* ── Add-to-backlog card: outside scroll, replaces chat bar ── */}
+        {/* ── Add-to-backlog card: outside scroll, replaces the action bar ── */}
         {tab === "proposed" && showAddIdea && (
           <div className="bl-chat-bar bl-chat-bar--add">
             <AddIdeaCard
@@ -1026,43 +1014,17 @@ export function IdeationScreen() {
           </div>
         )}
 
-        {/* ── Chat bar: visible when add-idea card is closed ── */}
+        {/* ── Action bar: visible when add-idea card is closed ── */}
         {tab === "proposed" && !showAddIdea && (
           <div className="bl-chat-bar">
-            <form className="bl-chat-form" onSubmit={handleChat}>
-              <textarea
-                ref={textareaRef}
-                className="bl-chat-input"
-                placeholder='Ask Sprntly to re-prioritize — "push revenue items up", "group by complaint frequency", "turn the top idea into a PRD"…'
-                value={chatValue}
-                rows={1}
-                onChange={(e) => {
-                  setChatValue(e.target.value)
-                  const el = e.target; el.style.height = "auto"
-                  el.style.height = `${Math.min(el.scrollHeight, 120)}px`
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleChat(e as unknown as React.FormEvent) }
-                }}
-              />
-              <div className="bl-chat-footer">
-                <div className="bl-chat-footer-left">
-                  <button type="button" className="bl-chat-action-btn"
-                    onClick={() => resequenceHandlerRef.current?.()}>
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                      <line x1="17" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" />
-                      <line x1="21" y1="14" x2="3" y2="14" /><line x1="17" y1="18" x2="3" y2="18" />
-                    </svg>
-                    Re-sequence
-                  </button>
-                </div>
-                <button type="submit" className="bl-chat-send" disabled={!chatValue.trim()} aria-label="Send">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
-                    <line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" />
-                  </svg>
-                </button>
-              </div>
-            </form>
+            <button type="button" className="bl-chat-action-btn"
+              onClick={() => resequenceHandlerRef.current?.()}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden>
+                <line x1="17" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" />
+                <line x1="21" y1="14" x2="3" y2="14" /><line x1="17" y1="18" x2="3" y2="18" />
+              </svg>
+              Re-sequence
+            </button>
           </div>
         )}
 

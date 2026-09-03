@@ -22161,7 +22161,7 @@
     flex-shrink: 0;
   }
 
-  /* ── Bottom chat bar (Proposed tab) ── */
+  /* ── Bottom action bar (Proposed tab) ── */
   .bl-chat-bar {
     flex-shrink: 0;
     padding: 18px 44px 17px;
@@ -22170,61 +22170,17 @@
     margin: 0 auto;
   }
 
-  .bl-chat-form {
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: #fff;
-    overflow: hidden;
-    transition: box-shadow 0.15s;
-  }
-
-  .bl-chat-form:focus-within {
-    box-shadow: 0 0 0 2px #17946330;
-    border-color: var(--accent);
-  }
-
-  .bl-chat-input {
-    width: 100%;
-    border: none;
-    outline: none;
-    resize: none;
-    font-size: 13px;
-    color: var(--ink);
-    background: transparent;
-    padding: 12px 14px 4px;
-    font-family: inherit;
-    line-height: 1.5;
-    display: block;
-  }
-
-  .bl-chat-input::placeholder {
-    color: var(--ink-4);
-  }
-
-  .bl-chat-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 8px 6px;
-  }
-
-  .bl-chat-footer-left {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
   .bl-chat-action-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 5px;
+    border: 1px solid var(--line);
+    background: #fff;
     font-size: 12px;
     font-weight: 500;
     color: var(--ink-3);
-    background: none;
-    border: none;
     border-radius: 6px;
-    padding: 4px 8px;
+    padding: 6px 10px;
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
     font-family: inherit;
@@ -22233,30 +22189,6 @@
   .bl-chat-action-btn:hover {
     background: var(--surface-3);
     color: var(--ink);
-  }
-
-  .bl-chat-send {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    border: none;
-    background: var(--accent);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: opacity 0.12s;
-    flex-shrink: 0;
-  }
-
-  .bl-chat-send:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-
-  .bl-chat-send:not(:disabled):hover {
-    opacity: 0.85;
   }
 
   /* ── Responsive ── */
