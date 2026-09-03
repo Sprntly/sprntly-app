@@ -1032,6 +1032,10 @@ export function ProjectDetailScreen({
         busyLabel="Removing…"
         tone="danger"
         busy={removeBusy}
+        // Remove can be triggered from the Members tab INSIDE the project
+        // settings modal (also a `modal-overlay`), so this confirm must render
+        // above it rather than behind it. Harmless when opened outside a modal.
+        elevated
         onConfirm={onConfirmRemove}
         onCancel={onCancelRemove}
       />
