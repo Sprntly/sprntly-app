@@ -43,6 +43,7 @@
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
 import { MAX_MOSCOW_ROWS, moscowFor } from "../../lib/goalMoscow"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
+import { findingsHeading } from "../../lib/goalFindingsHeading"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
@@ -295,6 +296,19 @@ export function GoalAnalysisReport({
   // `recommendationBasis` above: that one only answers a money target the
   // reader named, this renders whenever any finding carries pricing units.
   const listPricingBasis = (run.prioritisation?.list_pricing_basis || "").trim()
+  // The single, top-line recommendation for the whole report — narrated
+  // across the per-finding deep recommendations already shown above, never a
+  // replacement for them. Mirrors `report.py`'s
+  // `_synthesized_recommendation_section`, including the same "silent when
+  // empty" rule: `action`/`because` are blank exactly when there was
+  // nothing to synthesize (see `GoalRunDetail["prioritisation"]
+  // ["synthesized_recommendation"]`'s own comment in `api.ts`).
+  const synthesizedRecommendation = run.prioritisation?.synthesized_recommendation
+  const synthesizedAction = (synthesizedRecommendation?.action || "").trim()
+  const synthesizedBecause = (synthesizedRecommendation?.because || "").trim()
+  const synthesizedCitations = (synthesizedRecommendation?.citations || []).filter(
+    (c) => (c.evidence || "").trim(),
+  )
   // Whether `judge_relevance` actually ran on this run — turns the
   // "these findings were not selected"/"were filtered" branch below. Never
   // guessed from `setAside.length`: a gate that judged everything `true`
@@ -881,6 +895,43 @@ export function GoalAnalysisReport({
         )}
       </section>
 
+      {/* THE ONE RECOMMENDATION FOR THE WHOLE REPORT — narrated across the
+          per-finding deep recommendations already shown above, never a
+          replacement for them. Positioned right after "The short version" so
+          it reads as the primary answer, ahead of the money footnotes and the
+          findings list below. Mirrors `report.py`'s
+          `_synthesized_recommendation_section`, same wording and structure.
+          Silent when there was nothing to synthesize — see the type's own
+          comment in `api.ts`.
+          KEPT IN ITS OWN SECTION, never merged into `recommendationBasis`'s
+          or `listPricingBasis`'s paragraph below: one is a narrated
+          recommendation, the other two are dollar-bearing footnotes, and a
+          reader should never be tempted to read one as informing the
+          other. */}
+      {synthesizedAction && synthesizedBecause ? (
+        <section className="ga-doc-section" data-testid="goal-synthesized-recommendation">
+          <h2 className="ga-doc-h2">The recommendation</h2>
+          <p className="ga-doc-note">
+            <strong>Recommended.</strong> {synthesizedAction}
+          </p>
+          <p className="ga-doc-note">
+            <em>Why.</em> {synthesizedBecause}
+          </p>
+          {synthesizedCitations.length ? (
+            <>
+              <p className="ga-doc-note"><strong>Drawn from.</strong></p>
+              <ul className="ga-assumed" data-testid="goal-synthesized-citations">
+                {synthesizedCitations.map((c, i) => (
+                  <li key={i}>
+                    {c.evidence} <em>— from: “{c.cited_claim}”</em>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
+        </section>
+      ) : null}
+
       {recommendationBasis ? (
         <p className="ga-doc-note" data-testid="goal-recommendation-basis">
           <strong>How many got a full recommendation.</strong>{" "}
@@ -906,9 +957,12 @@ export function GoalAnalysisReport({
       {/* ── 4. The findings, ranked ──────────────────────────────────────── */}
       {findings.length ? (
         <section className="ga-doc-section">
-          <h2 className="ga-doc-h2">
-            What the evidence says ({findings.length})
-          </h2>
+          {/* A CLAIM, NOT A LABEL. Mirrors `report.py`'s `_findings_heading`
+              exactly, via the shared `findingsHeading` helper — see its own
+              comment for why this is the top-ranked finding's own statement,
+              cut before its example quote, rather than a static section
+              title. */}
+          <h2 className="ga-doc-h2">{findingsHeading(findings)}</h2>
           <p className="ga-doc-lede" data-testid="goal-findings-lede">
             {anythingSized ? (
               unsized && headlineCovers !== "full" ? (
