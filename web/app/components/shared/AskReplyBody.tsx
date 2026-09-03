@@ -67,22 +67,35 @@ const askMarkdownComponents: Components = {
       </a>
     )
   },
-  // Fenced ```chart blocks render as inline SVG infographics. Other fenced
-  // blocks fall through to the default <code><pre> rendering.
+  // A fenced block whose BODY IS A CHART renders as one, whatever the fence is
+  // labelled. Other blocks fall through to the default <code><pre>.
+  //
+  // THE LABEL USED TO BE THE TEST, and that is what put a wall of raw JSON in
+  // front of a reader who asked for a chart: the answer prompt asks for a
+  // ```chart fence, the model wrote the right spec inside a ```json one, and a
+  // renderer keyed on the word rendered it as source code. The spec was
+  // perfect; the three letters above it were not.
+  //
+  // Reading the CONTENT instead is safe because `parseChartBody` is strict —
+  // it needs a known `kind` and a non-empty `data` array of label/value pairs,
+  // and returns null for everything else. So a genuine ```json block, a code
+  // sample, or an inline `snippet` still renders exactly as it did; the only
+  // blocks that change are the ones that were a chart all along.
+  //
+  // The sibling renderers already work this way: `evidence-adapter` and the
+  // PRD adapter try a chart parse on every fence and ignore the info string
+  // entirely. This is the chat catching up with them, not a new idea.
   code({ className, children, ...rest }) {
-    const lang = /language-([\w-]+)/.exec(className || "")?.[1]
-    if (lang === "chart") {
-      const spec = parseChartBody(flattenText(children))
-      if (spec) {
-        return (
-          <InlineChart
-            kind={spec.kind}
-            title={spec.title}
-            subtitle={spec.subtitle}
-            data={spec.data}
-          />
-        )
-      }
+    const spec = parseChartBody(flattenText(children))
+    if (spec) {
+      return (
+        <InlineChart
+          kind={spec.kind}
+          title={spec.title}
+          subtitle={spec.subtitle}
+          data={spec.data}
+        />
+      )
     }
     return (
       <code className={className} {...rest}>
