@@ -282,6 +282,135 @@ def test_build_brief_without_source_content_is_backward_compatible(isolated_sett
     assert "actually about" not in calls[0]["user"].lower()
 
 
+# ── Recipient-aware brief: fold the assignee's own ongoing chat ───────────
+# The brief used to be generated 100% from the assigner's side with zero
+# awareness of the assignee's chat, so it re-explained the project overview +
+# artifacts the assignee had already seen in their welcome, and ran long. It
+# now folds a READ-ONLY, owner-gated tail of the assignee's OWN individual
+# chat so it can transition naturally and stop repeating what they've seen.
+
+
+def _seed_recipient_chat(project_id: int, assignee_user_id: str, *turns: tuple[str, str]) -> int:
+    """Seed the assignee's OWN individual project chat with `(role, content)`
+    turns (their welcome + whatever they've been discussing) and return the
+    conversation id."""
+    from app.db.conversations import create_individual_project_chat, post_individual_turn
+
+    conv = create_individual_project_chat(project_id, assignee_user_id)
+    for role, content in turns:
+        post_individual_turn(conv["id"], role, content)
+    return conv["id"]
+
+
+def test_build_brief_folds_recipient_chat_tail_into_prompt(isolated_settings, monkeypatch):
+    """When the assignee already has an ongoing chat, its recent tail (their
+    welcome + what they were just discussing) is folded into the brief prompt,
+    under a header that instructs transition/no-repeat."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _seed_recipient_chat(
+        project["id"],
+        assignee_id,
+        ("assistant", "Welcome to the project — here is the overview."),
+        ("user", "RECIPIENT_WAS_DISCUSSING: the Q3 onboarding metrics."),
+    )
+    calls = _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id, task="Prioritize the feedback")
+    assert "Assigned to" in result
+    assert len(calls) == 1
+    prompt = calls[0]["user"]
+    assert "RECIPIENT_WAS_DISCUSSING" in prompt, (
+        "the brief prompt must carry the assignee's own recent chat so it can "
+        "land intelligently instead of arriving cold"
+    )
+    assert "recipient's recent chat" in prompt.lower()
+
+
+def test_brief_prompt_is_conversation_aware_dedup_and_length():
+    """The system prompt must now instruct: conversation-aware arrival,
+    de-dup of already-seen project overview/artifacts, and a hard length
+    ceiling — the three behaviors David asked for."""
+    system = project_delegation._BRIEF_SYSTEM.lower()
+    # conversation-aware arrival
+    assert "ongoing" in system
+    assert "arriving cold" in system or "transition from" in system
+    # de-dup
+    assert "do not re-explain" in system
+    assert "already seen" in system
+    assert "welcome" in system
+    # hard length ceiling
+    assert "120 words" in system
+    # lead with the task
+    assert "lead with the task" in system
+
+    weak = "Write a brief for the assignee about the task."
+    assert "do not re-explain" not in weak.lower()
+    assert "120 words" not in weak.lower()
+
+
+def test_recipient_chat_absent_is_backward_compatible(isolated_settings, monkeypatch):
+    """With NO prior assignee chat, no recipient-chat block rides the prompt —
+    behavior is byte-identical to today's context/artifact-only fold."""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    calls = _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Assigned to" in result
+    assert len(calls) == 1
+    assert "recipient's recent chat" not in calls[0]["user"].lower()
+
+
+def test_recipient_chat_read_is_owner_gated_to_assignee_user_id(isolated_settings, monkeypatch):
+    """The recipient-chat read must use the ASSIGNEE's OWN user_id (the owner
+    gate on `list_individual_turns`), server-side — never the assigner's,
+    never a model-supplied id."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    get_calls: list[tuple] = []
+    list_calls: list[str] = []
+
+    def _fake_get(project_id, user_id):
+        get_calls.append((project_id, user_id))
+        return {"id": 4242}
+
+    def _fake_list(conversation_id, user_id, since=None):  # noqa: ARG001
+        list_calls.append(user_id)
+        return [{"id": 1, "role": "assistant", "content": "welcome", "created_at": "t"}]
+
+    monkeypatch.setattr(project_delegation, "get_individual_project_chat", _fake_get)
+    monkeypatch.setattr(project_delegation, "list_individual_turns", _fake_list)
+
+    _delegate(project, ctx.user_id)
+    # The recipient-tail read resolved the assignee's chat with the assignee id…
+    assert (project["id"], assignee_id) in get_calls
+    # …and every owner-gated turn read used the assignee's id, never the assigner's.
+    assert list_calls, "list_individual_turns must be called for the recipient tail"
+    assert all(uid == assignee_id for uid in list_calls)
+    assert ctx.user_id not in list_calls
+
+
+def test_recipient_chat_not_echoed_in_assigner_confirmation(isolated_settings, monkeypatch):
+    """Privacy: the assignee's chat is used ONLY to shape the brief. It must
+    never leak into the assigner-facing confirmation string."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _seed_recipient_chat(
+        project["id"],
+        assignee_id,
+        ("user", "PRIVATE_RECIPIENT_SECRET: my salary review is next week."),
+    )
+    _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id, task="Draft the pricing page")
+    assert "Assigned to" in result
+    assert "PRIVATE_RECIPIENT_SECRET" not in result
+    assert "salary review" not in result
+
+
 # ── Bare "send to <roster member>" entry-gate detector ───────────────────
 
 
