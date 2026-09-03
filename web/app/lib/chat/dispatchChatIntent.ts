@@ -59,7 +59,7 @@ export interface DispatchChatIntentContext {
  *  rendering, tab mutation) exactly as it did before the extraction. */
 export interface ChatIntentExecutors {
   onEditPrd: (instruction: string, prdId: number | null) => void
-  /** Change the REPORT or DOCUMENT open beside this chat. The target rides the
+  /** Change the REPORT, DOCUMENT or EVIDENCE PAGE open beside this chat. The target rides the
    *  envelope (`open_artifact`, re-read server-side under the caller's
    *  company), not the caller's own state, because the same server read is
    *  what the planner was told about when it chose this action — resolving it

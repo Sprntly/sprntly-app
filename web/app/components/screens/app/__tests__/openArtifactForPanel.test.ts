@@ -74,3 +74,54 @@ describe("openArtifactForPanel", () => {
     expect(openArtifactForPanel(content({}), CONV)).toBeNull()
   })
 })
+
+// ── the evidence page ────────────────────────────────────────────────────────
+// Reported: "improve the evidence with an analytical chart of the evidence"
+// drew the chart into the chat. Evidence was never a referent here, so
+// `edit_artifact` had no target and the endpoint downgraded it to an answer.
+
+describe("openArtifactForPanel — evidence", () => {
+  it("names the evidence page the tab has open", () => {
+    const c = content({
+      evidenceId: 42,
+      evidence: { html: "<h1>Export failures</h1>" },
+    } as Partial<AppContentState>)
+    expect(openArtifactForPanel(c, CONV)).toEqual({ kind: "evidence", id: 42 })
+  })
+
+  it("needs the document AND the id, never one alone", () => {
+    // An id can outlive the tab it was read on; the document alone does not say
+    // which row it came from. Either half by itself would risk pointing an edit
+    // at a page the reader is not looking at.
+    expect(
+      openArtifactForPanel(content({ evidenceId: 42 } as Partial<AppContentState>), CONV),
+    ).toBeNull()
+    expect(
+      openArtifactForPanel(
+        content({ evidence: { html: "<h1>x</h1>" } } as Partial<AppContentState>),
+        CONV,
+      ),
+    ).toBeNull()
+  })
+
+  it("yields to a report the reader has open", () => {
+    // The panel shows one thing at a time, and the report is the nearer
+    // referent when a thread has both.
+    const c = content({
+      evidenceId: 42,
+      evidence: { html: "<h1>x</h1>" },
+      threadReports: [row(12)],
+      threadReportsConversationId: CONV,
+    } as Partial<AppContentState>)
+    expect(openArtifactForPanel(c, CONV)).toEqual({ kind: "report", id: 12 })
+  })
+
+  it("yields to an open team document", () => {
+    const c = content({
+      documentId: 5,
+      evidenceId: 42,
+      evidence: { html: "<h1>x</h1>" },
+    } as Partial<AppContentState>)
+    expect(openArtifactForPanel(c, CONV)).toEqual({ kind: "document", id: 5 })
+  })
+})

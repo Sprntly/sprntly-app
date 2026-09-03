@@ -2285,6 +2285,10 @@ export function ChatScreen() {
       prd: tab?.prd ?? null,
       prdMeta: tab?.briefMeta ?? null,
       evidence: tab?.evidence ?? null,
+      // …and WHICH row that document is, which used to be left behind on a tab
+      // switch. A stale id beside a fresh document is what would point an
+      // evidence edit at the page the reader was looking at a moment ago.
+      evidenceId: tab?.evidenceId ?? null,
       // When switching tabs, reset the generating flag so the panel reflects
       // this tab's actual state (generating is tracked per-tab in local state).
       evidenceGenerating: tab?.evidenceGenerating ?? false,

@@ -234,7 +234,7 @@ export type Conversation = MainConversation &
 export function openArtifactForPanel(
   content: AppContentState,
   conversationId: number | null,
-): { kind: "report" | "document"; id: number } | null {
+): { kind: "report" | "document" | "evidence"; id: number } | null {
   if (content.documentId != null) {
     return { kind: "document", id: content.documentId }
   }
@@ -244,7 +244,19 @@ export function openArtifactForPanel(
       : []
   const shown =
     content.reportFocusId ?? (rows.length === 1 ? rows[0].id : null)
-  return shown != null ? { kind: "report", id: shown } : null
+  if (shown != null) return { kind: "report", id: shown }
+  // The evidence page on this tab, last — it is the referent for "improve the
+  // evidence", which had none before evidence gained an editor, so a request to
+  // add a chart to it was answered by drawing the chart into the chat.
+  //
+  // BOTH halves are required. `evidenceId` alone can outlive the tab it was
+  // read on, and `evidence` alone (the rendered document) does not say WHICH
+  // row it came from; pointing an edit at the wrong page is the one thing this
+  // must never do. The tab sync writes them together for exactly this reason.
+  if (content.evidenceId != null && content.evidence != null) {
+    return { kind: "evidence", id: content.evidenceId }
+  }
+  return null
 }
 
 /** What the chat says when the editor decided the message was a QUESTION about
@@ -833,6 +845,27 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                       reportsRefreshKey: Date.now(),
                     })
                     openPanelForTab(tabId, "reports")
+                    return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
+                  }
+                  if (target.kind === "evidence") {
+                    const { evidenceApi } = await import("../../../lib/api")
+                    const res = await evidenceApi.chatEdit(target.id, instruction)
+                    if (res.sections_changed.length === 0) {
+                      return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
+                    }
+                    // The panel is showing the body this edit just replaced, so
+                    // hand it the new one rather than leaving the reader to
+                    // reopen the page to see what changed.
+                    const { markdownToEvidenceState } = await import(
+                      "../../../lib/evidence-adapter"
+                    )
+                    setContent({
+                      evidence: markdownToEvidenceState(res.payload_md),
+                      evidenceId: target.id,
+                      evidenceGenerating: false,
+                      evidencePartialHtml: null,
+                    })
+                    openPanelForTab(tabId, "evidence")
                     return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                   }
                   const res = await customArtifactsApi.chatEdit(target.id, instruction)

@@ -1166,7 +1166,7 @@ export const askApi = {
        *  `openArtifactForPanel`. It does not fetch anything: the backend
        *  grounds on every artifact of `conversation_id` and uses this only to
        *  put the one on screen FIRST. Omit and the thread's newest leads. */
-      open_artifact?: { kind: "report" | "document"; id: number } | null
+      open_artifact?: { kind: "report" | "document" | "evidence"; id: number } | null
       /** Individual-project-chat send identity (project branch only): the
        *  idempotency key the server persists the user turn under, and links
        *  the answer to via ask_job_id. Ignored server-side on every other
@@ -1861,7 +1861,7 @@ export const chatIntentApi = {
        *  it under the caller's company — the title that reaches the planner's
        *  prompt and the id an edit acts on both come from the stored row, never
        *  from here. Omitted when the panel is closed or on a PRD. */
-      openArtifact?: { kind: "report" | "document"; id: number } | null
+      openArtifact?: { kind: "report" | "document" | "evidence"; id: number } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -2016,6 +2016,28 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+
+  /** Apply a chat instruction to this evidence page and return the new body.
+   *
+   *  The TARGET IS THE URL, never a body field: the caller names the page the
+   *  user has open, and nothing in the request can redirect the write. Same
+   *  rule as the PRD's and the report's chat-edit, same reason — see backend
+   *  `app/artifact_chat_edit.py`.
+   *
+   *  `sections_changed: []` means the editor judged the instruction was not an
+   *  edit — a question about the page, or a chart whose numbers are not in it —
+   *  and NOTHING was written. The caller says so rather than claiming a change.
+   */
+  chatEdit: (evidenceId: number, instruction: string) =>
+    api.post<{
+      id: number
+      title: string
+      payload_md: string
+      variant: string
+      status: string
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/evidence/${evidenceId}/chat-edit`, { instruction }),
   /** SSE URL to token-stream an evidence doc's generation as it's written.
    *  Mirrors prdApi.streamUrl: the bearer rides as ?token= (EventSource can't
    *  set headers). Frames: {kind:'delta',text} then a terminal

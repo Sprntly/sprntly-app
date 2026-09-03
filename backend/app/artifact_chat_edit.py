@@ -61,7 +61,10 @@ from app import report_markdown
 logger = logging.getLogger(__name__)
 
 _AGENT = "qa"
-EDIT_PROMPT_VERSION = "artifact-chat-edit-v1"
+#: v2: the FORMAT rule became per-artifact, so an evidence page — a whole
+#: HTML document with its own stylesheet and hand-authored SVG charts — is
+#: no longer edited under a rule written for prose in a dozen tags.
+EDIT_PROMPT_VERSION = "artifact-chat-edit-v2"
 
 #: The stored body of a report or a document, and how big an edit may return.
 #: Matches the full-emit budget the Goal Analysis editor uses — the two are the
@@ -79,19 +82,51 @@ _EDIT_SCHEMA: dict = {
     "required": ["document", "sections_changed", "summary"],
 }
 
-_EDIT_SYSTEM = """\
+#: The FORMAT half of the editor's contract, and the one thing that is not
+#: the same for every artifact. A report and a team document are prose in a
+#: small tag vocabulary; an evidence page is a complete, self-contained
+#: visual brief with its own stylesheet, layout classes and hand-authored
+#: SVG charts. Handing the prose rule to an evidence edit is how "add a
+#: chart to the evidence" comes back as a page stripped of everything that
+#: made it one.
+_SHAPE_PROSE = """\
+FORMAT. Return the document in the SAME FORMAT you were given it. Markdown in, \
+markdown out; HTML in, HTML out. The product decides how to render this \
+document by looking at the stored text, so a format change is a rendering \
+change nobody asked for. When the document is HTML, use only these tags: h1, \
+h2, h3, h4, p, strong, em, u, s, ul, ol, li, blockquote, code, pre, a, br, hr, \
+table, thead, tbody, tr, th, td — everything else is stripped on save."""
+
+_SHAPE_EVIDENCE = """\
+FORMAT. This is a COMPLETE, SELF-CONTAINED HTML PAGE \
+— its own <style> block, its own layout classes, and charts \
+hand-authored as inline SVG. Return the WHOLE page, and keep all of \
+that: the stylesheet, the `wrap` container, the class names, the \
+section order, and every chart already in it. Add nothing the page \
+cannot render on its own — no <script>, no chart library, no \
+external stylesheet, no remote image. The page renders with scripts \
+disabled, so each of those is a blank space where a reader expects \
+content.
+
+A NEW CHART IS HAND-AUTHORED SVG, in the visual language of the charts \
+already there: the same class names, the same type sizes, the same \
+palette. Plot only numbers already in this page or in the instruction \
+— a chart is the most believable thing on a page, so an invented \
+data point does more damage here than an invented sentence would. \
+Caption it with the takeaway as a complete sentence, the way the \
+captions already there do. If the numbers for the chart you were asked \
+for are not in the page, change NOTHING and say so in `summary` rather \
+than drawing a plausible one."""
+
+
+_EDIT_SYSTEM_TEMPLATE = """\
 You are Sprntly's document editor. You are given ONE document the user has open \
 beside their chat, and ONE edit instruction they typed ("convert the RICE \
 section into a table", "cut the appendix", "rewrite the summary for an exec", \
 "add a risks section"). Apply the instruction with the MINIMAL change necessary \
 and return the whole document back.
 
-FORMAT. Return the document in the SAME FORMAT you were given it. Markdown in, \
-markdown out; HTML in, HTML out. The product decides how to render this \
-document by looking at the stored text, so a format change is a rendering \
-change nobody asked for. When the document is HTML, use only these tags: h1, \
-h2, h3, h4, p, strong, em, u, s, ul, ol, li, blockquote, code, pre, a, br, hr, \
-table, thead, tbody, tr, th, td — everything else is stripped on save.
+{shape_rule}
 
 RULES
 - Change ONLY what the instruction affects. Leave every other section \
@@ -112,6 +147,12 @@ Return the FULL updated document in `document`, the human-readable names of the 
 sections you changed in `sections_changed`, and a one-line `summary` of what \
 you did."""
 
+#: Built once per shape rather than per call: the system block is
+#: cache-controlled, and a string rebuilt per call would fragment that
+#: cache.
+_EDIT_SYSTEM = _EDIT_SYSTEM_TEMPLATE.format(shape_rule=_SHAPE_PROSE)
+_EDIT_SYSTEM_EVIDENCE = _EDIT_SYSTEM_TEMPLATE.format(shape_rule=_SHAPE_EVIDENCE)
+
 _EDIT_USER = """\
 Apply this edit instruction to the {label} below.
 
@@ -123,7 +164,8 @@ INSTRUCTION: {instruction}
 
 
 def apply_edit(
-    document: str, instruction: str, *, enterprise_id: str, label: str = "document"
+    document: str, instruction: str, *, enterprise_id: str,
+    label: str = "document", shape: str = "prose",
 ) -> dict:
     """Run the editor over one document. `{"document", "sections_changed", "summary"}`.
 
@@ -131,16 +173,21 @@ def apply_edit(
     leaves the stored row untouched rather than writing an empty document over
     a report someone waited minutes for.
 
-    `label` only names the artifact in the prompt ("report" / "document"): the
-    RULES are identical for both, because the thing being protected — the
-    provenance of work already done — is the same in both.
+    `label` only names the artifact in the prompt ("report" / "document" /
+    "evidence page"). `shape` picks the FORMAT rule, and that is the one
+    thing which genuinely differs: "prose" for a report or a team document,
+    "evidence" for the self-contained visual brief, whose stylesheet,
+    classes and inline SVG charts a prose rule would tell the model to throw
+    away. Every other rule is identical for all three, because the thing
+    being protected — the provenance of work already done — is the same in
+    each.
     """
     result = llm_call(
         enterprise_id=enterprise_id,
         agent=_AGENT,
         purpose="apply_artifact_chat_edit",
         prompt_version=EDIT_PROMPT_VERSION,
-        system=_EDIT_SYSTEM,
+        system=_EDIT_SYSTEM_EVIDENCE if shape == "evidence" else _EDIT_SYSTEM,
         input=_EDIT_USER.format(
             label=label, label_upper=label.upper(), instruction=instruction,
             document=document,
@@ -231,6 +278,92 @@ def edit_report_scoped(report_id: int, instruction: str, company) -> dict:
     )
     return {
         "report": saved,
+        "sections_changed": edit["sections_changed"],
+        "summary": edit["summary"],
+    }
+
+
+def edit_evidence_scoped(
+    evidence_id: int, instruction: str, company, *, workspace_id=None
+) -> dict:
+    """Apply a chat instruction to an EVIDENCE PAGE (an `evidences` row).
+    `{"evidence", "sections_changed", "summary"}`.
+
+    WHY IT EXISTS. Asked to "improve the evidence with an analytical chart of
+    the evidence", the chat drew the chart into the conversation — because
+    evidence was the one artifact in the panel with no edit path at all. A PRD
+    has one, a report has one, a team document has one, and the document the
+    request was actually about did not, so the only thing the chat could do was
+    answer beside it.
+
+    TENANCY IS THE SAME CHAIN THE ROUTE USES, not a new one:
+    `require_owned_evidence` resolves evidence → brief → dataset → company (and
+    workspace when given) and raises 404 on a mismatch. A foreign id reads as
+    absent, never as forbidden — the rule every ownership check here follows.
+
+    THE SHAPE IS THE DIFFERENCE. An evidence page is not prose: it is a whole
+    self-contained HTML document with its own stylesheet, layout classes and
+    hand-authored SVG charts. It is edited under `_SHAPE_EVIDENCE`, and it goes
+    back through `normalize_evidence_html` — the SAME normaliser the generator
+    uses — rather than `sanitize_artifact_html`, whose dozen-tag allow-list
+    would strip the page down to its headings and throw away every chart on it,
+    including the one the user just asked for. Scripts are stripped there and
+    the canonical stylesheet is re-injected, so an edited page is stored under
+    exactly the contract a generated one is.
+
+    NO VERSION COMPARE-AND-SET, for the reason `edit_report_scoped` gives:
+    `evidences` has no version column. The losing window is two chat edits of
+    one page racing on a single thread.
+    """
+    from app.deps.ownership import require_owned_evidence
+    from app.db import complete_evidence
+    from app.evidence_html import EvidenceHtmlError, normalize_evidence_html
+    from app.skills.loader import get_skill
+
+    row = require_owned_evidence(evidence_id, company.company_id, workspace_id)
+
+    body = (row.get("payload_md") or "").strip()
+    if not body:
+        # Still generating, or generated and failed. Editing an empty page
+        # would write the model's idea of one over a row the reader is
+        # watching fill in.
+        raise HTTPException(409, "This evidence page has no content to edit yet")
+
+    try:
+        edit = apply_edit(
+            body, instruction, enterprise_id=company.company_id,
+            label="evidence page", shape="evidence",
+        )
+    except RuntimeError as exc:
+        raise HTTPException(502, f"Could not apply the edit: {exc}")
+
+    if not edit["sections_changed"]:
+        # A question about the evidence, or a chart whose numbers are not in
+        # the page — the editor is told to change nothing and say so. Either
+        # way the row is untouched and the chat answers instead of claiming an
+        # edit it did not make.
+        return {"evidence": row, "sections_changed": [], "summary": edit["summary"]}
+
+    try:
+        html = normalize_evidence_html(
+            edit["document"], get_skill("evidence-brief").assets["evidence.css"]
+        )
+    except EvidenceHtmlError as exc:
+        # The editor returned something that is not a document. Refusing is the
+        # only safe answer: the alternative is storing it and rendering a blank
+        # panel where a finished brief used to be.
+        raise HTTPException(502, f"The edited evidence page was unusable: {exc}")
+
+    complete_evidence(evidence_id, row.get("title") or "", html)
+    logger.info(
+        "evidence edited id=%s company=%s sections=%s",
+        evidence_id, company.company_id, edit["sections_changed"],
+    )
+    return {
+        # The stored row, re-read the way the other two writers return theirs,
+        # so the caller renders what was actually saved rather than what was
+        # sent.
+        "evidence": {**row, "payload_md": html, "status": "ready", "error": None},
         "sections_changed": edit["sections_changed"],
         "summary": edit["summary"],
     }
