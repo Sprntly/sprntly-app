@@ -178,8 +178,9 @@ def test_the_prompt_version_moved_with_the_menu():
     """`_PROMPT_VERSION` pools rows for routing-accuracy queries. A v13 row and
     a v14 row answer differently for every interrogative goal, so pooling them
     would measure nothing — the file's own rule is that anything altering what
-    the prompt ASKS bumps. Bumped again to v15 by the `delegate` action, which
-    answers a question no v14 row was asked."""
+    the prompt ASKS bumps. Bumped to v15 by the `delegate` action, then to v16
+    by `backlog_action` + `include_backlog`; each answers a question the
+    version before it was never asked."""
     from app.ask_planner import _PROMPT_VERSION
 
-    assert _PROMPT_VERSION == "ask-planner-v15"
+    assert _PROMPT_VERSION == "ask-planner-v16"
