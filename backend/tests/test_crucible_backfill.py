@@ -76,6 +76,16 @@ def test_ignores_a_bare_digit_with_no_dollar_sign():
     assert find_dollar_figures("about 3k accounts churned") == []
 
 
+def test_the_parser_itself_still_reports_a_stated_zero():
+    """`find_dollar_figures` finds "$0" as a real parse — the zero-is-not-a-
+    real-amount guard lives in the shared extractor validator
+    (`decide_for_signal` -> `_grounded_amount_properties`), not here. Keeping
+    the parse boundary and the amount-validity boundary separate is what
+    lets `decide_for_signal`'s zero-skip test prove it goes through the same
+    gate ingest does, rather than a private re-implementation."""
+    assert find_dollar_figures("it came down to $0 after the credit") == [0.0]
+
+
 def test_a_malformed_comma_grouping_never_yields_a_clipped_wrong_number():
     """The costing pass's own probe sample showed clipping mid-number
     (`$NN,NNN,`). A number with an invalid group width ("$12,34,567" — a
@@ -124,6 +134,17 @@ def test_skips_ambiguous_multiple_distinct_figures():
         {}, "either $500 a month or $10,000 up front, they hadn't decided",
     )
     assert decision.outcome == "ambiguous_multiple_figures"
+    assert decision.new_properties is None
+
+
+def test_a_stated_figure_of_zero_is_skipped_not_written():
+    """A parsed "$0" must never be written as a real amount — same exclusion
+    the shared extractor validator applies at ingest (a stated figure of
+    zero is not a real quoted amount, only ever a defaulted-looking
+    placeholder). Reaches `_grounded_amount_properties`'s own `_is_number`
+    zero-guard, not a check this module reimplements."""
+    decision = decide_for_signal({}, "the discount brought it down to $0 this month")
+    assert decision.outcome == "no_figure_found"
     assert decision.new_properties is None
 
 
@@ -324,6 +345,21 @@ def test_ambiguous_signal_is_left_untouched_and_counted(backfill_env, isolated_s
 
     assert result["enriched"] == 0
     assert result["skipped"]["ambiguous_multiple_figures"] == 1
+    row = _get_signal(client, sig_id)
+    assert row["properties"].get("amount") is None
+
+
+def test_a_stated_zero_is_never_written_even_in_apply_mode(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-zero"
+    sig_id = _insert_signal(
+        client, company_id=company_id, content="after the credit it was $0 this cycle",
+    )
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 0
+    assert result["skipped"]["no_figure_found"] == 1
     row = _get_signal(client, sig_id)
     assert row["properties"].get("amount") is None
 

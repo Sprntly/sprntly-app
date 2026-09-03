@@ -190,7 +190,11 @@ def decide_for_signal(properties: dict[str, Any] | None, content: str) -> Signal
         return SignalDecision(signal_id="", outcome="ambiguous_multiple_figures")
 
     validated = _grounded_amount_properties({"amount": figures[0], "currency": "USD"})
-    if "amount" not in validated:  # pragma: no cover - defensive; figures[0] is always finite
+    if "amount" not in validated:
+        # Reachable: the shared validator's `_is_number` excludes a literal
+        # `0` (a stated figure of zero is not a real quoted amount either —
+        # same exclusion the extractor applies at ingest), so a parsed "$0"
+        # lands here rather than being written as a real amount.
         return SignalDecision(signal_id="", outcome="no_figure_found")
 
     new_props = dict(props)
