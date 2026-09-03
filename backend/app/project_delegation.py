@@ -343,8 +343,9 @@ def _notify_assigner_task_completed_email(
     completion paths (the inbound explicit-done classifier and the
     outbound soft-done finalize, both via
     `delegation_status_ingest.notify_requester_task_completed`; and
-    `handle_complete_task` below directly, since that path has no
-    in-app notice to piggyback on today).
+    `handle_complete_task` below directly — which pairs it with its own
+    in-app assigner notice via `_post_completion_notice_to_assigner`, so
+    all three paths emit exactly one email + one in-app turn).
 
     Resolves the assigner off `load_delegation_for_authz(delegation_id)` —
     never trusts a caller-supplied assigner id for this cross-user email
@@ -817,6 +818,45 @@ def _score_task_match(task_ref: str, summary: str) -> int:
     return len((ref & tgt) - _stop)
 
 
+def _post_completion_notice_to_assigner(
+    project_id: int, delegation_id: int, *, completer_user_id: str, task_summary: str | None
+) -> None:
+    """Post the in-app "✓ {name} finished: {summary}" completion turn into the
+    ASSIGNER's own project chat (and broadcast it for realtime), matching the
+    background classifier path's assigner notice
+    (`delegation_status_ingest.notify_requester_task_completed` →
+    `_route_to_requester` → `_post_to_own_chat`) VERBATIM — same wording, same
+    `brief.delivered` broadcast — so the two completion paths are
+    indistinguishable to the assigner. The `complete_task`-tool path used to
+    fire ONLY the completion email and drop this in-app turn.
+
+    Reimplemented on THIS module's own primitives (`_member_first_name`,
+    `create_individual_project_chat`, `post_individual_turn`,
+    `_publish_brief_delivered`) rather than importing
+    `delegation_status_ingest`'s helper — that module already imports FROM this
+    one, and a reverse import would be a cycle (see `_member_first_name`).
+    Deliberately does NOT email: `handle_complete_task` already fires the DRY
+    completion email itself, so posting here keeps the net result at exactly
+    one in-app assigner turn + one email. Best-effort/never-raising: a post
+    failure must never roll back the already-recorded completion."""
+    try:
+        fact = load_delegation_for_authz(delegation_id) or {}
+        assigner_id = fact.get("assigner_user_id")
+        if not assigner_id:
+            return
+        name = _member_first_name(project_id, completer_user_id)
+        summary = (task_summary or "").strip()
+        text = f"✓ {name} finished: {summary}" if summary else f"✓ {name} finished the task."
+        conv = create_individual_project_chat(project_id, assigner_id)
+        turn = post_individual_turn(conv["id"], "assistant", text)
+        _publish_brief_delivered(project_id, assigner_id, conv["id"], turn)
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never blocks a recorded completion
+        logger.warning(
+            "delegation_complete_inapp_notice_failed project_id=%s delegation_id=%s error_class=%s",
+            project_id, delegation_id, type(exc).__name__,
+        )
+
+
 def handle_complete_task(
     *,
     project_id: int,
@@ -880,14 +920,18 @@ def handle_complete_task(
             "delegation_completed project_id=%s delegation_id=%s actor=%s",
             project_id, delegation_id, completer_user_id,
         )
-        # Best-effort transactional email to the ASSIGNER — this
-        # `complete_task`-tool path has no in-app requester notice today
-        # (unlike the two inbound/outbound completion paths, which post one
-        # via `notify_requester_task_completed`), so this is the only
-        # completion signal fired from here. Own try/except lives inside
-        # the (DRY, shared-with-those-two-paths) helper.
+        # Assigner completion signals — the SAME pair the background classifier
+        # path fires, so the deterministic tool path is indistinguishable to the
+        # assigner: (1) the DRY best-effort transactional email (own try/except
+        # inside the helper), and (2) the in-app "✓ {name} finished: {summary}"
+        # turn posted into the assigner's chat + broadcast for realtime. Exactly
+        # ONE of each — the in-app helper deliberately does not email.
         _notify_assigner_task_completed_email(
             project_id, delegation_id, assignee_user_id=completer_user_id
+        )
+        _post_completion_notice_to_assigner(
+            project_id, delegation_id,
+            completer_user_id=completer_user_id, task_summary=target.get("task_summary"),
         )
         # Ledger liveness: publish the shaped completed status DTO to BOTH
         # parties' per-user channels (best-effort, AD-P22) so the Task ledger

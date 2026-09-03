@@ -86,6 +86,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_project_completion_request,
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
@@ -2269,7 +2270,7 @@ _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
 
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
-    enterprise_id: str, dataset: str,
+    enterprise_id: str, dataset: str, admitted_completion: bool = False,
 ) -> Optional[dict]:
     """The SIXTH ladder branch (project surfaces) — RELOCATED, not
     reimplemented, from `project_individual_agent.respond_individual` /
@@ -2449,6 +2450,34 @@ def _try_scoped_tool_answer(
                 system=system, user=user, tools=list(scope.extra_tools),
                 dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
                 meta_out=meta, force_tool="delegate_task",
+            )
+        # Completion analogue of the delegate forcing pass above. The turn was
+        # DETERMINISTICALLY admitted as a first-person completion claim
+        # (`admitted_completion`, gated on `is_project_completion_request` at
+        # the caller), yet the model finished the normal loop WITHOUT ever
+        # calling `complete_task` (no captured narration) — the same "confirms
+        # without doing" failure the delegate guard closes: the model says
+        # "noted, I'll mark that done" and the ledger never moves. Re-run the
+        # loop forcing the tool so it actually writes; `handle_complete_task`'s
+        # authoritative return then OVERRIDES the model's free text below (it
+        # no-ops gracefully if the speaker has no open task, so a false-positive
+        # admission is absorbed). `elif` on the delegate guard keeps it at most
+        # ONE forcing pass per turn; the `not delegate_task_narrations` guard
+        # ensures we never force a completion when a delegate write already
+        # fired this turn (the override block prioritises delegate over this).
+        elif (
+            admitted_completion
+            and not complete_task_narrations
+            and not delegate_task_narrations
+        ):
+            logger.warning(
+                "completion_admitted_without_tool_call project_id=%s — forcing complete_task",
+                scope.project_id,
+            )
+            run_tool_loop(
+                system=system, user=user, tools=list(scope.extra_tools),
+                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
+                meta_out=meta, force_tool="complete_task",
             )
     except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
         logger.warning(
@@ -2727,6 +2756,18 @@ def answer(
             # never fires on a non-member destination — see
             # `_is_bare_send_to_roster_member`'s docstring.
             or _is_bare_send_to_roster_member(routing_text, scope)
+            # A first-person completion CLAIM ("I'm done with the pricing
+            # one-pager", "finished that", "sent it over") — the assignee (or
+            # the task-ledger tick, which submits the same shape) reporting
+            # THEIR OWN delegated task done. Admitting it here is a DETERMINISTIC
+            # regex decision (`is_project_completion_request` reuses the same
+            # interrogative/mention veto so "is the review done?" never trips
+            # it), routing the turn to the `complete_task` tool below instead of
+            # leaving it to the flaky ask-planner (which misrouted it to the
+            # backlog agent). `handle_complete_task` no-ops gracefully on a
+            # false positive (speaker has no open task), so this is safe to
+            # admit greedily.
+            or is_project_completion_request(routing_text, history)
             # An edit-intent turn must REACH the tool loop so the model can call
             # the in-band `edit_prd` tool. GUARDED on `edit_prd_handler` — only
             # the GROUP surface registers one, so this disjunct is always False
@@ -2770,11 +2811,40 @@ def answer(
         # assignment tool and would fabricate a delegation row rather than
         # decline. `"delegate"` itself is excluded from the deferred set —
         # see `_defers_to_ticket_action`'s docstring.
-        and not _defers_to_ticket_action(plan)
+        #
+        # EXEMPTION: an admitted first-person completion CLAIM overrides this
+        # deferral. Live-verified failure: the ask-planner classifies realistic
+        # completion phrasings ("I'm done with the security review", the ledger
+        # tick's "I've finished this task: '…'. Please mark it complete.") as
+        # `action=update_ticket` at ~0.82–0.85 confidence, so
+        # `_defers_to_ticket_action(plan)` was vetoing the completion branch and
+        # `complete_task` never fired — completion then fell to the
+        # non-deterministic background classifier, which confirmed "done" while
+        # the ledger stayed open. A completion claim must reach `complete_task`
+        # deterministically even when the planner mislabels it `update_ticket`.
+        # Safe: (1) `is_project_completion_request` is tightly scoped — first-
+        # person/declarative claims only, yes/no questions vetoed — so a genuine
+        # ticket-edit ("change the acceptance criteria on the export ticket") is
+        # NOT a completion and still defers; (2) `handle_complete_task` no-ops/
+        # disambiguates when there is no single matching open task; (3) no
+        # double-handling — the ticket-update EXECUTOR (`is_ticket_update`
+        # interceptor, regex-gated on the message's words) never matches a
+        # completion phrasing AND sits far below this branch, which returns
+        # first when it claims the turn.
+        and (
+            not _defers_to_ticket_action(plan)
+            or is_project_completion_request(routing_text, history)
+        )
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
             enterprise_id=enterprise_id, dataset=dataset,
+            # Deterministic completion admission (same predicate as the ladder
+            # disjunct above) → the tool-loop forcing pass insists on
+            # `complete_task` if the model narrates a completion without calling
+            # it. Recomputed here (cheap regex) rather than plumbed as a flag
+            # through the big `if` so the gate's disjuncts stay independent.
+            admitted_completion=is_project_completion_request(routing_text, history),
         )
         if scoped_result is not None:
             return scoped_result
