@@ -118,7 +118,7 @@ describe("IdeationScreen — Proposed tab", () => {
     // The count reflects the loaded list, not a hardcoded number. It surfaces
     // in two legitimate places — the top-bar count badge and the info-bar
     // summary line — so assert at least one carries the live count.
-    expect(screen.getAllByText(/2 ideas/).length).toBeGreaterThan(0)
+    expect(screen.getAllByText(/2 backlog items/).length).toBeGreaterThan(0)
     expect(listMock).toHaveBeenCalledTimes(1)
   })
 
@@ -131,7 +131,7 @@ describe("IdeationScreen — Proposed tab", () => {
     // No table rows / seeded placeholder ideas leak through.
     expect(screen.queryByText("Rank-4 idea")).toBeNull()
     // The count badge reads zero — nothing surfaced without an analysis.
-    expect(screen.getByText(/0 ideas/)).toBeTruthy()
+    expect(screen.getByText(/0 backlog items/)).toBeTruthy()
   })
 
   it("preserves the empty state when the pool is empty (no demo items)", async () => {

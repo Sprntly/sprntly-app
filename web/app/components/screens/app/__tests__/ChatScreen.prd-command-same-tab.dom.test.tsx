@@ -466,3 +466,64 @@ describe("ChatScreen — a report run that answers in the thread instead", () =>
     expect(screen.getByTestId("panel-probe").textContent).toBe("reports")
   })
 })
+
+// ── The reader wandered off while the planner was thinking ──────────────────
+// The intent round-trip is SECONDS long (a real one has been measured at 13s
+// with a PDF folded in). Switching tabs inside that window used to hand the
+// generation to whatever tab was active when the envelope landed: the command
+// executors resolve their target from the LIVE active tab, so the PRD was built
+// in — and took over — a blank tab the user had just opened, conversation and
+// all, while the thread that asked for it stayed empty.
+describe("ChatScreen — a PRD command whose planner returns after a tab switch", () => {
+  it("generates in the tab it was typed in, without stealing the tab the user moved to", async () => {
+    renderChat()
+    // Tab A: a real conversation, then the command.
+    await typeAndSend("our checkout drops 42% of users at the payment step")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    await waitFor(() => expect(document.body.textContent).toContain("canned"))
+
+    // Hold the planner open for exactly this send, so the tab switch below
+    // happens INSIDE the classify window rather than after it.
+    let release!: () => void
+    resolveIntent.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          intent: "generate_prd", confidence: 0.95, task: "dark mode on mobile",
+          instruction: null, reason: "test stub", source: "planner",
+          prd_id: null, prd_title: null,
+        })
+      }),
+    )
+    await typeAndSendInThread("generate a PRD for dark mode on mobile")
+    expect(generateFromTask).not.toHaveBeenCalled()
+
+    // …and the user opens a fresh tab while waiting.
+    // The strip's own "+" (the sidebar has a same-labelled control that
+    // navigates instead of opening a tab here).
+    const newTabBtn = document.querySelector(".chat-tab")!
+      .parentElement!.querySelector('button[aria-label="New chat"]') as HTMLButtonElement
+    await act(async () => { fireEvent.click(newTabBtn) })
+    expect(chatTabCount()).toBe(2)
+
+    await act(async () => { release() })
+    await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
+
+    // The new tab is untouched: still active, still empty, no panel over it.
+    const activeTab = document.querySelector('.chat-tab[data-tab-active="true"]')
+    expect(activeTab?.textContent).toContain("New chat")
+    expect(document.body.textContent).not.toContain("generate a PRD for dark mode on mobile")
+    expect(screen.getByTestId("panel-probe").textContent).toBe("closed")
+    expect(chatTabCount()).toBe(2)
+
+    // Going back to the tab that asked shows the command, its ack, and the
+    // PRD panel — the ordinary refocus route, no special case.
+    const prdTab = Array.from(document.querySelectorAll(".chat-tab"))
+      .find((t) => t.textContent?.includes("PRD · Dark mode on mobile"))
+    expect(prdTab).toBeTruthy()
+    await act(async () => { fireEvent.click(prdTab!) })
+    expect(document.body.textContent).toContain("our checkout drops 42% of users at the payment step")
+    expect(document.body.textContent).toContain("generate a PRD for dark mode on mobile")
+    expect(document.body.textContent).toContain("Generating a PRD for that")
+    await waitFor(() => expect(screen.getByTestId("panel-probe").textContent).toBe("prd"))
+  })
+})
