@@ -1065,6 +1065,25 @@ def _finding_block(
         out.append(_p(
             f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
         ))
+        # THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED — not
+        # left as a bare fact in "How many got a full recommendation" while
+        # this card sits below it looking like an unexplained absence.
+        # `deep_attempted` is only set (`routes/crucible.py`'s
+        # `_run_enrichment`) on a finding that was IN the top N a count named
+        # or defaulted to, but whose evidence did not clear the citation gate
+        # (or a deep pass that failed outright) — never on a finding that was
+        # simply ranked past N, which never had a full write-up coming. The
+        # specific reason lives once, in `_recommendation_basis_section`
+        # above; this points there rather than restating it, so the two can
+        # never drift apart.
+        if finding.get("deep_attempted"):
+            out.append(_p(
+                "<em>This finding was one of the ones in line for a full "
+                "write-up. It did not get one this run — see “How many got "
+                "a full recommendation” above for why — so the "
+                "recommendation above is the plain version, not a "
+                "downgrade of a deeper one you are missing.</em>"
+            ))
 
     meta = [_esc(_reach(finding))]
     band = (finding.get("confidence_band") or "").strip()

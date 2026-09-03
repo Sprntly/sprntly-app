@@ -111,6 +111,79 @@ def test_no_dollar_figure_in_plain_prose():
     assert find_dollar_figures("the customer seemed happy with the demo") == []
 
 
+# ── Scale-word resolution: the exact shapes the real corpus contains ────────
+#
+# A staging dry run examined 871 eligible signals and would enrich 218 of
+# them, in these shapes: $NM, $NNM, $N.NM, $NB, $NNK, $NNNK. A mis-parsed
+# scale is a 1,000x-or-more magnitude error — "$1.5M" resolving to 1.5 or
+# 1500 instead of 1,500,000 is worse than no figure at all, because unlike a
+# missing figure a wrong one is invisible: it looks like data. This locks
+# down the exact shapes before `--apply` writes any of the 218 rows.
+
+def test_letter_scale_suffixes_resolve_to_the_right_magnitude():
+    assert find_dollar_figures("renewed at $1.5M") == [1_500_000.0]
+    assert find_dollar_figures("renewed at $2M") == [2_000_000.0]
+    assert find_dollar_figures("a $250M book of business") == [250_000_000.0]
+    assert find_dollar_figures("quoted $50k for the pilot") == [50_000.0]
+    assert find_dollar_figures("quoted $50K for the pilot") == [50_000.0]
+    assert find_dollar_figures("a $250K expansion") == [250_000.0]
+    assert find_dollar_figures("a $1B contract") == [1_000_000_000.0]
+
+
+def test_word_scale_suffixes_with_a_space_resolve_to_the_right_magnitude():
+    assert find_dollar_figures("closed at $1.5 million ARR") == [1_500_000.0]
+    assert find_dollar_figures("saved $50 thousand a year") == [50_000.0]
+    assert find_dollar_figures("a $2 billion valuation") == [2_000_000_000.0]
+
+
+def test_scale_suffix_case_is_never_significant():
+    assert find_dollar_figures("worth $50k") == [50_000.0]
+    assert find_dollar_figures("worth $50K") == [50_000.0]
+    assert find_dollar_figures("worth $50m") == [50_000_000.0]
+    assert find_dollar_figures("worth $50M") == [50_000_000.0]
+    assert find_dollar_figures("worth $50b") == [50_000_000_000.0]
+    assert find_dollar_figures("worth $50B") == [50_000_000_000.0]
+    assert find_dollar_figures("worth $50 thousand") == [50_000.0]
+    assert find_dollar_figures("worth $50 THOUSAND") == [50_000.0]
+    assert find_dollar_figures("worth $50 Million") == [50_000_000.0]
+    assert find_dollar_figures("worth $50 MILLION") == [50_000_000.0]
+    assert find_dollar_figures("worth $50 Billion") == [50_000_000_000.0]
+    assert find_dollar_figures("worth $50 BILLION") == [50_000_000_000.0]
+
+
+def test_a_bare_figure_with_no_scale_word_is_never_inflated():
+    """THE NEGATIVE CASE THAT MATTERS MOST: a bare `$5` must stay 5, never
+    become 5,000 or larger just because a scale vocabulary exists."""
+    assert find_dollar_figures("it came to $5 total") == [5.0]
+
+
+def test_a_trailing_word_starting_with_a_scale_letter_is_never_consumed_as_a_scale():
+    """"$50 monthly" / "$50 Kubernetes" / "$5 by March" each have a word right
+    after the figure that HAPPENS to start with a scale letter (m/k/b). The
+    scale group's own trailing `\\b` requires the match to end on a real word
+    boundary, so a partial-word match ("m" out of "monthly") is rejected and
+    the pattern falls back to no scale at all — never a 1,000x-or-more
+    inflation from a word that was never a scale suffix."""
+    assert find_dollar_figures("billed at $50 monthly") == [50.0]
+    assert find_dollar_figures("cost $50 Kubernetes nodes") == [50.0]
+    assert find_dollar_figures("due $5 by March") == [5.0]
+
+
+def test_the_clipping_guard_still_refuses_a_malformed_group_with_a_scale_word_nearby():
+    """Same malformed-comma-grouping guard as
+    `test_a_malformed_comma_grouping_never_yields_a_clipped_wrong_number`,
+    re-run with a scale word in the sentence so the scale-suffix handling
+    cannot accidentally reopen the clipping hole — confirms the interaction
+    between `(?!,?\\d)` and the scale group, not just the scale group alone."""
+    figures = find_dollar_figures(
+        "a strange figure of $12,34,567 million was mentioned"
+    )
+    assert 12.0 not in figures
+    assert 12_000_000.0 not in figures
+    assert 1_234_567.0 not in figures
+    assert 1_234_567_000_000.0 not in figures
+
+
 # ─── decide_for_signal ───────────────────────────────────────────────────────
 
 def test_skips_a_signal_that_already_has_an_amount():

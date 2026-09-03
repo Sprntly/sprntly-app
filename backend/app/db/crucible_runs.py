@@ -289,6 +289,18 @@ def sweep_orphans(*, older_than_minutes: int = 45) -> int:
     Recurring, not startup-only: a process that dies at 03:00 must not leave a
     row spinning until the next deploy. `custom_artifacts` shipped this
     startup-only and it had to be fixed later — same mistake, already made once.
+
+    CHECKED AGAINST `find_stalled_enrichment`'s OWN `.limit(100)` DEFECT, AND
+    FOUND NOT TO SHARE ITS EXPOSURE. The shape is the same (an unordered
+    `.limit(100)` ahead of a predicate), but the predicate here is
+    `status IN (resolving_goal, planning, running)` — every one of those is a
+    non-terminal state, so every row `fail()` touches LEAVES the candidate set
+    for good. A tenant with more than 100 genuinely stuck runs in one tick
+    still drains across a few ticks; nothing here can accumulate the way a
+    `ready` run's history does. `find_stalled_enrichment` matches on `ready`,
+    a TERMINAL state every normally-completed run sits in forever, so its
+    matching pool only grows — the harmless majority permanently outcompetes
+    the rare real candidate for the same 100 slots. Left as-is.
     """
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
@@ -315,6 +327,23 @@ def sweep_orphans(*, older_than_minutes: int = 45) -> int:
 #: provider.
 STALLED_ENRICHMENT_AGE_MINUTES = 10
 
+#: `find_stalled_enrichment`'s per-page size while it walks every
+#: `ready`-and-stale row (see the function's own docstring for why it cannot
+#: stop at the first page). Independent of `_FINDINGS_PAGE` — that one mirrors
+#: PostgREST's own default cap; this one is just a reasonable chunk size for a
+#: query this function fully controls.
+_STALLED_ENRICHMENT_PAGE = 500
+
+#: A run-away safety valve, not a business rule: the total number of
+#: `ready`-and-stale rows one sweep tick will examine, across every page. A
+#: real candidate is almost always a small handful (see the function's own
+#: docstring), so this bounds the pathological case — a very old company with
+#: tens of thousands of completed runs — without reintroducing the silent
+#: early-truncation this replaces. `.order("heartbeat_at", desc=True)` below
+#: means a cap this generous would only ever bite on ancient, ordinary
+#: completions, never on a genuinely recent stall.
+_STALLED_ENRICHMENT_SCAN_CAP = 5000
+
 
 def find_stalled_enrichment(
     *, older_than_minutes: int = STALLED_ENRICHMENT_AGE_MINUTES,
@@ -325,30 +354,56 @@ def find_stalled_enrichment(
     published its findings and moved to `ready` before its worker died. THE
     ROW IS THE JOB, same as `sweep_orphans` — no separate job table.
 
+    WHY THIS PAGES RATHER THAN TAKING ONE `.limit(100)`. `ready` is a
+    TERMINAL state every normally-completed run sits in forever, so the
+    `status="ready" AND heartbeat_at < cutoff` predicate matches every old
+    completed run as well as a genuinely stalled one, and that harmless
+    majority only grows over the life of the table. A single unordered
+    `.limit(100)` ahead of the `enrichment_pending` filter below let that
+    majority permanently crowd the rare real candidate out of the page it was
+    filtered from — a company whose completed-run history passed 100 stopped
+    being rescuable at all, silently. Paging past that page, instead of
+    stopping at it, is what makes the candidate set actually a function of
+    `enrichment_pending` again rather than of row order.
+
+    `.order("heartbeat_at", desc=True)` is defence in depth for the
+    (extremely unlikely, given `_STALLED_ENRICHMENT_SCAN_CAP`) case where
+    scanning is cut short: a genuine stall's heartbeat stops within
+    `older_than_minutes` of falling stale, so it is always more RECENT than
+    an old completed run's frozen-forever heartbeat, and sorting
+    most-recent-first surfaces it before the cap would ever bite.
+
     Client-side filtered on `enrichment_pending`, deliberately: it lives
-    inside the `prioritisation` jsonb blob, not a column, and this table's
-    `status`/`heartbeat_at` columns already narrow the candidate set to
-    something small before that filter runs.
+    inside the `prioritisation` jsonb blob, not a column.
     """
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
     client = require_client()
-    candidates = (
-        client.table(TABLE).select("*")
-        .eq("status", "ready")
-        .lt("heartbeat_at", cutoff_iso)
-        .limit(100).execute()
-    ).data or []
-    out = []
-    for row in candidates:
-        meta = row.get("prioritisation") or {}
-        if isinstance(meta, str):
-            try:
-                meta = json.loads(meta)
-            except Exception:  # noqa: BLE001
-                meta = {}
-        if isinstance(meta, dict) and meta.get("enrichment_pending"):
-            out.append(row)
+    out: list[dict] = []
+    scanned = 0
+    offset = 0
+    while scanned < _STALLED_ENRICHMENT_SCAN_CAP:
+        page = (
+            client.table(TABLE).select("*")
+            .eq("status", "ready")
+            .lt("heartbeat_at", cutoff_iso)
+            .order("heartbeat_at", desc=True)
+            .range(offset, offset + _STALLED_ENRICHMENT_PAGE - 1)
+            .execute()
+        ).data or []
+        for row in page:
+            meta = row.get("prioritisation") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:  # noqa: BLE001
+                    meta = {}
+            if isinstance(meta, dict) and meta.get("enrichment_pending"):
+                out.append(row)
+        scanned += len(page)
+        if len(page) < _STALLED_ENRICHMENT_PAGE:
+            break
+        offset += _STALLED_ENRICHMENT_PAGE
     return out
 
 

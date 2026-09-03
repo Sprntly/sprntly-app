@@ -216,6 +216,47 @@ def test_named_count_is_honoured():
     assert _named_count("Nothing about a count here") is None
 
 
+# ── The adjective-window fix: a modifier between the number and the noun ────
+#
+# Reproduced directly: "the ten most important things" used to NO-MATCH
+# because the noun had to sit immediately after the number, and the report
+# then claimed "no count or target was named" over a goal that plainly named
+# one — worse than a missed cap, a false claim about what the user asked.
+
+def test_named_count_reads_across_an_adjective_before_the_noun():
+    assert _named_count(
+        "Give me the ten most important things we could do to grow revenue."
+    ) == 10
+    assert _named_count("the three biggest initiatives") == 3
+    assert _named_count("the 10 most important things") == 10
+    # Unaffected regression: the zero-gap phrasing the fix must not break.
+    assert _named_count(
+        "Give me the ten things we could do to grow revenue."
+    ) == 10
+    assert _named_count("What are three things I can do to reduce churn?") == 3
+
+
+def test_named_count_still_ignores_a_corpus_fact_shaped_like_a_count():
+    """THE NEGATIVE CASES MATTER MORE THAN THE POSITIVE ONES — a loosened
+    pattern that reads a corpus fact as a count is worse than the miss it
+    replaces. "two accounts churned" must never resolve, adjective window or
+    not: `accounts`/`months` are not in the countable-noun vocabulary at any
+    distance from the number."""
+    assert _named_count("two accounts churned in three months") is None
+    assert _named_count(
+        "we lost two accounts and three customers last quarter"
+    ) is None
+
+
+def test_the_adjective_window_is_bounded_not_unlimited():
+    """The window is capped at three intervening words specifically so a
+    future widening cannot silently become unlimited distance. Four
+    adjectives exceeds the cap and must not match."""
+    assert _named_count("ten really very extremely important things") is None
+    # Exactly at the cap (three) still matches.
+    assert _named_count("ten really very important things") == 10
+
+
 def test_named_target_reads_dollars_and_accounts_and_percent():
     assert _named_target("I want to get a million dollars in revenue") == (1_000_000.0, "dollars")
     assert _named_target("Reach $500k ARR by Q4") == (500_000.0, "dollars")

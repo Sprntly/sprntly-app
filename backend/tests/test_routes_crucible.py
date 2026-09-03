@@ -443,6 +443,63 @@ def test_find_stalled_enrichment_ignores_a_run_whose_enrichment_finished(ctx):
     assert runs_db.find_stalled_enrichment() == []
 
 
+def test_find_stalled_enrichment_is_not_crowded_out_past_the_old_limit(ctx):
+    """PROOF, not assertion. `status="ready"` is TERMINAL, so every normally-
+    completed run sits in it forever — a real tenant measured 32 of 34
+    `ready` rows already matching the `status`/`heartbeat_at` predicate with
+    NOTHING stalled. The superseded query (`.limit(100)`, no `.order()`, then
+    filtered on `enrichment_pending` client-side) truncated to that unordered
+    page BEFORE the filter ran, so once the harmless majority passed 100 rows
+    the genuine candidate could be excluded from the page it was being
+    filtered out of. Construct exactly that: 150 harmless completed rows
+    inserted FIRST (so an unordered scan without `.order()` — SQLite walks a
+    plain table scan in rowid/insertion order — returns them, and only them,
+    in its first 100), then the one genuinely stalled run LAST.
+    """
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    client = require_client()
+    stale_iso = "2020-01-01T00:00:00+00:00"
+    harmless = [
+        {
+            "company_id": ctx.company_id, "status": "ready",
+            "goal_text": f"completed run {i}", "heartbeat_at": stale_iso,
+            "prioritisation": {"enrichment_pending": False},
+        }
+        for i in range(150)
+    ]
+    client.table("crucible_runs").insert(harmless).execute()
+    stalled_row = client.table("crucible_runs").insert({
+        "company_id": ctx.company_id, "status": "ready",
+        "goal_text": "the one that actually stalled",
+        "heartbeat_at": stale_iso,
+        "prioritisation": {"enrichment_pending": True},
+    }).execute().data[0]
+    stalled_id = stalled_row["id"]
+
+    # THE SUPERSEDED SHAPE, reproduced exactly (unordered `.limit(100)`, then
+    # filtered client-side) — MISSED before the fix.
+    old_shape_page = (
+        client.table("crucible_runs").select("*")
+        .eq("status", "ready")
+        .lt("heartbeat_at", "2099-01-01T00:00:00+00:00")
+        .limit(100).execute()
+    ).data or []
+    old_shape_found = [
+        r for r in old_shape_page
+        if (r.get("prioritisation") or {}).get("enrichment_pending")
+    ]
+    assert old_shape_found == [], (
+        "the superseded shape was expected to miss the stalled run — if it "
+        "did not, the fixture no longer reproduces the bug"
+    )
+
+    # THE FIX — FOUND.
+    found = runs_db.find_stalled_enrichment()
+    assert [r["id"] for r in found] == [stalled_id]
+
+
 def test_claim_stalled_enrichment_is_a_compare_and_set(ctx):
     """THE CLAIM IS ATOMIC. Two sweep ticks (or a sweep tick racing a worker
     that was alive after all) reading the SAME stale `heartbeat_at` must not
@@ -506,6 +563,124 @@ def test_sweep_stalled_enrichment_clears_the_flag_without_ever_failing_the_run(c
 
     # A second tick must not re-process the same, now-current, run.
     assert sweep_stalled_enrichment() == 0
+
+
+def _stalled_run(ctx, *, goal_text, statement):
+    """A `ready` run, findings already saved, `enrichment_pending` left up by
+    a worker that died — the shape `sweep_stalled_enrichment` exists to
+    rescue. Factored out because several tests below each need one."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    run_id = _start(ctx, goal=goal_text).json()["id"]
+    require_client().table("crucible_findings").insert({
+        "run_id": run_id, "company_id": ctx.company_id,
+        "statement": statement, "claim_ids": [], "adjudication": None,
+        "impact_value": None, "currency": "accounts",
+        "confidence_band": "low", "tier": "deep",
+    }).execute()
+    runs_db.update(
+        run_id, ctx.company_id, status="ready", goal_text=goal_text,
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    return run_id
+
+
+def test_sweep_stalled_enrichment_caps_recoveries_per_tick(ctx):
+    """One recovery measured 105s of synchronous model calls, inline inside
+    the SAME 5-minute job that also fails abandoned Ask jobs. Several
+    stranded runs in one tick would overrun the interval and skip that other
+    sweep's execution — a different subsystem's reliability degraded by this
+    one's recovery. A cap bounds work per tick; a run left untouched this
+    tick is DEFERRED, not dropped — it is still a candidate next tick,
+    because its `heartbeat_at` was never touched."""
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_ids = [
+        _stalled_run(ctx, goal_text=f"goal {i}", statement=f"finding {i}")
+        for i in range(3)
+    ]
+
+    def pending(rid):
+        return bool(
+            runs_db.get(rid, ctx.company_id)["prioritisation"]
+            .get("enrichment_pending")
+        )
+
+    swept_first_tick = sweep_stalled_enrichment(max_recoveries=2)
+    assert swept_first_tick == 2
+    still_pending = [rid for rid in run_ids if pending(rid)]
+    assert len(still_pending) == 1, "the cap should leave exactly one run untouched"
+
+    # DEFERRED, NOT DROPPED.
+    swept_second_tick = sweep_stalled_enrichment(max_recoveries=2)
+    assert swept_second_tick == 1
+    assert not any(pending(rid) for rid in run_ids)
+
+
+def test_sweep_recovered_enrichment_step_is_not_clobbered_by_a_stale_snapshot(ctx):
+    """`_reenrich_stalled_run` used to write back the `meta` snapshot it read
+    at the TOP of the function — captured BEFORE `_run_enrichment` ran its
+    own `_progress` calls — silently erasing every one of them on the final
+    write. A sweep-recovered run showed `progress.enrichment_step: null`
+    while a normally-completed run kept its last stage name
+    ("deep_recommending"). Re-reading the row fresh right before the final
+    write, like `execute_run`'s own tail already does, closes the gap: both
+    paths now agree."""
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _stalled_run(
+        ctx, goal_text="raise renewals",
+        statement="Renewals stall on the parts flow",
+    )
+
+    assert sweep_stalled_enrichment() == 1
+
+    row = runs_db.get(run_id, ctx.company_id)
+    progress = row["prioritisation"].get("progress") or {}
+    # `_run_enrichment` ALWAYS reaches "deep_recommending" — it is the last
+    # stage it narrates, set unconditionally regardless of whether judging
+    # relevance, the flat pass, or the deep pass individually failed.
+    assert progress.get("enrichment_step") == "deep_recommending", (
+        f"expected the sweep's own progress write to survive; got {progress!r}"
+    )
+
+
+def test_sweep_recovery_publishes_the_actual_deep_recommendation_count(ctx):
+    """The narration recap's "top N written up in full" line reads
+    `progress.deep`. It used to freeze at Stage 10a's screening-tier cap the
+    moment `execute_run` published it, before enrichment (and its citation
+    gate) had even run — a constant, not the count of what was actually
+    written up. `_run_enrichment` now corrects it, in BOTH paths that call
+    it. Offline under pytest, so the deep pass writes nothing — the true,
+    corrected count here is 0, not whatever the tiering cap happened to be.
+    """
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _stalled_run(
+        ctx, goal_text="raise renewals",
+        statement="Renewals stall on the parts flow",
+    )
+    # Simulate the stale pre-enrichment publish `execute_run` makes, so this
+    # test actually exercises the correction rather than starting from a
+    # value that already happens to be right.
+    runs_db.update(
+        run_id, ctx.company_id,
+        prioritisation={
+            "enrichment_pending": True,
+            "progress": {"deep": 5},
+        },
+    )
+
+    assert sweep_stalled_enrichment() == 1
+
+    row = runs_db.get(run_id, ctx.company_id)
+    progress = row["prioritisation"].get("progress") or {}
+    assert progress.get("deep") == 0
 
 
 def test_document_creation_is_refused_while_enrichment_is_pending(ctx):
