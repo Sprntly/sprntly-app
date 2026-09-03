@@ -81,7 +81,32 @@ DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 # on the call (see app/graph/extractor.py's checklist 'commercial' shape) —
 # is a different, stronger kind of evidence, and is reclassified per-CLAIM
 # below rather than per-kind.
-_GROUNDED_MAGNITUDE_KINDS: frozenset[str] = frozenset({"commercial_term"})
+#
+# `pricing` IS IN THIS SET, AND THE GATE THAT MAKES IT SAFE IS `basis`, NOT
+# `kind`. The write side attaches a figure to `commercial_term` AND
+# `pricing` (`app.graph.extractor._AMOUNT_ELIGIBLE_KINDS`); this read side
+# used to admit only the first, so the majority of the figures the extractor
+# captured were enriched and then discarded. The obvious fix — "a price is
+# not a deal value" — cannot be made on `kind`, because the distinction is
+# not in `kind`: it is one LLM judgement over a taxonomy whose own prose
+# blurs the two, and asking a model to be reliable about it is asking for a
+# decision, not a candidate.
+#
+# The distinction lives in `basis`, a field of the SAME grounded shape and a
+# closed vocabulary the extractor's validator enforces. A price with a
+# `total-contract` or `one-off` basis is a figure that means the same thing
+# a deal value means: this is what it costs, in total, once. A `per-seat`
+# price is a rate, and a rate without a seat count is not a sum — summing it
+# would be a projection wearing a quoted figure's clothes, which is exactly
+# what the grounded-figure evidence exists NOT to be. `per-year` is
+# excluded for the same reason: it is a rate over a term nobody stated.
+#
+# `commercial_term` is not basis-gated, and the asymmetry is deliberate: it
+# is the taxonomy's own name for a deal fact, so a figure on it is already
+# the thing `basis` is being used to establish about a price.
+_SUM_ELIGIBLE_BASIS: frozenset[str] = frozenset({"total-contract", "one-off"})
+_BASIS_GATED_KINDS: frozenset[str] = frozenset({"pricing"})
+_GROUNDED_MAGNITUDE_KINDS: frozenset[str] = frozenset({"commercial_term", "pricing"})
 
 
 def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional[float]:
@@ -103,8 +128,14 @@ def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional
     this repo's own extractor produced, and I2/I3 ("unmeasured is never
     zero") has to hold here even if some other writer ever puts a literal
     `0` in `properties["amount"]`.
+
+    `pricing` additionally requires a SUM-ELIGIBLE `basis` — see
+    `_SUM_ELIGIBLE_BASIS`. A price with no basis is not admitted: an absent
+    basis is unmeasured, and unmeasured is never assumed favourably (I3).
     """
     if kind not in _GROUNDED_MAGNITUDE_KINDS:
+        return None
+    if kind in _BASIS_GATED_KINDS and props.get("basis") not in _SUM_ELIGIBLE_BASIS:
         return None
     amount = props.get("amount")
     if isinstance(amount, bool) or not isinstance(amount, (int, float)):

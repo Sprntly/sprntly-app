@@ -123,17 +123,65 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     explicit "USD" are summed. A claim naming a different currency is
     counted (`commercial_grounded_claims`) but excluded from the dollar sum
     rather than risk silently mixing currencies into one number.
+
+    DEDUPLICATED BEFORE SUMMING, AND THAT IS THE WHOLE POINT OF THE SUM.
+    One deal restated in five messages is five claims carrying one figure.
+    Adding them gives five times the money, which turns HOW OFTEN something
+    was said into HOW BIG it is — corroboration contaminating size, the one
+    failure the separation of impact from confidence exists to prevent (see
+    `ImpactInputs`' own docstring). Two DIFFERENT accounts each naming
+    $50,000 genuinely is $100,000 of opportunity; the same $50,000 named
+    five times is not $250,000, and no amount of repetition can make it so.
+
+    The identity of a figure is therefore `(the accounts it is attached to,
+    the amount)`:
+
+      * named account — the same amount on the same account is one figure,
+        however many claims restate it. Two accounts naming the same amount
+        stay two figures.
+      * no named account — the amount alone is the identity, which is what
+        collapses an anonymous restatement of one deal.
+      * an anonymous amount already attributed to some account is dropped
+        entirely. Most often that is the same deal in a message that did not
+        name the customer, and between double-counting a real figure and
+        under-counting a duplicate, only one of those errors inflates.
+
+    Currency needs no place in the key: a claim in another currency is
+    already excluded from the sum above, so everything reaching the
+    deduplication is one currency by construction.
+
+    The cost is real and worth naming: one account that genuinely signs two
+    separate contracts for the identical amount is counted once. That is an
+    undercount of an unknowable, and this sum's job is to be a floor a
+    reader can trust, not a maximum.
     """
     grounded = [c for c in group if c.magnitude is not None]
     if not grounded:
         return {}
-    usd_amounts = [
-        c.magnitude for c in grounded
-        if (c.raw or {}).get("currency") in (None, "", "USD")
-    ]
+
     accounts_named: set[str] = set()
+    attributed: dict[tuple[tuple[str, ...], float], float] = {}
+    anonymous: dict[float, float] = {}
     for c in grounded:
-        accounts_named.update(c.population.segments.get("accounts", ()))
+        accounts = tuple(sorted(c.population.segments.get("accounts", ())))
+        accounts_named.update(accounts)
+        if (c.raw or {}).get("currency") not in (None, "", "USD"):
+            continue
+        if accounts:
+            attributed[(accounts, c.magnitude)] = c.magnitude
+        else:
+            anonymous[c.magnitude] = c.magnitude
+
+    attributed_amounts = {amount for _accounts, amount in attributed}
+    usd_amounts = list(attributed.values()) + [
+        amount for amount in anonymous if amount not in attributed_amounts
+    ]
+
+    # STILL THE RAW CLAIM COUNT, deliberately. This is a statement about the
+    # evidence ("N claims carried a figure"), not about the money, and it is
+    # the one number here a reader should be able to reconcile against the
+    # claim list. It is also why nothing downstream may size a finding from
+    # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
     if usd_amounts:
         units["commercial_grounded_usd"] = float(sum(usd_amounts))

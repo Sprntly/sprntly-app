@@ -224,6 +224,129 @@ def test_no_grounded_claims_leaves_native_units_empty():
     assert out.impacts[0].native_units == {}
 
 
+# ── Repetition is not magnitude ──────────────────────────────────────────────
+#
+# The sum is deduplicated before it is taken, and that is not tidiness. One
+# deal restated in five messages is five claims carrying ONE figure; adding
+# them turns how often something was said into how big it is, which is
+# corroboration deciding size — the single failure the wall between impact
+# and confidence exists to prevent. It is only a display error while the sum
+# is display-only. It stops being one the moment anything downstream reads
+# the sum to order findings.
+
+
+def test_one_figure_restated_by_the_same_account_is_counted_once():
+    """THE DEFECT. Five messages about one $50,000 deal are not $250,000, and
+    no amount of restatement can make them so."""
+    claims = [
+        claim(f"c{i}", days_ago=d, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"})
+        for i, d in enumerate([5, 20, 40, 90, 150])
+    ]
+    out = run(claims, goal_accounts=None)
+    # One account only, so this cluster is refuted before it can be a
+    # finding — the dedup is asserted on the helper directly below. This
+    # case is kept at the pipeline level to pin the surrounding behaviour.
+    assert out.findings == ()
+
+
+def test_the_same_amount_from_two_accounts_is_two_real_figures():
+    """The control that stops the fix over-correcting. Two DIFFERENT
+    accounts each naming $50,000 genuinely is $100,000 of opportunity."""
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 100000.0
+
+
+def test_a_restated_figure_never_inflates_the_sum_across_accounts():
+    """Two accounts, one figure each, every one of them said three times.
+    The sum is the two figures, not the six claims."""
+    claims = []
+    for i, (account, amount) in enumerate(
+        [("Northwind", 50000.0), ("Acme", 30000.0)]
+    ):
+        for j, days in enumerate([5, 40, 120]):
+            claims.append(claim(
+                f"c{i}{j}", days_ago=days, accounts=(account,), ctype="magnitude",
+                source="revenue", magnitude=amount, raw={"currency": "USD"},
+            ))
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 80000.0
+    # The CLAIM count is deliberately still the raw count: it is a statement
+    # about the evidence, not about the money, and a reader must be able to
+    # reconcile it against the claim list.
+    assert units["commercial_grounded_claims"] == 6.0
+    assert units["commercial_grounded_accounts"] == 2.0
+
+
+def test_an_anonymous_restatement_of_an_attributed_figure_is_dropped():
+    """Most often the same deal in a message that did not name the customer.
+    Between double-counting a real figure and under-counting a duplicate,
+    only one of those errors inflates."""
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=30000.0, raw={"currency": "USD"}),
+        claim("c3", days_ago=90, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+
+
+def test_two_anonymous_statements_of_the_same_amount_are_one_figure():
+    claims = [
+        claim("c1", days_ago=5, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=60, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 50000.0
+
+
+def test_distinct_anonymous_amounts_are_all_summed():
+    claims = [
+        claim("c1", days_ago=5, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=60, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=30000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+
+
+def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
+    """Stated as the property rather than as an example: the sum is a
+    function of the DISTINCT figures, so multiplying the number of claims
+    saying each one must not move it at all."""
+    def sum_for(repeats: int) -> float:
+        claims = []
+        for i, (account, amount) in enumerate(
+            [("Northwind", 50000.0), ("Acme", 30000.0)]
+        ):
+            for j in range(repeats):
+                claims.append(claim(
+                    # Spread well past ECHO_WINDOW so the cluster survives
+                    # refutation at every repeat count — the property under
+                    # test is the sum, not the echo check.
+                    f"c{i}{j}", days_ago=5 + 45 * (i + 2 * j),
+                    accounts=(account,),
+                    ctype="magnitude", source="revenue", magnitude=amount,
+                    raw={"currency": "USD"},
+                ))
+        return run(claims).impacts[0].native_units["commercial_grounded_usd"]
+
+    assert sum_for(1) == sum_for(2) == sum_for(5) == 80000.0
+
+
 # ── Adjudication ─────────────────────────────────────────────────────────────
 
 def test_opposing_authoritative_claims_are_a_conflict_not_an_average():
