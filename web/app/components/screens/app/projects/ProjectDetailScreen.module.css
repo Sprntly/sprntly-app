@@ -325,12 +325,19 @@
  * stretch so the host fills `.threadHost` the same way regardless of
  * content — the group surface's taller multi-party rows are what actually
  * exercise this, not private's shorter single-party ones. */
+/* This host only BOUNDS the mounted ChatShell to its flex track (exactly like
+   main chat's grid `1fr` cell) — it must NOT scroll. ChatShell already scrolls
+   internally (`.od-center-scroll`) and pins its own composer (`.bc-dock`), so a
+   second `overflow-y: auto` here made a redundant outer scroller: dragging it
+   pushed the pinned composer up and exposed this container's own `padding` as a
+   dead grey band below the composer during the "working" state. Removed both
+   the outer scroll and the 24px padding (the shell carries its own inner
+   gutters); if the chat ever reads too flush, add a gutter to the INNER scroll
+   content, never back onto this outer host. */
 .threadHost {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
   display: flex;
-  padding: 24px;
 }
 
 .threadPlaceholder {
