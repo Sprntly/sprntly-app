@@ -45,6 +45,10 @@ from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 from app.crucible.lint import lint_claim
+from app.crucible.moscow import (
+    TYPE_BUCKET_BLOCKER, TYPE_BUCKET_NEITHER, TYPE_BUCKET_PREFERENCE,
+    type_bucket,
+)
 from app.crucible.types import (
     Claim,
     Confidence,
@@ -1287,6 +1291,20 @@ def _deep_acceptable(
 #: to pick which of two bands is higher.
 _BAND_ORDER = {"low": 0, "medium": 1, "high": 2}
 
+#: What each claim-type bucket is CALLED in the comparison sentence, phrased
+#: to follow "this one" / "that one". Keyed on `moscow.type_bucket`'s own
+#: return values, so a bucket cannot be described as one thing here and
+#: sorted as another there.
+_BUCKET_PHRASE = {
+    TYPE_BUCKET_BLOCKER:
+        "states a blocker — something is stopping an account today",
+    TYPE_BUCKET_PREFERENCE:
+        "states a preference — something an account asked for",
+    TYPE_BUCKET_NEITHER:
+        "states neither — it describes the world rather than asking for "
+        "or blocking anything",
+}
+
 
 def _compare(
     top: Finding, second: Finding,
@@ -1295,12 +1313,26 @@ def _compare(
 ) -> str:
     """Why the ranking put `top` before `second` — COMPUTED, never narrated
     by a model (I2). Reads only what `_rank` itself reads: adjudication,
-    `Impact.value`, and `Confidence.band` — never `Confidence.score`, which
-    is internal and never rendered anywhere in this codebase.
+    the claim-type bucket, `Impact.value`, and `Confidence.band` — never
+    `Confidence.score`, which is internal and never rendered anywhere in
+    this codebase.
 
-    Mirrors `pipeline._rank`'s own key order (conflict, then reach, then
-    confidence) so this sentence can never disagree with the ranking it is
-    explaining.
+    Mirrors `pipeline._rank`'s own key order (conflict, then CLAIM-TYPE
+    BUCKET, then reach, then confidence) so this sentence can never disagree
+    with the ranking it is explaining.
+
+    THE BUCKET TERM IS NOT DECORATION — it is the first discriminator most
+    runs actually reach. Before it existed, the reach and band branches both
+    fell through on a document-only corpus (nothing there carries a number,
+    so `value` is `None` on both sides and the bands tie), and every such run
+    printed the same "read it as a position in a list, not as a verdict"
+    disclaimer. Which is to say this sentence had never yet printed a real
+    reason for its own ordering. "A stated blocker outranks a stated
+    preference" is a real reason, and it is the one the ranking used.
+
+    IF `pipeline._rank`'S KEY CHANGES, THIS CHANGES IN THE SAME COMMIT. The
+    failure is silent: the ordering stays correct and the sentence explaining
+    it stops being true, which is worse than printing no sentence at all.
     """
     top_label = (top.label or top.statement).strip()
     second_label = (second.label or second.statement).strip()
@@ -1310,6 +1342,26 @@ def _compare(
             f"Ranked above “{second_label}” because sources "
             f"disagree here — an authoritative conflict is treated as worth "
             f"more than any single-sided claim, regardless of size."
+        )
+
+    # THE CLAIM-TYPE BUCKET — second in the key, exactly as in `_rank`. Read
+    # through `moscow.type_bucket` rather than re-tested here, so the sentence
+    # and the sort cannot disagree about what counts as a blocker.
+    bucket_top = type_bucket(top.confidence_inputs.claim_types)
+    bucket_second = type_bucket(second.confidence_inputs.claim_types)
+    if bucket_top < bucket_second:
+        tail = (
+            " Something stopping an account is treated as worth more than "
+            "something an account would prefer, however many accounts "
+            "prefer it."
+            if bucket_top == TYPE_BUCKET_BLOCKER
+            and bucket_second == TYPE_BUCKET_PREFERENCE
+            else ""
+        )
+        return (
+            f"Ranked above “{second_label}” on what each one IS, before "
+            f"any question of size: this one {_BUCKET_PHRASE[bucket_top]}, "
+            f"and that one {_BUCKET_PHRASE[bucket_second]}.{tail}"
         )
 
     v1, v2 = impact_top.value, impact_second.value

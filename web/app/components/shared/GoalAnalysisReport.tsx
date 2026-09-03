@@ -41,7 +41,12 @@
  * test those rules against without a server.
  */
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
-import { MAX_MOSCOW_ROWS, moscowFor } from "../../lib/goalMoscow"
+import {
+  CALL_COUNT_FLOOR_NOTE, MAX_MOSCOW_ROWS, hasCallCount, moscowFor,
+} from "../../lib/goalMoscow"
+import {
+  DATA_GAPS_HEADING, dataGapsFor, optionNumbers,
+} from "../../lib/goalDataGaps"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
 import { findingsHeading } from "../../lib/goalFindingsHeading"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
@@ -99,14 +104,26 @@ function Sized({ f, idPrefix = "goal" }: { f: GoalFinding; idPrefix?: string }) 
   )
 }
 
+//: A stable empty array, so every card that is not the recommended one gets
+//: the same `dataGaps` identity instead of a fresh `[]` literal on each render.
+const EMPTY_GAPS: readonly string[] = []
+
 /** One ranked finding, written out: what it says, how big it is, how much of
  *  it we trust, what it rests on, and what had to be assumed to state it. */
 function ReportFinding({
   f, rank, sharedWeakest = false, sharedCap = false,
-  sharedAssumptions = false,
+  sharedAssumptions = false, option = 0, dataGaps = [],
 }: {
   f: GoalFinding
   rank: number
+  /** `Option N` among the deep write-ups, or 0 for a finding that is not one.
+   *  A LABEL AND NOTHING ELSE — `optionNumbers` numbers the run's own frozen
+   *  rank order (I10); nothing here groups, scores or chooses (I2). */
+  option?: number
+  /** What is still unknown about the finding being RECOMMENDED — empty on
+   *  every other card. Assembled deterministically by `dataGapsFor` from
+   *  fields the engine already produced; no model call. */
+  dataGaps?: readonly string[]
   /** Hoisted to the top of the section because every finding assumes the
    *  identical thing. Suppressed here rather than emptied upstream, so the
    *  finding itself is untouched and the two renderers cannot disagree about
@@ -150,7 +167,19 @@ function ReportFinding({
               used to say the identical "Recommended." — the only visible
               discriminator was whether a "What to change" list happened to
               follow. Mirrors `report.py`'s `_finding_block` fix. */}
-          <p><strong>Recommended — the full write-up.</strong> {f.deep_recommendation!.action}</p>
+          {/* OPTION N, NOT A REPEATED "Recommended". Every deep write-up
+              carried the identical header, so a column of them read as a list
+              to work through rather than as a choice between named
+              alternatives with a stated preference. Option 1 is the one the
+              single recommendation is bound to and carries the "Why this over
+              the next" sentence below. Mirrors `report.py`'s
+              `_finding_block`. */}
+          <p><strong>{option === 0
+            ? "Recommended — the full write-up."
+            : option === 1
+              ? "Option 1 — recommended."
+              : `Option ${option} — alternative.`}</strong>{" "}
+            {f.deep_recommendation!.action}</p>
           <p className="ga-finding-rec-why">
             <em>Why.</em> {f.deep_recommendation!.because}
           </p>
@@ -166,7 +195,11 @@ function ReportFinding({
               </ul>
             </>
           ) : null}
-          {f.deep_recommendation!.open_questions.length ? (
+          {/* SUPPRESSED ON THE CARD THAT CARRIES THE GAPS LIST — these same
+              questions are the middle of it. Shown in both places a reader
+              sees one list of open questions and then a second containing
+              them again under a heading implying they are something else. */}
+          {f.deep_recommendation!.open_questions.length && !dataGaps.length ? (
             <>
               <p><strong>Still open.</strong></p>
               <ul className="ga-assumed">
@@ -186,6 +219,28 @@ function ReportFinding({
             <p className="ga-weakest" data-testid="goal-finding-comparison">
               <b>Why this over the next.</b> {f.deep_recommendation!.comparison}
             </p>
+          ) : null}
+          {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────
+              Only on the recommended card, assembled deterministically from
+              fields the engine already produced — no model call, nothing
+              scored (I2). GAPS, NOT ACTIONS: the heading says "close these
+              before you spend" rather than "next steps" so it cannot be read
+              as work competing with the recommendation above it. Corpus-level
+              gaps (`plan.cannot_answer`) are excluded on purpose and rendered
+              once, in their own section. Mirrors `report.py`. */}
+          {dataGaps.length ? (
+            <div data-testid="goal-finding-data-gaps">
+              <p>
+                <strong>{DATA_GAPS_HEADING}</strong>{" "}
+                These are gaps in what is known about this option, not work to
+                schedule.
+              </p>
+              <ul className="ga-assumed">
+                {dataGaps.map((g, i) => (
+                  <li key={i}>{g}</li>
+                ))}
+              </ul>
+            </div>
           ) : null}
         </div>
       ) : (f.recommendation?.action || "").trim()
@@ -261,6 +316,18 @@ function ReportFinding({
         <p className="ga-sources" data-testid="goal-sources">
           <span className="ga-sources-label">Source documents</span>{" "}
           {f.surfaced_by.join(" · ")}
+        </p>
+      ) : null}
+      {/* THE FLOOR, SAID IN WORDS. A call provider is extracted one pass per
+          call, so a collapsed entry carries how many CALLS it stands for —
+          but anything ingested before that changed was batched several calls
+          to a document, so the number can only be a lower bound. Printed only
+          where a call count is actually shown; "≥" alone is a symbol a reader
+          has to interpret and the reason for it is not guessable. Mirrors
+          `report.py`'s source block. */}
+      {hasCallCount(f.surfaced_by ?? []) ? (
+        <p className="ga-cap" data-testid="goal-call-count-floor">
+          <em>{CALL_COUNT_FLOOR_NOTE}</em>
         </p>
       ) : null}
       {/* I8: every assumed parameter is disclosed where the number is read,
@@ -469,6 +536,14 @@ export function GoalAnalysisReport({
     new Set(findings.map((f) => (f.confidence_band ?? "").trim())).size === 1
   const sharedWeakest = sharedReason("weakest_leg_reason")
   const sharedCap = sharedReason("cap_reason")
+
+  // THE ALTERNATIVES, NUMBERED, AND THE GAPS UNDER THE ONE BEING
+  // RECOMMENDED. Both are deterministic reads over what the engine already
+  // produced — no model call, no grouping, nothing chosen (I2) — and both
+  // mirror `report.py`'s `_findings_section` exactly, so the panel and the
+  // exported document cannot label the same run differently.
+  const options = optionNumbers(findings)
+  const [recommendedGapsIndex, recommendedGaps] = dataGapsFor(findings)
   const unsized = findings.filter((f) => f.impact_value == null).length
   const anythingSized = unsized < findings.length
   // HOW MUCH OF THE UNSIZED DISCLOSURE THE HEADLINE ALREADY MADE. Mirrors
@@ -1081,6 +1156,10 @@ export function GoalAnalysisReport({
                 sharedWeakest={!!sharedWeakest}
                 sharedCap={!!sharedCap}
                 sharedAssumptions={!!sharedAssumptions?.length}
+                option={options[i]}
+                dataGaps={
+                  i === recommendedGapsIndex ? recommendedGaps : EMPTY_GAPS
+                }
               />
             ))}
           </ol>

@@ -26,7 +26,7 @@ distinct source documents on the finding (see `pipeline._sources_of`), so
 this reuses it rather than re-deriving it — but it is PRE-FORMATTED for
 display (`"doc-a (14)"`, `"doc-b (3)"`, and — past `MAX_NAMED_SOURCES` —
 one trailing `"+2 more documents"` summary entry), so `len(surfaced_by)`
-undercounts: `_document_count` below expands that trailing entry back into
+undercounts: `document_count` below expands that trailing entry back into
 the real number it summarises.
 
 `?` MARKS A THIN MUST, NOT A DEMOTION. A single-claim, single-document
@@ -46,12 +46,50 @@ from typing import Optional, Sequence
 #: `"doc (n)"` entry and counts as one document.
 _MORE_DOCS_RE = re.compile(r"^\+(\d+) more documents?$")
 
+#: Matches `pipeline._sources_of`'s COLLAPSED CALL-PROVIDER entry exactly
+#: (`"Fireflies call transcripts (≥ 12 calls, 31 claims)"`). One such entry
+#: stands for N distinct calls, not for one document: a call provider is
+#: extracted once per call, so each call is an independent source that happens
+#: to share a provider label. Counting the entry as `1` — which is what the
+#: fall-through below does for every other shape — pinned every call-tenant
+#: finding at `doc_count == 1` and therefore at `MUST?`, so `MUST` was
+#: unreachable on those tenants and the document count carried no signal at
+#: all. N is a FLOOR (see `_sources_of`); a floor is still the honest number
+#: to grade on, and it can only ever understate corroboration.
+_CALL_ENTRY_RE = re.compile("\\(≥\\s*(\\d+)\\s+calls?,\\s*\\d+\\s+claims?\\)$")
+
+
+#: Said in the output wherever a call count is shown, because "≥" alone is a
+#: symbol a reader has to interpret and the reason for it is not guessable.
+#: Kept here, beside the regex that parses the shape, so the sentence and the
+#: format it explains live in one place.
+CALL_COUNT_FLOOR_NOTE = (
+    "Call counts are a floor (“≥”): one call is extracted "
+    "as one document today, but calls ingested before that changed were "
+    "batched several to a document, so the true number can be higher — "
+    "never lower."
+)
+
+
+def has_call_count(surfaced_by: Sequence[str]) -> bool:
+    """Whether any entry carries a call count, so a renderer knows whether the
+    floor note above applies to what it is about to print."""
+    return any(_CALL_ENTRY_RE.search((s or "").strip()) for s in surfaced_by)
+
 #: A finding earns a bucket from the STRONGEST claim type it carries — same
 #: "strongest, not the average" rule as `rice.impact_for`, and for the same
 #: reason: one blocked deal among ten descriptions is still about a blocked
 #: deal.
 _MUST_TYPES = frozenset({"constraint"})
 _SHOULD_TYPES = frozenset({"preference"})
+
+#: The claim-type buckets as an ORDER, smallest first: a stated blocker
+#: outranks a stated preference outranks neither. `bucket_for` below names the
+#: bucket and `pipeline._rank` sorts on it, and both read `type_bucket` so the
+#: name a reader sees and the position it was given cannot drift apart.
+TYPE_BUCKET_BLOCKER = 0
+TYPE_BUCKET_PREFERENCE = 1
+TYPE_BUCKET_NEITHER = 2
 
 #: Below this many independent source documents, a MUST is real but thin —
 #: said plainly with `?` rather than silently ranked as though it were as
@@ -70,11 +108,37 @@ class MoscowRow:
     reach_unit: str
 
 
+def type_bucket(claim_types: Sequence[str]) -> int:
+    """Which claim-type bucket a finding sits in, as a SORT position.
+
+    The same "strongest claim type wins" rule `bucket_for` uses to NAME the
+    bucket, lifted out so prioritisation can order on it without keeping a
+    second copy of the mapping. One definition; a change to what counts as a
+    blocker moves the name and the position together.
+
+    THE `?` FLAG IS DELIBERATELY NOT PART OF THIS, and must never be added.
+    `MUST` vs `MUST?` is decided by `document_count(surfaced_by)`, and
+    `surfaced_by` is in `types.CORROBORATION_FIELDS` — ordering on it would
+    let a two-account blocker heard in three calls outrank a twenty-account
+    blocker heard in one, which is "the loudest problem wins", the exact
+    failure this engine exists to prevent. The claim TYPE is a property of
+    what was said; how many documents repeated it is corroboration, and
+    corroboration keeps the one place it already has in the ranking — the
+    tail of the key, via confidence. The `?` stays a display flag.
+    """
+    kinds = set(claim_types)
+    if kinds & _MUST_TYPES:
+        return TYPE_BUCKET_BLOCKER
+    if kinds & _SHOULD_TYPES:
+        return TYPE_BUCKET_PREFERENCE
+    return TYPE_BUCKET_NEITHER
+
+
 def bucket_for(claim_types: Sequence[str], doc_count: int) -> tuple[str, str]:
     """The bucket a finding earns, and why — mirrors `rice.impact_for`'s
     "strongest type decides, and says which"."""
-    kinds = set(claim_types)
-    if kinds & _MUST_TYPES:
+    kind = type_bucket(claim_types)
+    if kind == TYPE_BUCKET_BLOCKER:
         if doc_count < THIN_EVIDENCE_DOCS:
             return (
                 "MUST?",
@@ -86,7 +150,7 @@ def bucket_for(claim_types: Sequence[str], doc_count: int) -> tuple[str, str]:
             f"a stated blocker, corroborated across {doc_count} independent "
             f"source documents",
         )
-    if kinds & _SHOULD_TYPES:
+    if kind == TYPE_BUCKET_PREFERENCE:
         return (
             "SHOULD" if doc_count >= THIN_EVIDENCE_DOCS else "COULD",
             f"a stated preference, seen in {doc_count} "
@@ -101,7 +165,7 @@ def bucket_for(claim_types: Sequence[str], doc_count: int) -> tuple[str, str]:
     )
 
 
-def _document_count(surfaced_by: Sequence[str]) -> int:
+def document_count(surfaced_by: Sequence[str]) -> int:
     """How many independent documents `surfaced_by` actually names.
 
     `surfaced_by` arrives PRE-FORMATTED for display (`pipeline._sources_of`):
@@ -116,8 +180,12 @@ def _document_count(surfaced_by: Sequence[str]) -> int:
         s = (s or "").strip()
         if not s:
             continue
-        m = _MORE_DOCS_RE.match(s)
-        n += int(m.group(1)) if m else 1
+        more = _MORE_DOCS_RE.match(s)
+        if more:
+            n += int(more.group(1))
+            continue
+        calls = _CALL_ENTRY_RE.search(s)
+        n += int(calls.group(1)) if calls else 1
     return n
 
 
@@ -129,7 +197,7 @@ def moscow_for(
     claim_types: Sequence[str],
     surfaced_by: Sequence[str],
 ) -> MoscowRow:
-    doc_count = _document_count(surfaced_by)
+    doc_count = document_count(surfaced_by)
     bucket, basis = bucket_for(claim_types, doc_count)
     return MoscowRow(
         label=label,

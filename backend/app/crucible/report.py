@@ -36,7 +36,12 @@ from __future__ import annotations
 import hashlib
 import json
 from html import escape
-from typing import Any, Iterable, Optional
+from typing import Any, Iterable, Optional, Sequence
+
+from app.crucible.data_gaps import (
+    DATA_GAPS_HEADING, data_gaps_for, option_numbers,
+)
+from app.crucible.moscow import CALL_COUNT_FLOOR_NOTE, has_call_count
 
 #: Rendered into `custom_artifacts.title`. The goal text follows it, so a
 #: reader scanning the shared library can tell one run's report from another's.
@@ -1037,6 +1042,8 @@ def _finding_block(
     finding: dict, rank: int, *,
     shared_weakest: bool = False, shared_cap: bool = False,
     shared_assumptions: bool = False,
+    option: int = 0,
+    data_gaps: Sequence[str] = (),
 ) -> str:
     # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
     # across 11 accounts concern “Sales Pipeline” — for example, “…”" — so the
@@ -1081,8 +1088,21 @@ def _finding_block(
         # was whether a "What to change" list happened to follow, which a
         # reader has no reason to go looking for. This is the deeper of the
         # two passes — the full write-up, not a one-liner — and it says so.
+        # OPTION N, NOT A REPEATED "Recommended". Every deep write-up used
+        # the identical header, so a column of them read as a list to work
+        # through rather than as a choice between named alternatives with a
+        # stated preference. `option` comes from `data_gaps.option_numbers` —
+        # the run's own frozen rank order (I10), numbered; option 1 is the one
+        # the single recommendation is bound to, and it carries the "Why this
+        # over the next" sentence below. Purely a label: nothing here groups,
+        # scores or chooses, and no model is consulted (I2).
+        header = (
+            "Recommended — the full write-up." if not option
+            else f"Option {option} — recommended." if option == 1
+            else f"Option {option} — alternative."
+        )
         out.append(_p(
-            f"<strong>Recommended — the full write-up.</strong> "
+            f"<strong>{header}</strong> "
             f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
         ))
         out.append(_p(
@@ -1105,7 +1125,12 @@ def _finding_block(
             q for q in _as_list(deep.get("open_questions"))
             if isinstance(q, str) and q.strip()
         ]
-        if open_qs:
+        # SUPPRESSED ON THE FINDING THAT CARRIES THE GAPS LIST, because these
+        # same questions are the middle of it (`data_gaps.data_gaps_for`).
+        # Printed in both places a reader sees one list of open questions,
+        # then a second list containing them again under a heading that
+        # implies they are a different kind of thing.
+        if open_qs and not data_gaps:
             out.append("<p><strong>Still open.</strong></p>")
             out.append(_ul(
                 _esc_clipped(q, MAX_STATEMENT_CHARS)
@@ -1129,6 +1154,25 @@ def _finding_block(
             out.append(_p(
                 f"<strong>Why this over the next.</strong> "
                 f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
+            ))
+        # ── WHAT WE DO NOT KNOW ABOUT THE THING WE JUST RECOMMENDED. ───────
+        #
+        # Only on the recommended finding, and assembled deterministically
+        # from fields the engine already produced (`data_gaps.data_gaps_for`)
+        # — no model call, nothing scored (I2). GAPS, NOT ACTIONS: the
+        # heading says "close these before you spend" rather than "next
+        # steps" precisely so it cannot be read as work competing with the
+        # recommendation two lines above it. Corpus-level gaps
+        # (`plan.cannot_answer`) are excluded on purpose and rendered once,
+        # in their own section.
+        if data_gaps:
+            out.append(
+                f"<p><strong>{_esc(DATA_GAPS_HEADING)}</strong> "
+                f"These are gaps in what is known about this option, not work "
+                f"to schedule.</p>"
+            )
+            out.append(_ul(
+                _esc_clipped(g, MAX_STATEMENT_CHARS) for g in data_gaps
             ))
     elif action and because:
         out.append(_p(
@@ -1291,6 +1335,14 @@ def _finding_block(
         out.append(_p(
             "<strong>Source documents</strong> " + " · ".join(shown) + tail
         ))
+        # THE FLOOR, SAID IN WORDS. A call provider is extracted one pass per
+        # call, so a collapsed entry carries how many CALLS it stands for —
+        # but anything ingested before that changed was batched several calls
+        # to a document, so the number can only be a lower bound. Printed only
+        # where a call count is actually shown; "≥" alone is a symbol a reader
+        # has to interpret, and the reason for it is not guessable.
+        if has_call_count(surfaced):
+            out.append(_p(f"<em>{_esc(CALL_COUNT_FLOOR_NOTE)}</em>"))
 
     # I8: every assumed parameter is disclosed WHERE THE NUMBER IS READ, not in
     # a methodology page nobody opens.
@@ -1628,11 +1680,19 @@ def _findings_section(
 
     full = findings[:full_cap]
     rest = findings[full_cap:]
+    # THE ALTERNATIVES, NUMBERED, AND THE GAPS UNDER THE ONE BEING
+    # RECOMMENDED. Both computed over `full` — the findings that actually get
+    # a write-up — and both deterministic reads over what the engine already
+    # produced (`data_gaps`): no model call, no grouping, nothing chosen (I2).
+    options = option_numbers(full)
+    gaps_index, gaps = data_gaps_for(full)
     out.extend(
         _finding_block(
             f, i + 1,
             shared_weakest=bool(shared_weakest), shared_cap=bool(shared_cap),
             shared_assumptions=bool(shared_assumptions),
+            option=options[i],
+            data_gaps=gaps if i == gaps_index else (),
         )
         for i, f in enumerate(full)
     )
