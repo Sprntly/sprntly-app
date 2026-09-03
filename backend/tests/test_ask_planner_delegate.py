@@ -160,4 +160,4 @@ def test_the_prompt_version_reflects_the_widening():
     `delegate` was v15. The pin moves with every later bump because the rule it
     encodes is about POOLING, not about `delegate`: v16 added `backlog_action`
     and `include_backlog`, which a v15 row could not name either."""
-    assert ap._PROMPT_VERSION == "ask-planner-v16"
+    assert ap._PROMPT_VERSION == "ask-planner-v17"
