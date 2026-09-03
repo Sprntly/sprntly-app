@@ -878,18 +878,32 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
-- edit_artifact — the user wants the REPORT or the DOCUMENT open beside this
-  chat CHANGED: "convert the RICE section into a table", "cut the appendix",
-  "rewrite the summary for an exec", "add a risks section to that report",
-  "make the report shorter". Set `instruction` to the change, self-contained.
-  A LINE ABOVE NAMING A REPORT OR A DOCUMENT IS THE PRECONDITION, and there
-  are two of them. "Active tab: report #45 … is open beside this chat" is the
+- edit_artifact — the user wants the REPORT, the DOCUMENT or the EVIDENCE
+  PAGE open beside this chat CHANGED: "convert the RICE section into a table",
+  "cut the appendix", "rewrite the summary for an exec", "add a risks section
+  to that report", "make the report shorter", "improve the evidence with a
+  chart of the data in it", "add a chart to the evidence". Set `instruction`
+  to the change, self-contained.
+  A CHART IS AN EDIT TO THE DOCUMENT, NOT A REPLY. "Improve the evidence with
+  an analytical chart" asks for the chart to end up IN the evidence page —
+  answering it in the chat gives the reader a picture beside the document it
+  belongs in, which is the reported failure this action closes for evidence.
+  The same is true of a table, a section, a summary or a diagram: if it
+  belongs in the document, this is the action.
+  A LINE ABOVE NAMING A REPORT, A DOCUMENT OR AN EVIDENCE PAGE IS THE
+  PRECONDITION, and there are two of them. "Active tab: report #45 … is open beside this chat" is the
   reader looking at it. "In this chat: report #45 … was produced in this
   conversation" is a document this thread made that is not on screen — still a
   referent, because "that report" in the chat that wrote it means that report.
   Either one is enough to choose this action; with NEITHER line present there
   is nothing to edit and the request is `answer`. A PRD open instead is
   edit_prd — the two are different documents behind different editors.
+  WHEN A PRD AND AN EVIDENCE PAGE ARE BOTH OPEN, the words decide, and they
+  usually say which outright: "improve the evidence…" / "add a chart to the
+  evidence" is edit_artifact against the evidence page, and "make this PRD
+  shorter" / "add a rollout section" is edit_prd. An instruction naming
+  neither belongs to the PRD — it is the document the reader is working on,
+  and the evidence exists to support it.
   A QUESTION ABOUT the open document is `answer`, not this: "what does the
   report say about pricing?" and "is the RICE section right?" want prose in the
   chat. Only an instruction to CHANGE it is this action.
@@ -1783,10 +1797,14 @@ def _open_artifact_block(
     if open_artifact:
         kind = str(open_artifact.get("kind") or "").strip().lower()
         oid = open_artifact.get("id")
-        # Only the two kinds the editor can actually act on. An unknown kind is
+        # Only the kinds the editor can actually act on. An unknown kind is
         # dropped rather than rendered: a line naming something no action can
         # target invites the model to choose one that will then be refused.
-        if kind in {"report", "document"} and oid is not None:
+        # `evidence` joined the set when evidence pages gained an editor
+        # (`artifact_chat_edit.edit_evidence_scoped`) — before that, a request
+        # to change the evidence open on screen had nowhere to go, and the
+        # chat wrote the change into the conversation instead.
+        if kind in {"report", "document", "evidence"} and oid is not None:
             raw = str(open_artifact.get("title") or "").strip()
             # One line, bounded: the title is customer text landing in a prompt,
             # and a newline inside it could forge a section header here.
