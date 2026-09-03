@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import ReactMarkdown from "react-markdown"
 import remarkGfm from "remark-gfm"
-import { useNavigation } from "../../../context/NavigationContext"
+import { useNavigation, type ContentPanelTab } from "../../../context/NavigationContext"
 import { useContent } from "../../../context/ContentContext"
 import { useCompany } from "../../../context/CompanyContext"
 import { profileDisplayName, useWorkspace } from "../../../context/WorkspaceContext"
@@ -309,6 +309,20 @@ export type ChatTab = {
    *  Transient; never persisted. */
   prdLoading?: boolean
   evidenceGenerating: boolean
+  /** A panel THIS TAB's own work asked for, deferred because the reader was
+   *  looking at a different tab when it became ready.
+   *
+   *  The rule it enforces (owner, 2026-09-03): "when you're in a tab doing
+   *  something that would bring up a panel, and you switch to another tab
+   *  while it is coming up, don't open it over the new tab — that tab has not
+   *  asked for any artifact. Hold it, and show it when you switch back."
+   *
+   *  Every panel that opens from an ASYNC continuation goes through
+   *  `openPanelForTab`, which opens immediately when its tab is on screen and
+   *  parks the request here when it is not. The panel↔tab reconcile spends it
+   *  on the next switch to this tab. Transient by design — a reload drops it,
+   *  the same as every other in-flight panel intent. */
+  panelWanted?: ContentPanelTab
   /** This PRD tab was opened by an IN-CHAT COMMAND (import a doc + "generate prd",
    *  "generate a PRD for X", "create tickets from this doc") — its first thread
    *  turn IS the user's command. When true, the insight/PRD card + clarifying
@@ -1865,9 +1879,16 @@ export function ChatScreen() {
           // real network and the other against a fast or cached import. Cancel
           // it instead: by this point the destination is decided, and a default
           // that arrived earlier has no business overriding it.
-          if (wantsTickets && activeTabIdRef.current === tabId) {
-            setPrdPanelPending(null)
-            openContentPanel("tickets")
+          // …and the destination follows THIS TAB, not the reader. The guard
+          // here used to be `activeTabIdRef.current === tabId`, which was right
+          // about not opening Tickets over someone else's thread and wrong about
+          // what to do instead: it dropped the request, so a reader who stepped
+          // away during the import (the longest wait in the product) came back
+          // to the PRD panel and no sign of the tickets they asked for.
+          // `openPanelForTab` holds it for the tab instead.
+          if (wantsTickets) {
+            if (activeTabIdRef.current === tabId) setPrdPanelPending(null)
+            openPanelForTab(tabId, "tickets")
           }
           // The prd_id was UNKNOWN upfront (generate | generateIdeation — including
           // "View PRD" find-or-create, which resolves an EXISTING PRD). Now that we
@@ -2364,6 +2385,27 @@ export function ChatScreen() {
   // report list, with main's own panel wiring around it. No match means capture
   // hasn't landed yet (or the row is gone): open the tab and let it show what it
   // has, rather than pointing at a report that isn't there.
+  /** Open `panel` for `tabId` — NOW if that tab is the one on screen, else
+   *  parked on the tab until the reader returns to it.
+   *
+   *  The single door for every panel that becomes ready after an await. Before
+   *  it, each async flow called `openContentPanel` directly and the panel
+   *  landed wherever the reader happened to be: start a goal analysis (or a
+   *  doc-to-tickets import, which takes ~80s), switch tabs while it works, and
+   *  its panel slid in over a thread that had asked for nothing. Reported as
+   *  "the panel opens in the new tab you opened".
+   *
+   *  Deliberately NOT a no-op when the tab is inactive: dropping the request
+   *  would trade one wrong panel for a missing one, and the reader would come
+   *  back to the thread that did the work and find nothing there. */
+  const openPanelForTab = useCallback((tabId: string, panel: ContentPanelTab) => {
+    if (activeTabIdRef.current === tabId) {
+      openContentPanel(panel)
+      return
+    }
+    setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, panelWanted: panel } : t))
+  }, [openContentPanel])
+
   const openReportByTitle = useCallback((title: string) => {
     const match = matchReportByTitle(threadReports, title)
     if (match) setContent({ reportFocusId: match.id, reportFocusStandalone: false })
@@ -4029,6 +4071,7 @@ export function ChatScreen() {
       postSummary: (key, kind, artifactId) => { postSummaryRef.current?.(key, kind, artifactId) },
       setContent,
       openContentPanel,
+      openPanelForTab,
       closeContentPanel,
       content,
       composer,
@@ -4338,6 +4381,16 @@ export function ChatScreen() {
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
+    // A PANEL THIS TAB ASKED FOR WHILE THE READER WAS ELSEWHERE, spent here and
+    // ahead of every default below — those decide what a tab shows at REST, and
+    // this is an explicit request from the tab's own work. Cleared as it opens,
+    // so it is spent exactly once and a manual close afterwards sticks.
+    if (tab?.panelWanted) {
+      const wanted = tab.panelWanted
+      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, panelWanted: undefined } : t))
+      openContentPanel(wanted)
+      return
+    }
     // A PRD that landed IN THIS TAB, as opposed to one that merely exists in the
     // DB for the same insight. The distinction only matters for evidence tabs
     // (below), which must not be hijacked by a PRD they were never opened for.
@@ -5261,8 +5314,11 @@ export function ChatScreen() {
         })
         goalRunRef.current = runId
         setContent({ goalRunId: runId })
-        goalAutoOpenedRef.current.add(tabId)
-        openContentPanel("goal")
+        // The claim is only taken when the panel actually opens HERE. Taking it
+        // unconditionally would tell the goal auto-open effect that this tab had
+        // already had its turn, so a deferred panel would never be shown at all.
+        if (activeTabIdRef.current === tabId) goalAutoOpenedRef.current.add(tabId)
+        openPanelForTab(tabId, "goal")
       } catch (e) {
         const refused = goalRefusalMessage(e)
         if (refused) {
@@ -5298,8 +5354,8 @@ export function ChatScreen() {
         })
         goalRunRef.current = runId
         setContent({ goalRunId: runId })
-        goalAutoOpenedRef.current.add(tabId)
-        openContentPanel("goal")
+        if (activeTabIdRef.current === tabId) goalAutoOpenedRef.current.add(tabId)
+        openPanelForTab(tabId, "goal")
       } finally {
         goalGateBusyTurnRef.current = null
         setGoalGateBusyTurnId(null)
