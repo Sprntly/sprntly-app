@@ -711,6 +711,24 @@ async def run_ask_job(
                         "project report auto-attach failed ask_id=%s project_id=%s",
                         ask_id, _report_project_id, exc_info=True,
                     )
+        elif report_id is not None and conversation_id is not None:
+            # David's forked-thread case: the surface is a MAIN chat (so the
+            # `kind == "project"` block above did NOT fire), but this thread's
+            # conversation was auto-forked into a project by an earlier PRD —
+            # the report the thread just produced belongs on that project too.
+            # Unlike the block above (keyed on the project *surface*), resolve
+            # the project the *conversation* is bound to, mirroring exactly how
+            # evidence / ticket_set / custom_artifact wire their forward-pin
+            # (`maybe_pin_conversation_artifact_to_project`). A no-op when the
+            # thread has no bound project (an ordinary main chat). Best-effort:
+            # a failed pin can only fail to ADD a ref, never break the answer.
+            from app.project_from_prd import (
+                maybe_pin_conversation_artifact_to_project,
+            )
+
+            maybe_pin_conversation_artifact_to_project(
+                conversation_id, enterprise_id, "report", report_id
+            )
         # Private project chat: promote a durable insight into project
         # memory + ingest inbound task-status — gated on a PROJECT-scoped ask
         # (the assembler resolved a project `SurfaceScope` for this turn, which
