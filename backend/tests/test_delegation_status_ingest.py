@@ -354,6 +354,31 @@ def test_ingest_done_explicit_emits_completed(isolated_settings, monkeypatch):
     assert [e["event"] for e in events] == ["completed"]
 
 
+def test_ingest_skips_already_completed_row_no_double_fire(isolated_settings, monkeypatch):
+    """No-double-completion guarantee. Once the deterministic `complete_task`
+    tool path has written `completed`, the row is no longer in `OPEN_STATES`,
+    so this background classifier's pre-filter drops it and NEVER reaches the
+    LLM — the two completion paths can't both fire on the same message (which
+    would double-complete and double-email)."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    # Simulate the `complete_task` tool path having already completed it.
+    delegation_events_db.record_event(
+        delegation_id=deleg_id, event="completed", actor_user_id=assignee_id
+    )
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "yep, all done")
+
+    assert state["calls"] == []  # pre-filter dropped the completed row; zero LLM calls
+    # And no SECOND completed event was recorded by this path.
+    events = [e["event"] for e in delegation_events_db.list_events(deleg_id)]
+    assert events == ["completed"]
+
+
 def test_ingest_done_inferred_is_soft(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
@@ -540,13 +565,53 @@ def test_ingest_done_explicit_publishes_delegation_event_and_brief_delivered(
     assert len(status_events) == 2, published
     assert all(p[2]["status"] == "completed" for p in status_events)
 
-    # The completion NOTICE (the turn `notify_requester_task_completed` posts
-    # into the requester's own chat) live-appends too, reusing the exact
-    # `brief.delivered` mechanic a fresh brief delivery already uses.
+    # The completion NOTICEs live-append too, reusing the exact
+    # `brief.delivered` mechanic a fresh brief delivery already uses: ONE into
+    # the requester's own chat (`notify_requester_task_completed`) AND ONE into
+    # the ASSIGNEE's own chat (the safety-net confirmation — so a completion
+    # the deterministic `complete_task` gate misses still confirms back to the
+    # person who reported it done).
     notices = [p for p in published if p[1] == "brief.delivered"]
-    assert len(notices) == 1, published
-    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
-    assert "finished" in notices[0][2]["content"]
+    assert len(notices) == 2, published
+    by_topic = {p[0]: p[2]["content"] for p in notices}
+    assert "finished" in by_topic[f"project:{project['id']}:user:{ctx.user_id}"]
+    assignee_notice = by_topic[f"project:{project['id']}:user:{assignee_id}"]
+    assert "Marked done" in assignee_notice
+
+
+def test_ingest_done_explicit_confirms_to_the_assignee(isolated_settings, monkeypatch):
+    """Safety net: the background `done_explicit` path (which catches the
+    completion phrasings the deterministic `complete_task` gate misses) posts a
+    confirmation into the ASSIGNEE's OWN chat, carrying the task summary — so
+    the person who reported the task done always sees it registered, not just
+    the requester."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(
+        ctx, project["id"], assignee_id, task_summary="Draft the pricing page",
+    )
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "completed",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "wrapped that up")
+
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assignee_notices = [
+        p for p in notices if p[0] == f"project:{project['id']}:user:{assignee_id}"
+    ]
+    assert len(assignee_notices) == 1, published
+    content = assignee_notices[0][2]["content"]
+    assert "Marked done" in content
+    assert "Draft the pricing page" in content  # carries the task summary
 
 
 def test_ingest_blocked_publishes_brief_delivered_to_requester(isolated_settings, monkeypatch):

@@ -2009,11 +2009,10 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
 #: "the review is done", "wrapped up the deck", "sent it over". First-person
 #: framing (the assignee signalling their OWN completion) so it does not fire
 #: on "is the review done?" (a question — vetoed below) or "mark X done"
-#: aimed at someone else's task. Currently unreferenced (its sole caller,
-#: `is_project_completion_request`, lost its only call site when the
-#: group-only `complete_task` admission path was removed) — kept, not
-#: deleted, per this ticket's comment-only scope for this file; flagged
-#: for a follow-up dead-code pass.
+#: aimed at someone else's task. Consumed by `is_project_completion_request`,
+#: which `qa_agent._try_scoped_tool_answer`'s admission ladder calls to route a
+#: completion claim to the deterministic `complete_task` tool (re-armed after
+#: the group surface — its original caller — was retired).
 _PROJECT_TOOL_COMPLETE_VERB = re.compile(
     r"\b(?:i'?m|i am|it'?s|its|that'?s|thats|this is|we'?re|we are|all)\s+"
     r"(?:now\s+)?(?:done|finished|complete|completed|wrapped\s+up|ready|good\s+to\s+go)\b"
@@ -2035,10 +2034,10 @@ _PROJECT_TOOL_COMPLETE_VERB = re.compile(
 
 def is_project_completion_request(question: str, history: list[dict] | None = None) -> bool:
     """True when the speaker is reporting that a task assigned to THEM is
-    finished. Currently unreferenced — its sole call site was the
-    group-only `complete_task` admission path removed with the group
-    surface; kept, not deleted, per this ticket's comment-only scope for
-    this file (flagged for a follow-up dead-code pass).
+    finished. Called by `qa_agent._try_scoped_tool_answer`'s admission ladder
+    to route the turn to the deterministic `complete_task` tool (re-armed on
+    the project surface after the group surface — its original caller — was
+    retired).
 
     Sibling of `is_project_tool_request`: cheap regex, veto-set discipline.
     The mention/interrogative veto is reused so "is the review done?" (a

@@ -13,10 +13,11 @@ the caller's `(company, workspace)` 404s, a same-tenant NON-member 403s — and
 BOTH checks run BEFORE any project data is read, so knowing a project id can
 never leak its memory into an answer. The gate is NOT best-effort: it raises.
 
-Breadth AND depth: `extra_tools` carries the 6 project tools (4 shared read
-tools + `delegate_task` + `execute_task`), so the EXISTING sixth tool-loop
-branch in `qa_agent.answer` (`_try_scoped_tool_answer`, which reads
-`scope.extra_tools`) claims a project-content / delegate / execute turn. A
+Breadth AND depth: `extra_tools` carries the 7 project tools (4 shared read
+tools + `delegate_task` + `execute_task` + `complete_task`), so the EXISTING
+sixth tool-loop branch in `qa_agent.answer` (`_try_scoped_tool_answer`, which
+reads `scope.extra_tools`) claims a project-content / delegate / execute /
+complete turn. A
 plain-Q&A project ask is NOT claimed by that branch — its own intent gate
 decides — and still reaches the composer via `qa_agent._fold_project_context`,
 which prepends the authoritative preamble itself, so this assembler must NOT
@@ -265,12 +266,12 @@ class ProjectContextAssembler:
             insession_check_block = ""
 
         # ── Depth tools (the breadth → depth flip) ───────────────────────────
-        # Populate `extra_tools` with the 6 project tools so the EXISTING sixth
+        # Populate `extra_tools` with the 7 project tools so the EXISTING sixth
         # ladder branch (`qa_agent._try_scoped_tool_answer`, which reads
-        # `scope.extra_tools`) claims a project-content / delegate / execute
-        # turn. Ported in shape — NOT reimplemented — from `b09801dd^:app/
-        # ask_job_runner._build_private_scope`: the 4 shared read tools +
-        # `delegate_task` + `execute_task`, with the three sidecar fields that
+        # `scope.extra_tools`) claims a project-content / delegate / execute /
+        # complete turn. Ported in shape — NOT reimplemented — from `b09801dd^:
+        # app/ask_job_runner._build_private_scope`: the 4 shared read tools +
+        # `delegate_task` + `execute_task` + `complete_task`, with the three sidecar fields that
         # branch's dispatch consumes: `roster` (free-text assignee → member
         # resolution), `assigner_identity` (delegation attribution) and
         # `post_turn` (execute-task progress posts). All best-effort (AD-P7).
@@ -396,12 +397,13 @@ class ProjectContextAssembler:
             context_payload=block,
             system_addendum=system_addendum,
             composer_fold_addendum=composer_fold_addendum,
-            # The project tools, stable order: delegate + execute + the 4
-            # shared read tools. Non-empty `extra_tools` is the on-switch the
-            # sixth branch gates on (along with its intent gate).
+            # The project tools, stable order: delegate + execute + complete +
+            # the 4 shared read tools. Non-empty `extra_tools` is the on-switch
+            # the sixth branch gates on (along with its intent gate).
             extra_tools=(
                 project_delegation.DELEGATE_TASK_TOOL,
                 project_task_execution.EXECUTE_TASK_TOOL,
+                project_delegation.COMPLETE_TASK_TOOL,
                 *read_tools(),
             ),
             roster=tuple(roster),

@@ -8,7 +8,11 @@ built on it; this file is the equivalent home for the new one).
 """
 from __future__ import annotations
 
-from app.skill_router import is_project_content_request, is_project_tool_request
+from app.skill_router import (
+    is_project_completion_request,
+    is_project_content_request,
+    is_project_tool_request,
+)
 
 
 def test_delegate_phrasings_match():
@@ -224,3 +228,47 @@ def test_is_project_tool_request_unchanged():
         assert is_project_tool_request(q) is False, q
     assert is_project_tool_request("") is False
     assert is_project_tool_request(None) is False
+
+
+# ── is_project_completion_request (re-armed for the `complete_task` re-wire) ──
+
+
+def test_completion_claims_match():
+    """First-person completion CLAIMS — the assignee (or the ledger tick,
+    which submits the same shape) reporting THEIR OWN task done — admit."""
+    for q in (
+        "I've finished the export review",
+        "I have finished the pricing one-pager",
+        "finished that",
+        "done with the onboarding checklist",
+        "wrapped up the deck",
+        "I'm done with the review",
+        "it's ready",
+        "sent it over",
+        "all set",
+        "the deck is done",
+    ):
+        assert is_project_completion_request(q) is True, q
+
+
+def test_completion_questions_and_reads_decline():
+    """Interrogative / status-QUESTION phrasings (wh-led, "status of …") are
+    vetoed — they are not first-person completion claims and must not route to
+    `complete_task`."""
+    for q in (
+        "what's the status of the review?",
+        "who is working on the deck?",
+        "how is the export review going?",
+        "when will the deck be done?",
+        "summarize the PRD",
+        "what tasks are open?",
+    ):
+        assert is_project_completion_request(q) is False, q
+    assert is_project_completion_request("") is False
+    assert is_project_completion_request(None) is False
+
+
+def test_completion_signature_accepts_history():
+    """Signature parity with the sibling gates: `history` is accepted (not
+    consulted in v1) so the admission ladder can call it uniformly."""
+    assert is_project_completion_request("finished that", [{"role": "user", "content": "hi"}]) is True

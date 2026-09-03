@@ -208,12 +208,12 @@ def test_respond_individual_removed():
 # by hand-constructing an empty `extra_tools=()` scope — that bypass is
 # exactly what the ship-gate's live run caught as masking the un-gated bug
 # (a hand-built empty-tools scope "proved" streaming worked while the real
-# `_build_private_scope` path, always 6 tools, never reached the composer at
+# `_build_private_scope` path, always 7 tools, never reached the composer at
 # all). ─────────────────────────────────────────────────────────────────
 
 
 def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
-    """AC5: the REAL private scope (all 6 tools) + a plain-context question
+    """AC5: the REAL private scope (all 7 tools) + a plain-context question
     the gate DECLINES routes to the untouched composer path and streams —
     exactly like main chat."""
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
@@ -238,7 +238,7 @@ def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
 
     monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
     scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
-    assert len(scope.extra_tools) == 6  # real, declarative, unconditional — not hand-emptied
+    assert len(scope.extra_tools) == 7  # real, declarative, unconditional — not hand-emptied
     out = qa.answer(
         enterprise_id="c1", question="what's blocking the launch?", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
@@ -458,7 +458,7 @@ def test_private_read_tools_registered_and_dispatched(monkeypatch):
 
 
 def test_project_read_question_routes_to_loop_and_dispatches_read_tool(monkeypatch):
-    """AC4: the REAL project scope (6 tools) + a natural read/summary
+    """AC4: the REAL project scope (7 tools) + a natural read/summary
     question ("summarize the PRD" — vetoed by `is_project_tool_request`,
     matched by `is_project_content_request`) enters `_try_scoped_tool_
     answer` and dispatches a read tool, with no streaming deltas."""
@@ -918,6 +918,177 @@ def test_delegate_forcing_removal_makes_private_delegation_red(monkeypatch):
     monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
     qa.answer(
         enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=scope,
+    )
+    assert len(recorded_green) == 1  # GREEN — the real forcing pass restores the write
+
+
+# ── complete_task re-wire: admission + forcing pass (re-armed orphaned path) ──
+
+
+def _patch_completion_seams(monkeypatch, recorded, *, task_summary="the export review"):
+    """Stub the DB/notify seams `handle_complete_task` touches so it writes a
+    `completed` event (captured in `recorded`) and returns its authoritative
+    'Got it — …' confirmation, without a real DB or network."""
+    import app.project_delegation as pd
+
+    monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+    monkeypatch.setattr(
+        pd, "list_status_for_assignee",
+        lambda pid, uid: [
+            {"delegation_id": 5, "status": "assigned", "task_summary": task_summary}
+        ],
+    )
+    monkeypatch.setattr(pd, "is_legal_transition", lambda a, b: True)
+    monkeypatch.setattr(
+        pd, "record_event",
+        lambda **kw: recorded.append(kw),
+    )
+    monkeypatch.setattr(pd, "_notify_assigner_task_completed_email", lambda *a, **kw: None)
+    monkeypatch.setattr(pd, "load_delegation_for_authz", lambda did: {})
+    monkeypatch.setattr(pd, "status_dto", lambda did: None)
+
+
+def test_private_completion_admitted_fires_complete_task_and_confirms(monkeypatch):
+    """A first-person completion claim is DETERMINISTICALLY admitted to the
+    project tool loop; when the model calls `complete_task`, the ledger records
+    a `completed` event and the reply is the handler's AUTHORITATIVE
+    confirmation (not the model's free text). This is the orphaned path
+    re-armed: the tool is now offered (extra_tools) and the turn is admitted by
+    `is_project_completion_request`."""
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        # The model itself calls complete_task on the first pass.
+        return dispatch("complete_task", {"task_summary": "the export review"})
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    result = qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
+        dataset="d", scope=scope,
+    )
+
+    assert len(recorded) == 1
+    assert recorded[0]["event"] == "completed"
+    # Authoritative override: the reply is the handler's confirmation string.
+    assert result["answer"].startswith("Got it")
+    assert "export review" in result["answer"]
+
+
+def test_private_completion_forcing_pass_fires_when_model_skips_tool(monkeypatch, caplog):
+    """The 'confirms without doing' failure, completion flavour: the turn is
+    admitted as a completion but the model narrates a promise ('noted, I'll
+    mark that done') WITHOUT calling `complete_task`. The forcing pass re-runs
+    the loop with `force_tool='complete_task'`, which DOES write the ledger."""
+    import logging
+
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        if force_tool == "complete_task":
+            return dispatch("complete_task", {"task_summary": "the export review"})
+        return "Noted — I'll mark that done for you."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    with caplog.at_level(logging.WARNING):
+        result = qa.answer(
+            enterprise_id="c1", question="I've finished the export review",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 2  # initial pass + one forced complete_task re-run
+    assert len(recorded) == 1 and recorded[0]["event"] == "completed"
+    assert result["answer"].startswith("Got it")  # authoritative override still wins
+    assert any(
+        "completion_admitted_without_tool_call" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_private_noncompletion_question_not_admitted_as_completion(monkeypatch, caplog):
+    """A non-completion project turn (a wh-question read) is NOT admitted as a
+    completion, so the completion forcing pass never fires and no ledger write
+    happens — the new gate does not hijack ordinary project traffic. The turn
+    still reaches the loop as a READ (its own predicate), returns the model's
+    text, and no `complete_task` is forced."""
+    import logging
+
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        assert force_tool != "complete_task", "must never force complete on a non-completion turn"
+        return "There are two open tasks on the ledger."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    with caplog.at_level(logging.WARNING):
+        result = qa.answer(
+            enterprise_id="c1", question="what tasks are in the ledger?",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 1  # no forced re-run
+    assert recorded == []  # no completion written
+    assert result["answer"] == "There are two open tasks on the ledger."
+    assert not any(
+        "completion_admitted_without_tool_call" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_completion_forcing_removal_makes_private_completion_red(monkeypatch):
+    """Mutation proof for the completion forcing seam. Simulating deletion of
+    the `admitted_completion` forcing `elif` (by forcing the completion
+    predicate off — the same observable effect: `admitted_completion` is False
+    so the turn is never admitted/forced) means a completion claim the model
+    narrates-without-calling NEVER writes the ledger — RED. Restoring the real
+    predicate re-arms the forcing pass and the row is written — GREEN."""
+    recorded_red: list = []
+    _patch_completion_seams(monkeypatch, recorded_red)
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        if force_tool == "complete_task":
+            return dispatch("complete_task", {"task_summary": "the export review"})
+        return "Noted — I'll mark that done for you."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    # Benign offline composer for the fall-through path (RED: turn not admitted).
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "", "key_points": [], "citations": [], "confidence": 0.0, "unanswered": ""},
+    )
+
+    # RED: predicate forced off — `admitted_completion` is False everywhere,
+    # so the turn is neither admitted nor force-completed (observably identical
+    # to deleting the forcing `elif`).
+    monkeypatch.setattr(qa, "is_project_completion_request", lambda *a, **k: False)
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
+        dataset="d", scope=scope,
+    )
+    assert recorded_red == []  # RED — no forcing, no write
+
+    # GREEN: restore the real predicate — the forcing pass fires and writes.
+    monkeypatch.undo()
+    recorded_green: list = []
+    _patch_completion_seams(monkeypatch, recorded_green)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
         dataset="d", scope=scope,
     )
     assert len(recorded_green) == 1  # GREEN — the real forcing pass restores the write
