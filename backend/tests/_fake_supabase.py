@@ -86,6 +86,7 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
                               "impact", "confidence"},
     "crucible_ledger":       {"claim_ids"},
     "crucible_goal_definitions": {"population", "conflicts_found"},
+    "crucible_backfill_runs": {"skipped_counts"},
     "ask_log":              {"citations"},
     "cached_asks":          {"response"},
     "ask_jobs":             {"response"},
