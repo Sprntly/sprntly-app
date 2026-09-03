@@ -485,6 +485,30 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       expect(startRun).toHaveBeenCalledWith(EXTRACTED, expect.anything())
     }, 30_000)
 
+  it("carries the reader's literal sentence to the run, not only to the transcript",
+    async () => {
+      // THE BUG: the run used to be started from `EXTRACTED` alone, so a
+      // count or target the reader phrased in their own words — and the
+      // planner's extraction dropped — never reached the request at all.
+      // `saidText` (`trimmed`, in `useConversation`) was already sitting one
+      // scope away from the network call the whole time; this is the seam
+      // that closes it. Real chat path: a composer send, the planner-mock's
+      // extraction, `dispatchChatIntent`, `useConversation`'s closure and
+      // `ChatScreen.startGoalAnalysis` — never the route directly.
+      const typedWithCount = "What are three things I can do to reduce churn?"
+      const extractedGoal = "reduce churn"
+      resolveIntent.mockResolvedValue({ intent: "analyse_goal", task: extractedGoal })
+      seedPersistedTab(
+        { id: "t1", title: "chat", dbConvId: CONV_ID, thread: [], messages: [] }, "t1")
+      mountApp()
+      await typeAndSend(typedWithCount)
+      await waitFor(() => expect(startRun).toHaveBeenCalled())
+      expect(startRun).toHaveBeenCalledWith(
+        extractedGoal,
+        expect.objectContaining({ asked_text: typedWithCount }),
+      )
+    }, 30_000)
+
   it("quotes the definition the reader confirmed, not the one proposed",
     async () => {
       // Through the wire, not from a fixture: the plan's `definition_text` is

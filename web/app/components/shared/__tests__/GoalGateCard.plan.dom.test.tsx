@@ -76,6 +76,36 @@ describe("the plan is shown before anything is spent", () => {
     expect(panel.textContent).toContain("what customers asked for and reported")
   })
 
+  it("shows the reader's own sentence beside the goal it was taken to mean", () => {
+    // What was asked AND what the metric was taken to mean, both on screen —
+    // a count phrased in the sentence, not only in `goal_text`.
+    render(
+      <GoalGateCard
+        gate={{
+          kind: "plan",
+          runId: 7,
+          plan: {
+            ...PLAN,
+            asked_text: "What are three things I can do to raise net revenue retention?",
+          } as unknown as GoalRunPlan,
+        }}
+        onApprovePlan={vi.fn()}
+      />,
+    )
+    const panel = screen.getByTestId("goal-plan")
+    expect(panel.textContent).toContain(
+      "What are three things I can do to raise net revenue retention?",
+    )
+  })
+
+  it("says nothing extra when there is no literal sentence to show", () => {
+    // A run with no `asked_text` (the direct API, an older run) renders
+    // exactly as it did before this field existed.
+    renderPlan()
+    const panel = screen.getByTestId("goal-plan")
+    expect(panel.querySelector("[data-testid='goal-plan-asked-text']")).toBeNull()
+  })
+
   it("states what the run will NOT be able to answer, with the fix", () => {
     // Said BEFORE the run, this is a decision — connect the source, or accept
     // a qualitative answer knowingly. Said after, it is an apology.

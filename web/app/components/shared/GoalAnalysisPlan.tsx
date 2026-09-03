@@ -192,6 +192,15 @@ export function GoalAnalysisPlan({
           {settled ? "Plan approved" : "Before this runs"}
         </p>
         <h1 className="ga-doc-title">{plan.goal_text}</h1>
+        {/* THE READER'S OWN WORDS, beside what they were taken to mean.
+            Only when there is one to show and it actually differs — a run
+            with no literal text (the direct API, the `+` menu) shows just
+            the goal, exactly as before this existed. */}
+        {plan.asked_text && plan.asked_text.trim() !== plan.goal_text.trim() ? (
+          <p className="ga-doc-note" data-testid="goal-plan-asked-text">
+            You asked: “{plan.asked_text}”
+          </p>
+        ) : null}
       </header>
 
       {/* THE APPROACH, IN FIVE SENTENCES. Everything below this block was

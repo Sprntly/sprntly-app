@@ -47,6 +47,14 @@ def create(
     goal_text: str,
     conversation_id: Optional[int] = None,
     created_by: Optional[str] = None,
+    #: THE READER'S OWN SENTENCE, when the caller has one distinct from
+    #: `goal_text` — chat sends the planner's EXTRACTED goal as `goal_text`
+    #: and this alongside it, so a count or target the reader phrased in
+    #: their own words is not silently dropped. Stored here, ONCE, because
+    #: this is the only place a run's whole life this text is ever supplied —
+    #: every later stage (`confirm`, `approve`) reads it back off the row
+    #: rather than being resupplied it.
+    asked_text: Optional[str] = None,
 ) -> dict:
     """Create the row FIRST, before any work. Returns it immediately."""
     row = {
@@ -57,6 +65,14 @@ def create(
         "status": "resolving_goal",
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
     }
+    stripped = (asked_text or "").strip()
+    if stripped:
+        # RIDES IN `prioritisation`, same as the plan and the progress
+        # narration this blob already carries — no migration needed. Written
+        # only when non-blank, so a caller with nothing to add (the direct
+        # API, an older client) leaves the row byte-for-byte what it was
+        # before this field existed.
+        row["prioritisation"] = {"asked_text": stripped}
     res = require_client().table(TABLE).insert(row).execute()
     return (res.data or [{}])[0]
 

@@ -247,6 +247,89 @@ def test_named_count_is_capped_at_the_safety_limit():
     assert "40" in result.basis  # says what was asked, even though capped
 
 
+# ─── The chat hand-off bug: a count named in the reader's own sentence, ──────
+# lost to the planner's extraction, was silently ignored. `goal_text` is what
+# chat sends as the EXTRACTED goal ("reduce churn"); `asked_text` is the
+# reader's literal sentence ("What are three things I can do to reduce
+# churn?"). The count has to be read from the sentence that actually names it.
+
+def test_asked_text_is_read_for_the_count_when_goal_text_dropped_it():
+    """THE BUG, reproduced directly: the extracted goal names no count at
+    all, and the literal ask names three."""
+    result = resolve_recommendation_count(
+        "reduce churn",
+        [],
+        asked_text="What are three things I can do to reduce churn?",
+    )
+    assert result.count == 3
+    assert result.basis == (
+        "you asked for 3, so the top 3 get a full recommendation."
+    )
+
+
+def test_a_blank_asked_text_falls_back_to_goal_text():
+    """AC4: a run with no literal text (the direct API) is unaffected —
+    blank and whitespace-only both mean "nothing to prefer"."""
+    for blank in (None, "", "   "):
+        result = resolve_recommendation_count(
+            "give me three things I can do", [], asked_text=blank,
+        )
+        assert result.count == 3
+
+
+def test_asked_text_also_carries_a_named_target_not_only_a_count():
+    """The same seam covers a target ("get to 8 accounts"), not only a
+    count — both are the reader's own arithmetic ask, dropped the same way
+    by an extraction that keeps only the metric."""
+    impacts = [
+        Impact(value=5.0, currency="accounts", affected_population=None,
+               movable_gap=None, value_per_unit=None),
+        Impact(value=4.0, currency="accounts", affected_population=None,
+               movable_gap=None, value_per_unit=None),
+    ]
+    result = resolve_recommendation_count(
+        "grow accounts",
+        impacts,
+        asked_text="I want to activate 8 accounts by end of quarter",
+    )
+    assert result.count == 2  # 5 + 4 = 9 >= 8
+    assert not result.target_unsizeable
+
+
+def test_asked_text_never_overrides_a_count_goal_text_already_names():
+    """When `goal_text` itself names a count — a direct-API caller, or a
+    caller that passes the same text twice — nothing about `asked_text`
+    changes the answer: it is a fallback SOURCE for the same regex, not a
+    second vote."""
+    without = resolve_recommendation_count("give me four options", [])
+    with_same = resolve_recommendation_count(
+        "give me four options", [], asked_text="give me four options",
+    )
+    assert without.count == with_same.count == 4
+
+
+def test_build_deep_recommendations_threads_asked_text_into_the_count():
+    """The seam `build_deep_recommendations` actually exposes to its caller
+    (`routes/crucible.py`) — offline under pytest, so no model is called, but
+    `resolve_recommendation_count` still runs before that check and its basis
+    is what the report renders."""
+    _, result = _build_two()
+    deep = build_deep_recommendations(
+        enterprise_id="co",
+        goal_text="reduce churn",
+        definition_text="LOGO churn, accounts that cancel or fail to renew",
+        findings=result.findings,
+        impacts=result.impacts,
+        confidences=result.confidences,
+        claims=[],
+        asked_text="What are three things I can do to reduce churn?",
+    )
+    assert deep.count.count == 3
+    assert deep.count.basis == (
+        "you asked for 3, so the top 3 get a full recommendation."
+    )
+
+
 def test_named_target_sums_impacts_in_rank_order_until_met():
     """David's own example, in miniature: sum the top-ranked, ALREADY-SIZED
     findings until the target is met — never re-sorted, never an LLM call."""

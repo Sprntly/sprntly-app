@@ -928,6 +928,88 @@ def test_approving_the_plan_is_what_starts_the_analysis(ctx):
     assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] in ("ready", "failed")
 
 
+# ─── The chat hand-off bug: a count named in the reader's own sentence ───────
+#
+# Chat dispatches the planner's EXTRACTED goal as `goal_text` ("reduce
+# churn") — right for the plan's own metric resolution below — and drops the
+# reader's literal sentence ("What are three things I can do to reduce
+# churn?") on the floor, so the count it names never reached the
+# recommendation count's arithmetic. `asked_text` is the fix: carried
+# alongside `goal_text`, read ONLY for the count/target, never for the
+# definition.
+
+def test_the_readers_literal_ask_reaches_the_recommendation_count_on_the_folded_path(ctx):
+    """The FOLDED path — a goal naming a metric family resolves straight to
+    the plan and on to the run in one `/approve`, which is the common case
+    and the one dispatched from chat. `_signal` rows with no embeddings still
+    let claims through, so this reaches `_run_enrichment` for real."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    typed = "What are three things I can do to reduce churn?"
+    run_id = _start(ctx, goal="reduce churn", asked_text=typed).json()["id"]
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["asked_text"] == typed
+    assert plan["goal_text"] == "reduce churn"
+
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "you asked for 3, so the top 3 get a full recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_the_readers_literal_ask_reaches_the_recommendation_count_through_confirm(ctx):
+    """The NON-folded path — a goal with nothing to propose stops at its own
+    gate first. `asked_text` has to survive that extra hop too: `/confirm`
+    reads it back off the row, same as `/approve` does on the folded path."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    typed = "What are two initiatives that would help us here?"
+    run_id = _start(ctx, goal=NO_METRIC, asked_text=typed).json()["id"]
+    _confirm(ctx, run_id)
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["asked_text"] == typed
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "you asked for 2, so the top 2 get a full recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_no_literal_ask_is_unaffected_ac4(ctx):
+    """AC4 / backward compatibility: a run started with no `asked_text` — the
+    direct API, and every run created before this field existed — reads the
+    count off `goal_text` exactly as it always did."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal="reduce churn").json()["id"]  # no asked_text
+    assert "asked_text" not in _prioritisation(run_id)["plan"] \
+        or not _prioritisation(run_id)["plan"]["asked_text"]
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "no count or target was named in the goal, so the top 2 get a full "
+        "recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_the_literal_ask_never_changes_which_metric_convention_is_adopted(ctx):
+    """I9: `asked_text` must never become a back door to inferring the
+    definition from words the extraction itself dropped. A sentence naming a
+    DIFFERENT metric family than the extracted goal must not move the
+    adopted convention — only `goal_text` may."""
+    typed = "What are three things I can do to grow revenue this quarter?"
+    run_id = _start(ctx, goal="reduce churn", asked_text=typed).json()["id"]
+    plan = _prioritisation(run_id)["plan"]
+    # The churn convention, from `goal_text` — not the revenue one `typed`
+    # would propose if the literal sentence were ever read for the metric.
+    assert "LOGO churn" in plan["definition_text"]
+    assert "recognised" not in plan["definition_text"].lower()
+
+
 def test_a_double_approval_cannot_start_two_analyses(ctx):
     """Same race as double-confirm, same fix: the expected status is in the
     WHERE clause, so the second click loses the claim."""
