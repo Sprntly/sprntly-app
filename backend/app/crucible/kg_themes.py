@@ -28,7 +28,6 @@ import unicodedata
 from dataclasses import replace
 from typing import Iterable, Mapping, Optional, Sequence
 
-from app.crucible.cluster import leader_groups, parse_embedding
 from app.crucible.types import Claim
 
 logger = logging.getLogger(__name__)
@@ -43,48 +42,26 @@ _ENTITY_BATCH = 200
 #: merge unrelated signals if treated as such.
 THEME_TYPE = "theme"
 
-#: Cosine above which two THEME LABELS name the same topic.
-#:
-#: WHY THIS CONSTANT EXISTS AT ALL. The extractor already has a find-or-create
-#: merge gate at 0.86 on bare-label embeddings, and on a real tenant it fired 0
-#: times in 63,903 pairs — `text-embedding-3-small` does not put two- to
-#: four-word labels that high even when they differ only in case
-#: ('entity resolution' / 'Entity resolution' = 0.857). So the graph holds one
-#: topic under several entity ids, and a run that groups on entity id writes
-#: one recommendation per SHARD: on that tenant, 71 kept findings covering ~39
-#: distinct topics, with two of the five deep findings being shards of each
-#: other. This is the read-side defence; the gate itself is a graph-wide change
-#: with a backfill behind it and is not attempted here.
-#:
-#: CALIBRATION, measured on that tenant. True-synonym label pairs:
-#: 'entity resolution'/'Entity resolution' 0.857,
-#: 'billing & pricing'/'billing / pricing model' 0.824,
-#: 'EU AI Act / regulatory compliance'/'regulatory compliance — EU AI Act'
-#: 0.798. Kept findings by threshold: none 71, 0.86 71 (the live gate, a
-#: no-op), 0.82 67, 0.80 54, 0.75 43, 0.72 32.
-#:
-#: 0.80 is the conservative pick that still roughly halves the shredding. It
-#: misses the EU AI Act pair by 0.002, and that is the stated cost of not
-#: over-merging: a reader seeing one topic twice is a worse-looking report,
-#: while a reader seeing two topics fused into one is a wrong report.
-#:
-#: AND THE ORDERING AROUND 0.80 IS NOISY — read this before tuning it. On the
-#: same corpus 'Enterprise compliance infrastructure' /
-#: 'enterprise compliance requirements' (genuinely one topic, and two separate
-#: deep findings in a five-item list) scores 0.7924, while 'Prototype Agent' /
-#: 'Strategy Agent' (two DIFFERENT products) scores 0.8012. No threshold on
-#: bare-label cosine separates those two pairs, in either direction. Moving
-#: this number buys one and sells the other; the real fix is comparing
-#: something richer than a two-word label, which belongs with the extractor's
-#: merge gate and not here.
-LABEL_MERGE_THRESHOLD = 0.80
+#: Words that carry no topic. Deliberately TINY. The overlap rule below
+#: discriminates by counting shared content words, so every word removed here
+#: is discrimination given away — stoplisting 'enterprise', 'compliance',
+#: 'agent', 'model' or 'infrastructure' because they look like filler would
+#: reduce real topic pairs to one shared token and split them right back up.
+_STOPWORDS = frozenset(
+    {"and", "the", "of", "for", "a", "to", "in", "on", "with"}
+)
 
-#: FAIL SAFE TOWARD NOT MERGING. On a corpus where labels are near-identical
-#: for reasons we did not anticipate, similarity merging could collapse the
-#: whole graph into one mega-finding — a single "everything" recommendation
-#: that is confidently wrong, which is worse than the shredding it replaced.
-#: If either guard trips, the embedding tier is discarded whole and only the
-#: exact-label tier survives; that tier cannot over-merge by construction.
+#: Shared content words above which two labels name the same topic. Two is the
+#: whole rule: one shared word is a coincidence of vocabulary
+#: ('Prototype Agent' / 'Strategy Agent'), two is a subject.
+_MIN_SHARED_TOKENS = 2
+
+#: FAIL SAFE TOWARD NOT MERGING. On a corpus where labels overlap for reasons
+#: we did not anticipate, merging could collapse the whole graph into one
+#: mega-finding — a single "everything" recommendation that is confidently
+#: wrong, which is worse than the shredding it replaced. If either guard trips,
+#: the overlap tier is discarded whole and only the exact-label tier survives;
+#: that tier cannot over-merge by construction.
 _MAX_MERGE_SHARE = 0.5      # no single merged topic may hold >50% of themes
 _MIN_GROUP_RATIO = 0.1      # merging may not cut the topic count below 10%
 
@@ -104,11 +81,12 @@ _PUNCT_EDGES = ' \t\n\r.,;:!?\'"“”‘’()[]{}<>*-–—/&|_'
 def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
     """signal id -> (representative theme entity id, its label), from the graph.
 
-    Read in stages because the tables are shaped very differently: the
+    Read in two steps because the tables are shaped very differently: the
     relationship rows are narrow and page cheaply, while `kg_entity` carries an
     embedding column that makes a scan expensive — so entities are fetched by
-    the ids the relationships actually referenced, and their vectors only for
-    the ones that turn out to be themes.
+    the ids the relationships actually referenced, and only their labels are
+    selected. The fold below reads words, not vectors, so no embedding is
+    fetched at all.
 
     The id returned is CANONICAL, not raw: synonym theme entities are folded
     onto one representative first (see `canonicalize_themes`), because the
@@ -192,8 +170,7 @@ def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
         for entity_id, _ in out.values():
             counts[entity_id] = counts.get(entity_id, 0) + 1
         labels = {e: themes[e] for e in in_play if e in themes}
-        vectors = _load_theme_embeddings(client, sorted(in_play))
-        canonical = canonicalize_themes(labels, vectors, counts)
+        canonical = canonicalize_themes(labels, counts)
         if canonical:
             out = {
                 signal_id: (
@@ -208,18 +185,20 @@ def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
 def normalize_label(label: str) -> str:
     """A theme label reduced to the topic it names.
 
-    TIER 1 OF THE MERGE, and the half that carries no threshold risk: two
+    TIER 1 OF THE MERGE, and the half that cannot over-merge at all: two
     labels that reduce to the same string are the same topic, full stop.
     'competitive landscape' and 'Competitive landscape' are separate entities
     in the graph today, each with its own recommendation, purely because one
-    was capitalised. This is what fixes those, and it cannot over-merge —
-    equality is equality.
+    was capitalised. This is what fixes those — equality is equality.
+
+    Also the input to tier 2, which counts the words this produces.
 
     Case-folded, unicode-normalised, separators ('&', '/', dashes) flattened to
     a space, edge punctuation stripped, internal whitespace collapsed. NOT
     stemmed and NOT de-pluralised: 'renewal' and 'renewals' plausibly differ,
-    and guessing about that belongs in the similarity tier where a measured
-    threshold decides it, not in the tier whose whole value is being certain.
+    and a stemmer would make that call silently on every label to rescue a
+    handful — tier 2 already merges the pairs worth merging by counting the
+    words they share, without guessing about any single one of them.
     """
     s = unicodedata.normalize("NFKC", label or "")
     s = _SEPARATORS.sub(" ", s)
@@ -227,56 +206,78 @@ def normalize_label(label: str) -> str:
     return s.strip(_PUNCT_EDGES).casefold().strip()
 
 
-def _load_theme_embeddings(client, theme_ids: Sequence[str]) -> dict[str, object]:
-    """Label vectors for theme entities, fetched in a SECOND pass.
+def content_tokens(label: str) -> frozenset[str]:
+    """The topic-bearing words of a label, normalised.
 
-    Deliberately separate from the label read. `target_ids` covers every entity
-    kind the relationships touched — hypotheses, artifacts, decisions — and
-    `embedding` is 1536 floats arriving as JSON text, so selecting it in the
-    first pass would pull megabytes for rows we discard a line later. Themes
-    are the minority of that set, so asking twice moves less data than asking
-    once.
-
-    A batch that fails costs those themes their similarity merge and nothing
-    else: they keep their own ids and stay separate, which is exactly today's
-    behaviour.
+    Built on `normalize_label`, so it inherits case-folding and separator
+    flattening for free — 'EU AI Act / regulatory compliance' and
+    'regulatory compliance — EU AI Act' produce the SAME token set, which is
+    the point: word order is not topic.
     """
-    out: dict[str, object] = {}
-    for i in range(0, len(theme_ids), _ENTITY_BATCH):
-        batch = list(theme_ids[i : i + _ENTITY_BATCH])
-        try:
-            rows = (
-                client.table("kg_entity")
-                .select("id,embedding")
-                .in_("id", batch)
-                .execute()
-            ).data or []
-        except Exception:  # noqa: BLE001 — degrades to exact-label merging only
-            logger.warning(
-                "crucible: theme embedding batch %d unreadable; those themes "
-                "merge on exact label only", i // _ENTITY_BATCH,
-            )
-            continue
-        for r in rows:
-            vec = parse_embedding(r.get("embedding"))
-            if vec is not None:
-                out[r["id"]] = vec
-    return out
+    return frozenset(
+        t for t in normalize_label(label).split() if t and t not in _STOPWORDS
+    )
+
+
+def same_topic(a: frozenset[str], b: frozenset[str]) -> bool:
+    """Do two label token sets name the same topic?
+
+    TWO WAYS TO QUALIFY, and both are about the words themselves rather than
+    about a learned distance:
+
+      SUBSET — one label says everything the other says and possibly more.
+      'benchmarking' vs 'benchmarking validation' is one topic named at two
+      levels of detail, not two topics.
+
+      TWO SHARED CONTENT WORDS — 'enterprise compliance infrastructure' and
+      'enterprise compliance requirements' share {enterprise, compliance}.
+      Sharing exactly one is a coincidence of vocabulary: 'Prototype Agent'
+      and 'Strategy Agent' share {agent} and are different products.
+
+    An EMPTY set never matches, including against another empty set. It is
+    vacuously a subset of everything, so admitting it would let a label made
+    entirely of stopwords absorb the entire corpus.
+    """
+    if not a or not b:
+        return False
+    if a <= b or b <= a:
+        return True
+    return len(a & b) >= _MIN_SHARED_TOKENS
 
 
 def canonicalize_themes(
     labels: Mapping[str, str],
-    embeddings: Mapping[str, object],
     counts: Mapping[str, int],
-    *,
-    threshold: float = LABEL_MERGE_THRESHOLD,
 ) -> dict[str, str]:
     """theme entity id -> the id that should REPRESENT it.
 
-    READ-SIDE ONLY. Nothing here is written back: `kg_entity` keeps its 358
-    split rows, every other consumer of the graph sees exactly what it saw
-    before, and Crucible simply stops being fooled into writing one
-    recommendation per shard of a topic.
+    READ-SIDE ONLY. Nothing here is written back: `kg_entity` keeps its split
+    rows, every other consumer of the graph sees exactly what it saw before,
+    and Crucible simply stops being fooled into writing one recommendation per
+    shard of a topic.
+
+    WHY WORDS AND NOT EMBEDDINGS. The obvious fix is the one the extractor
+    already tries — cosine between label embeddings — and it does not work at
+    this length. Measured on a real tenant:
+
+        0.7924  'Enterprise compliance infrastructure'
+                / 'enterprise compliance requirements'   <- ONE topic
+        0.8012  'Prototype Agent' / 'Strategy Agent'     <- TWO products
+
+    The true pair scores BELOW the false one. No threshold separates them in
+    either direction, so any cosine gate must either miss real synonyms or fuse
+    real distinctions, and the extractor's own gate at 0.86 does the former so
+    thoroughly it fired 0 times in 63,903 pairs on that tenant. Counting shared
+    content words separates exactly those two cases and, unlike a threshold, a
+    reader can check it by looking at the two labels.
+
+    COMPLETE LINKAGE, NOT SINGLE LINKAGE. This is the trap. Under single
+    linkage a label only has to match SOMETHING in a group to join it, and
+    'compliance' bridged EU AI Act -> provenance -> citation chains into one
+    27-member component on this corpus — a mega-finding assembled out of pairs
+    that were each individually defensible. So a candidate is admitted only if
+    it satisfies the rule against EVERY member already in the group. Groups
+    stay cliques, and a bridge word cannot walk one topic into another.
 
     REPRESENTATIVE SELECTION IS MOST-CITED, TIES BROKEN ON LOWEST ENTITY ID.
     Both halves matter. Most-cited is the shard the graph actually leaned on,
@@ -287,13 +288,18 @@ def canonicalize_themes(
     findings on different days. Same discipline `figure_class` enforces when it
     classifies once and never re-rolls.
 
-    That ordering is also the order the similarity tier sees, so the leader of
-    each group IS its representative: one rule, applied once.
+    That ordering is also the order candidates are offered to the clique
+    growth, so the first member of a group IS its representative: one rule,
+    applied once.
     """
     if not labels:
         return {}
 
-    # TIER 1 — exact match on the normalised label.
+    def rank(entity_id: str) -> tuple[int, str]:
+        return (-int(counts.get(entity_id, 0)), str(entity_id))
+
+    # TIER 1 — exact match on the normalised label. No threshold, no
+    # judgement: two labels that reduce to the same string are the same topic.
     by_norm: dict[str, list[str]] = {}
     singletons: list[str] = []
     for entity_id, label in labels.items():
@@ -306,12 +312,8 @@ def canonicalize_themes(
             continue
         by_norm.setdefault(key, []).append(entity_id)
 
-    def rank(entity_id: str) -> tuple[int, str]:
-        return (-int(counts.get(entity_id, 0)), str(entity_id))
-
     groups: list[list[str]] = [sorted(v, key=rank) for v in by_norm.values()]
     groups.extend([[e] for e in singletons])
-    # Deterministic order in, deterministic leaders out.
     groups.sort(key=lambda g: rank(g[0]))
     exact_merged = sum(len(g) - 1 for g in groups)
 
@@ -320,73 +322,49 @@ def canonicalize_themes(
         for member in g:
             canonical[member] = g[0]
 
-    # TIER 2 — label-embedding similarity between the tier-1 representatives.
+    # TIER 2 — content-word overlap between the tier-1 representatives. Members
+    # of a tier-1 group share a normalised label by construction, so they share
+    # a token set too and the representative speaks for all of them.
     reps = [g[0] for g in groups]
-    vectors = [embeddings.get(r) for r in reps]
-    if sum(v is not None for v in vectors) < 2:
-        return canonical
-
-    try:
-        import numpy as np
-    except Exception:  # noqa: BLE001 — exact-label merging still stands
-        logger.warning("crucible: numpy unavailable; themes merge on label only")
-        return canonical
-
-    usable_rows = [i for i, v in enumerate(vectors) if v is not None]
-    try:
-        matrix = np.asarray([vectors[i] for i in usable_rows], dtype=np.float32)
-    except ValueError:
-        logger.warning("crucible: theme embeddings are ragged; label merge only")
-        return canonical
-    if matrix.ndim != 2:
-        return canonical
-
-    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
-    # A zero vector has cosine 0.0 with everything, so it cannot merge anyway —
-    # but it also cannot be normalised, and dividing by it would put NaNs into
-    # every comparison and take the whole merge down with it.
-    usable = np.isfinite(matrix).all(axis=1) & (norms[:, 0] > 0)
-    if not usable.any():
-        return canonical
-    matrix = matrix / np.where(norms == 0, 1.0, norms)
-
-    leaders, assignment = leader_groups(matrix, usable, threshold=threshold)
-
-    merged: dict[str, str] = {}
-    for row, cluster in enumerate(assignment):
-        if cluster < 0:
-            continue
-        merged[reps[usable_rows[row]]] = reps[usable_rows[leaders[cluster]]]
+    tokens = {r: content_tokens(labels.get(r, "")) for r in reps}
+    cliques: list[list[str]] = []
+    for rep in reps:                      # already in (most-cited, id) order
+        mine = tokens[rep]
+        joined = False
+        if mine:
+            for clique in cliques:
+                if all(same_topic(mine, tokens[m]) for m in clique):
+                    clique.append(rep)
+                    joined = True
+                    break
+        if not joined:
+            cliques.append([rep])
 
     # THE SAFE-FAIL CHECK, before anything is applied.
-    final_of = {r: merged.get(r, r) for r in reps}
-    sizes: dict[str, int] = {}
-    for r in reps:
-        target = final_of[r]
-        sizes[target] = sizes.get(target, 0) + 1
-    topic_count = len(sizes)
-    largest = max(sizes.values(), default=0)
+    largest = max((len(c) for c in cliques), default=0)
     if len(reps) >= _GUARD_MIN_THEMES and (
         largest > _MAX_MERGE_SHARE * len(reps)
-        or topic_count < max(2, _MIN_GROUP_RATIO * len(reps))
+        or len(cliques) < max(2, _MIN_GROUP_RATIO * len(reps))
     ):
         logger.warning(
-            "crucible: theme similarity merge is degenerate (%d themes -> %d "
+            "crucible: theme overlap merge is degenerate (%d themes -> %d "
             "topics, largest %d); keeping exact-label merging only",
-            len(reps), topic_count, largest,
+            len(reps), len(cliques), largest,
         )
         return canonical
 
+    final_of = {m: clique[0] for clique in cliques for m in clique}
     for member, rep in list(canonical.items()):
         canonical[member] = final_of.get(rep, rep)
 
     logger.info(
         "crucible: themes canonicalised %d -> %d (%d by exact label, %d by "
-        "label similarity >= %.2f)",
+        "content-word overlap)",
         len(labels), len(set(canonical.values())), exact_merged,
-        len(reps) - topic_count, threshold,
+        len(reps) - len(cliques),
     )
     return canonical
+
 
 
 def assign_themes(

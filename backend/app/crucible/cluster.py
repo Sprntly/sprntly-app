@@ -160,60 +160,6 @@ def label_for(text: str) -> str:
     return s.rstrip(" ,;:.") or "unlabelled"
 
 
-def leader_groups(matrix, usable=None, *, threshold: float = DEFAULT_THRESHOLD):
-    """Single-pass leader clustering over ALREADY-NORMALISED row vectors.
-
-    Returns `(leader_rows, assignment)`: the row index that founded each group,
-    and, per input row, the group it joined (`-1` for rows excluded by
-    `usable`). First row to appear founds a group; each later row joins the
-    nearest leader at or above `threshold` or founds its own. Same rows in the
-    same order, same groups, every time — the reproducibility claim this engine
-    makes rests on the caller fixing that order, not on this loop.
-
-    EXTRACTED so a second caller does not get a second copy. `assign_clusters`
-    groups CLAIMS by signal embedding; `kg_themes` groups THEME ENTITIES by
-    label embedding. Same loop, different substrate — and a divergent second
-    implementation would mean two definitions of "the same thing", which is the
-    exact failure both of them exist to prevent.
-
-    Rows must already be L2-normalised: the dot product is taken AS the cosine,
-    and normalising here would hide a caller that forgot to.
-    """
-    import numpy as np
-
-    if usable is None:
-        usable = np.ones(matrix.shape[0], dtype=bool)
-
-    # PREALLOCATED AND DOUBLED, not `np.vstack` per leader. Growing by vstack
-    # reallocates and copies the whole leader block on every new cluster, which
-    # is quadratic in the number of clusters — and a real tenant produced 1,744
-    # clusters from 2,777 signals, so the pathological case IS the normal case.
-    capacity = 256
-    leader_matrix = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
-    leaders: list[int] = []
-    assignment: list[int] = []
-
-    for row in range(matrix.shape[0]):
-        if not usable[row]:
-            assignment.append(-1)          # ungrouped, never forced anywhere
-            continue
-        if leaders:
-            sims = leader_matrix[: len(leaders)] @ matrix[row]
-            best = int(np.argmax(sims))
-            if float(sims[best]) >= threshold:
-                assignment.append(best)
-                continue
-        if len(leaders) == capacity:
-            capacity *= 2
-            grown = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
-            grown[: len(leaders)] = leader_matrix[: len(leaders)]
-            leader_matrix = grown
-        leader_matrix[len(leaders)] = matrix[row]
-        leaders.append(row)
-        assignment.append(len(leaders) - 1)
-    return leaders, assignment
-
-
 def assign_clusters(
     claims: Sequence[Claim],
     embeddings: Mapping[str, Sequence[float]],
@@ -310,7 +256,33 @@ def assign_clusters(
     safe_norms = np.where(norms == 0, 1.0, norms)
     matrix = matrix / safe_norms
 
-    leaders, assignment = leader_groups(matrix, usable, threshold=threshold)
+    # PREALLOCATED AND DOUBLED, not `np.vstack` per leader. Growing by vstack
+    # reallocates and copies the whole leader block on every new cluster, which
+    # is quadratic in the number of clusters — and a real tenant produced 1,744
+    # clusters from 2,777 signals, so the pathological case IS the normal case.
+    capacity = 256
+    leader_matrix = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
+    leaders: list[int] = []
+    assignment: list[int] = []
+
+    for row in range(matrix.shape[0]):
+        if not usable[row]:
+            assignment.append(-1)          # ungrouped, never forced anywhere
+            continue
+        if leaders:
+            sims = leader_matrix[: len(leaders)] @ matrix[row]
+            best = int(np.argmax(sims))
+            if float(sims[best]) >= threshold:
+                assignment.append(best)
+                continue
+        if len(leaders) == capacity:
+            capacity *= 2
+            grown = np.zeros((capacity, matrix.shape[1]), dtype=np.float32)
+            grown[: len(leaders)] = leader_matrix[: len(leaders)]
+            leader_matrix = grown
+        leader_matrix[len(leaders)] = matrix[row]
+        leaders.append(row)
+        assignment.append(len(leaders) - 1)
 
     # THE LABEL IS THE MEDOID, NOT THE LEADER. The leader is simply whichever
     # member appeared first in the input, and naming a theme after an arbitrary
