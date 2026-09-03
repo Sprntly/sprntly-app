@@ -114,26 +114,43 @@ export interface ChatHomeCard {
   icon: ChatCardIconId
   title: string
   desc: string
-  target: "brief" | "ondemand"
+  /** Where a click goes. `brief` and `ondemand` are screens; `create-project`
+   *  (2026-09-03) opens the project-creation modal in place — the one home
+   *  card whose job is not to send or navigate but to start something. */
+  target: "brief" | "ondemand" | "create-project"
   prompt?: string
 }
 
-/** Home landing: go-to destinations plus a few prefilled prompts (brief uses AI bar; Ask uses `pendingOndemandDraft`). */
+/**
+ * Home landing: the two chips under the composer (spec §14, 2026-09-03).
+ *
+ * They replaced "Show me this week's top insights" (→ the brief) and "Give me
+ * summary on last week's customer conversations" (→ prefilled Ask). Both
+ * pointed at things a new user could not yet judge the value of; these two
+ * point at the two things the product exists to do — tell you what to build
+ * for revenue, and give your team a place to do it. Top Insights is still one
+ * click away in the rail.
+ *
+ * Same mechanics as before: an `ondemand` card with a `prompt` FILLS Ask (via
+ * `pendingOndemandDraft`) so the question can be edited before it is sent; the
+ * `create-project` card opens `CreateProjectModal` (see ChatScreen's
+ * `handleHomeCard`) — the same flow as Projects → "New project".
+ */
 export const DEFAULT_HOME_STARTER_CARDS: ChatHomeCard[] = [
   {
-    id: "home-goto-brief",
-    icon: "sparkle",
-    title: "Show me this week's top insights",
-    desc: "Ranked findings, impact, and signals in one view.",
-    target: "brief",
-  },
-  {
-    id: "home-prompt-customer-feedback",
-    icon: "diamond",
-    title: "Give me summary on last week's customer conversations",
+    id: "home-prompt-drive-revenue",
+    icon: "chart",
+    title: "What should I do to drive revenue",
     desc: "Fills Ask so you can edit or send.",
     target: "ondemand",
-    prompt: "Give me summary on last week's customer conversations.",
+    prompt: "What should I do to drive revenue?",
+  },
+  {
+    id: "home-create-project",
+    icon: "message",
+    title: "Create a project and collaborate with my team",
+    desc: "Opens project creation — pick what it covers and invite teammates.",
+    target: "create-project",
   },
 ]
 
