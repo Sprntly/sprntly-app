@@ -241,7 +241,15 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     for that block, so its answers to those questions were ungrounded by
 #     construction; the two must not be pooled. (v18 is #1460's wants_report
 #     and v19 is #1461's prioritisation rule; both land ahead of this one.)
-_PROMPT_VERSION = "ask-planner-v20"
+#   v21: the analyse_goal menu learned that PRIORITISATION IS NOT A GOAL.
+#     Reported: "help me prioritise the roadmap for Q4" started a Goal
+#     Analysis run — a definition gate in front of a question with no metric
+#     to define — and its panel landed over whichever thread the reader had
+#     moved to. A v20 row could send a ranking question either way; a v21 row
+#     is told which, so the two must not be pooled. (v19 was this change's
+#     number while it queued behind #1460 and #1462; it never shipped, so no
+#     row carries it.)
+_PROMPT_VERSION = "ask-planner-v21"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -1032,6 +1040,22 @@ or wants an answer.
   stops and asks what the metric means, states what it will read, and runs
   only once the user approves — a goal answered directly skips the
   confirmation the user needs in order to defend the result.
+  A GOAL NAMES A METRIC. PRIORITISATION DOES NOT, and that is the line.
+  "help me prioritise the roadmap for Q4", "what should we build next?",
+  "which of these should we do first?", "rank these features", "what are the
+  top three things to work on?", "how should we sequence this quarter?" ask
+  which work comes FIRST. There is no number in them to define, nothing to
+  confirm the meaning of, and nothing for Goal Analysis to ask about — it
+  opens by asking what the metric means, so pointed at a prioritisation
+  question it asks a question with no answer, in a panel, instead of the
+  ranked list the user wanted in the chat. All of these are `answer`
+  (include_backlog=true when the backlog is what is being ranked).
+  Reported: a prioritisation question started a Goal Analysis run, and the
+  reader — who had moved on — found its panel over a thread that had asked
+  for nothing.
+  A goal that HAPPENS to mention priority is still a goal: "what should we
+  prioritise to reduce churn 3%?" names a metric and a number, so it is this
+  action. The test is the metric, never the word "prioritise".
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
