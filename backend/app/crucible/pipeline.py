@@ -18,6 +18,7 @@ question.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 from bisect import bisect_right
@@ -38,6 +39,7 @@ from app.crucible.types import (
     ConfidenceInputs,
     Finding,
     GoalCurrency,
+    GroundedFigure,
     Impact,
     ImpactInputs,
     _band_for_rank,
@@ -116,6 +118,108 @@ AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 #: no dollar finding ever bands, and nothing would fail.
 GROUNDED_USD_UNIT = "commercial_grounded_usd"
 
+#: How much of that sum came off a paraphrase rather than a verified quote.
+#: A separate key rather than a flag so a renderer can hedge in proportion.
+GROUNDED_USD_DERIVED_UNIT = "commercial_grounded_usd_derived"
+
+#: The `certainty` marker a figure recovered from a written summary carries
+#: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
+#: imported because `backfill` is an operator tool that imports the graph
+#: extractor and a DB client; the read path must not pull that in to answer a
+#: question about one string. The value is pinned by a test on both sides.
+BACKFILL_CERTAINTY_MARKER = "derived-from-summary"
+
+
+def _account_key(accounts: Sequence[str]) -> str:
+    """A stable, opaque identity for the account(s) a figure belongs to.
+
+    STABLE, so two runs over the same corpus deduplicate identically —
+    Python's own `hash()` is salted per process and would make the output
+    depend on which process produced it, which is the reproducibility claim
+    this engine makes against asking a general model the same question.
+
+    OPAQUE, because this value rides on scored objects that get logged and
+    diffed. Deduplication needs to know two figures belong to the same
+    customer; nothing downstream needs to know which customer, and a digest
+    grants the first while refusing the second.
+    """
+    if not accounts:
+        return ""
+    joined = "\x1f".join(sorted(accounts))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ...]:
+    """The DISTINCT transcript-stated dollar figures among this finding's
+    claims — the single source of truth for the grounded sum, which is simply
+    these added up.
+
+    DO NOT "SIMPLIFY" THIS INTO `sum(c.magnitude for c in group)`. One deal
+    restated in five messages is five claims carrying one figure; adding them
+    gives five times the money, which turns HOW OFTEN something was said into
+    HOW BIG it is — corroboration deciding size, the single failure the
+    separation of impact from confidence exists to prevent. It was merely a
+    wrong display line while the sum was display-only. It is now also the
+    number that orders findings and the number summed toward a reader's
+    stated money target, so the same defect would inflate a target by
+    whatever the repetition rate happened to be.
+
+    The identity of a figure is `(the accounts it is attached to, the
+    amount)`:
+
+      * named account — the same amount on the same account is one figure,
+        however many claims restate it. Two accounts naming the same amount
+        stay two figures.
+      * no named account — the amount alone is the identity, which collapses
+        an anonymous restatement of one deal.
+      * an anonymous amount already attributed to some account is dropped
+        entirely. Most often that is the same deal in a message that did not
+        name the customer, and between double-counting a real figure and
+        under-counting a duplicate, only one of those errors inflates.
+
+    Currency needs no place in the key: a claim in another currency is
+    excluded outright, so everything reaching deduplication is one currency
+    by construction.
+
+    The cost is real and worth naming: one account that genuinely signs two
+    separate contracts for the identical amount is counted once. That is an
+    undercount of an unknowable, and this sum's job is to be a floor a reader
+    can trust, not a maximum.
+    """
+    attributed: dict[tuple[str, float], GroundedFigure] = {}
+    anonymous: dict[float, GroundedFigure] = {}
+    for c in group:
+        if c.magnitude is None:
+            continue
+        raw = c.raw or {}
+        if raw.get("currency") not in (None, "", "USD"):
+            continue
+        accounts = tuple(sorted(c.population.segments.get("accounts", ())))
+        key = _account_key(accounts)
+        derived = raw.get("certainty") == BACKFILL_CERTAINTY_MARKER
+        figure = GroundedFigure(
+            account_key=key, amount=float(c.magnitude), derived=derived,
+        )
+        if accounts:
+            existing = attributed.get((key, figure.amount))
+            # A figure seen both ways keeps the STRONGER provenance: if any
+            # claim carried it against a verified quote, the money is quoted
+            # money, and hedging it as derived would understate what we know.
+            if existing is None or (existing.derived and not derived):
+                attributed[(key, figure.amount)] = figure
+        else:
+            existing = anonymous.get(figure.amount)
+            if existing is None or (existing.derived and not derived):
+                anonymous[figure.amount] = figure
+
+    attributed_amounts = {amount for _key, amount in attributed}
+    out = list(attributed.values()) + [
+        f for amount, f in anonymous.items() if amount not in attributed_amounts
+    ]
+    # Sorted so the tuple is stable regardless of claim iteration order —
+    # these end up on a frozen, hashed, repr-compared object.
+    return tuple(sorted(out, key=lambda f: (-f.amount, f.account_key)))
+
 
 def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float]:
     """Real, transcript-stated dollar figures among THIS finding's claims —
@@ -134,58 +238,20 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     counted (`commercial_grounded_claims`) but excluded from the dollar sum
     rather than risk silently mixing currencies into one number.
 
-    DEDUPLICATED BEFORE SUMMING, AND THAT IS THE WHOLE POINT OF THE SUM.
-    One deal restated in five messages is five claims carrying one figure.
-    Adding them gives five times the money, which turns HOW OFTEN something
-    was said into HOW BIG it is — corroboration contaminating size, the one
-    failure the separation of impact from confidence exists to prevent (see
-    `ImpactInputs`' own docstring). Two DIFFERENT accounts each naming
-    $50,000 genuinely is $100,000 of opportunity; the same $50,000 named
-    five times is not $250,000, and no amount of repetition can make it so.
-
-    The identity of a figure is therefore `(the accounts it is attached to,
-    the amount)`:
-
-      * named account — the same amount on the same account is one figure,
-        however many claims restate it. Two accounts naming the same amount
-        stay two figures.
-      * no named account — the amount alone is the identity, which is what
-        collapses an anonymous restatement of one deal.
-      * an anonymous amount already attributed to some account is dropped
-        entirely. Most often that is the same deal in a message that did not
-        name the customer, and between double-counting a real figure and
-        under-counting a duplicate, only one of those errors inflates.
-
-    Currency needs no place in the key: a claim in another currency is
-    already excluded from the sum above, so everything reaching the
-    deduplication is one currency by construction.
-
-    The cost is real and worth naming: one account that genuinely signs two
-    separate contracts for the identical amount is counted once. That is an
-    undercount of an unknowable, and this sum's job is to be a floor a
-    reader can trust, not a maximum.
+    DEDUPLICATED BEFORE SUMMING, AND THAT IS THE WHOLE POINT OF THE SUM —
+    the rule and the reasoning live on `deduped_grounded_figures`, which is
+    the single source of truth. This sum is literally those figures added up,
+    so the two can never disagree about what the money is.
     """
     grounded = [c for c in group if c.magnitude is not None]
     if not grounded:
         return {}
 
     accounts_named: set[str] = set()
-    attributed: dict[tuple[tuple[str, ...], float], float] = {}
-    anonymous: dict[float, float] = {}
     for c in grounded:
-        accounts = tuple(sorted(c.population.segments.get("accounts", ())))
-        accounts_named.update(accounts)
-        if (c.raw or {}).get("currency") not in (None, "", "USD"):
-            continue
-        if accounts:
-            attributed[(accounts, c.magnitude)] = c.magnitude
-        else:
-            anonymous[c.magnitude] = c.magnitude
+        accounts_named.update(c.population.segments.get("accounts", ()))
 
-    attributed_amounts = {amount for _accounts, amount in attributed}
-    usd_amounts = list(attributed.values()) + [
-        amount for amount in anonymous if amount not in attributed_amounts
-    ]
+    figures = deduped_grounded_figures(group)
 
     # STILL THE RAW CLAIM COUNT, deliberately. This is a statement about the
     # evidence ("N claims carried a figure"), not about the money, and it is
@@ -193,8 +259,15 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     # claim list. It is also why nothing downstream may size a finding from
     # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
-    if usd_amounts:
-        units[GROUNDED_USD_UNIT] = float(sum(usd_amounts))
+    if figures:
+        units[GROUNDED_USD_UNIT] = float(sum(f.amount for f in figures))
+        derived_total = sum(f.amount for f in figures if f.derived)
+        if derived_total:
+            # The portion of the sum that came off a written summary rather
+            # than a verified quote. Carried as a NUMBER rather than a flag
+            # so a renderer can hedge in proportion — "$X of that" reads very
+            # differently from a blanket disclaimer over the whole figure.
+            units[GROUNDED_USD_DERIVED_UNIT] = float(derived_total)
     if accounts_named:
         units["commercial_grounded_accounts"] = float(len(accounts_named))
     return units
@@ -653,6 +726,9 @@ def build_findings(
                 value_per_unit=None,
                 assumed_params=assumed,
                 native_units=_grounded_commercial_native_units(group),
+                # The identities behind that sum, so anything summing ACROSS
+                # findings can deduplicate the same money one more time.
+                grounded_figures=deduped_grounded_figures(group),
             ),
             confidence_inputs=ConfidenceInputs(
                 strengths=tuple(c.strength for c in group),

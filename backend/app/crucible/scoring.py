@@ -119,6 +119,7 @@ def score_impact(finding: Finding) -> Impact:
         assumed_params=i.assumed_params,
         native_units=i.native_units,
         size_rank=i.size_rank,
+        grounded_figures=i.grounded_figures,
     )
 
 

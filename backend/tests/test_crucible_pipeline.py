@@ -349,6 +349,134 @@ def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
     assert sum_for(1) == sum_for(2) == sum_for(5) == 80000.0
 
 
+# ── Provenance rides with the figure ─────────────────────────────────────────
+#
+# The backfill stamps a distinct `certainty` on any figure recovered from a
+# written summary, precisely so a reader could tell it from one captured
+# against a verified verbatim quote. Nothing read it, so the two were
+# indistinguishable downstream — the promise was stored and never kept.
+
+
+def test_the_derived_marker_matches_the_one_the_backfill_actually_writes():
+    """Pinned on BOTH sides. The read path declares the string rather than
+    importing the operator tool (which drags in the extractor and a DB
+    client), so the only thing keeping them in step is this assertion."""
+    from app.crucible.backfill import BACKFILL_CERTAINTY
+    from app.crucible.pipeline import BACKFILL_CERTAINTY_MARKER
+
+    assert BACKFILL_CERTAINTY_MARKER == BACKFILL_CERTAINTY
+
+
+def test_a_figure_read_back_from_a_summary_is_marked_derived():
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0],
+                            derived=True)
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert units["commercial_grounded_usd_derived"] == 340000.0
+    assert all(f.derived for f in out.impacts[0].grounded_figures)
+
+
+def test_a_quoted_figure_carries_no_derived_portion_at_all():
+    """Proportionate means silent when there is nothing to hedge — the key is
+    absent rather than present at zero, so a renderer cannot accidentally
+    hedge a fully quoted figure."""
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0])
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert "commercial_grounded_usd_derived" not in units
+
+
+def test_only_the_derived_portion_of_a_mixed_sum_is_marked():
+    quoted = _dollar_claims("q", "alpha", amounts=[250000.0])
+    derived = _dollar_claims("d", "alpha", amounts=[90000.0], derived=True)
+    # Same subject, so they cluster into one finding; dates already spread.
+    derived = [claim(
+        "d9", subject="alpha", days_ago=200, accounts=(), ctype="magnitude",
+        source="revenue", magnitude=90000.0,
+        raw={"currency": "USD", "certainty": "derived-from-summary"},
+    )]
+    out = run(quoted + derived)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert units["commercial_grounded_usd_derived"] == 90000.0
+
+
+def test_the_same_figure_seen_both_ways_keeps_the_stronger_provenance():
+    """If any claim carried this money against a verified quote, it IS quoted
+    money. Hedging it because a summary restated it would understate what we
+    know."""
+    claims = [
+        claim("c1", subject="alpha", days_ago=5, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=50000.0,
+              raw={"currency": "USD", "certainty": "derived-from-summary"}),
+        claim("c2", subject="alpha", days_ago=60, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=50000.0,
+              raw={"currency": "USD", "certainty": "quoted"}),
+        claim("c3", subject="alpha", days_ago=120, accounts=("Acme",),
+              ctype="magnitude", source="revenue", magnitude=30000.0,
+              raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 80000.0
+    assert "commercial_grounded_usd_derived" not in units
+
+
+# ── Cross-finding identity: the reason figures travel as identities ─────────
+
+def test_the_figures_behind_the_sum_travel_with_the_impact():
+    """The sum alone cannot be deduplicated a second time. Carrying the
+    identities is what lets a consumer summing ACROSS findings apply the same
+    rule again — see `recommend._quoted_money_toward_target`."""
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0])
+    out = run(claims)
+    figures = out.impacts[0].grounded_figures
+    assert sorted(f.amount for f in figures) == [90000.0, 250000.0]
+    assert sum(f.amount for f in figures) == (
+        out.impacts[0].native_units["commercial_grounded_usd"]
+    )
+
+
+def test_a_figure_identity_never_carries_the_account_name():
+    """These ride on scored objects that get logged and diffed. Deduplication
+    needs to know two figures belong to the same customer; nothing downstream
+    needs to know which customer."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=d, accounts=(a,),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"})
+        for i, (d, a, m) in enumerate(
+            [(5, "Northwind Trading", 50000.0), (60, "Acme Corp", 30000.0)]
+        )
+    ]
+    out = run(claims)
+    keys = {f.account_key for f in out.impacts[0].grounded_figures}
+    assert len(keys) == 2
+    blob = repr(out.impacts[0])
+    assert "Northwind" not in blob and "Acme" not in blob
+
+
+def test_the_account_key_is_stable_across_processes():
+    """Reproducibility is the claim this engine makes against asking a
+    general model the same question, so the key cannot come from Python's own
+    per-process-salted `hash()`."""
+    import subprocess
+    import sys
+
+    from app.crucible.pipeline import _account_key
+
+    here = _account_key(("Northwind Trading", "Acme Corp"))
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from app.crucible.pipeline import _account_key;"
+         "print(_account_key(('Northwind Trading', 'Acme Corp')))"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == here
+
+
 # ── The ordinal size band ────────────────────────────────────────────────────
 #
 # A finding carrying a real quoted figure but no named account scored
@@ -360,7 +488,7 @@ def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
 # each finding competes in its own currency.
 
 
-def _dollar_claims(prefix, subject, *, amounts, accounts=None):
+def _dollar_claims(prefix, subject, *, amounts, accounts=None, derived=False):
     """One finding's worth of quoted-figure claims.
 
     NO NAMED ACCOUNTS BY DEFAULT, and that is what makes these tests mean
@@ -372,7 +500,9 @@ def _dollar_claims(prefix, subject, *, amounts, accounts=None):
         claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i,
               accounts=(accounts[i],) if accounts else (),
               ctype="magnitude", source="revenue",
-              magnitude=amount, raw={"currency": "USD"})
+              magnitude=amount,
+              raw={"currency": "USD",
+                   **({"certainty": "derived-from-summary"} if derived else {})})
         for i, amount in enumerate(amounts)
     ]
 

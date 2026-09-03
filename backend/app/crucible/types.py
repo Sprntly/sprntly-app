@@ -35,7 +35,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, NamedTuple, Optional, Sequence
 
 
 class FrozenDict(dict):
@@ -141,9 +141,36 @@ SelectionBias = Literal["none", "self_selected", "sampled", "census"]
 
 ConfidenceBand = Literal["high", "medium", "low"]
 
-#: Field names that carry "how many sources agree". Impact may never read one.
-#: Enforced by `invariants.assert_no_corroboration_fields`, which is why this is
-#: a data structure rather than a paragraph.
+class GroundedFigure(NamedTuple):
+    """One deduplicated, transcript-stated commercial figure.
+
+    THE IDENTITY, NOT JUST THE NUMBER, and that is the whole reason this type
+    exists rather than a bare `float`. A finding's grounded sum is already
+    deduplicated within itself, but the same deal can be described by two
+    different signals that cluster into two different findings — clustering
+    keys on subject, so a renewal figure can legitimately appear under both a
+    pricing theme and a churn theme. Summing findings' totals would then count
+    that money twice. Carrying the identities lets any consumer that sums
+    ACROSS findings apply the same rule one more time.
+
+    `account_key` IS OPAQUE ON PURPOSE. Deduplication needs to know that two
+    figures belong to the same customer; nothing downstream needs to know
+    WHICH customer, and this value travels into scored objects that are
+    logged and diffed. A stable digest gives the first and refuses the
+    second. Empty string means no account was named, which is its own
+    identity class (see `pipeline._grounded_commercial_native_units`).
+
+    `derived` marks a figure read back out of a written summary rather than
+    captured against a verified verbatim quote. The failure mode there is
+    transcription error, not invention — so it is a reason to hedge the
+    wording proportionately, never a reason to hide the figure.
+    """
+
+    account_key: str
+    amount: float
+    derived: bool
+
+
 #: How many ordinal bands a size is REPORTED in. Quartiles: enough to
 #: separate a big finding from a small one, few enough that the output never
 #: implies a precision the underlying evidence cannot support. A percentile
@@ -170,6 +197,9 @@ def _band_for_rank(size_rank: Optional[float]) -> Optional[int]:
     return max(1, min(SIZE_BANDS, math.ceil(SIZE_BANDS * size_rank)))
 
 
+#: Field names that carry "how many sources agree". Impact may never read one.
+#: Enforced by `invariants.assert_no_corroboration_fields`, which is why this is
+#: a data structure rather than a paragraph.
 CORROBORATION_FIELDS: frozenset[str] = frozenset({
     "surfaced_by", "source_types", "breadth", "connected_breadth",
     "corroboration", "corroboration_bonus", "agreeing_sources", "source_count",
@@ -448,6 +478,10 @@ class ImpactInputs:
     #: so the number a reader sees and the number that sorts can never
     #: disagree.
     size_rank: Optional[float] = None
+    #: The deduplicated figures behind `native_units`' grounded dollar sum,
+    #: carried as identities so a consumer summing ACROSS findings can apply
+    #: the same deduplication one more time. See `GroundedFigure`.
+    grounded_figures: tuple[GroundedFigure, ...] = ()
 
     @property
     def size_band(self) -> Optional[int]:
@@ -463,7 +497,8 @@ class ImpactInputs:
     def __hash__(self) -> int:
         return hash((self.currency, self.affected_population, self.movable_gap,
                      self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units), self.size_rank))
+                     _hashable(self.native_units), self.size_rank,
+                     self.grounded_figures))
 
 
 @dataclass(frozen=True)
@@ -509,6 +544,9 @@ class Impact:
     #: account produces: we did not measure its reach, and saying so is not
     #: the same as saying it is worth nothing.
     size_rank: Optional[float] = None
+    #: Carried through from `ImpactInputs` so a consumer summing across
+    #: findings can deduplicate the same money one more time.
+    grounded_figures: tuple[GroundedFigure, ...] = ()
 
     @property
     def size_band(self) -> Optional[int]:
@@ -524,7 +562,8 @@ class Impact:
     def __hash__(self) -> int:
         return hash((self.value, self.currency, self.affected_population,
                      self.movable_gap, self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units), self.size_rank))
+                     _hashable(self.native_units), self.size_rank,
+                     self.grounded_figures))
 
 
 @dataclass(frozen=True)

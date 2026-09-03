@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from app.crucible.pipeline import build_findings
 from app.crucible.recommend import (
     Recommendation, _acceptable, build_recommendations,
@@ -263,6 +265,233 @@ def test_named_target_reads_dollars_and_accounts_and_percent():
     assert _named_target("I want to activate 1,000 accounts") == (1000.0, "accounts")
     assert _named_target("lift retention by 12%") == (12.0, "percent")
     assert _named_target("just make it better") is None
+
+
+# ─── A money target is answered from figures people actually stated ─────────
+#
+# A finding whose only evidence is a quoted dollar figure has no named
+# account, so it is honestly unsizeable in the corpus's own currency and
+# carries `value = None`. It was therefore invisible to the target path,
+# which read `corpus_currency` off the first SIZED finding — accounts. So
+# "how do we drive $100,000 in revenue?" was refused with "this corpus sizes
+# findings in accounts, not in dollars" while genuinely quoted dollars sat
+# ranked at the top of the same report.
+
+
+def _money(amount, *, account="acct-a", derived=False):
+    from app.crucible.types import GroundedFigure
+
+    return GroundedFigure(account_key=account, amount=amount, derived=derived)
+
+
+def _occurrences(haystack, needle):
+    start = 0
+    while True:
+        at = haystack.find(needle, start)
+        if at == -1:
+            return
+        yield at
+        start = at + 1
+
+
+def _figure_only(*figures):
+    """A finding whose evidence is quoted money and nothing else: no named
+    account, so no measured reach, so `value` is honestly None."""
+    return Impact(value=None, currency="accounts", affected_population=None,
+                  movable_gap=None, value_per_unit=None,
+                  native_units={"commercial_grounded_usd":
+                                sum(f.amount for f in figures)},
+                  grounded_figures=tuple(figures))
+
+
+def test_a_money_target_is_answered_from_quoted_figures_not_refused():
+    """THE DEFECT, reproduced directly. Quoted dollars are present and
+    ranked; the reader asked in dollars; the answer must be the money, not a
+    refusal to talk about money."""
+    impacts = [_figure_only(_money(60000.0, account="a")),
+               _figure_only(_money(50000.0, account="b"))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert not result.target_unsizeable
+    assert "sizes findings in accounts" not in result.basis
+    assert "$100,000" in result.basis
+    assert "$110,000" in result.basis
+
+
+def test_the_refusal_is_untouched_when_the_corpus_really_has_no_dollars():
+    """The control. Widening the money path must not weaken the honest
+    refusal — it must only stop it firing when we DO have dollars."""
+    impacts = [Impact(value=5.0, currency="accounts", affected_population=5.0,
+                       movable_gap=1.0, value_per_unit=None)]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert result.target_unsizeable
+    assert "sizes findings in accounts" in result.basis
+    assert "would say more than the evidence supports" in result.basis
+
+
+def test_the_same_deal_in_two_findings_is_counted_once():
+    """Deduplication ACROSS findings, not only within them. Clustering keys
+    on subject, so one renewal figure can legitimately appear under both a
+    pricing theme and a churn theme. Summing the findings' totals would count
+    that money twice — and against a target, double-counting is the
+    difference between "covered" and "half covered"."""
+    same = _money(60000.0, account="acct-shared")
+    impacts = [_figure_only(same), _figure_only(same)]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$60,000" in result.basis
+    assert "$120,000" not in result.basis
+    assert result.target_unsizeable, "short of target once counted once"
+
+
+def test_two_accounts_naming_the_same_amount_are_still_two_figures():
+    """The control that stops the cross-finding dedup over-correcting."""
+    impacts = [_figure_only(_money(60000.0, account="acct-a")),
+               _figure_only(_money(60000.0, account="acct-b"))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$120,000" in result.basis
+    assert not result.target_unsizeable
+
+
+def test_one_finding_covering_the_whole_target_says_so_and_shows_its_figures():
+    """"One initiative covers your $100k" is a strong claim resting entirely
+    on the accuracy of the figures behind it. Padding the count would hide
+    that; showing the figures lets a reader judge it."""
+    impacts = [_figure_only(_money(60000.0, account="a"),
+                            _money(50000.0, account="b"))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert result.count == 1
+    assert "top finding alone" in result.basis
+    assert "$60,000 + $50,000" in result.basis
+    assert "meets it on its own" in result.basis
+
+
+def test_falling_short_says_so_and_never_projects_the_gap_closed():
+    impacts = [_figure_only(_money(20000.0, account="a"))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert result.target_unsizeable
+    assert "$20,000" in result.basis
+    assert "short of it" in result.basis
+    assert "Nothing here is projected to close the gap" in result.basis
+
+
+@pytest.mark.parametrize("asked", [
+    "how do we drive $100,000 in revenue?",
+    "I want to get to $2 million",
+    "get me a million dollars",
+])
+def test_the_money_wording_never_claims_more_than_a_sum_of_stated_figures(asked):
+    """The rule this whole feature rests on: summing real quoted values is
+    legitimate, extrapolating from them is forbidden. No sentence here may
+    suggest a number nobody said."""
+    impacts = [_figure_only(_money(60000.0, account="a")),
+               _figure_only(_money(50000.0, account="b"))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts, asked_text=asked,
+    ).basis.lower()
+    for forbidden in ("we expect", "potential", "could be worth",
+                      "estimated", "forecast", "on track"):
+        assert forbidden not in basis, forbidden
+    # "projected" and "projection" are allowed ONLY inside a denial. The
+    # honest sentences here are "not a projection" and "nothing here is
+    # projected to close the gap" — a blanket substring ban would forbid the
+    # very wording that makes the claim safe, so the guard checks the
+    # affirmative use instead.
+    for word in ("projected", "projection"):
+        for occurrence in _occurrences(basis, word):
+            preceding = basis[max(0, occurrence - 30):occurrence]
+            assert any(
+                neg in preceding for neg in ("not ", "nothing ", "never ")
+            ), f"affirmative use of {word!r} in: {basis}"
+    assert "actually stated" in basis
+
+
+def test_named_accounts_are_counted_but_anonymous_figures_are_not_claimed_as_accounts():
+    """A figure with no named account is still real money and still counts
+    toward the target — but it must not inflate a count of named accounts,
+    which is a claim about who said it."""
+    impacts = [_figure_only(_money(60000.0, account="acct-a"),
+                            _money(50000.0, account=""))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$110,000" in result.basis
+    assert "1 named account" in result.basis
+    assert "2 named accounts" not in result.basis
+
+
+# ─── Provenance: a derived figure may not wear a quoted figure's clothes ────
+#
+# The backfill stamps a distinct `certainty` on any figure recovered from a
+# written summary, precisely so a reader could tell it from one captured
+# against a verified verbatim quote. Nothing read it, so the two rendered
+# identically. That matters most here: telling a reader their money target is
+# covered is a materially stronger claim than telling them a figure was named.
+
+
+def test_a_derived_figure_is_hedged_specifically_not_blanketly():
+    impacts = [_figure_only(_money(60000.0, account="a"),
+                            _money(50000.0, account="b", derived=True))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$50,000 of that was read back from written summaries" in basis
+    # The risk is transcription, not invention — the hedge must not imply the
+    # figure might be made up.
+    assert "may not be real" not in basis
+    assert "unreliable" not in basis
+
+
+def test_a_target_met_only_by_derived_figures_says_so_outright():
+    """The disclosure that matters most. A reader must not have to subtract
+    the hedged figures themselves to discover that their target is covered
+    only by numbers read back from summaries."""
+    impacts = [_figure_only(_money(30000.0, account="a"),
+                            _money(80000.0, account="b", derived=True))]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert not result.target_unsizeable
+    assert "$110,000" in result.basis
+    assert "Without those, the quoted figures total $30,000" in result.basis
+    assert "would not meet your target" in result.basis
+
+
+def test_a_fully_quoted_target_carries_no_hedge_at_all():
+    """Proportionate means silent when there is nothing to hedge.
+
+    Anchored on the POSITIVE content first. An absence-only assertion passes
+    just as happily when the money path never ran at all, which is exactly
+    the state this whole section exists to fix — so it would have gone green
+    against the defect."""
+    impacts = [_figure_only(_money(60000.0, account="a"),
+                            _money(50000.0, account="b"))]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$110,000" in basis, "the money path must have produced this"
+    assert "read back from written summaries" not in basis
+    assert "Without those" not in basis
 
 
 def test_default_recommendation_count_is_two():
