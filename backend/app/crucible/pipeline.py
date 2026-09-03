@@ -226,14 +226,27 @@ def _figure_is_committed(
     been over-claiming, and a figure wrongly left out of the sum understates
     a total, where one wrongly added invents money.
     """
+    # A PROBABILISTIC LABEL MAY NOT OVERTURN A DETERMINISTIC ONE IN THE
+    # DIRECTION THAT INFLATES A TOTAL.
+    #
+    # The extraction pass already judged this row a PRICE. A live run found
+    # the classifier promoting one anyway — "internal annual license is
+    # priced at $24,000 with a 20% discount applied", `kind = pricing`,
+    # phrasing "priced at", called `deal_value` — and $24,000 of discounted
+    # list price entered the committed total.
+    #
+    # This is the ties-go-to-not-committed principle one layer up. The
+    # classifier may still move a figure OUT of the sum, which is the safe
+    # direction; it may not move one in over the extractor's objection.
+    if claim.artifact_type == _LIST_PRICE_KIND:
+        return False
+
     # THE CLASSIFIER DECIDES WHERE IT HAS SPOKEN, from a fixed table. The
     # model returned a category; which categories may be summed is settled
     # here, in deterministic code, and is not something the model can move.
     if claim.figure_class is not None:
         return claim.figure_class == SUMMABLE_CLASS
     if amount in list_price_amounts:
-        return False
-    if claim.artifact_type == _LIST_PRICE_KIND:
         return False
     text = claim.assertion or ""
     if _LIST_PRICE_PHRASE.search(text):
@@ -253,6 +266,15 @@ def _figure_is_list_price(claim: Claim, amount: float,
     its category as the reason.
     """
     if claim.figure_class is not None:
+        # A `pricing` row the classifier tried to promote to `deal_value` is
+        # refused from the sum above — and it does not then vanish. The
+        # extractor judged it a price, so a price is what it stays. The
+        # classifier may still move such a row to a REFUSAL category
+        # (compensation, hypothetical, …), which is the safe direction and
+        # is honoured; it simply cannot relabel a price as committed money.
+        if (claim.artifact_type == _LIST_PRICE_KIND
+                and claim.figure_class == SUMMABLE_CLASS):
+            return True
         return claim.figure_class == RANGE_CLASS
     # Without a classification, the deterministic rules keep their previous
     # meaning: anything not admitted to the sum was a price.
