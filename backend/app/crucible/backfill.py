@@ -58,11 +58,19 @@ figure a deal fact?" is made by the model under a prompt contract, and only
 then is `amount` attached. A regex cannot ask that question, and the first
 revision of this module did not try to — it kept the transcription and
 dropped the classification, which is how market sizes and valuations were
-read as customer-stated deal values. The four gates in
-`scan_dollar_figures` are a deliberate, lossy approximation of the missing
-half, and each one refuses with a recorded reason rather than adjusting a
-number: this module may decline to write a figure, but it never writes a
-figure other than the one the text states.
+read as customer-stated deal values. The gates in `scan_dollar_figures` are
+a deliberate, lossy approximation of the missing half, and each one refuses
+with a recorded reason rather than adjusting a number: this module may
+decline to write a figure, but it never writes a figure other than the one
+the text states.
+
+THAT APPROXIMATION HAS NOW BEEN PATCHED FIVE TIMES. Read the header comment
+above `_NO_DEAL_VALUE_STATED` before adding a sixth pattern — the durable
+fix is a classifier, and every pattern added here is permanent surface for
+some future real quote to collide with. (The range gate below is the one
+exception worth separating out: it fixes the PARSER producing a number the
+text never stated, which is a different and more serious fault than the
+category patterns, and no classifier removes the need for it.)
 """
 from __future__ import annotations
 
@@ -92,7 +100,15 @@ logger = logging.getLogger(__name__)
 #: run under v2 recovered a headline sum whose bottom five addends were
 #: $500, $400, $200, $100 and $25 — noise being laundered into a figure a
 #: reader would quote.
-PATTERN_VERSION = "dollar-v3"
+#:
+#: `dollar-v4` added the three refusal families. The same live run's HEAD
+#: was worse than its tail: $4.5M of a $5.17M total was a competitor's
+#: pricing, a revenue target and the company's own ARR bound.
+#:
+#: `dollar-v5` refuses ranges. "~$100-150k/year" was being stored as $100 —
+#: a 1,000x DOWNWARD error, and the only one of these defects that
+#: manufactures a wrong number rather than importing one.
+PATTERN_VERSION = "dollar-v5"
 
 #: The sentinel `certainty` value a backfilled row carries. Deliberately NOT
 #: a member of `extractor._COMMERCIAL_CERTAINTY_VALUES` — see module docstring.
@@ -209,6 +225,143 @@ _NON_DEAL_CONTEXT = re.compile(
     re.IGNORECASE,
 )
 
+# ─────────────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE ADDING A SIXTH PATTERN.
+#
+# The families below are the FOURTH patch on one wound. In order: a $50B
+# market size; a tail of $25/$100/$200 line items; then a $3M figure that a
+# customer pays to a COMPETITOR, a $1M "target", and a "less than $500K ARR"
+# stored as a precise point value. Every one of them was arithmetically
+# valid and semantically wrong, and each time the answer was another phrase.
+#
+# (`_RANGE_AFTER`/`_RANGE_BEFORE` further down are NOT part of this count.
+# Those fix the parser inventing a value the text never stated — a
+# correctness bug, not a category judgement — and a classifier would not
+# make them unnecessary.)
+#
+# A phrase list catches phrasings we have already seen. It cannot catch the
+# next one, and there is always a next one, because the question these
+# patterns are approximating — "is this figure a deal value?" — is a
+# judgement about meaning, not a property of the characters. At ingest that
+# judgement is made by a model under a prompt contract, which is why the
+# ingest path does not have this problem.
+#
+# So: the durable fix is CLASSIFICATION, not accumulation. If you have found
+# a fifth variant that slips through, that is the signal to build the
+# classifier — not to add pattern six. Each pattern added here buys one
+# corpus's worth of correctness and adds permanent surface that some future
+# real quote will collide with (see `_BOUNDED_QUANTITY_BEFORE`, which is
+# adjacency-anchored for exactly that reason).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: THE PARAGRAPH ARGUES AGAINST ITSELF — the highest-precision signal here,
+#: because the text states outright that no deal value is present and the
+#: sweep then reads a number out of the same sentence anyway.
+#:
+#: Observed: "No specific contract value or pricing for [subject] is
+#: stated." alongside a $3,000,000 figure, and "clients above $250K … rather
+#: than a direct fee" alongside a $250,000 one.
+_NO_DEAL_VALUE_STATED = re.compile(
+    r"\bno\s+(?:specific\s+)?contract\s+value\b"
+    r"|\bno\s+(?:specific\s+)?(?:contract\s+value|pricing)"
+    r"[^.]{0,80}?\b(?:is\s+)?(?:stated|discussed|mentioned|specified)\b"
+    r"|\brather\s+than\s+a\s+direct\s+fee\b",
+    re.IGNORECASE,
+)
+
+#: THE FIGURE IS ABOUT THE COMPANY, NOT ABOUT A DEAL. Recurring-revenue
+#: totals and revenue goals are the company's own scale; a deal is what one
+#: customer agreed to pay.
+#:
+#: Observed: "with a target of $1M+ by end of year" (an aspiration, not an
+#: agreement) and "less than $500K ARR" (the company's own book).
+#:
+#: NO BARE `ARR`, AND THAT IS A MEASURED DECISION RATHER THAN AN OVERSIGHT.
+#: The obvious pattern here is `\bARR\b`, and it was written, and the
+#: existing suite immediately refused "closed at $1.5 million ARR" — which
+#: is a real DEAL, stated the way SaaS contracts are normally stated. ARR is
+#: the unit both a company's own book and a single contract are quoted in,
+#: so the token cannot distinguish them.
+#:
+#: It also turned out to be unnecessary. The observed ARR case ("less than
+#: $500K ARR") is already refused by `_BOUNDED_QUANTITY_BEFORE` on "less
+#: than", so the bare token caught nothing the other families missed while
+#: eating a legitimate quote. A pattern that adds no coverage and removes
+#: real data is strictly worse than no pattern.
+#:
+#: NO COMPETITOR-PRICING PATTERN, for the same reason. The observed
+#: competitor case ("customers currently pay around $3,000,000 to [vendor]")
+#: is already refused twice over — by the disclaimer in its own sentence and
+#: by "around" — so a "pay $X to Y" pattern would buy nothing while
+#: misfiring on the most ordinary real deal sentence there is ("they pay
+#: $50,000 to us annually").
+#:
+#: What is left is the pair that cannot mean an agreement: a TARGET is by
+#: definition a number nobody has agreed to yet.
+_COMPANY_SCALE = re.compile(
+    r"\btarget\s+of\b|\brevenue\s+target\b",
+    re.IGNORECASE,
+)
+
+#: A BOUND OR AN ESTIMATE IS NOT A STATED AMOUNT, and this one is a
+#: correctness bug in its own right, independent of any category: the sweep
+#: was silently converting inequalities into precise numbers. "less than
+#: $500K" is not $500,000. It is not any number.
+#:
+#: ANCHORED TO THE FIGURE, NOT SEARCHED IN A WINDOW — the one place these
+#: families deliberately differ, because this is a claim about GRAMMAR
+#: rather than about topic. "less than" only bounds the figure it sits
+#: immediately in front of. Searched in the ±80-character window used by the
+#: topic families, "revenue is under pressure, but the deal closed at
+#: $50,000" would refuse a perfectly good quote on the word "under", and a
+#: stop-list that eats real quotes is worse than the problem it solves.
+#:
+#: `estimated` IS ABSENT AND MUST STAY ABSENT. "Estimated solution cost for
+#: [subject] is $300,000" is a real, usable figure; the word modifies "cost"
+#: several words earlier and does not bound the number. Adjacency is what
+#: keeps that quote alive — see the control test.
+_BOUNDED_QUANTITY_BEFORE = re.compile(
+    r"\b(?:less\s+than|under|below|above|over|approximately|around|roughly)"
+    r"\s*$",
+    re.IGNORECASE,
+)
+
+#: A RANGE IS A BOUND, AND THE PARSER WAS TURNING IT INTO A POINT VALUE.
+#:
+#: THE SAME DEFECT CLASS AS THE `billion` ONE, and worse. In
+#: "~$100-150k/year" the pattern matches `$100`, the dash then blocks the
+#: scale group, `150k` is discarded, and the `k` never applies — so a
+#: hundred-thousand-a-year engagement was stored as ONE HUNDRED DOLLARS.
+#: Wrong by 1,000x, downward, and invisible: it looks like clean data.
+#:
+#: NOT CAUGHT BY ANYTHING ELSE HERE, which is why it needs its own gate. The
+#: stop-list families see no category signal in a range. The ceiling is far
+#: above it. The floor cannot save it in general — it MANUFACTURES sub-floor
+#: values, so the floor refuses some of them for the wrong reason and
+#: reports a misleading funnel, while ranges whose endpoints clear the floor
+#: ("$100 to $150k" stored 150,000; "$20,000-30,000" stored 20,000) sail
+#: straight through.
+#:
+#: BOTH ENDS, because refusing only the left one promotes the right one. In
+#: "$50,000-$75,000" the first figure is followed by a separator and the
+#: second is preceded by one; catching only the first would have turned an
+#: ambiguous row into a confidently-stored $75,000.
+#:
+#: NEITHER ENDPOINT IS TAKEN AND THE RANGE IS NEVER AVERAGED. "$100-150k"
+#: is not $100, not $150k, and not $125k — it is a range, and this module's
+#: contract is that it may decline to write a figure but never writes a
+#: figure other than the one the text states.
+#:
+#: A DIGIT IS REQUIRED ON THE FAR SIDE, which is what separates a range from
+#: ordinary punctuation: "$30,000 - the annual fee" keeps its figure, and so
+#: does "a two-year contract for $30,000", where the hyphen belongs to a
+#: word and never touches the number.
+_RANGE_AFTER = re.compile(r"^\s{0,2}(?:[-–—]|to\b)\s{0,2}\$?\s?\d")
+_RANGE_BEFORE = re.compile(
+    r"(?:\d|\dk|\dm)\s{0,2}(?:[-–—]|to)\s{0,2}$",
+    re.IGNORECASE,
+)
+
 #: How far either side of a matched figure the stop-list looks. `content` is
 #: a one-or-two-sentence paraphrase, so this is roughly "the same clause and
 #: its neighbour" — wide enough to catch the qualifier that names what the
@@ -226,6 +379,16 @@ SKIP_NON_DEAL_CONTEXT = "non_deal_context"
 #: facts about the corpus, and collapsing them would hide how much the floor
 #: is actually removing behind a count that already means something else.
 SKIP_BELOW_DEAL_FLOOR = "below_deal_floor"
+#: One reason PER FAMILY, so the funnel shows which pattern is doing the
+#: work. Collapsing them would hide a family that has stopped matching
+#: anything behind the counts of the ones that still do — which is how you
+#: end up maintaining dead patterns and trusting live ones you cannot see.
+SKIP_NO_DEAL_VALUE_STATED = "no_deal_value_stated"
+SKIP_COMPANY_SCALE = "company_scale"
+SKIP_BOUNDED_QUANTITY = "bounded_quantity"
+#: Its own reason so the funnel shows how many rows this was silently
+#: corrupting — the shape that was storing $100 for a $100-150k/year deal.
+SKIP_STATED_AS_A_RANGE = "stated_as_a_range"
 
 #: A single dollar figure, `$`-prefixed only.
 #:
@@ -279,17 +442,26 @@ def scan_dollar_figures(text: str) -> FigureScan:
     """Read every `$` figure in `text`, resolve the ones that can be a stated
     deal value, and record why each of the others was refused.
 
-    Four gates, applied in this order to each match:
+    Eight gates, applied in this order to each match:
 
-    1. **Context** — a stop-word near the figure says it is about the market,
-       the company's valuation or a funding round rather than a deal. Checked
-       first because it is the truest reason: "$250M book of business" is
-       refused for being a book of business, not for being large, and the
-       recorded reason should say so.
-    2. **Scale word** — a billions figure is never a deal here.
-    3. **Ceiling** — a plainly-written figure above the plausible maximum
+    1. **Disclaimer** — the text says outright that no deal value is stated.
+       Checked first: a paragraph that argues against itself is the clearest
+       evidence there is.
+    2. **Context** — a stop-word near the figure says it is about the market,
+       the company's valuation or a funding round rather than a deal. Before
+       the magnitude checks because it is the truer reason: "$250M book of
+       business" is refused for being a book of business, not for being
+       large, and the recorded reason should say so.
+    3. **Company scale** — recurring-revenue totals and revenue goals are
+       the company's own size, not what a customer agreed to pay.
+    4. **Bounded quantity** — a bound or an estimate immediately in front of
+       the figure ("less than $500K") means it is not a stated amount.
+    5. **Range** — a separator touching either side of the figure
+       ("$100-150k") means it is one end of a range, not a point value.
+    6. **Scale word** — a billions figure is never a deal here.
+    7. **Ceiling** — a plainly-written figure above the plausible maximum
        (no scale word to catch it, e.g. "$4,000,000,000") is refused too.
-    4. **Floor** — a figure below the plausible minimum is a line item, a
+    8. **Floor** — a figure below the plausible minimum is a line item, a
        credit or a per-unit price rather than a deal value. Refused here at
        SWEEP time, so junk is never written and then filtered on read.
 
@@ -316,8 +488,32 @@ def scan_dollar_figures(text: str) -> FigureScan:
             max(0, m.start() - _CONTEXT_WINDOW_CHARS):
             m.end() + _CONTEXT_WINDOW_CHARS
         ]
+        # MOST SPECIFIC REASON FIRST. Several families can be true of one
+        # sentence ("less than $500K ARR" is both a bound and a company
+        # total); the recorded reason should be the one that says the most
+        # about why the figure is not a deal value.
+        if _NO_DEAL_VALUE_STATED.search(window):
+            skips.append(SKIP_NO_DEAL_VALUE_STATED)
+            continue
         if _NON_DEAL_CONTEXT.search(window):
             skips.append(SKIP_NON_DEAL_CONTEXT)
+            continue
+        if _COMPANY_SCALE.search(window):
+            skips.append(SKIP_COMPANY_SCALE)
+            continue
+        # ADJACENCY, NOT THE WINDOW — see `_BOUNDED_QUANTITY_BEFORE`. Only
+        # the text immediately in front of the figure can bound it.
+        if _BOUNDED_QUANTITY_BEFORE.search(text[:m.start()]):
+            skips.append(SKIP_BOUNDED_QUANTITY)
+            continue
+        # BEFORE the magnitude gates, so the recorded reason is the true one.
+        # A range's left endpoint is often sub-floor precisely BECAUSE the
+        # scale word was stripped, so letting the floor answer first would
+        # report "too small" for a figure whose real problem is that it was
+        # never a point value.
+        if (_RANGE_AFTER.search(text[m.end():])
+                or _RANGE_BEFORE.search(text[:m.start()])):
+            skips.append(SKIP_STATED_AS_A_RANGE)
             continue
         if scale in _NON_DEAL_SCALE:
             skips.append(SKIP_IMPLAUSIBLE_MAGNITUDE)
@@ -386,6 +582,10 @@ class BackfillCounts:
     skipped_non_deal_context: int = 0
     skipped_implausible_magnitude: int = 0
     skipped_below_deal_floor: int = 0
+    skipped_no_deal_value_stated: int = 0
+    skipped_company_scale: int = 0
+    skipped_bounded_quantity: int = 0
+    skipped_stated_as_a_range: int = 0
 
     def as_dict(self) -> dict[str, int]:
         return {
@@ -395,6 +595,10 @@ class BackfillCounts:
             SKIP_NON_DEAL_CONTEXT: self.skipped_non_deal_context,
             SKIP_IMPLAUSIBLE_MAGNITUDE: self.skipped_implausible_magnitude,
             SKIP_BELOW_DEAL_FLOOR: self.skipped_below_deal_floor,
+            SKIP_NO_DEAL_VALUE_STATED: self.skipped_no_deal_value_stated,
+            SKIP_COMPANY_SCALE: self.skipped_company_scale,
+            SKIP_BOUNDED_QUANTITY: self.skipped_bounded_quantity,
+            SKIP_STATED_AS_A_RANGE: self.skipped_stated_as_a_range,
         }
 
     @property
@@ -406,6 +610,10 @@ class BackfillCounts:
             + self.skipped_non_deal_context
             + self.skipped_implausible_magnitude
             + self.skipped_below_deal_floor
+            + self.skipped_no_deal_value_stated
+            + self.skipped_company_scale
+            + self.skipped_bounded_quantity
+            + self.skipped_stated_as_a_range
         )
 
 
@@ -418,6 +626,8 @@ class SignalDecision:
     #: "enriched" | "already_has_amount" | "no_figure_found"
     #: | "ambiguous_multiple_figures" | SKIP_NON_DEAL_CONTEXT
     #: | SKIP_IMPLAUSIBLE_MAGNITUDE | SKIP_BELOW_DEAL_FLOOR
+    #: | SKIP_NO_DEAL_VALUE_STATED | SKIP_COMPANY_SCALE
+    #: | SKIP_BOUNDED_QUANTITY | SKIP_STATED_AS_A_RANGE
     outcome: str
     new_properties: Optional[dict[str, Any]] = None
 
@@ -449,8 +659,16 @@ def decide_for_signal(properties: dict[str, Any] | None, content: str) -> Signal
         # The most specific reason wins. `non_deal_context` says what the
         # figure WAS; `implausible_magnitude` only says it was too big, which
         # is the weaker statement of the two when both apply.
+        if SKIP_NO_DEAL_VALUE_STATED in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_NO_DEAL_VALUE_STATED)
         if SKIP_NON_DEAL_CONTEXT in scan.skips:
             return SignalDecision(signal_id="", outcome=SKIP_NON_DEAL_CONTEXT)
+        if SKIP_COMPANY_SCALE in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_COMPANY_SCALE)
+        if SKIP_STATED_AS_A_RANGE in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_STATED_AS_A_RANGE)
+        if SKIP_BOUNDED_QUANTITY in scan.skips:
+            return SignalDecision(signal_id="", outcome=SKIP_BOUNDED_QUANTITY)
         if SKIP_IMPLAUSIBLE_MAGNITUDE in scan.skips:
             return SignalDecision(signal_id="", outcome=SKIP_IMPLAUSIBLE_MAGNITUDE)
         if SKIP_BELOW_DEAL_FLOOR in scan.skips:
@@ -541,6 +759,14 @@ def run_backfill(*, company_id: str, apply: bool, limit: Optional[int] = None) -
                     counts.skipped_implausible_magnitude += 1
                 elif decision.outcome == SKIP_BELOW_DEAL_FLOOR:
                     counts.skipped_below_deal_floor += 1
+                elif decision.outcome == SKIP_NO_DEAL_VALUE_STATED:
+                    counts.skipped_no_deal_value_stated += 1
+                elif decision.outcome == SKIP_COMPANY_SCALE:
+                    counts.skipped_company_scale += 1
+                elif decision.outcome == SKIP_BOUNDED_QUANTITY:
+                    counts.skipped_bounded_quantity += 1
+                elif decision.outcome == SKIP_STATED_AS_A_RANGE:
+                    counts.skipped_stated_as_a_range += 1
                 elif decision.outcome == "enriched":
                     counts.enriched += 1
                     minted.append(float((decision.new_properties or {})["amount"]))

@@ -23,6 +23,10 @@ import pytest
 from app.crucible.backfill import (
     BACKFILL_CERTAINTY,
     SKIP_BELOW_DEAL_FLOOR,
+    SKIP_BOUNDED_QUANTITY,
+    SKIP_COMPANY_SCALE,
+    SKIP_NO_DEAL_VALUE_STATED,
+    SKIP_STATED_AS_A_RANGE,
     SKIP_IMPLAUSIBLE_MAGNITUDE,
     SKIP_NON_DEAL_CONTEXT,
     amount_distribution,
@@ -244,6 +248,234 @@ def test_a_plainly_written_figure_above_the_ceiling_is_refused():
     assert scan.skips == (SKIP_IMPLAUSIBLE_MAGNITUDE,)
 
 
+# ── The head of the same sum was worse than its tail ────────────────────────
+#
+# The six figures below are the REAL paraphrase phrasings from the live run,
+# and between them they were $4.5M of a $5.17M headline total. Every one is
+# arithmetically valid and semantically wrong: money paid to a competitor, a
+# revenue aspiration, an upper bound stored as a point value, and a
+# client-size threshold. None of them is a deal.
+#
+# These are the fourth patch on one wound. See the header comment above
+# `_NO_DEAL_VALUE_STATED` before adding a fifth.
+
+
+def test_a_figure_the_paragraph_itself_disclaims_is_refused():
+    """The highest-precision signal: the text says outright that no deal
+    value is present, and the sweep read a number out of the same sentence
+    anyway."""
+    scan = scan_dollar_figures(
+        "Customers currently pay around $3,000,000 to a competing vendor. "
+        "No specific contract value or pricing for the integration is stated."
+    )
+    assert scan.figures == ()
+    assert SKIP_NO_DEAL_VALUE_STATED in scan.skips
+
+
+def test_a_fee_disclaimer_refuses_a_client_size_threshold():
+    scan = scan_dollar_figures(
+        "they focus on clients above $250K in assets, monetised through a "
+        "revenue share rather than a direct fee"
+    )
+    assert scan.figures == ()
+    assert SKIP_NO_DEAL_VALUE_STATED in scan.skips
+
+
+@pytest.mark.parametrize("text", [
+    "the company is growing with a target of $1M by end of year",
+    "they set a revenue target of $1,000,000 for the year",
+])
+def test_a_revenue_aspiration_is_not_an_agreement(text):
+    """A target is by definition a number nobody has agreed to yet."""
+    scan = scan_dollar_figures(text)
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_COMPANY_SCALE,)
+
+
+@pytest.mark.parametrize("text,bound", [
+    ("the business is at less than $500K ARR today", 500_000.0),
+    ("they focus on clients above $250K in assets", 250_000.0),
+    ("customers currently pay around $3,000,000 to another vendor", 3_000_000.0),
+    ("the deal is under $50,000", 50_000.0),
+    ("revenue is over $2,000,000 annually", 2_000_000.0),
+    ("it came to approximately $75,000", 75_000.0),
+    ("roughly $40,000 was discussed", 40_000.0),
+    ("somewhere below $30,000", 30_000.0),
+])
+def test_a_bound_or_an_estimate_is_not_a_stated_amount(text, bound):
+    """A CORRECTNESS BUG IN ITS OWN RIGHT, independent of category: the sweep
+    was silently converting inequalities into precise numbers. "less than
+    $500K" is not $500,000 — it is not any number."""
+    scan = scan_dollar_figures(text)
+    assert bound not in scan.figures, text
+    assert scan.figures == (), text
+    assert scan.skips, text
+
+
+def test_every_figure_from_the_live_run_that_was_wrong_is_now_refused():
+    """All six, together, as they actually appeared. This is the regression
+    that matters: $4.5M of a $5.17M total."""
+    live_wrong = [
+        "Customers currently pay around $3,000,000 to a competing vendor. "
+        "No specific contract value or pricing for the integration is stated.",
+        "the company is growing with a target of $1M by end of year",
+        "they are tracking to a target of $1,000,000 by December",
+        "the business is at less than $500K ARR today",
+        "currently less than $500,000 ARR",
+        "they focus on clients above $250K in assets, monetised through a "
+        "revenue share rather than a direct fee",
+    ]
+    for text in live_wrong:
+        scan = scan_dollar_figures(text)
+        assert scan.figures == (), text
+        assert scan.skips, text
+
+
+# ── A range is not a point value, and the parser was inventing one ─────────
+#
+# THE HIGHEST-SEVERITY DEFECT IN THIS FILE'S HISTORY, and the only one that
+# manufactures a wrong number rather than importing a real number from the
+# wrong category. In "~$100-150k/year" the pattern matched `$100`, the dash
+# blocked the scale group, `150k` was discarded, and the `k` never applied —
+# a hundred-thousand-a-year engagement stored as ONE HUNDRED DOLLARS.
+#
+# Same class as the `billion` defect: a scale word silently dropped, leaving
+# a bare number that looks like clean data.
+
+
+@pytest.mark.parametrize("text", [
+    "the engagement runs ~$100–150k/year",          # en dash, the live row
+    "budget is $100-150k for the year",             # plain hyphen
+    "the contract was $100—150k annually",          # em dash
+    "they quoted $100 to $150k a year",             # the word "to"
+    "pricing lands at $50,000-$75,000 depending on scope",
+    "the range was $20,000–30,000",
+])
+def test_a_range_is_refused_rather_than_collapsed_to_an_endpoint(text):
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (), text
+    assert SKIP_STATED_AS_A_RANGE in scan.skips, text
+
+
+def test_neither_endpoint_is_taken_and_the_range_is_never_averaged():
+    """"$100-150k" is not $100, not $150,000, and not $125,000. It is a
+    range, and this module may decline to write a figure but never writes a
+    figure other than the one the text states."""
+    scan = scan_dollar_figures("budget is $100-150k for the year")
+    for wrong in (100.0, 150_000.0, 125_000.0, 100_000.0):
+        assert wrong not in scan.figures
+    assert scan.figures == ()
+
+
+def test_the_right_hand_endpoint_is_refused_too():
+    """Catching only the left end would have PROMOTED the right one: before
+    this, "$50,000-$75,000" was merely ambiguous; refusing just the first
+    figure would have turned it into a confidently-stored $75,000."""
+    scan = scan_dollar_figures("pricing lands at $50,000-$75,000 for the year")
+    assert 75_000.0 not in scan.figures
+    assert 50_000.0 not in scan.figures
+    assert scan.figures == ()
+
+
+def test_the_live_row_is_refused_as_a_range_not_as_a_small_number():
+    """THE FUNNEL HONESTY POINT. The floor happens to refuse $100 as well, so
+    without its own gate this row would be counted under "below the deal
+    floor" — reporting a magnitude problem for a figure whose real fault is
+    that it was never a point value, and hiding how many rows the range bug
+    was corrupting."""
+    text = "reselling to sub-$250M revenue customers (~100 exercises, ~$100–150k/year)"
+    decision = decide_for_signal({}, text)
+    assert decision.outcome == SKIP_STATED_AS_A_RANGE
+    assert decision.new_properties is None
+
+
+def test_a_range_that_clears_the_floor_was_silently_enriched_before():
+    """The shapes the floor could never have caught: both endpoints are well
+    above it, so these were stored as confident point values."""
+    for text in ("they quoted $100 to $150k a year",
+                 "the range was $20,000–30,000"):
+        decision = decide_for_signal({}, text)
+        assert decision.outcome == SKIP_STATED_AS_A_RANGE, text
+        assert decision.new_properties is None, text
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("a two-year contract for $30,000", 30_000.0),
+    ("the fee is $30,000 — the annual figure", 30_000.0),
+    ("a 12-month deal worth $45,000", 45_000.0),
+    ("they signed a multi-year $90,000 agreement", 90_000.0),
+])
+def test_a_hyphen_that_is_not_a_range_leaves_the_figure_alone(text, expected):
+    """A DIGIT ON THE FAR SIDE is what separates a range from ordinary
+    punctuation or a hyphenated word. Without that requirement this gate
+    would eat every "two-year contract for $X" in the corpus."""
+    assert find_dollar_figures(text) == [expected], text
+
+
+def test_the_range_reason_is_counted_in_the_funnel(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-range"
+    _insert_signal(client, company_id=company_id,
+                   content="budget is $100-150k for the year")
+    _insert_signal(client, company_id=company_id,
+                   content="they quoted $100 to $150k a year")
+    _insert_signal(client, company_id=company_id, content="closed at $30,000")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 1
+    assert result["skipped"][SKIP_STATED_AS_A_RANGE] == 2
+    run = (
+        client.table("crucible_backfill_runs").select("*")
+        .eq("company_id", company_id).execute().data[0]
+    )
+    assert run["skipped_counts"][SKIP_STATED_AS_A_RANGE] == 2
+
+
+# ── The control: a stop-list that eats real quotes is worse than the disease
+
+def test_a_genuine_estimated_cost_is_not_refused():
+    """THE CONTROL, and the reason the bounded-quantity family is anchored to
+    the figure rather than searched in a window.
+
+    "Estimated" modifies "solution cost" several words earlier; it does not
+    bound the number. This is a real, usable figure and the sweep must keep
+    it — `estimated` is deliberately absent from the bounded-quantity
+    vocabulary, and adjacency is what stops the family reaching back to it.
+    """
+    text = ("Estimated solution cost for the integration is $300,000, "
+            "largely driven by compliance overhead")
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (300_000.0,)
+    assert scan.skips == ()
+    assert decide_for_signal({}, text).outcome == "enriched"
+
+
+def test_a_hedge_word_far_from_the_figure_does_not_bound_it():
+    """WHY ADJACENCY AND NOT THE WINDOW. Searched in the same +/-80 character
+    window the topic families use, "under" here would refuse a perfectly good
+    quote. The word bounds the figure it stands in front of, and nothing
+    else."""
+    text = ("revenue is under pressure this quarter, but the renewal still "
+            "closed at $50,000")
+    scan = scan_dollar_figures(text)
+    assert scan.figures == (50_000.0,)
+    assert scan.skips == ()
+
+
+def test_ordinary_deal_phrasings_still_survive_all_the_families():
+    """The families are lossy by design; they must not be lossy about the
+    thing the feature exists to capture."""
+    for text, expected in (
+        ("they quoted $75,000 for the full rollout", 75_000.0),
+        ("the annual contract is $120,000", 120_000.0),
+        ("closed at $1.5 million ARR", 1_500_000.0),
+        ("renewed at $12M for three years", 12_000_000.0),
+        ("they pay $50,000 to us annually", 50_000.0),
+    ):
+        assert find_dollar_figures(text) == [expected], text
+
+
 # ── The floor: the tail of a real headline sum was noise ────────────────────
 #
 # A live run recovered a finding whose grounded sum was rendered as
@@ -342,7 +574,7 @@ def test_the_pattern_version_moved_so_old_runs_are_never_compared():
     comparable, and the version string is how a reader can tell."""
     from app.crucible.backfill import PATTERN_VERSION
 
-    assert PATTERN_VERSION == "dollar-v3"
+    assert PATTERN_VERSION == "dollar-v5"
 
 
 def test_a_large_but_plausible_deal_figure_still_parses():
