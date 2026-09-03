@@ -479,7 +479,7 @@ export function ProjectDetailScreen({
   // `null` = drawer closed. Driven purely by local state, never the URL.
   // The SAME global content store + side-panel main uses (mounted via AppShell).
   const { content, setContent } = useContent()
-  const { openContentPanel, contentPanelTab } = useNavigation()
+  const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   // The PRD open in that panel — parity with main chat's open-tab `prd_id`,
   // threaded to both chat surfaces as the edit target. `null` when no PRD is open.
   const openPrdId =
@@ -820,14 +820,30 @@ export function ProjectDetailScreen({
   // (mounted at the app root via AppShell) and open the panel on the "prd" tab.
   // Extracted from `onOpenArtifactInPlace` so the URL-restore effect below can
   // reuse the EXACT same terminal action (no second content-set path to drift).
+  //
+  // Opens the panel SYNCHRONOUSLY, before the fetch resolves — mirrors main
+  // chat's own PRD-by-id load (ChatScreen's `savedPrdId` branch): flip
+  // `prdGenerating` + `openContentPanel` first so the panel mounts on its own
+  // loading skeleton immediately, then fill in the real document (or clear the
+  // flag and toast) when the fetch settles. Opening only inside `.then` left a
+  // dead gap — drawer gone, chat full-width, nothing on the right — for the
+  // whole round-trip. Already-loaded PRDs short-circuit the refetch entirely.
   const openPrdInPanelById = useCallback((prdId: number) => {
+    if (content.prd && content.prd.prd_id === prdId) {
+      openContentPanel("prd")
+      return
+    }
+    setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
     void loadPrdById(prdId).then((r) => {
       if (r.ok) {
         setContent({ prd: r.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
-        openContentPanel("prd")
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("Couldn't load PRD", r.message)
       }
     })
-  }, [setContent, openContentPanel])
+  }, [content.prd, setContent, openContentPanel, showToast])
 
   // One-shot restore: on (re)load of `/projects?…&prd=<id|public_id>`, re-open
   // that PRD IN-PLACE beside the project chat. The global `useArtifactUrlSync`
