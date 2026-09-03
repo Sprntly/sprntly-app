@@ -967,10 +967,35 @@ def _shared_assumptions(findings: list[dict]) -> tuple[tuple, int]:
     return keys.pop(), len(with_any)
 
 
+def _finding_money_estimate(reach: float, account_value: Any) -> Optional[str]:
+    """A per-finding money clause, in the memo's TOP-LINE wording verbatim.
+
+    `_stat_strip`'s "Reach × your estimate" cell and `_decision_section`'s
+    money clause already established the exact convention for this kind of
+    number — labelled as the reader's own estimate every time it appears,
+    never bare. This reuses that phrasing rather than writing a third one, so
+    a reader never meets two different tones for the same kind of number in
+    one document.
+
+    `None` when `account_value` is absent, zero, or not numeric — the same
+    guard shape `_stat_strip`/`_decision_section` use — so a caller can skip
+    cleanly rather than repeat the guard.
+    """
+    if not isinstance(account_value, (int, float)) or account_value <= 0:
+        return None
+    value = float(account_value)
+    return (
+        f"about {reach * value:,.0f} on your own figure of {value:,.0f} per "
+        f"account, which is an estimate you gave rather than something "
+        f"measured"
+    )
+
+
 def _finding_block(
     finding: dict, rank: int, *,
     shared_weakest: bool = False, shared_cap: bool = False,
     shared_assumptions: bool = False,
+    account_value: Any = None,
 ) -> str:
     # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
     # across 11 accounts concern “Sales Pipeline” — for example, “…”" — so the
@@ -1243,6 +1268,32 @@ def _finding_block(
             out.append(_p(
                 f"and {len(assumed) - len(shown)} further assumed parameters"
             ))
+
+    # SIZED ON THE READER'S OWN ESTIMATE, DISPLAY-ONLY — NEVER SCORING.
+    # `Impact.value`/ranking read the frozen reach exactly as before; this is
+    # commentary alongside an unchanged order, not a new sizing input. David's
+    # own words: "Reach is the unit, not points against revenue."
+    #
+    # LAST IN THE CARD, AND ITS OWN PARAGRAPH — deliberately far from the
+    # grounded committed-money paragraph above, which is a SUM of figures a
+    # customer actually stated. That number is a fact; this one is the
+    # reach this finding already shows, multiplied by a figure the reader
+    # typed at the plan gate. Putting them at opposite ends of the same card,
+    # each in its own sentence with its own framing, is the same
+    # non-additivity discipline `_findings_section`'s list-pricing paragraph
+    # already follows for the corpus-wide figures: two numbers that must
+    # never be added are never adjacent enough to invite it.
+    #
+    # SKIPPED ENTIRELY FOR AN UNSIZED FINDING (I3): there is no reach to
+    # multiply, and no size should be invented for a theme this run could not
+    # measure. `_finding_money_estimate` returns `None` on its own guard
+    # (no `account_value`, or one that is zero/non-numeric) — this is the
+    # ADDITIONAL guard I3 needs, on the finding's own reach.
+    if finding.get("impact_value") is not None:
+        reach_n = float(finding.get("impact_value") or 0)
+        estimate = _finding_money_estimate(reach_n, account_value)
+        if estimate:
+            out.append(_p(f"<strong>On your own estimate.</strong> {estimate}."))
     return "".join(out)
 
 
@@ -1434,9 +1485,15 @@ def _findings_section(
     # one gets a memo rather than the 150-block dump this replaced.
     full_cap: int = MAX_DETAILED_FINDINGS,
     overflow_cap: int = MAX_OVERFLOW_ROWS,
+    plan: Optional[dict] = None,
 ) -> str:
     if not findings:
         return ""
+    # THE SAME NUMBER THE STAT STRIP AND DECISION BOX ALREADY MULTIPLY BY,
+    # read once here rather than re-derived per finding — see
+    # `_finding_money_estimate`, which does the actual guarding (absent,
+    # zero, non-numeric all fall through to no line at all).
+    account_value = _as_dict(plan).get("account_value")
     out = [f"<h2>{_findings_heading(findings)}</h2>"]
     # THE HEADING HAS TO AGREE WITH THE HEADLINE. Fixing only the summary left
     # one document reading "not ordered by size at all" and, two lines later,
@@ -1603,6 +1660,7 @@ def _findings_section(
             f, i + 1,
             shared_weakest=bool(shared_weakest), shared_cap=bool(shared_cap),
             shared_assumptions=bool(shared_assumptions),
+            account_value=account_value,
         )
         for i, f in enumerate(full)
     )
@@ -1942,7 +2000,7 @@ def render_report_html(
             _framework_section(kept, plan),
             _headline_section(kept),
             _recommendation_basis_section(recommendation_basis),
-            _findings_section(kept, full_cap, overflow_cap),
+            _findings_section(kept, full_cap, overflow_cap, plan),
             _set_aside_section(set_aside),
             _hypotheses_section(plan),
             _ledger_section(ledger),
