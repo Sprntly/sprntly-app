@@ -278,10 +278,20 @@ def test_named_target_reads_dollars_and_accounts_and_percent():
 # ranked at the top of the same report.
 
 
-def _money(amount, *, account="acct-a", derived=False):
+def _money(amount, *, account="acct-a", derived=False, committed=True):
+    """COMMITTED by default in these fixtures, because these tests are about
+    the money-target path and that path reads committed money only. The
+    production default on `GroundedFigure` is the opposite — a figure nothing
+    has positively identified stays out of the sum."""
     from app.crucible.types import GroundedFigure
 
-    return GroundedFigure(account_key=account, amount=amount, derived=derived)
+    return GroundedFigure(account_key=account, amount=amount, derived=derived,
+                          committed=committed)
+
+
+def _list_price(amount, *, account="acct-a"):
+    """A rate-card entry: real, quoted, and not summable."""
+    return _money(amount, account=account, committed=False)
 
 
 def _occurrences(haystack, needle):
@@ -299,7 +309,7 @@ def _figure_only(*figures):
     account, so no measured reach, so `value` is honestly None."""
     return Impact(value=None, currency="accounts", affected_population=None,
                   movable_gap=None, value_per_unit=None,
-                  native_units={"commercial_grounded_usd":
+                  native_units={"commercial_committed_usd":
                                 sum(f.amount for f in figures)},
                   grounded_figures=tuple(figures))
 
@@ -492,6 +502,60 @@ def test_a_fully_quoted_target_carries_no_hedge_at_all():
     assert "$110,000" in basis, "the money path must have produced this"
     assert "read back from written summaries" not in basis
     assert "Without those" not in basis
+
+
+# ── The money target answers from COMMITTED money only ──────────────────────
+
+def test_a_list_price_never_answers_a_money_target():
+    """A $30,000 tier quoted to sixteen accounts is sixteen genuine mentions
+    of one rate-card entry. Deduplication cannot touch them — they really are
+    different accounts — and they are not $480,000 of anything."""
+    impacts = [_figure_only(*[
+        _list_price(30000.0, account=f"acct-{i}") for i in range(16)
+    ])]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    )
+    assert "$480,000" not in result.basis
+    assert "$30,000" not in result.basis
+    # No committed money at all, so the money path declines and the honest
+    # refusal stands.
+    assert result.target_unsizeable
+
+
+def test_only_committed_money_is_summed_toward_the_target():
+    impacts = [_figure_only(
+        _money(165000.0, account="a"),
+        _money(9000.0, account="b"),
+        *[_list_price(30000.0, account=f"p{i}") for i in range(16)],
+    )]
+    basis = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $100,000 in revenue?",
+    ).basis
+    assert "$174,000" in basis
+    assert "$654,000" not in basis, "list pricing must not enter the sum"
+    assert "$30,000" not in basis
+
+
+def test_a_committed_total_short_of_the_target_says_so():
+    """EXPECTED ON THIS CORPUS. Committed money is a small fraction of what
+    the sweep recovers, so a named target will often not be reached — that is
+    the honest answer, and the shortfall wording carries it."""
+    impacts = [_figure_only(
+        _money(165000.0, account="a", derived=True),
+        _money(20000.0, account="b", derived=True),
+        *[_list_price(30000.0, account=f"p{i}") for i in range(16)],
+    )]
+    result = resolve_recommendation_count(
+        "grow revenue", impacts,
+        asked_text="how do we drive $1,000,000 in revenue?",
+    )
+    assert result.target_unsizeable
+    assert "$185,000" in result.basis
+    assert "short of it" in result.basis
+    assert "meets" not in result.basis
 
 
 # ── The four defects the first live run exposed ─────────────────────────────

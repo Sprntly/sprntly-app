@@ -516,6 +516,17 @@ def _quoted_money_toward_target(
     single number, and only correct because they were deduplicated within a
     finding first.
     """
+    # COMMITTED MONEY ONLY, and this is the load-bearing line of the whole
+    # function. A list price quoted to sixteen accounts is sixteen genuine
+    # mentions of one rate-card entry — not duplicates, so deduplication
+    # never touched them, and not $480,000 of anything either. Summing was
+    # the wrong OPERATION for that population, so it is excluded here rather
+    # than deduplicated harder. See `types.GroundedFigure.committed`.
+    #
+    # The consequence is intended: on a corpus that is mostly rate card, the
+    # committed total is small and a named target will often not be reached.
+    # That is the honest answer, and the shortfall wording already carries
+    # it.
     seen: set[tuple[str, float]] = set()
     counted: list[GroundedFigure] = []
     findings_used = 0
@@ -525,6 +536,8 @@ def _quoted_money_toward_target(
             break
         contributed = False
         for figure in imp.grounded_figures:
+            if not figure.committed:
+                continue
             identity = (figure.account_key, figure.amount)
             if identity in seen:
                 continue

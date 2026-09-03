@@ -196,7 +196,7 @@ def test_a_grounded_commercial_figure_is_named_as_evidence_not_a_projection():
     value: it must appear distinctly from `_reach`'s own line and must not
     use projection language ("worth", "potential", "will")."""
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 150000.0,
+        "native_units": {"commercial_committed_usd": 150000.0,
                           "commercial_grounded_accounts": 2.0},
     })])
     assert "Customers named" in html
@@ -207,7 +207,7 @@ def test_a_grounded_commercial_figure_is_named_as_evidence_not_a_projection():
 
 def test_a_single_grounded_account_is_singular_too():
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 100000.0,
+        "native_units": {"commercial_committed_usd": 100000.0,
                           "commercial_grounded_accounts": 1.0},
     })])
     assert "1 named account" in html
@@ -220,8 +220,8 @@ def test_a_wholly_derived_figure_never_claims_customers_named_it():
     is only true of the quoted kind, and the wording has to stop saying it
     when the figures are derived."""
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 150000.0,
-                          "commercial_grounded_usd_derived": 150000.0,
+        "native_units": {"commercial_committed_usd": 150000.0,
+                          "commercial_committed_usd_derived": 150000.0,
                           "commercial_grounded_accounts": 2.0},
     })])
     assert "Customers named" not in html
@@ -237,8 +237,8 @@ def test_a_partly_derived_figure_hedges_only_the_derived_portion():
     wording and the derived part is named as an amount, so a reader can
     weigh it instead of discounting the whole line."""
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 150000.0,
-                          "commercial_grounded_usd_derived": 40000.0,
+        "native_units": {"commercial_committed_usd": 150000.0,
+                          "commercial_committed_usd_derived": 40000.0,
                           "commercial_grounded_accounts": 2.0},
     })])
     assert "Customers named $150,000 across 2 named accounts" in html
@@ -249,7 +249,7 @@ def test_a_fully_quoted_figure_carries_no_hedge():
     """The regression guard on the hedge itself: silent when there is
     nothing to hedge, so the disclosure keeps its meaning."""
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 150000.0,
+        "native_units": {"commercial_committed_usd": 150000.0,
                           "commercial_grounded_accounts": 2.0},
     })])
     assert "Customers named $150,000" in html
@@ -262,8 +262,8 @@ def test_the_derived_hedge_names_transcription_risk_not_invention():
     implied the figure might be invented would overstate the risk as badly
     as silence understates it."""
     html = render_report_html(_run(), [_finding(impact={
-        "native_units": {"commercial_grounded_usd": 90000.0,
-                          "commercial_grounded_usd_derived": 90000.0},
+        "native_units": {"commercial_committed_usd": 90000.0,
+                          "commercial_committed_usd_derived": 90000.0},
     })])
     # Anchored on the positive first: an absence-only assertion would pass
     # just as happily if the hedge never rendered at all.
@@ -271,6 +271,89 @@ def test_the_derived_hedge_names_transcription_risk_not_invention():
     for overstatement in ("unverified", "unreliable", "may not be real",
                           "possibly fabricated", "cannot be trusted"):
         assert overstatement not in html.lower(), overstatement
+
+
+# ── The two money lines must not be addable ─────────────────────────────────
+
+def _both_moneys():
+    return render_report_html(_run(), [_finding(impact={
+        "native_units": {
+            "commercial_committed_usd": 165000.0,
+            "commercial_grounded_accounts": 1.0,
+            "commercial_list_price_min": 30000.0,
+            "commercial_list_price_max": 50000.0,
+            "commercial_list_price_distinct": 3.0,
+            "commercial_list_price_accounts": 16.0,
+        },
+    })])
+
+
+def test_list_pricing_is_rendered_as_a_range_and_never_totalled():
+    html = _both_moneys()
+    assert "$30,000–$50,000" in html
+    assert "across 16 accounts" in html
+    assert "not added together" in html
+    # A $30,000 tier quoted sixteen times is not $480,000, and no arithmetic
+    # over these numbers may appear anywhere.
+    for forbidden in ("$480,000", "$195,000", "$640,000"):
+        assert forbidden not in html, forbidden
+
+
+def test_the_committed_line_and_the_pricing_line_share_no_figure():
+    """THE HARD REQUIREMENT. Each sentence carries one kind of money and says
+    which kind it is; neither contains the other's numbers, so there is no
+    clause in which a reader is invited to add them."""
+    html = _both_moneys()
+    committed = html[html.find("Customers named"):]
+    committed = committed[:committed.find("</p>")]
+    pricing = html[html.find("List pricing quoted here"):]
+    pricing = pricing[:pricing.find("</p>")]
+
+    assert "$165,000" in committed
+    assert "$30,000" not in committed and "$50,000" not in committed
+
+    assert "$30,000" in pricing and "$50,000" in pricing
+    assert "$165,000" not in pricing
+
+    # Separate paragraphs, never one clause with both numbers in it.
+    assert committed != pricing
+    assert "</p>" in html[html.find("Customers named"):html.find("List pricing")]
+
+
+def test_each_money_line_says_which_kind_of_money_it_is():
+    """Labelled rather than left to inference — a reader should not have to
+    work out from the number which of the two they are looking at."""
+    html = _both_moneys()
+    assert "Customers named this evidence" in html
+    assert "List pricing quoted here" in html
+    assert "what was quoted, not what was agreed" in html
+
+
+def test_a_single_list_price_renders_as_one_figure_not_a_degenerate_range():
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {
+            "commercial_list_price_min": 30000.0,
+            "commercial_list_price_max": 30000.0,
+            "commercial_list_price_distinct": 1.0,
+            "commercial_list_price_accounts": 16.0,
+        },
+    })])
+    assert "$30,000 across 16 accounts" in html
+    assert "$30,000–$30,000" not in html
+    assert "distinct price points" not in html
+
+
+def test_a_finding_with_only_list_pricing_makes_no_committed_claim():
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {
+            "commercial_list_price_min": 30000.0,
+            "commercial_list_price_max": 30000.0,
+            "commercial_list_price_distinct": 1.0,
+            "commercial_list_price_accounts": 16.0,
+        },
+    })])
+    assert "Customers named" not in html
+    assert "List pricing quoted here" in html
 
 
 def test_no_grounded_figure_means_no_commercial_evidence_line():
@@ -292,7 +375,7 @@ def test_the_commercial_evidence_line_never_names_a_channel():
     html = render_report_html(_run(), [_finding(
         label="Slack-sourced renewal evidence",
         surfaced_by=["slack/#renewals-acme"],
-        impact={"native_units": {"commercial_grounded_usd": 80000.0,
+        impact={"native_units": {"commercial_committed_usd": 80000.0,
                                   "commercial_grounded_accounts": 1.0}},
     )])
     assert "Customers named $80,000 across 1 named account" in html

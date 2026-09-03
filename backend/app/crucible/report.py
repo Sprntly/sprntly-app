@@ -1121,7 +1121,7 @@ def _finding_block(
     # `pipeline`/`routes.crucible` into `native_units` first — a real
     # follow-up, not something to guess at render time.
     commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
-    commercial_usd = commercial.get("commercial_grounded_usd")
+    commercial_usd = commercial.get("commercial_committed_usd")
     if isinstance(commercial_usd, (int, float)):
         accounts_n = commercial.get("commercial_grounded_accounts")
         accounts_txt = (
@@ -1141,7 +1141,7 @@ def _finding_block(
         # unreliable" would overstate it — and saying nothing at all would
         # let a derived figure wear a quoted figure's credibility, which is
         # the promise this line was making and not keeping.
-        derived_usd = commercial.get("commercial_grounded_usd_derived")
+        derived_usd = commercial.get("commercial_committed_usd_derived")
         derived_usd = (
             float(derived_usd) if isinstance(derived_usd, (int, float)) else 0.0
         )
@@ -1167,6 +1167,49 @@ def _finding_block(
                 f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
                 f"figures actually quoted, not a projection."
             ))
+
+    # LIST PRICING: A RANGE, IN ITS OWN PARAGRAPH, WITH NO TOTAL.
+    #
+    # THE READER MUST NOT BE ABLE TO ADD THIS TO THE LINE ABOVE. One is a sum
+    # of money people committed to; the other is a rate card quoted to N
+    # accounts, whose total is meaningless — a $30,000 tier quoted sixteen
+    # times is not $480,000. Three things keep them apart, and all three are
+    # deliberate:
+    #
+    #   * a RANGE and a SUM are structurally non-additive, so the arithmetic
+    #     a reader might attempt has no obvious form;
+    #   * this is its own paragraph, never a clause beside the committed
+    #     figure — two numbers in one sentence is an invitation to add them;
+    #   * each line says which KIND of money it is in its own words, rather
+    #     than leaving a reader to infer it from the number.
+    #
+    # No total is printed here, and none should be added later.
+    price_min = commercial.get("commercial_list_price_min")
+    price_max = commercial.get("commercial_list_price_max")
+    if isinstance(price_min, (int, float)) and isinstance(price_max, (int, float)):
+        distinct = commercial.get("commercial_list_price_distinct")
+        priced_accounts = commercial.get("commercial_list_price_accounts")
+        span = (
+            f"${price_min:,.0f}"
+            if price_min == price_max else
+            f"${price_min:,.0f}–${price_max:,.0f}"
+        )
+        across = (
+            f" across {int(priced_accounts)} account"
+            f"{'' if priced_accounts == 1 else 's'}"
+            if isinstance(priced_accounts, (int, float)) and priced_accounts
+            else ""
+        )
+        shape = (
+            f" from {int(distinct)} distinct price points"
+            if isinstance(distinct, (int, float)) and distinct > 1 else ""
+        )
+        out.append(_p(
+            f"<strong>List pricing quoted here.</strong> {span}{across}"
+            f"{shape}. This is what was quoted, not what was agreed — the "
+            f"same price offered to several accounts is one rate card, so "
+            f"these are not added together."
+        ))
 
     # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.
     #

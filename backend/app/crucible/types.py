@@ -164,11 +164,30 @@ class GroundedFigure(NamedTuple):
     captured against a verified verbatim quote. The failure mode there is
     transcription error, not invention — so it is a reason to hedge the
     wording proportionately, never a reason to hide the figure.
+
+    `committed` IS THE FIELD THAT DECIDES WHETHER A FIGURE MAY BE ADDED UP,
+    and it exists because deduplication was solving the wrong problem. A
+    sample of the real corpus found one list price — "$30,000 for 50 users" —
+    quoted to SIXTEEN different accounts across sixteen different sales
+    calls. Those are not duplicates: they are sixteen genuine prospects and
+    sixteen genuine mentions, so nothing about deduplication touches them.
+    They are also not $480,000 of anything. Summing was the wrong OPERATION,
+    not merely the wrong rows.
+
+    So a committed figure (an issued quote, a contract value, a named deal)
+    is summable and answers a money target. A list price is a RATE CARD:
+    reported as a range across the accounts it was quoted to, never totalled,
+    because the total means nothing.
+
+    DEFAULTS TO FALSE — the non-additive side. Every failure in this feature's
+    history has been over-claiming, so a figure nothing has positively
+    identified as committed stays out of the sum.
     """
 
     account_key: str
     amount: float
     derived: bool
+    committed: bool = False
 
 
 #: How many ordinal bands a size is REPORTED in. Quartiles: enough to
