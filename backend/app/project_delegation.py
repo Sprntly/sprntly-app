@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from app.db.artifacts import list_artifacts_for_project
 from app.db.conversations import (
     create_individual_project_chat,
+    get_individual_project_chat,
     list_individual_turns,
     post_individual_turn,
 )
@@ -397,6 +398,18 @@ _ARTIFACT_LIMIT = 5
 # just said, not the start of a long thread.
 _SOURCE_CONTENT_CHARS = 6000
 
+# The tail of the ASSIGNEE's OWN individual project chat (their welcome turn
+# plus whatever they've most recently been discussing) folded into the brief
+# so the hand-off lands INTELLIGENTLY into an ongoing conversation — it can
+# transition from what they were just doing and stop re-explaining the project
+# overview + artifacts they were already shown in their welcome. Bounded the
+# same way every other user-derived block here is: the last few turns only
+# (`_RECIPIENT_CHAT_TURNS`), then a hard char cap in the spirit of
+# `_SOURCE_CONTENT_CHARS` (`_RECIPIENT_CHAT_CHARS`). Read READ-ONLY and
+# owner-gated (see `_recipient_chat_tail`); best-effort, degrades to None.
+_RECIPIENT_CHAT_TURNS = 8
+_RECIPIENT_CHAT_CHARS = 4000
+
 DELEGATE_TASK_TOOL = {
     "name": "delegate_task",
     "description": (
@@ -440,21 +453,32 @@ DELEGATE_TASK_TOOL = {
 
 _BRIEF_SYSTEM = """\
 You write a short brief handing a task from one project teammate to
-another. It is delivered straight into the assignee's private chat with
-Sprntly — a one-way notification, not a live conversation turn a reply
-could land on.
+another. It is delivered straight into the assignee's private, ONGOING
+chat with Sprntly — a one-way notification, not a live conversation turn
+a reply could land on.
 
-Write in plain prose (short paragraphs or a few brief bullets — no
-heading dump). State, in this order:
-  - the task itself, clearly and concretely
-  - who assigned it — name AND role — so the assignee knows who to ask
-    for more context
+You are dropping this task into the recipient's ongoing chat. Their
+recent conversation is given below when available (their welcome, and
+whatever they were just discussing). Introduce the task so it fits
+naturally with what they were just doing — acknowledge or transition from
+it when relevant, rather than arriving cold.
+
+Lead with the task. State, in this order:
+  - the task itself, clearly and concretely, first
   - the actual content the task is ABOUT, when given below (the feedback,
     the themes, the specifics the requester supplied) — quote or closely
     paraphrase it, never a vaguer restatement that drops the substance
-  - the relevant project context and any linked artifacts given below,
-    ONLY what is actually provided — never invent a fact, a name, a
-    deadline, or an artifact that is not in the material given to you
+  - who assigned it — name AND role — so the assignee knows who to ask
+    for more context
+
+Do NOT re-explain the project's purpose, its history, or the artifacts
+they have already seen — they were shown these in their welcome and their
+own chat. Reference them in a few words at most, and never invent a fact,
+a name, a deadline, or an artifact that is not in the material given to
+you.
+
+Keep the whole brief SHORT: under about 120 words, three or four short
+sentences. Write in plain prose — no heading dump.
 
 You are handing off a task, not doing it. Never perform the task yourself
 and never write the deliverable the assignee is being asked to produce —
@@ -501,6 +525,46 @@ def _log_brief_run(
         logger.warning("delegation_brief_cost_log_failed project_id=%s", project_id)
 
 
+def _recipient_chat_tail(project_id: int, assignee_user_id: str | None) -> str | None:
+    """READ-ONLY, owner-gated tail of the ASSIGNEE's OWN individual project
+    chat — their welcome turn plus whatever they've most recently been
+    discussing — so the brief can land intelligently into an ongoing
+    conversation instead of arriving cold and re-explaining what they were
+    already shown in their welcome.
+
+    Resolved with the read-only `get_individual_project_chat` (never the
+    `create_individual_project_chat` the delivery path uses — this must NOT
+    mint a chat as a side effect of building the brief), then the owner-gated
+    `list_individual_turns`, to which `assignee_user_id` is passed EXPLICITLY,
+    server-side — never a model-supplied id (the read-side counterpart of the
+    delegation cross-user write gate). Bounded to the last
+    `_RECIPIENT_CHAT_TURNS` turns, then char-capped from the tail in the
+    spirit of `_SOURCE_CONTENT_CHARS`.
+
+    Best-effort: on no chat yet (None), no turns, or ANY read failure it
+    returns None and the brief degrades to "no prior recipient context" —
+    exactly the way the `assemble_project_context` and artifact folds degrade
+    in `_build_brief` below."""
+    if not assignee_user_id:
+        return None
+    try:
+        conv = get_individual_project_chat(project_id, assignee_user_id)
+        if not conv:
+            return None
+        turns = list_individual_turns(conv["id"], assignee_user_id)
+    except Exception:  # noqa: BLE001 — best-effort recipient-context fold
+        return None
+    if not turns:
+        return None
+    tail = turns[-_RECIPIENT_CHAT_TURNS:]
+    rendered = "\n".join(
+        f"{t.get('role', '')}: {(t.get('content') or '').strip()}".strip()
+        for t in tail
+    ).strip()
+    rendered = rendered[-_RECIPIENT_CHAT_CHARS:].strip()
+    return rendered or None
+
+
 def _render_brief_user(
     task_summary: str,
     assigner: dict | None,
@@ -508,6 +572,7 @@ def _render_brief_user(
     context_block: str,
     artifacts: list[dict],
     source_content: str | None = None,
+    recipient_context: str | None = None,
 ) -> str:
     assigner_name = (assigner or {}).get("name") or "a teammate"
     assigner_role = (assigner or {}).get("job_role") or "no role set"
@@ -531,6 +596,12 @@ def _render_brief_user(
             for a in artifacts
         )
         lines.append(f"\nLinked artifacts:\n{art_lines}")
+    if recipient_context:
+        lines.append(
+            "\nThe recipient's recent chat (their welcome and whatever "
+            "they've been discussing — transition from it, don't repeat "
+            f"it):\n{recipient_context}"
+        )
     return "\n".join(lines)
 
 
@@ -551,9 +622,12 @@ def _build_brief(
     `source_content`: the tail of the actual triggering conversation, so the
     brief carries the requester's real material (the feedback, the themes)
     rather than only general project memory and an unrelated artifact
-    fan-out. Context/artifact folding degrades silently to "none" on a read
-    failure — only the LLM call itself can fail the brief outright (returns
-    None, never raises)."""
+    fan-out. ALSO folds a READ-ONLY, owner-gated tail of the assignee's OWN
+    individual chat (`_recipient_chat_tail`) so the brief lands intelligently
+    into their ongoing conversation instead of arriving cold and re-explaining
+    what they were already shown in their welcome. Context/artifact/recipient
+    folding all degrade silently to "none" on a read failure — only the LLM
+    call itself can fail the brief outright (returns None, never raises)."""
     start = time.monotonic()
     meta: dict = {}
     assignee_user_id = assignee.get("user_id")
@@ -574,8 +648,16 @@ def _build_brief(
 
     trimmed_source = (source_content or "").strip()[-_SOURCE_CONTENT_CHARS:] or None
 
+    # READ-ONLY, owner-gated fold of the assignee's OWN recent chat (welcome +
+    # what they were just discussing) so the brief transitions naturally
+    # instead of arriving cold and re-explaining what they've already seen.
+    # `assignee_user_id` is server-side (the resolved assignee), never a
+    # model-supplied id; degrades silently to None like the folds above.
+    recipient_context = _recipient_chat_tail(project_id, assignee_user_id)
+
     user = _render_brief_user(
-        task_summary, assigner, assignee, context_block, artifacts, trimmed_source
+        task_summary, assigner, assignee, context_block, artifacts,
+        trimmed_source, recipient_context,
     )
 
     try:

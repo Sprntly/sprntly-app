@@ -72,6 +72,41 @@ const KILL_SIGNAL_CAVEAT =
   + "reads what people said, not a metric series, so nothing is watching for "
   + "this on your behalf. Someone has to go and look."
 
+/** How many findings get a FULL write-up in "What the evidence says" —
+ *  mirroring `backend/app/crucible/report.py`'s `MAX_DETAILED_FINDINGS`
+ *  (== `MAX_RICE_ROWS`, that file's own comment explains the "10, not 150"
+ *  reasoning in full). Kept equal to the RICE/MoSCoW table's row cap on
+ *  purpose: the document is a decision memo, so a full block is reserved for
+ *  the same themes the ranking put first in the table above, and the two
+ *  sections must not disagree about what mattered.
+ *
+ *  A run with more findings than this is NOT truncated — see
+ *  `MAX_OVERFLOW_FINDINGS` below. Rendering every finding in full (the bug
+ *  this constant fixes) put 529 full blocks on screen on a real run and made
+ *  the panel unusable. */
+const MAX_DETAILED_FINDINGS = MAX_RICE_ROWS
+
+/** The compact overflow list's rows, mirroring `report.py`'s
+ *  `MAX_OVERFLOW_ROWS`. 1,000 rather than a smaller number for the same
+ *  reason `report.py` picked it: a smaller cap silently degraded a real run
+ *  that had more findings than the cap, which is the exact failure this
+ *  feature exists to avoid. Whatever is beyond even this is still COUNTED,
+ *  never dropped in silence. */
+const MAX_OVERFLOW_FINDINGS = 1_000
+
+/** A clipped finding label/statement for one line of the compact overflow
+ *  list — mirrors `report.py`'s `_esc_statement` / `MAX_STATEMENT_CHARS`
+ *  (400), cut on a word boundary. React escapes text content itself, so
+ *  unlike the backend's HTML string this needs no separate escaping step. */
+const MAX_OVERFLOW_STATEMENT_CHARS = 400
+function overflowStatement(f: GoalFinding): string {
+  const text = ((f.label || "").trim() || f.statement).replace(/\s+/g, " ").trim()
+  if (text.length <= MAX_OVERFLOW_STATEMENT_CHARS) return text
+  const cut = text.slice(0, MAX_OVERFLOW_STATEMENT_CHARS)
+  const lastSpace = cut.lastIndexOf(" ")
+  return (lastSpace > 0 ? cut.slice(0, lastSpace) : cut) + "…"
+}
+
 /** An excluded source is only a KEY by the time the report runs — its label
  *  went with the entry the run dropped. Rather than keep a second copy of the
  *  backend's source prose here, where it would drift, the key is softened into
@@ -1209,7 +1244,7 @@ export function GoalAnalysisReport({
             </div>
           ) : null}
           <ol className="ga-doc-findings">
-            {findings.map((f, i) => (
+            {findings.slice(0, MAX_DETAILED_FINDINGS).map((f, i) => (
               <ReportFinding
                 key={f.id}
                 f={f}
@@ -1229,6 +1264,49 @@ export function GoalAnalysisReport({
               />
             ))}
           </ol>
+          {/* NO SILENT CAPS. A full write-up is reserved for the same
+              `MAX_DETAILED_FINDINGS` the RICE/MoSCoW table above scores —
+              everything past it is still on the run, listed one line each in
+              the same rank order, with the count stated. This is the fix for
+              the bug where this section rendered every finding in full (529
+              of them on a real run) with no cap at all; mirrors
+              `report.py`'s `_findings_section` tail. */}
+          {findings.length > MAX_DETAILED_FINDINGS ? (
+            <div data-testid="goal-findings-overflow">
+              <p className="ga-doc-note">
+                The next{" "}
+                {Math.min(
+                  findings.length - MAX_DETAILED_FINDINGS,
+                  MAX_OVERFLOW_FINDINGS
+                )}{" "}
+                findings are listed below in rank order rather than in full —
+                a full write-up is reserved for the {MAX_DETAILED_FINDINGS}{" "}
+                the ranking put first. Every one of them is still on the run
+                itself.
+              </p>
+              <ul className="ga-doc-list">
+                {findings
+                  .slice(
+                    MAX_DETAILED_FINDINGS,
+                    MAX_DETAILED_FINDINGS + MAX_OVERFLOW_FINDINGS
+                  )
+                  .map((f, i) => (
+                    <li key={f.id} data-testid="goal-finding-overflow-row">
+                      {MAX_DETAILED_FINDINGS + i + 1}. {overflowStatement(f)}
+                    </li>
+                  ))}
+              </ul>
+              {findings.length - MAX_DETAILED_FINDINGS > MAX_OVERFLOW_FINDINGS ? (
+                <p className="ga-doc-note">
+                  A further{" "}
+                  {findings.length - MAX_DETAILED_FINDINGS - MAX_OVERFLOW_FINDINGS}{" "}
+                  findings are on the run and are not listed here, because
+                  this list has a size limit. They were not dropped from the
+                  analysis.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
           {/* ── CONSIDERED AND SET ASIDE. ───────────────────────────────────
               NOT A DELETION. Each of these was found, corroborated and ranked
               exactly like the findings above; what changed is that it does not

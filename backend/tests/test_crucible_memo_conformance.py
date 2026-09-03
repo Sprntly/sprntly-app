@@ -139,10 +139,6 @@ def test_money_reaches_the_strip_only_as_the_readers_own_estimate():
     assert "48,000" in t
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "Memo headings are CLAIMS — 'We tell customers their export succeeded "
-    "roughly 72,000 times, and it did not'. Ours are labels: 'What the "
-    "evidence says'. The claim is derivable from the top finding."))
 def test_section_headings_are_claims_not_labels():
     # NOT A WORD COUNT. The first version asserted "some heading is longer than
     # six words" and XPASSED against "Considered and set aside for this goal
@@ -152,6 +148,16 @@ def test_section_headings_are_claims_not_labels():
     heads = [re.sub(r"<[^>]+>", "", h) for h in re.findall(r"<h2>(.*?)</h2>", _doc())]
     assert not any(h.startswith("What the evidence says") for h in heads), (
         "the findings heading is still a label; the memo's is a claim"
+    )
+    # NOT JUST "DIFFERENT" — DERIVED. Any different string would satisfy the
+    # assertion above (an empty heading, a typo'd label, anything). The claim
+    # has to actually be about THIS corpus, so this proves it by finding a
+    # fragment of the top finding's own statement inside a rendered heading.
+    assert any(h.strip() for h in heads), "no non-empty h2 headings rendered"
+    assert any("export defect" in h for h in heads), (
+        "the findings heading should carry a fragment of the top finding's "
+        "own statement ('...concern export defect'), proving the claim is "
+        "derived from the corpus rather than any different string"
     )
 
 
@@ -228,13 +234,44 @@ def test_one_recommendation_for_the_whole_document():
 
 # ─── NOT DERIVABLE: the corpus cannot support it ────────────────────────────
 
-@pytest.mark.skip(reason=(
-    "Memo sizes everything in money ($944K, $7.01M reach, $186K renewing). "
-    "Needs revenue mapped to accounts; the plan step already declares this "
-    "corpus has none. Would require an ingest change or a gate that ASKS what "
-    "an account is worth — Apurva's call, not a rendering fix."))
 def test_sizing_in_currency():
-    ...
+    """Memo sizes EVERY finding in money ($944K, $7.01M reach, $186K
+    renewing) — mapped independently from a revenue system this corpus does
+    not have. That exact form is still NOT DERIVABLE: nothing here connects
+    an account to its actual revenue.
+
+    What is buildable without new data, and now built: each finding's own
+    reach, multiplied by the SAME reader-supplied per-account figure the
+    corpus-wide stat strip and decision box already use — in their exact
+    words, so a per-finding size in money is never a different voice from
+    the aggregate one. DISPLAY-ONLY: this proves two DIFFERENT findings
+    carry two DIFFERENT dollar figures tied to their OWN reach, not one
+    total smeared across the section, and that ranking-relevant fields
+    (`impact_value` itself) are untouched by this."""
+    run = _run_dict()
+    run["prioritisation"]["plan"]["account_value"] = 10000
+    # A fresh two-finding corpus, neither set aside — the frozen
+    # `_DOC_FINDINGS` fixture keeps only one finding after the goal-relevance
+    # gate, which would make a per-finding assertion indistinguishable from a
+    # corpus-wide total.
+    run["prioritisation"]["set_aside_by_rank"] = [None, None]
+    run["prioritisation"]["findings_extra_by_rank"] = []
+    findings = [
+        {"statement": "3 accounts named export latency", "impact_value": 3,
+         "currency": "accounts", "confidence_band": "medium", "confidence": {}},
+        {"statement": "9 accounts named renewal churn", "impact_value": 9,
+         "currency": "accounts", "confidence_band": "medium", "confidence": {}},
+    ]
+    t = _text(render_report_html(run, findings, []))
+    assert "30,000" in t, "the smaller finding's own reach x estimate"
+    assert "90,000" in t, "the larger finding's own reach x estimate"
+    assert "on your own figure of 10,000 per account" in t
+    assert "an estimate you gave rather than something measured" in t
+    # RANKING IS UNTOUCHED (I10): the finding dicts this test built its own
+    # assertions from still carry their original `impact_value` — nothing
+    # in the render path wrote a derived number back onto them.
+    assert findings[0]["impact_value"] == 3
+    assert findings[1]["impact_value"] == 9
 
 
 @pytest.mark.skip(reason=(

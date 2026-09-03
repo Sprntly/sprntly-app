@@ -1447,15 +1447,31 @@ def _as_meta(run: dict) -> dict:
     return dict(run.get("prioritisation") or {})
 
 
+def _findings_heading_index(html: str) -> int:
+    """Where the findings section's own `<h2>` starts.
+
+    The heading is now a CLAIM derived from the top finding's own statement
+    (`_findings_heading`), not the literal "What the evidence says" label, so
+    it is no longer a stable string to search for. It is, however, always the
+    `<h2>` immediately before the first NUMBERED `<h3>` — a full finding
+    write-up (`_finding_block` emits `<h3>{rank}. …</h3>`); the document's
+    other `<h3>` ("What was missing from it") never starts with a digit, so
+    the numbered-heading regex cannot land on it.
+    """
+    h3 = re.search(r"<h3>\d+\.", html)
+    assert h3, "no numbered finding card rendered"
+    i = html.rfind("<h2>", 0, h3.start())
+    assert i != -1, "no findings heading before the first finding card"
+    return i
+
+
 def _findings_html(html: str) -> str:
     """Everything from the findings heading on.
 
     The document has `<h3>` section headings of its own above this point, so a
     test that reads "the first h3" reads the wrong one.
     """
-    i = html.find("What the evidence says")
-    assert i != -1, "no findings section"
-    return html[i:]
+    return html[_findings_heading_index(html):]
 
 
 def test_the_heading_is_the_theme_and_the_counts_are_not_repeated_in_it():
@@ -1661,7 +1677,7 @@ def test_the_funnel_is_stated_before_the_findings():
         _with_aside(_run(), [None, "off-topic", "off-topic", None]), findings)
 
     assert "4 themes were found. 2 bear on this goal." in html
-    assert html.index("bear on this goal") < html.index("What the evidence says")
+    assert html.index("bear on this goal") < _findings_heading_index(html)
 
 
 def test_no_funnel_when_nothing_was_set_aside():
@@ -1695,7 +1711,7 @@ def test_the_headline_describes_the_kept_findings_not_all_of_them():
     html = render_report_html(
         _with_aside(_run(), ["describes our own product", None]), findings)
 
-    head = html[html.index("The short version"):html.index("What the evidence says")]
+    head = html[html.index("The short version"):_findings_heading_index(html)]
     assert "renewals stall on the parts flow" in head
     assert "our platform supports scenario building" not in head
 
@@ -1933,7 +1949,7 @@ def test_the_findings_past_the_cap_are_still_listed_and_counted():
     assert html.count("<li>") >= 60 - MAX_DETAILED_FINDINGS
     assert "The next 50 findings are listed below" in html
     # and the heading still tells the truth about the total
-    assert "What the evidence says (60)" in html
+    assert "the strongest of 60 findings below" in html
 
 
 def test_the_further_findings_sentence_agrees_in_the_singular():
