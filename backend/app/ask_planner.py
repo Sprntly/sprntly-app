@@ -227,7 +227,13 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     FROM the attachment (and `_gate_action` now keeps the action with the
 #     attached text as the brief when it still does not); a v16 row was never
 #     asked, so the two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v17"
+#   v18: `wants_report`. Report-versus-answer stopped being a regex over the
+#     question's surface words (`call_digest.is_voc_query`) and became the
+#     planner's own field. A v17 row was never asked where its answer should
+#     go, so its pipeline picks say nothing about whether a document was
+#     wanted; the two must not be pooled. (v17 is #1459's — the attached-
+#     document brief — which this deliberately does not renumber.)
+_PROMPT_VERSION = "ask-planner-v18"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -712,6 +718,23 @@ _PLANNER_SCHEMA: dict = {
             ),
         },
         "confidence": {"type": "number", "description": "0..1"},
+        # WHERE A PIPELINE'S ANSWER GOES, and it is the model's call rather
+        # than a regex's. Generated straight after `pipeline_id` because it is
+        # only meaningful once one has been picked.
+        "wants_report": {
+            "type": "boolean",
+            "description": (
+                "Did the user ASK FOR A DOCUMENT? true ONLY when the message "
+                "explicitly requests one — 'report', 'write-up', 'one-pager', "
+                "'deck', 'digest', 'document', 'doc', 'PDF', 'write this up' — "
+                "or names a document by its name ('voice of customer', 'VoC'). "
+                "false for every QUESTION about customers, feedback, "
+                "competitors or the market, however long or detailed, and "
+                "false when no pipeline is picked. A question answered in the "
+                "chat costs one more message if they did want the document; a "
+                "document nobody asked for costs minutes and a panel."
+            ),
+        },
         "sources": {
             "type": "array",
             "items": {"type": "string"},
@@ -809,7 +832,7 @@ _PLANNER_SCHEMA: dict = {
     "required": [
         "reason", "action", "action_confidence",
         "company_skill_id", "company_confidence",
-        "pipeline_id", "confidence", "sources",
+        "pipeline_id", "confidence", "wants_report", "sources",
         "include_knowledge_graph", "include_library", "include_team",
         "include_projects", "include_backlog", "web_search", "in_scope",
     ],
@@ -1182,6 +1205,49 @@ Only send it to the public web when the message ASKS for the public web.
 
 When a pipeline is chosen it owns the answer. Do not also request sources or a
 web search — the pipeline does its own gathering.
+
+=== REPORT OR ANSWER: `wants_report` ===
+
+Picking a pipeline decides WHAT GETS READ. It does not decide WHERE THE ANSWER
+GOES — `wants_report` does, and it is a separate question you answer separately.
+
+A REPORT IS A DOCUMENT SOMEBODY ASKED FOR. Set `wants_report` true ONLY when
+the message asks for one in so many words:
+
+  * it names a document — "report", "write-up", "write this up", "one-pager",
+    "digest", "deck", "document", "doc", "PDF";
+  * or it names a document BY NAME — "voice of customer", "VoC", "competitive
+    intelligence review", "public feedback report".
+
+Everything else is false, and false is the normal answer. A question about
+customers is a QUESTION, however long, however detailed, and however many
+sources it takes to answer:
+
+  * "look at all customer conversations in the last month and show me what
+    product features users are asking for" — false. It says look, not write.
+  * "what are customers complaining about?" — false.
+  * "summarize last week's customer calls" — false. A summary is an answer.
+  * "give me a list of the features clients asked for, as a table" — false.
+    They named the shape they wanted and it was not a document.
+  * "what are people saying about us on Reddit?" — false.
+  * "give me a voice-of-customer report for last month" — true.
+  * "write last week's calls up as a one-pager" — true.
+
+THE SAME PIPELINE SERVES BOTH. A false verdict does not mean reading less: the
+pipeline still fetches the calls, the graph and the connected sources exactly
+as it would for the document, and answers from all of it IN THE CHAT. So a
+question that needs the pipeline's gathering should still name the pipeline —
+just with `wants_report` false.
+
+THE COST IS NOT SYMMETRIC, which is why the bar is "they said the word". Get
+it wrong towards `false` and someone who wanted a document reads the answer and
+asks for it, one message later. Get it wrong towards `true` and someone who
+asked a question waits minutes for a document they did not want, in a panel
+they did not open, while the answer they wanted never appears in the thread.
+When you are unsure, it is false.
+
+Leave it false whenever `pipeline_id` is "none" — there is no document to
+write, and the field is ignored.
 
 === LIVE MACHINERY ===
 
@@ -1584,6 +1650,12 @@ class Plan:
     company_confidence: float = 0.0
     pipeline_id: Optional[str] = None
     confidence: float = 0.0
+    #: Did the user ASK FOR A DOCUMENT? The report pipelines each serve two
+    #: shapes — the document, and the same evidence answered in the chat — and
+    #: this is which one was wanted. Only ever true alongside a report
+    #: `pipeline_id` (`apply_gates` clamps it), so `False` covers both "they
+    #: asked a question" and "no pipeline ran".
+    wants_report: bool = False
     sources: list[str] = field(default_factory=list)
     include_knowledge_graph: bool = False
     include_library: bool = False
@@ -1679,6 +1751,11 @@ class Plan:
             # next to a plan line saying `web: false` looks like the executor
             # ignoring the plan, when it is the plan saying "no SECOND search".
             "web": "pipeline" if self.pipeline_id else self.web_search,
+            # WHERE the pipeline's answer was going to be written. Logged
+            # unconditionally because the first question asked of a report
+            # nobody wanted — and of an answer someone expected a document for
+            # — is "did the plan think they asked for one".
+            "wants_report": self.wants_report,
             "constraints": self.constraints,
             "in_scope": self.in_scope,
             "confidence": round(
@@ -2413,6 +2490,27 @@ def apply_gates(
         sources = []
         web_search = False
 
+    # WHERE THE PIPELINE'S ANSWER GOES, clamped to the pipelines that can
+    # actually write a document. The model is asked this outright (see the
+    # prompt's REPORT OR ANSWER section) rather than having it inferred from
+    # the question's surface words downstream, which is where the previous
+    # verdict lived: `call_digest.is_voc_query`, a regex that had to be widened
+    # twice in one day (a summary ask, then a table ask) because each new
+    # phrasing that meant "answer me" defaulted to the document.
+    #
+    # Clamped for the same "belongs to its action" reason every argument above
+    # is: `wants_report` on a plan that picked no pipeline — or picked a lookup
+    # like `tracker-lookup` — names a document nothing was ever going to write.
+    wants_report = bool(out.get("wants_report"))
+    if wants_report:
+        try:
+            from app.qa_agent import _REPORT_PIPELINE_IDS
+
+            wants_report = pipeline_id in _REPORT_PIPELINE_IDS
+        except Exception:  # noqa: BLE001 — a gate must never break a plan
+            logger.exception("report-pipeline set unreadable; wants_report cleared")
+            wants_report = False
+
     if pipeline_id is not None:
         # PIPELINE EXCLUSIVITY. A chosen pipeline owns the answer and does its
         # own gathering (a paid web sweep, a live call fetch), so a plan that
@@ -2517,6 +2615,7 @@ def apply_gates(
         company_confidence=company_confidence,
         pipeline_id=pipeline_id,
         confidence=confidence,
+        wants_report=wants_report,
         sources=sources,
         include_knowledge_graph=bool(out.get("include_knowledge_graph")),
         include_library=include_library,

@@ -1519,6 +1519,10 @@ def _m_call_digest(
         enterprise_id=enterprise_id, question=question, history=history,
         constraints=(plan.constraints if plan is not None else None),
         on_phase=on_phase,
+        # DOCUMENT OR ANSWER, decided by the planner rather than re-derived
+        # from the question's words inside the digest. None without a plan,
+        # which is exactly the regex behaviour this dispatch had before.
+        wants_report=getattr(plan, "wants_report", None),
     )
 
 
@@ -3906,6 +3910,11 @@ def answer(
                 # Narrates its gather→synthesis legs (competitive_intel parity);
                 # David's most-used report and the reported blank-wait path.
                 on_phase=on_phase,
+                # And WHERE the answer goes — the plan's own verdict, for the
+                # same reason its window travels with it: a decision the
+                # planner already made from the whole sentence beats one the
+                # digest re-derives from its surface words.
+                wants_report=getattr(plan, "wants_report", None),
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).
