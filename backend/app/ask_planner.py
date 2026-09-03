@@ -233,7 +233,15 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     go, so its pipeline picks say nothing about whether a document was
 #     wanted; the two must not be pooled. (v17 is #1459's — the attached-
 #     document brief — which this deliberately does not renumber.)
-_PROMPT_VERSION = "ask-planner-v18"
+#   v20: `include_knowledge_base` — a question about what Sprntly KNOWS, as
+#     opposed to one answered from what it knows. Reported: "the chat system
+#     does not understand KG". Asked what its memory holds, the assistant had
+#     nothing to say: every retrieval path answers about a TOPIC, and none can
+#     say how much there is or where it came from. A v19 row had no way to ask
+#     for that block, so its answers to those questions were ungrounded by
+#     construction; the two must not be pooled. (v18 is #1460's wants_report
+#     and v19 is #1461's prioritisation rule; both land ahead of this one.)
+_PROMPT_VERSION = "ask-planner-v20"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -771,6 +779,16 @@ _PLANNER_SCHEMA: dict = {
                 "the question is ABOUT projects, false for everything else."
             ),
         },
+        "include_knowledge_base": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs a description of WHAT SPRNTLY HAS "
+                "LEARNED for this company and how much is in it — true when "
+                "the question is ABOUT that memory itself ('what do you know "
+                "about us', 'what is in my knowledge base'), false when the "
+                "question is about the product, which is nearly always."
+            ),
+        },
         "include_backlog": {
             "type": "boolean",
             "description": (
@@ -834,7 +852,8 @@ _PLANNER_SCHEMA: dict = {
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "wants_report", "sources",
         "include_knowledge_graph", "include_library", "include_team",
-        "include_projects", "include_backlog", "web_search", "in_scope",
+        "include_projects", "include_backlog", "include_knowledge_base",
+        "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -1606,6 +1625,41 @@ grounding, and a connected tracker full of "projects" is the exact wrong answer.
 The exception is a question that names the connected tool itself ("what Jira
 projects can we push to") — that is the tracker, not this.
 
+=== QUESTIONS ABOUT WHAT SPRNTLY KNOWS ===
+
+Sprntly keeps a MEMORY for each company: everything it has extracted from the
+sources they connected — customer conversations, team chat, tickets, analytics,
+revenue, documents — as dated, sourced facts, plus the themes, accounts and
+decisions those facts are about. It is what every answer here is grounded on.
+
+A question about THE MEMORY ITSELF is a different question from one answered
+FROM it, and only the first sets include_knowledge_base=true:
+
+  * "what do you know about us", "what is in your memory", "what have you
+    learned so far", "how much data do you have on us", "what is my knowledge
+    base / knowledge graph / KG", "where does what you know come from",
+    "how up to date is what you know" — TRUE. These ask what the memory holds,
+    and the answer is counts and sources, not signals about a topic.
+  * "what are customers complaining about", "what do we know about export
+    failures", "what is our churn" — FALSE, and these are the overwhelming
+    majority. They are answered FROM the memory with
+    include_knowledge_graph=true, which is a different field and a different
+    job: that one retrieves what is relevant to a topic, this one describes
+    the whole.
+
+READERS NAME IT MANY WAYS and several of them are our internal words —
+"knowledge graph", "KG", "the graph", "your brain", "the knowledge base". Every
+one of those is this, and a question using them is answerable, not out of
+scope. The answer describes their product memory in plain language.
+
+Set include_knowledge_graph=false alongside it, pick NO sources and name NO
+documents, on the same rule as the library, the team, projects and the backlog:
+the block is the whole grounding for these, and retrieved signals about a topic
+answer a question nobody asked. A question that genuinely crosses both — "what
+do you know about Acme, and how much of it is recent?" — keeps the graph.
+
+The action stays `answer`: a question about what we know is still a question.
+
 === QUESTIONS ABOUT THE BACKLOG ===
 
 THE BACKLOG is Sprntly's pool of product ideas: the themes the weekly
@@ -1676,6 +1730,11 @@ class Plan:
     include_team: bool = False
     include_projects: bool = False
     include_backlog: bool = False
+    #: Whether the answer needs a description of the company's product memory
+    #: ITSELF — what it holds and where it came from — rather than signals
+    #: retrieved from it (`include_knowledge_graph`, which is the field for
+    #: every ordinary question). See `knowledge_base_context.py`.
+    include_knowledge_base: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1742,6 +1801,7 @@ class Plan:
             "team": self.include_team,
             "projects": self.include_projects,
             "backlog": self.include_backlog,
+            "knowledge_base": self.include_knowledge_base,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -2640,6 +2700,7 @@ def apply_gates(
         include_team=bool(out.get("include_team")),
         include_projects=bool(out.get("include_projects")),
         include_backlog=bool(out.get("include_backlog")),
+        include_knowledge_base=bool(out.get("include_knowledge_base")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
