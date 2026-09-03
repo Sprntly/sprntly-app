@@ -27,6 +27,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
+from app.crucible.figure_class import RANGE_CLASS, SUMMABLE_CLASS
 from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
@@ -205,24 +206,57 @@ def _figure_is_committed(
        never seen — but it was measured firing on only one of ~13 distinct
        list prices in the sample, so it cannot be asked to do the job alone.
     2. PHRASES, where the text says outright which it is.
-    3. KIND AS THE ROUTER. The extraction pass already judged whether the
-       signal is a `pricing` fact or a `commercial_term`, and unlike the
-       other two it has an opinion about every row. It is the default rather
-       than the decider: measured at 93% precision on `pricing` and 55% on
-       `commercial_term`, which is why the phrase refusals upstream exist.
+    3. KIND, WHICH MAY ONLY EXCLUDE. The extraction pass already judged
+       whether the signal is a `pricing` fact or a `commercial_term`, and it
+       is the only one of the three with an opinion about every row — but a
+       `commercial_term` label is a weak signal, and it is attached to the
+       lower-precision of the two populations.
+
+    A POSITIVE SIGNAL IS REQUIRED, and this function used to end
+    `return claim.artifact_type != _LIST_PRICE_KIND`, which did the exact
+    opposite of the paragraph below it: a `commercial_term` row matching
+    NEITHER phrase is a tie, and that line resolved the tie by admitting it.
+    It routed the whole weaker population into the summed total on the
+    strength of a label. A live spot-check found 2 of 11 rows in the
+    committed head were real deals, and both of the real ones had matched a
+    phrase anyway — so requiring the phrase removed nine wrong rows and cost
+    nothing.
 
     Ties go to NOT committed. Every failure in this feature's history has
     been over-claiming, and a figure wrongly left out of the sum understates
     a total, where one wrongly added invents money.
     """
+    # THE CLASSIFIER DECIDES WHERE IT HAS SPOKEN, from a fixed table. The
+    # model returned a category; which categories may be summed is settled
+    # here, in deterministic code, and is not something the model can move.
+    if claim.figure_class is not None:
+        return claim.figure_class == SUMMABLE_CLASS
     if amount in list_price_amounts:
+        return False
+    if claim.artifact_type == _LIST_PRICE_KIND:
         return False
     text = claim.assertion or ""
     if _LIST_PRICE_PHRASE.search(text):
         return False
-    if _COMMITTED_PHRASE.search(text):
-        return True
-    return claim.artifact_type != _LIST_PRICE_KIND
+    return bool(_COMMITTED_PHRASE.search(text))
+
+
+def _figure_is_list_price(claim: Claim, amount: float,
+                          list_price_amounts: frozenset[float]) -> bool:
+    """May this figure appear in the non-additive pricing range?
+
+    A THIRD STATE EXISTS AND IT IS THE POINT. Before the classifier every
+    figure was either summed or ranged, so a salary or a competitor's fee
+    that failed the committed test silently became the pricing MAXIMUM — one
+    candidate's "$3.7M TCV at a previous employer" rendered the range as
+    $1,000 – $3,700,000. A figure can now be neither: refused outright, with
+    its category as the reason.
+    """
+    if claim.figure_class is not None:
+        return claim.figure_class == RANGE_CLASS
+    # Without a classification, the deterministic rules keep their previous
+    # meaning: anything not admitted to the sum was a price.
+    return not _figure_is_committed(claim, amount, list_price_amounts)
 
 #: The `certainty` marker a figure recovered from a written summary carries
 #: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
@@ -307,6 +341,9 @@ def deduped_grounded_figures(
             committed=_figure_is_committed(
                 c, float(c.magnitude), list_price_amounts,
             ),
+            list_price=_figure_is_list_price(
+                c, float(c.magnitude), list_price_amounts,
+            ),
         )
         if accounts:
             existing = attributed.get((key, figure.amount))
@@ -379,7 +416,7 @@ def _grounded_commercial_native_units(
     # claim list. It is also why nothing downstream may size a finding from
     # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
-    list_prices = [f for f in figures if not f.committed]
+    list_prices = [f for f in figures if f.list_price]
     if list_prices:
         # A RANGE AND ITS SHAPE, WITH NO TOTAL ANYWHERE. The parts are chosen
         # so they cannot be recombined into a sum: two ends, a count of

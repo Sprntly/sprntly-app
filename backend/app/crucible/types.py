@@ -188,6 +188,13 @@ class GroundedFigure(NamedTuple):
     amount: float
     derived: bool
     committed: bool = False
+    #: May this figure appear in the non-additive pricing range? A THIRD
+    #: STATE: a figure can be neither summed nor ranged — a salary, a
+    #: competitor's fee, a hypothetical — and before the classifier existed
+    #: everything that failed the committed test silently became a price,
+    #: which is how a candidate's career track record became a pricing
+    #: maximum.
+    list_price: bool = False
 
 
 #: How many ordinal bands a size is REPORTED in. Quartiles: enough to
@@ -413,6 +420,17 @@ class Claim:
     magnitude: Optional[float] = None
     direction: Literal["positive", "negative", "neutral"] = "neutral"
     subject_cluster_id: Optional[str] = None
+    #: WHAT KIND OF MONEY `magnitude` IS — one of
+    #: `app.crucible.figure_class.FIGURE_CLASSES`, or `None` when nothing
+    #: classified it (the model was not run, or did not answer for this
+    #: claim). `None` is not a category and never means "assume the good
+    #: one": the pipeline falls back to its deterministic phrase families,
+    #: which admit money to a sum only on a positive signal.
+    #:
+    #: A CATEGORY, NEVER A DECISION (I2). The consequence of each class —
+    #: summed, ranged, or refused — is a fixed table in `pipeline`, not
+    #: anything the classifier returns.
+    figure_class: Optional[str] = None
     raw: Any = None           # original payload, always retained
 
     def __post_init__(self) -> None:

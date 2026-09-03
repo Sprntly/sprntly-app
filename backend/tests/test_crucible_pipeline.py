@@ -34,7 +34,11 @@ def claim(
     artifact_id="a", magnitude=None, raw=None, artifact_type="t",
 ) -> Claim:
     return Claim(
-        id=cid, assertion=(f"claim {cid}" if assertion is None else assertion),
+        # DEFAULTS TO A COMMITTED PHRASING, because committed money now
+        # requires a positive signal — a fixture with neutral text is a tie
+        # and ties are refused. Tests about list pricing pass their own text.
+        id=cid, assertion=(f"the deal {cid} closed" if assertion is None
+                           else assertion),
         type=ctype, subject=subject,
         source_id=source, artifact_id=artifact_id, artifact_type=artifact_type,
         strength=strength, observed_at=NOW - timedelta(days=days_ago),
@@ -494,6 +498,44 @@ def test_an_unclassifiable_figure_stays_out_of_the_sum():
     assert units["commercial_list_price_min"] == 8000.0
     assert units["commercial_list_price_max"] == 12000.0
     assert units["commercial_list_price_distinct"] == 2.0
+
+
+def test_a_commercial_term_with_no_positive_signal_is_not_committed():
+    """THE TIE, AND THE BUG THAT WAS IN IT. A `commercial_term` row matching
+    neither phrase is a tie, and the classifier used to resolve it by
+    ADMITTING the figure — routing the whole lower-precision population into
+    the summed total on the strength of a label, which is the exact opposite
+    of what its own docstring promised.
+
+    A live spot-check found 2 of 11 rows in the committed head were real
+    deals. Both of the real ones matched a phrase anyway, so requiring the
+    positive signal removed the nine wrong rows and cost nothing."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=5 + 45 * i, accounts=(a,),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion="the figure came up during the conversation")
+        for i, (a, m) in enumerate([("Northwind", 260000.0), ("Acme", 150000.0)])
+    ]
+    units = run(claims).impacts[0].native_units
+    assert "commercial_committed_usd" not in units
+
+
+def test_a_commercial_term_with_a_positive_signal_is_still_committed():
+    """The control: requiring evidence must not silence the rows that have
+    it."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=5 + 45 * i, accounts=(a,),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"}, artifact_type="commercial_term",
+              assertion=t)
+        for i, (a, m, t) in enumerate([
+            ("Northwind", 165000.0, "deals nearing closure, valued at $165k"),
+            ("Acme", 9000.0, "A $9,000 quote was issued"),
+        ])
+    ]
+    units = run(claims).impacts[0].native_units
+    assert units["commercial_committed_usd"] == 174000.0
 
 
 def test_the_pricing_line_never_carries_a_total():
