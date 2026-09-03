@@ -28,7 +28,8 @@ import { isEmailNeedle } from "./mentions"
 import { useEscapeToClose } from "./useEscapeToClose"
 import detailStyles from "./ProjectDetailScreen.module.css"
 
-type CandidateRow = Awaited<ReturnType<typeof projectsApi.candidateSearch>>[number]
+type CandidateSearchResult = Awaited<ReturnType<typeof projectsApi.candidateSearch>>
+type CandidateRow = CandidateSearchResult["candidates"][number]
 type TagResult = Awaited<ReturnType<typeof projectsApi.tagCandidate>>
 type Affordance = { tone: "ok" | "error"; text: string }
 
@@ -66,10 +67,21 @@ export type ProjectInviteBodyProps = {
 export function ProjectInviteBody({ projectId, onInvited, listClassName }: ProjectInviteBodyProps) {
   const [query, setQuery] = useState("")
   const [candidates, setCandidates] = useState<CandidateRow[]>([])
+  // Lower-cased emails with a live (non-expired) pending invite — from
+  // `candidateSearch`'s `pending_invites` (`db/team.py::
+  // list_pending_invite_emails`, company-wide + already expiry-filtered).
+  // Drives the static "Invited" state below, distinct from "Added"
+  // (`kind === "member"`).
+  const [pendingInvites, setPendingInvites] = useState<Set<string>>(new Set())
   const [candLoading, setCandLoading] = useState(false)
   const [candError, setCandError] = useState(false)
   const [addingNeedle, setAddingNeedle] = useState<string | null>(null)
   const [affordance, setAffordance] = useState<Affordance | null>(null)
+
+  const isPendingEmail = useCallback(
+    (email: string | null | undefined) => !!email && pendingInvites.has(email.toLowerCase()),
+    [pendingInvites],
+  )
 
   // Candidate fetch — the SAME tenant-scoped read the group chat's mention
   // picker uses (`candidateSearch`), degraded to an in-body error rather
@@ -85,9 +97,10 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
       () => {
         projectsApi
           .candidateSearch(projectId, q)
-          .then((rows) => {
+          .then((res) => {
             if (cancelled) return
-            setCandidates(rows)
+            setCandidates(res.candidates)
+            setPendingInvites(new Set((res.pending_invites ?? []).map((e) => e.toLowerCase())))
             setCandLoading(false)
           })
           .catch(() => {
@@ -121,8 +134,20 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
   // Add/invite via the REAL `/tag` path (AD-TNM6 — never throw/block; a
   // refuse degrades to one opaque message). On success the caller refetches
   // the roster so the new member appears in the members list above.
+  // `email` (when known — a candidate row's `c.email`, or the by-email row's
+  // own validated `q`) is what an INVITE-tier result optimistically adds to
+  // `pendingInvites` so the row flips to "Invited" immediately, ahead of the
+  // `onInvited()` refetch (which then keeps it there for real from the
+  // server-derived set).
+  //
+  // Query-clear is now PER-BRANCH rather than unconditional in a shared
+  // `.finally()`: the t_workspace ("Add") and refuse/error paths still clear
+  // it (reset the search for the next action, unchanged from before), but a
+  // t_company/t_newuser (invite) success deliberately leaves the query in
+  // place — clearing it would immediately hide the very row/badge that just
+  // flipped to "Invited", making that state invisible.
   const addByNeedle = useCallback(
-    (needle: string, label: string) => {
+    (needle: string, label: string, email?: string | null) => {
       if (addingNeedle) return
       setAddingNeedle(needle)
       setAffordance(null)
@@ -133,7 +158,12 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
           if (res.tier === "t_workspace") {
             setAffordance({ tone: "ok", text: `${label} added to the project` })
             onInvited()
+            setQuery("")
           } else if (res.tier === "t_company" || res.tier === "t_newuser") {
+            const invitedEmail = (email ?? (isEmailNeedle(needle) ? needle : null))?.toLowerCase()
+            if (invitedEmail) {
+              setPendingInvites((prev) => new Set(prev).add(invitedEmail))
+            }
             if (emailFailed(res.email_status)) {
               setAffordance({
                 tone: "error",
@@ -145,14 +175,15 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
             onInvited()
           } else {
             setAffordance({ tone: "ok", text: `${label} is already on the project` })
+            setQuery("")
           }
         })
         .catch(() => {
           setAffordance({ tone: "error", text: "Couldn't add that person" })
+          setQuery("")
         })
         .finally(() => {
           setAddingNeedle(null)
-          setQuery("")
         })
     },
     [addingNeedle, projectId, onInvited],
@@ -203,6 +234,7 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
             const label = c.name ?? c.email ?? "Unknown"
             const needle = c.email ?? c.name ?? ""
             const isMember = c.kind === "member"
+            const isPending = !isMember && isPendingEmail(c.email)
             return (
               <div className={detailStyles.memberRow} key={`${c.kind}:${c.user_id}`} data-testid="project-invite-candidate">
                 <span className={detailStyles.memberAv} aria-hidden="true" style={personAvatarStyle(c.user_id, c.name)}>
@@ -216,11 +248,15 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
                   <span className="modal-sub" data-testid="project-invite-already">
                     On this project
                   </span>
+                ) : isPending ? (
+                  <span className="modal-sub" data-testid="project-invite-pending">
+                    Invited
+                  </span>
                 ) : (
                   <button
                     type="button"
                     className="btn btn-primary"
-                    onClick={() => addByNeedle(needle, label)}
+                    onClick={() => addByNeedle(needle, label, c.email)}
                     disabled={addingNeedle === needle}
                     data-testid="project-invite-add"
                   >
@@ -243,16 +279,22 @@ export function ProjectInviteBody({ projectId, onInvited, listClassName }: Proje
                 </div>
                 <div className={detailStyles.memberRole}>They get an invite and land in this project.</div>
               </div>
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() => addByNeedle(q, q)}
-                disabled={!emailLike || addingNeedle === q}
-                title={emailLike ? undefined : "Enter a full email address to invite someone new"}
-                data-testid="project-invite-by-email"
-              >
-                {addingNeedle === q ? "Inviting…" : "Invite"}
-              </button>
+              {emailLike && isPendingEmail(q) ? (
+                <span className="modal-sub" data-testid="project-invite-pending">
+                  Invited
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={() => addByNeedle(q, q, q)}
+                  disabled={!emailLike || addingNeedle === q}
+                  title={emailLike ? undefined : "Enter a full email address to invite someone new"}
+                  data-testid="project-invite-by-email"
+                >
+                  {addingNeedle === q ? "Inviting…" : "Invite"}
+                </button>
+              )}
             </div>
           ) : null}
         </div>

@@ -681,7 +681,17 @@ def candidate_search_route(
     (workspace directory, then the rest of the company directory), each tagged
     `kind` in {"member","workspace","company"}, filtered by casefold-contains
     on name/email, capped at 20. NEVER lists anyone outside the project's
-    `company_id`. Membership-gated (403 for a same-tenant non-member)."""
+    `company_id`. Membership-gated (403 for a same-tenant non-member).
+
+    Also returns `pending_invites`: lower-cased emails with a LIVE (non-
+    expired) `workspace_invites` row in this company (`team_db.
+    list_pending_invite_emails` — company-wide by construction, see its
+    docstring). This is the single source the picker needs to render
+    "Invited" for a not-yet-accepted invitee — including a brand-new email
+    typed into the by-email row, which never appears in `candidates` at
+    all. Uncapped by the `[:20]` on `candidates` below; a picker with more
+    than 20 matching candidates is already an edge case, and the pending set
+    is cheap (one query, no join)."""
     project = _require_project_member(project_id, ctx)
     company_id = project["company_id"]
     workspace_id = project["workspace_id"]
@@ -717,7 +727,8 @@ def candidate_search_route(
     for e in team_db.list_company_members(company_id):
         _emit(e.get("user_id"), e.get("display_name"), e.get("email"), "company")
 
-    return {"candidates": out[:20]}
+    pending_invites = team_db.list_pending_invite_emails(company_id, project_id)
+    return {"candidates": out[:20], "pending_invites": pending_invites}
 
 
 @router.delete("/{project_id}/members/{user_id}")

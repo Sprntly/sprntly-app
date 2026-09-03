@@ -292,7 +292,7 @@ afterEach(() => {
   emitDelegationEventMock.mockReset()
   emitDelegationEventMock.mockResolvedValue({ delegation_id: 1, status: "accepted" })
   candidateSearchMock.mockReset()
-  candidateSearchMock.mockResolvedValue([])
+  candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
   tagCandidateMock.mockReset()
   instructionsMock.mockReset()
   instructionsMock.mockResolvedValue({ instructions: null })
@@ -724,7 +724,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -746,7 +746,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -770,7 +770,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })

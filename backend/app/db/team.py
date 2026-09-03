@@ -10,6 +10,7 @@ caller's route is the access boundary, not the DB policy).
 from __future__ import annotations
 
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from app.db.authcache import invalidate_user
 from app.db.client import require_client, retry_on_disconnect
@@ -102,6 +103,74 @@ def list_pending_invites(company_id: str) -> list[dict]:
         .execute()
     )
     return result.data or []
+
+
+def _parse_invite_created_at(value) -> datetime | None:
+    """Parse an ISO-8601 `created_at` (with or without 'Z') to aware UTC —
+    same tolerant parse `app/invite_reminders.py::_parse_ts` uses, kept as a
+    small local copy rather than an import to avoid a db/ → app-module
+    layering edge for one helper."""
+    if not value:
+        return None
+    text = str(value).strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+@retry_on_disconnect
+def list_pending_invite_emails(company_id: str, project_id: int | None = None) -> list[str]:
+    """Lower-cased emails with a LIVE (non-expired) pending invite in
+    `company_id` — feeds the project candidate picker's "Invited" state
+    (`routes/projects.py::candidate_search_route`).
+
+    "Pending" means the `workspace_invites` row still exists — accept
+    deletes it (see `list_pending_invites`'s docstring above), so there is
+    no status column to read. Expiry is derived HERE, at read time, from
+    `created_at + settings.invite_expiry_days`, the same contract `app/
+    invite_reminders.py`'s stop-condition already uses for the reminder
+    drip — an expired-by-age row is treated as not-pending.
+
+    `(company_id, email)` is UNIQUE on `workspace_invites` (one row per
+    email per company, whether or not it carries a `project_id` — Extension
+    B), so a pending invite is inherently company-wide: `project_id` is
+    accepted here for callers that have it on hand but is deliberately NOT
+    part of the filter — narrowing to `workspace_invites.project_id ==
+    project_id` would hide a company-wide (non-project) or a
+    different-project invite for the same email, even though accepting it
+    still lands them as a member visible from every project's picker."""
+    client = require_client()
+    rows = (
+        client.table("workspace_invites")
+        .select("email, created_at")
+        .eq("company_id", company_id)
+        .execute()
+        .data
+        or []
+    )
+    if not rows:
+        return []
+    from app import config as config_mod
+
+    expiry_days = getattr(config_mod.settings, "invite_expiry_days", 30) or 30
+    cutoff = datetime.now(timezone.utc) - timedelta(days=expiry_days)
+
+    out: list[str] = []
+    for row in rows:
+        email = (row.get("email") or "").strip().lower()
+        if not email:
+            continue
+        created = _parse_invite_created_at(row.get("created_at"))
+        if created is not None and created < cutoff:
+            continue  # expired-by-age — not pending
+        out.append(email)
+    return out
 
 
 @retry_on_disconnect

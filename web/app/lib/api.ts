@@ -6823,20 +6823,24 @@ export const projectsApi = {
    *  project plus in-tenant non-members (workspace, then company), each
    *  tagged `kind`, filtered by `q` (casefold-contains on name/email) and
    *  capped at 20 — never anyone outside the project's company. A non-member
-   *  caller gets 403. */
+   *  caller gets 403.
+   *
+   *  `pending_invites` (lower-cased emails) is the single source the picker
+   *  uses to render "Invited" for a not-yet-accepted invite — including a
+   *  brand-new email typed into the by-email row, which never appears in
+   *  `candidates`. Company-wide by construction (`workspace_invites`'
+   *  `(company_id, email)` uniqueness) and already excludes expired-by-age
+   *  rows — see `db/team.py::list_pending_invite_emails`. */
   candidateSearch: (id: number | string, q: string) =>
-    api
-      .get<{
-        candidates: {
-          kind: "member" | "workspace" | "company"
-          user_id: string
-          name: string | null
-          email: string | null
-        }[]
-      }>(
-        `/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`,
-      )
-      .then((r) => r.candidates),
+    api.get<{
+      candidates: {
+        kind: "member" | "workspace" | "company"
+        user_id: string
+        name: string | null
+        email: string | null
+      }[]
+      pending_invites: string[]
+    }>(`/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`),
   /** Add an artifact ref to the project
    *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
    *  ownership validation happens server-side; a foreign/absent artifact

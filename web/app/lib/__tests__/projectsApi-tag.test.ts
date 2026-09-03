@@ -46,10 +46,11 @@ describe("projectsApi tag-action methods", () => {
     expect(JSON.parse(init.body as string)).toEqual({ needle: "Fortune" })
   })
 
-  it("candidateSearch GETs the q-scoped candidates route and unwraps candidates", async () => {
+  it("candidateSearch GETs the q-scoped candidates route and returns candidates + pending_invites", async () => {
     fetchMock.mockResolvedValueOnce(
       jsonResponse(200, {
         candidates: [{ kind: "member", user_id: "u1", name: "A", email: "a@x.co" }],
+        pending_invites: ["b@x.co"],
       }),
     )
     const out = await projectsApi.candidateSearch(3, "for")
@@ -57,11 +58,14 @@ describe("projectsApi tag-action methods", () => {
     const [url, init] = lastCall()
     expect(url).toContain("/v1/projects/3/candidates?q=for")
     expect(init.method).toBe("GET")
-    expect(out).toEqual([{ kind: "member", user_id: "u1", name: "A", email: "a@x.co" }])
+    expect(out).toEqual({
+      candidates: [{ kind: "member", user_id: "u1", name: "A", email: "a@x.co" }],
+      pending_invites: ["b@x.co"],
+    })
   })
 
   it("candidateSearch url-encodes the query", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse(200, { candidates: [] }))
+    fetchMock.mockResolvedValueOnce(jsonResponse(200, { candidates: [], pending_invites: [] }))
     await projectsApi.candidateSearch(3, "a b@x.co")
 
     const [url] = lastCall()

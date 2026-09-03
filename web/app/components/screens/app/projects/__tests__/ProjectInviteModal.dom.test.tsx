@@ -49,7 +49,7 @@ afterEach(() => {
 
 describe("ProjectInviteModal — no current-members block", () => {
   it("test_invite_modal_has_no_current_members_block — project-invite-members-label and project-invite-members are absent", async () => {
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     renderModal()
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
     expect(screen.queryByTestId("project-invite-members-label")).toBeNull()
@@ -66,11 +66,14 @@ describe("ProjectInviteModal — no current-members block", () => {
 
 describe("ProjectInviteModal — open (empty query) fetches workspace non-members", () => {
   it("test_invite_modal_open_fetches_workspace_non_members — candidateSearch is called on open; the add list shows only kind:workspace rows; kind:member is absent; no project-invite-hint", async () => {
-    candidateSearchMock.mockResolvedValue([
-      { kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" },
-      { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
-      { kind: "company", user_id: "u4", name: "Someone Else", email: "else@example.com" },
-    ])
+    candidateSearchMock.mockResolvedValue({
+      candidates: [
+        { kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" },
+        { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
+        { kind: "company", user_id: "u4", name: "Someone Else", email: "else@example.com" },
+      ],
+      pending_invites: [],
+    })
     renderModal()
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalledWith(101, ""))
 
@@ -83,9 +86,10 @@ describe("ProjectInviteModal — open (empty query) fetches workspace non-member
   })
 
   it("test_invite_modal_empty_workspace_shows_empty_state — no kind:workspace rows renders an empty-state, not the old hint", async () => {
-    candidateSearchMock.mockResolvedValue([
-      { kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" },
-    ])
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" }],
+      pending_invites: [],
+    })
     renderModal()
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
 
@@ -95,9 +99,10 @@ describe("ProjectInviteModal — open (empty query) fetches workspace non-member
   })
 
   it("test_invite_modal_add_button_calls_tag_candidate — clicking a workspace row's add button calls tagCandidate(projectId, needle) once, fires onInvited, shows the added affordance on t_workspace", async () => {
-    candidateSearchMock.mockResolvedValue([
-      { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
-    ])
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" }],
+      pending_invites: [],
+    })
     tagCandidateMock.mockResolvedValue({ tier: "t_workspace", added: true })
     const onInvited = vi.fn()
     renderModal({ onInvited })
@@ -116,7 +121,7 @@ describe("ProjectInviteModal — open (empty query) fetches workspace non-member
 
 describe("ProjectInviteModal — typed query: typeahead + email invite path still present", () => {
   it("test_invite_modal_email_path_still_present — the search input + email-invite affordance render and call tagCandidate", async () => {
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     const onInvited = vi.fn()
     tagCandidateMock.mockResolvedValue({ tier: "t_newuser", invited: true, email_status: "sent" })
     renderModal({ onInvited })
@@ -137,9 +142,12 @@ describe("ProjectInviteModal — typed query: typeahead + email invite path stil
   })
 
   it("searches via projectsApi.candidateSearch as the user types (typeahead, unchanged)", async () => {
-    candidateSearchMock.mockResolvedValueOnce([]).mockResolvedValueOnce([
-      { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
-    ])
+    candidateSearchMock
+      .mockResolvedValueOnce({ candidates: [], pending_invites: [] })
+      .mockResolvedValueOnce({
+        candidates: [{ kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" }],
+        pending_invites: [],
+      })
     renderModal()
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalledWith(101, ""))
 
@@ -153,9 +161,12 @@ describe("ProjectInviteModal — typed query: typeahead + email invite path stil
   })
 
   it("a members-already row for an existing member is not clickable", async () => {
-    candidateSearchMock.mockResolvedValueOnce([]).mockResolvedValueOnce([
-      { kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" },
-    ])
+    candidateSearchMock
+      .mockResolvedValueOnce({ candidates: [], pending_invites: [] })
+      .mockResolvedValueOnce({
+        candidates: [{ kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" }],
+        pending_invites: [],
+      })
     renderModal()
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalledWith(101, ""))
 
@@ -166,5 +177,76 @@ describe("ProjectInviteModal — typed query: typeahead + email invite path stil
     const row = await screen.findByTestId("project-invite-candidate")
     expect(within(row).getByTestId("project-invite-already")).toBeTruthy()
     expect(within(row).queryByTestId("project-invite-add")).toBeNull()
+  })
+})
+
+describe("ProjectInviteModal — pending-invite state (Invited vs Added)", () => {
+  it("test_invite_modal_pending_candidate_shows_invited — a non-member candidate whose email is in pending_invites renders a static Invited badge, not an Add button", async () => {
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" }],
+      pending_invites: ["fortune@example.com"],
+    })
+    renderModal()
+    await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
+
+    const row = await screen.findByTestId("project-invite-candidate")
+    expect(within(row).getByTestId("project-invite-pending").textContent).toContain("Invited")
+    expect(within(row).queryByTestId("project-invite-add")).toBeNull()
+  })
+
+  it("test_invite_modal_member_shows_added_not_invited — a kind:member row still renders 'On this project' even if its email happens to be in pending_invites", async () => {
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "member", user_id: "u2", name: "Grace Hopper", email: "grace@example.com" }],
+      pending_invites: ["grace@example.com"],
+    })
+    renderModal()
+    await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("project-invite-search"), { target: { value: "grac" } })
+      await new Promise((r) => setTimeout(r, 200))
+    })
+    const row = await screen.findByTestId("project-invite-candidate")
+    expect(within(row).getByTestId("project-invite-already").textContent).toContain("On this project")
+    expect(within(row).queryByTestId("project-invite-pending")).toBeNull()
+  })
+
+  it("test_invite_modal_by_email_pending_shows_invited — a needle already in pending_invites renders Invited instead of the Invite button", async () => {
+    candidateSearchMock.mockResolvedValue({
+      candidates: [],
+      pending_invites: ["new.person@example.com"],
+    })
+    renderModal()
+    await waitFor(() => expect(candidateSearchMock).toHaveBeenCalledWith(101, ""))
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("project-invite-search"), { target: { value: "new.person@example.com" } })
+      await new Promise((r) => setTimeout(r, 200))
+    })
+    const row = await screen.findByTestId("project-invite-by-email-row")
+    expect(within(row).getByTestId("project-invite-pending").textContent).toContain("Invited")
+    expect(within(row).queryByTestId("project-invite-by-email")).toBeNull()
+  })
+
+  it("test_invite_modal_invite_optimistically_flips_to_invited — after a successful t_newuser tag, the by-email row flips to Invited without a refetch", async () => {
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
+    tagCandidateMock.mockResolvedValue({ tier: "t_newuser", invited: true, email_status: "sent" })
+    const onInvited = vi.fn() // does NOT re-trigger candidateSearch in this test — proves the flip is optimistic, not from a refetch
+    renderModal({ onInvited })
+    await waitFor(() => expect(candidateSearchMock).toHaveBeenCalledWith(101, ""))
+
+    await act(async () => {
+      fireEvent.change(screen.getByTestId("project-invite-search"), { target: { value: "new.person@example.com" } })
+      await new Promise((r) => setTimeout(r, 200))
+    })
+    const inviteBtn = await screen.findByTestId("project-invite-by-email")
+    await act(async () => {
+      fireEvent.click(inviteBtn)
+    })
+    await waitFor(() => expect(tagCandidateMock).toHaveBeenCalledWith(101, "new.person@example.com"))
+
+    const row = await screen.findByTestId("project-invite-by-email-row")
+    expect(within(row).getByTestId("project-invite-pending").textContent).toContain("Invited")
+    expect(within(row).queryByTestId("project-invite-by-email")).toBeNull()
   })
 })
