@@ -31,6 +31,7 @@ import { useAuth } from "../../lib/auth"
 import { useWorkspace } from "../../context/WorkspaceContext"
 import { markProductTourSeen } from "../../lib/onboarding/store"
 import { parseFeatureFlags } from "../../lib/onboarding/types"
+import { BILLING_ENABLED } from "../../lib/billingAccess"
 import { stepsFor, type TourAudience, type TourStep } from "./tourSteps"
 import styles from "./ProductTour.module.css"
 
@@ -133,7 +134,9 @@ export function ProductTour() {
       flags: parseFeatureFlags(workspace.feature_flags),
       orgRole,
       firstName: profile.first_name,
-      onTrial: workspace.subscription_status === "trialing",
+      // PAYMENTS HIDDEN: never. The step is anchored to `sidebar-trial`,
+      // which the rail no longer renders, so it would point at nothing.
+      onTrial: BILLING_ENABLED && workspace.subscription_status === "trialing",
       workspaceCount: workspaces.length,
     }
     const resolved = stepsFor(audience)

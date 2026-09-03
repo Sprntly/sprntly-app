@@ -68,6 +68,7 @@ vi.mock("../../prdAccessApi", () => ({
 }))
 
 import { postLoginPath } from "../client"
+import { BILLING_ENABLED } from "../../billingAccess"
 import { ONBOARDING_STEP_SLUGS, slugForStep } from "../../onboarding/types"
 import { ApiError } from "../../api"
 
@@ -487,7 +488,9 @@ describe("postLoginPath — the onboarding payment gate", () => {
   // The gate is COMPANY-level, not user-level, which is what stops an invited
   // teammate being charged for a company that already pays.
 
-  it("sends an unpaid company's unfinished onboarding to the plan gate", async () => {
+  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
+  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
+  it.skipIf(!BILLING_ENABLED)("sends an unpaid company's unfinished onboarding to the plan gate", async () => {
     existingMemberUser({
       onboarding_completed_at: null,
       onboarding_step: 2,
@@ -498,7 +501,9 @@ describe("postLoginPath — the onboarding payment gate", () => {
     expect(await postLoginPath()).toBe("/onboarding/plan")
   })
 
-  it("keeps sending them back there until they finish — the step is NOT rewound", async () => {
+  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
+  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
+  it.skipIf(!BILLING_ENABLED)("keeps sending them back there until they finish — the step is NOT rewound", async () => {
     // Someone who abandons at Stripe still has a company row, a verified
     // email and a persisted step naming where they carry on. That is the
     // whole reason payment sits this early: an abandoned signup is a lead.
@@ -516,6 +521,20 @@ describe("postLoginPath — the onboarding payment gate", () => {
       onboarding_completed_at: null,
       onboarding_step: 6,
       subscription_status: "active",
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)
+  })
+
+  it.runIf(!BILLING_ENABLED)("payments hidden: an unpaid company resumes its own step, not the gate", async () => {
+    // The step is still NOT rewound — that half never depended on payment.
+    // What changes is the destination: they carry on where they left off
+    // instead of being parked in front of a plan picker.
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 6,
+      plan: "starter",
+      subscription_status: "canceled",
     })
     acceptInviteMock.mockRejectedValue(new Error("no invite"))
     expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)

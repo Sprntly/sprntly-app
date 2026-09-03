@@ -13,6 +13,34 @@
  * being copied at all.
  */
 
+/**
+ * PAYMENTS ARE HIDDEN. The one switch, and the whole of it.
+ *
+ * Nothing below is deleted and no billing file was removed — the plan screen,
+ * the Billing pane, the trial pill, the Stripe client and the credit ledger
+ * are all still here, exactly as they were. While this is false every gate in
+ * this module simply answers "yes, carry on": nothing is ever refused, no
+ * subscription can lapse, and no balance can run out.
+ *
+ * WHAT IS HIDDEN IS THE COMPULSION, NOT THE SCREENS (owner decision). Settings
+ * still shows Billing and a curious user can read it and even start a checkout
+ * — it is only that nothing they see there stands between them and the
+ * product. The two places that DID stand in the way are gone with the gates:
+ * the onboarding plan step, which is reached only by a guard redirect, and the
+ * sidebar trial countdown, which checks this flag at its call site along with
+ * the product-tour step anchored to it. `trialDaysLeft` itself stays honest —
+ * the Billing pane still has to report a trial Stripe really did record.
+ *
+ * TO BRING PAYMENTS BACK: set this to true, and its backend mirror
+ * `BILLING_ENABLED` in `backend/app/billing/enforce.py` to True. That is the
+ * entire revert — two constants, no other edit, no behaviour lost in between.
+ *
+ * A constant rather than a `NEXT_PUBLIC_*` env var on purpose: web is a static
+ * export, so an env var is inlined at build time anyway and buys nothing but a
+ * second place for the two sides to disagree.
+ */
+export const BILLING_ENABLED = false
+
 /** Stripe's vocabulary, stored verbatim. `past_due` still grants access —
  *  cutting a paying customer off while Smart Retries work the card is how a
  *  bounced card becomes churn. */
@@ -35,6 +63,8 @@ export function subscriptionGrantsAccess(
 export function companyHasPaid(
   company: { plan?: string | null; subscription_status?: string | null } | null,
 ): boolean {
+  // Hidden: nobody is ever asked for a card, so everybody has already paid.
+  if (!BILLING_ENABLED) return true
   if (!company) return false
   return subscriptionGrantsAccess(company.plan, company.subscription_status)
 }

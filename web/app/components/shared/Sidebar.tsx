@@ -6,7 +6,7 @@ import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
 import { useRouter } from "next/navigation"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
-import { trialDaysLeft, trialLabel } from "../../lib/billingAccess"
+import { BILLING_ENABLED, trialDaysLeft, trialLabel } from "../../lib/billingAccess"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
 import {
@@ -47,7 +47,10 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
     orgRole,
     setActiveWorkspace,
   } = useWorkspace()
-  const trialDays = trialDaysLeft(workspace)
+  // PAYMENTS HIDDEN: no pill. A countdown to a charge that will not happen is
+  // the last thing in the app that would mention money, and the tour step
+  // anchored to it goes with it (see ProductTour).
+  const trialDays = BILLING_ENABLED ? trialDaysLeft(workspace) : null
   // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
   // active dataset — the same run the scheduler triggers, not a bespoke
   // sync-all. The backend collapses repeat clicks onto the in-flight run

@@ -19,8 +19,29 @@ from app.billing import plans
 def gate(monkeypatch, isolated_settings):
     from app import scheduler
 
+    # PAYMENTS HIDDEN: the fixture means "billing is switched on", which is
+    # both halves of the switch — see the constant in app/billing/plans.py.
+    monkeypatch.setattr(plans, "BILLING_ENABLED", True)
     monkeypatch.setattr(scheduler.settings, "billing_enforced", True)
     return scheduler
+
+
+def test_payments_hidden_works_every_tenant(monkeypatch, isolated_settings):
+    """With payments hidden nobody is lapsed, so nobody is skipped.
+
+    Deliberately asserted with the env flag ON: the constant outranks it, and a
+    scheduler that silently stopped generating briefs for a tenant marked
+    `canceled` in a database from before the switch would be a support ticket
+    nobody could explain from the UI.
+    """
+    from app import scheduler
+
+    monkeypatch.setattr(scheduler.settings, "billing_enforced", True)
+    assert plans.BILLING_ENABLED is False
+    for status in ("canceled", "unpaid", "incomplete_expired", None):
+        assert scheduler._billing_allows_scheduled_work(
+            _co(subscription_status=status)
+        ) is True, status
 
 
 def _co(**over) -> dict:
