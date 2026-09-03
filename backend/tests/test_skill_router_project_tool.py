@@ -8,7 +8,11 @@ built on it; this file is the equivalent home for the new one).
 """
 from __future__ import annotations
 
-from app.skill_router import is_project_content_request, is_project_tool_request
+from app.skill_router import (
+    is_project_completion_request,
+    is_project_content_request,
+    is_project_tool_request,
+)
 
 
 def test_delegate_phrasings_match():
@@ -224,3 +228,113 @@ def test_is_project_tool_request_unchanged():
         assert is_project_tool_request(q) is False, q
     assert is_project_tool_request("") is False
     assert is_project_tool_request(None) is False
+
+
+# ── is_project_completion_request (re-armed for the `complete_task` re-wire) ──
+
+
+def test_completion_claims_match():
+    """First-person completion CLAIMS — the assignee (or the ledger tick,
+    which submits the same shape) reporting THEIR OWN task done — admit."""
+    for q in (
+        "I've finished the export review",
+        "I have finished the pricing one-pager",
+        "finished that",
+        "done with the onboarding checklist",
+        "wrapped up the deck",
+        "I'm done with the review",
+        "it's ready",
+        "sent it over",
+        "all set",
+        "the deck is done",  # declarative status CLAIM — kept admitting
+        # The task-ledger tick submits exactly this shape.
+        'I\'ve finished this task: "the export review". Please mark it complete.',
+    ):
+        assert is_project_completion_request(q) is True, q
+
+
+def test_completion_questions_and_reads_decline():
+    """Interrogative / status-QUESTION phrasings (wh-led, "status of …") are
+    vetoed — they are not first-person completion claims and must not route to
+    `complete_task`."""
+    for q in (
+        "what's the status of the review?",
+        "who is working on the deck?",
+        "how is the export review going?",
+        "when will the deck be done?",
+        "summarize the PRD",
+        "what tasks are open?",
+    ):
+        assert is_project_completion_request(q) is False, q
+    assert is_project_completion_request("") is False
+    assert is_project_completion_request(None) is False
+
+
+def test_completion_signature_accepts_history():
+    """Signature parity with the sibling gates: `history` is accepted (not
+    consulted in v1) so the admission ladder can call it uniformly."""
+    assert is_project_completion_request("finished that", [{"role": "user", "content": "hi"}]) is True
+
+
+#: The yes/no-interrogative cases the completion-only question veto must reject —
+#: same words as a completion CLAIM but in QUESTION order (constraint-(b) guard).
+_YESNO_COMPLETION_QUESTIONS = (
+    "are we done with the deck?",
+    "has David finished the review?",
+    "did I finish that?",
+    "is the review complete?",
+)
+
+
+def test_completion_yesno_questions_decline():
+    """Constraint-(b) regression guard. A yes/no-interrogative phrased with the
+    SAME words as a completion claim ("is the review complete?" vs "the review
+    is complete") must NOT admit — otherwise the forcing pass would
+    force-complete a task on a QUESTION. Vetoed by the completion-only leading-
+    auxiliary veto (`_PROJECT_TOOL_COMPLETE_QUESTION_VETO`)."""
+    for q in _YESNO_COMPLETION_QUESTIONS:
+        assert is_project_completion_request(q) is False, q
+
+
+#: The subset of yes/no questions whose words `_PROJECT_TOOL_COMPLETE_VERB`
+#: DOES match ("done with the deck", "finished the review") — so ONLY the
+#: completion-only question veto stands between them and a false-positive
+#: admission. (The other two decline anyway because the verb regex never
+#: matches their words — the veto is belt-and-braces there.)
+_VETO_LOAD_BEARING_QUESTIONS = (
+    "are we done with the deck?",
+    "has David finished the review?",
+)
+
+
+def test_completion_yesno_veto_is_load_bearing(monkeypatch):
+    """Mutation proof for the completion-only question veto. Neutralise it (a
+    never-match regex — the observable effect of deleting the veto) and the
+    questions whose WORDS match the completion verb regex become FALSE
+    POSITIVES that admit (RED). Restore it and they decline (GREEN). Proves the
+    veto — not some pre-existing guard — is what closes the constraint-(b) gap
+    for the phrasings the verb regex would otherwise wave through."""
+    import re
+
+    import app.skill_router as sr
+
+    # RED: veto deleted → the bare completion-verb regex admits the questions.
+    monkeypatch.setattr(sr, "_PROJECT_TOOL_COMPLETE_QUESTION_VETO", re.compile(r"(?!)"))
+    assert all(sr.is_project_completion_request(q) for q in _VETO_LOAD_BEARING_QUESTIONS)
+
+    # GREEN: real veto restored → all decline.
+    monkeypatch.undo()
+    assert not any(sr.is_project_completion_request(q) for q in _VETO_LOAD_BEARING_QUESTIONS)
+
+
+def test_completion_veto_does_not_regress_delegation_admission():
+    """The completion-only veto is completion-scoped: leading-auxiliary
+    delegation leads ("can you ask …", "have Fortune handle …") must STILL be
+    admitted by `is_project_tool_request` — the shared `_PROJECT_TOOL_MENTION_
+    VETO` was intentionally left untouched."""
+    for q in (
+        "can you ask Femi to take this",
+        "have Fortune handle the deploy",
+        "can you delegate this to Fortune",
+    ):
+        assert is_project_tool_request(q) is True, q

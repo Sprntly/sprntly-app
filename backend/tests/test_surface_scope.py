@@ -81,19 +81,21 @@ def _assemble_private_scope_unit(monkeypatch, *, project_id: int = 9):
     return ProjectContextAssembler().assemble(req)
 
 
-def test_surface_scope_project_private_carries_six_extra_tools(monkeypatch):
+def test_surface_scope_project_private_carries_seven_extra_tools(monkeypatch):
     from app import project_delegation, project_task_execution
     from app.project_group_context import read_tools
 
     scope = _assemble_private_scope_unit(monkeypatch)
-    assert len(scope.extra_tools) == 6
+    assert len(scope.extra_tools) == 7
     names = [t["name"] for t in scope.extra_tools]
     expected = [t["name"] for t in (
         project_delegation.DELEGATE_TASK_TOOL,
         project_task_execution.EXECUTE_TASK_TOOL,
+        project_delegation.COMPLETE_TASK_TOOL,
         *read_tools(),
     )]
     assert names == expected
+    assert "complete_task" in names
     # AC9 no-leak: the GROUP-only `edit_prd` tool is NOT on the private scope,
     # and private registers no edit handler — so its `answer()` result shape
     # is unaffected by the group's in-band edit tool.

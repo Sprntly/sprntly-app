@@ -1075,6 +1075,80 @@ def test_complete_task_tool_fires_completion_email(isolated_settings, monkeypatc
     assert calls[0] == (project["id"], deleg["id"], assignee_id)
 
 
+def test_complete_task_tool_posts_one_inapp_assigner_notice_and_one_email(
+    isolated_settings, monkeypatch,
+):
+    """The deterministic `complete_task` path must post the SAME in-app assigner
+    notice the background classifier path posts ("✓ {name} finished: {summary}"
+    into the ASSIGNER's own chat) AND send exactly ONE completion email — no
+    double-email, no double in-app turn. This restores the real-time in-app
+    notice the tool path previously dropped (it fired only the email)."""
+    from app.db import conversations as conversations_db
+    from app.db.project_delegations import record_delegation
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)  # assignee "Fortune Adeyemi"
+    deleg = record_delegation(
+        project_id=project["id"], assigner_user_id=ctx.user_id, assignee_user_id=assignee_id,
+        task_summary="Ship the deck", source_conversation_id=None, source_turn_id=None,
+        delivered_conversation_id=None, delivered_turn_id=None,
+    )
+
+    # Count emails (don't actually send).
+    email_calls: list = []
+    monkeypatch.setattr(
+        project_delegation, "_notify_assigner_task_completed_email",
+        lambda project_id, delegation_id, *, assignee_user_id: email_calls.append(
+            (project_id, delegation_id, assignee_user_id)
+        ),
+    )
+    monkeypatch.setattr(
+        project_delegation, "list_status_for_assignee",
+        lambda project_id, user_id: [
+            {"delegation_id": deleg["id"], "status": "assigned", "task_summary": "Ship the deck"}
+        ],
+    )
+    # Skip the ledger-liveness DTO publish so the ONLY in-app turn this asserts
+    # on is the assigner completion notice itself.
+    monkeypatch.setattr(project_delegation, "status_dto", lambda delegation_id: None)
+
+    # Capture every in-app turn posted + which chat it lands in.
+    turn_calls: list = []
+    original_post = project_delegation.post_individual_turn
+
+    def _spy_post(conversation_id, role, content):
+        turn_calls.append({"conversation_id": conversation_id, "role": role, "content": content})
+        return original_post(conversation_id, role, content)
+
+    monkeypatch.setattr(project_delegation, "post_individual_turn", _spy_post)
+
+    chat_owners: list = []
+    original_chat = project_delegation.create_individual_project_chat
+
+    def _spy_chat(project_id, user_id):
+        chat_owners.append(user_id)
+        return original_chat(project_id, user_id)
+
+    monkeypatch.setattr(project_delegation, "create_individual_project_chat", _spy_chat)
+
+    result = project_delegation.handle_complete_task(
+        project_id=project["id"], completer_user_id=assignee_id,
+        tool_input={"task_summary": "Ship the deck"},
+    )
+    assert result.startswith("Got it")
+
+    # Exactly ONE completion email (no double-email).
+    assert len(email_calls) == 1
+
+    # Exactly ONE in-app assigner notice, correct background-path wording,
+    # posted into the ASSIGNER's own chat (no double in-app turn).
+    notice_turns = [t for t in turn_calls if t["content"].startswith("✓")]
+    assert len(notice_turns) == 1, turn_calls
+    assert notice_turns[0]["content"] == "✓ Fortune finished: Ship the deck"
+    assert notice_turns[0]["role"] == "assistant"
+    assert chat_owners == [ctx.user_id]  # the assigner's own chat, exactly once
+
+
 # ── Cost / observability (AC10/AC11) ──────────────────────────────────────
 
 

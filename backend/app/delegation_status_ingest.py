@@ -399,6 +399,21 @@ def _apply_classification(
                 project_id, delegation_id,
                 assignee_user_id=replier_user_id, task_summary=row.get("task_summary"),
             )
+            # Assignee-facing confirmation safety net: post a "marked done"
+            # turn into the ASSIGNEE's OWN chat too. This background classifier
+            # path catches the completion phrasings the deterministic
+            # `complete_task` gate (`skill_router.is_project_completion_request`)
+            # misses — those turns never reach `handle_complete_task`, whose
+            # authoritative reply the assignee would otherwise have seen — so
+            # without this the assignee gets NO confirmation their report
+            # registered. Reuses the module's own `_post_to_own_chat` helper
+            # (same mechanic the requester notice uses). Does NOT duplicate the
+            # completion write — that already happened via `record_event`
+            # above — only adds the assignee-facing post beside the existing
+            # assigner notification. Best-effort like every notify here.
+            summary = (row.get("task_summary") or "").strip()
+            confirm = f"✓ Marked done: {summary}" if summary else "✓ Marked done."
+            _post_to_own_chat(project_id, replier_user_id, confirm)
         delegation_followups_db.upsert_followup(delegation_id, pending_done_since=None)
     elif intent == "done_inferred":
         delegation_followups_db.upsert_followup(
