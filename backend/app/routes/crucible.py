@@ -1566,6 +1566,33 @@ def _run_enrichment(
     except Exception:  # noqa: BLE001
         logger.exception("crucible: deep recommendations skipped for run %s", run_id)
 
+    # LIST PRICING, FOR THE LIVE PANEL — computed UNCONDITIONALLY, unlike
+    # `recommendation_basis` above. That one only exists to answer a money
+    # target somebody named, so it lives inside the money-target branch of
+    # `resolve_recommendation_count` and is silent on every other run. List
+    # pricing is not a property of one goal — `report.py`'s own words: "it
+    # is what the product costs, and it turns up wherever pricing was
+    # discussed" — so `report.py`'s `_findings_section` renders it on EVERY
+    # report, and this line has to match that scope: computed every run,
+    # over the same goal-relevant `relevant_impacts` set the deep pass above
+    # reads, gated on nothing but whether any finding actually carries
+    # pricing units.
+    #
+    # NEVER BUILT ON A REPORT.PY IMPORT. `quoted_list_pricing_basis` lives
+    # beside `_quoted_money_toward_target` in `recommend.py` and reads
+    # `Impact.native_units` directly — the frozen scored shape this route
+    # already has in hand, not the stored-row dict shape `report.py`'s own
+    # `_list_pricing` reads back later. Both call the same
+    # `aggregate_price_range` for the arithmetic, so the two surfaces can
+    # never disagree even though they start from different data.
+    list_pricing_basis = ""
+    try:
+        from app.crucible.recommend import quoted_list_pricing_basis
+
+        list_pricing_basis = quoted_list_pricing_basis(relevant_impacts) or ""
+    except Exception:  # noqa: BLE001
+        logger.exception("crucible: list pricing basis skipped for run %s", run_id)
+
     # THE FUNNEL'S OWN "written up in full" NUMBER, CORRECTED. `execute_run`
     # published `deep=result.deep_count` before this function ever ran —
     # Stage 10a's screening-tier cap (a constant, e.g. 5), which is the best
@@ -1639,6 +1666,11 @@ def _run_enrichment(
     }
     return {
         "recommendation_basis": recommendation_basis,
+        # Sibling of `recommendation_basis` above, same panel-parity purpose:
+        # `GoalAnalysisReport.tsx` reads this straight off the run's
+        # `prioritisation` dict and renders it verbatim, the same way it
+        # already does for `recommendation_basis` — see that field's comment.
+        "list_pricing_basis": list_pricing_basis,
         # Recorded so the renderer can tell "the gate ran and kept
         # everything" from "no gate ever touched this run" — see
         # `report.py`'s `_definition_section`/`_limits_section`.

@@ -174,7 +174,9 @@ from app.crucible.recommend import (
     _grounded_in,
     _named_count,
     _named_target,
+    aggregate_price_range,
     build_deep_recommendations,
+    quoted_list_pricing_basis,
     resolve_recommendation_count,
 )
 from app.crucible.invariants import assert_llm_schema_returns_no_decision
@@ -1416,3 +1418,86 @@ def test_deep_recommendation_never_moves_the_ranking():
     assert [i.value for i in after.impacts] == [i.value for i in before.impacts]
     assert [c.band for c in after.confidences] == [c.band for c in before.confidences]
     assert [c.score for c in after.confidences] == [c.score for c in before.confidences]
+
+
+# ── List pricing, unconditionally — the live panel's own basis string ───────
+#
+# Mirrors `report.py`'s `_list_pricing`/`_findings_section`, in wording and in
+# arithmetic (`aggregate_price_range` is the one place both this function and
+# `report._list_pricing` compute the min-of-mins/max-of-maxes rule), so the
+# live panel and the exported document can never disagree.
+
+def _list_priced_impact(lo, hi):
+    """An `Impact` whose only evidence is a rate-card quote: real, quoted,
+    and — unlike `_figure_only` above — never summed across findings."""
+    return Impact(value=None, currency="accounts", affected_population=None,
+                  movable_gap=None, value_per_unit=None,
+                  native_units={"commercial_list_price_min": lo,
+                                "commercial_list_price_max": hi})
+
+
+def test_aggregate_price_range_is_a_min_of_mins_and_a_max_of_maxes():
+    """Exact, and the only aggregate that is — see `report.py`'s own
+    docstring on why summing a rate card double-counts it."""
+    assert aggregate_price_range([(5000.0, 30000.0), (2000.0, 47500.0)]) == (
+        2000.0, 47500.0, 2
+    )
+
+
+def test_aggregate_price_range_is_none_for_an_empty_sequence():
+    assert aggregate_price_range([]) is None
+
+
+def test_quoted_list_pricing_basis_is_none_when_nothing_carries_pricing():
+    impacts = [Impact(value=5.0, currency="accounts", affected_population=5.0,
+                       movable_gap=1.0, value_per_unit=None)]
+    assert quoted_list_pricing_basis(impacts) is None
+
+
+def test_quoted_list_pricing_basis_fires_with_no_named_money_target():
+    """THE HARD REQUIREMENT this ticket exists to prove: unlike
+    `recommendation_basis` (only computed inside `resolve_recommendation_
+    count`'s money-target branch), this must fire on a plain, non-dollar
+    goal — proving it is not accidentally gated the same way."""
+    impacts = [_list_priced_impact(2000.0, 100000.0)]
+    basis = quoted_list_pricing_basis(impacts)
+    assert basis is not None
+    assert "List pricing was quoted in" in basis
+    assert "$2,000–$100,000" in basis
+    # And the goal itself never named a target at all — this is not the
+    # money-target code path answering a question nobody asked.
+    result = resolve_recommendation_count(
+        "improve onboarding satisfaction", impacts,
+    )
+    assert not result.basis or "you asked for" not in result.basis
+    assert "you named a target" not in result.basis
+
+
+def test_quoted_list_pricing_basis_matches_the_exported_documents_wording():
+    """Identical prose to `report.py`'s `_list_pricing`/`_findings_section`
+    paragraph, so the live panel and the document never disagree."""
+    impacts = [_list_priced_impact(30000.0, 30000.0)]
+    basis = quoted_list_pricing_basis(impacts)
+    assert basis == (
+        "List pricing was quoted in one finding below. $30,000. "
+        "This is what was quoted, not what was agreed — the same price "
+        "offered to several accounts is one rate card, so these are never "
+        "added together or added to any figure above."
+    )
+
+
+def test_quoted_list_pricing_basis_says_how_many_findings_it_speaks_for():
+    impacts = [_list_priced_impact(5000.0, 30000.0),
+               _list_priced_impact(2000.0, 47500.0)]
+    basis = quoted_list_pricing_basis(impacts)
+    assert "2 of the findings below" in basis
+    assert "$2,000–$47,500" in basis
+
+
+def test_quoted_list_pricing_basis_never_sums_the_ranges():
+    """A $30,000 tier quoted sixteen times is not $480,000 — same
+    non-additivity rule as `report.py`'s `_list_pricing`."""
+    impacts = [_list_priced_impact(30000.0, 30000.0) for _ in range(16)]
+    basis = quoted_list_pricing_basis(impacts)
+    for forbidden in ("$480,000", "$195,000"):
+        assert forbidden not in basis, forbidden

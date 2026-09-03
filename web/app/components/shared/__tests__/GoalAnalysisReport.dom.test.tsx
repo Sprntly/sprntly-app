@@ -988,6 +988,50 @@ describe("AC-2: how many got a full recommendation", () => {
   })
 })
 
+describe("list pricing, in the live panel", () => {
+  it("renders the list-pricing paragraph when the run recorded one", () => {
+    render(<GoalAnalysisReport run={{
+      ...RUN, findings: [SIZED],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        list_pricing_basis:
+          "List pricing was quoted in 2 of the findings below. "
+          + "$5,000–$47,500. This is what was quoted, not what was agreed "
+          + "— the same price offered to several accounts is one rate "
+          + "card, so these are never added together or added to any "
+          + "figure above.",
+      },
+    } as never} />)
+    expect(screen.getByTestId("goal-list-pricing-basis").textContent)
+      .toContain("$5,000–$47,500")
+  })
+
+  it("renders nothing when no list pricing was recorded", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
+    expect(screen.queryByTestId("goal-list-pricing-basis")).toBeNull()
+  })
+
+  it("never shares a block with the committed-money basis line, so the two cannot be read as addable", () => {
+    render(<GoalAnalysisReport run={{
+      ...RUN, findings: [SIZED],
+      prioritisation: {
+        ...(RUN.prioritisation ?? {}),
+        recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
+        list_pricing_basis:
+          "List pricing was quoted in one finding below. $30,000. This is "
+          + "what was quoted, not what was agreed — the same price offered "
+          + "to several accounts is one rate card, so these are never "
+          + "added together or added to any figure above.",
+      },
+    } as never} />)
+    const recommendationEl = screen.getByTestId("goal-recommendation-basis")
+    const listPricingEl = screen.getByTestId("goal-list-pricing-basis")
+    expect(recommendationEl).not.toBe(listPricingEl)
+    expect(recommendationEl.contains(listPricingEl)).toBe(false)
+    expect(listPricingEl.contains(recommendationEl)).toBe(false)
+  })
+})
+
 describe("the shortfall, connected to the finding it actually dropped", () => {
   // "Asked for N, got fewer" is a real, deliberate citation gate — never
   // weakened. The basis sentence above discloses it once, but a reader who
