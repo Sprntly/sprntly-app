@@ -226,6 +226,24 @@ ACTIVE_SUBSCRIPTION_STATUSES = frozenset(
 )
 
 
+# PAYMENTS ARE HIDDEN. The backend half of the switch.
+#
+# The mirror of `BILLING_ENABLED` in `web/app/lib/billingAccess.ts`. It lives
+# here rather than in config.py on purpose: `settings.billing_enforced` is an
+# ENV var, so a stray `BILLING_ENFORCED=1` in someone's .env would otherwise
+# turn the paywall back on server-side while the web app still shows no way to
+# pay — 402s on every generation and no screen that fixes them. A constant in
+# the billing package itself cannot be flipped by an environment.
+#
+# Nothing is deleted: credits.py, stripe_client.py, webhooks.py, the routes and
+# the whole ledger are untouched, and a webhook still records whatever Stripe
+# sends. Only the GATE, the DEBIT and the trial emails are inert.
+#
+# TO BRING PAYMENTS BACK: set this to True and its web mirror to true. The env
+# flags then mean what they always meant.
+BILLING_ENABLED = False
+
+
 def subscription_grants_access(plan: str | None, status: str | None) -> bool:
     """Whether a company may run billable work right now.
 

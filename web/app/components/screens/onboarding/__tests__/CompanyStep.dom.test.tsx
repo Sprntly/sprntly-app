@@ -1,23 +1,30 @@
 // @vitest-environment jsdom
 //
-// Container mount test for onboarding step 01 — "Tell us about your company"
-// (v6 screenshot spec 2026-07-17). Covers: the name/website/mission/strategy
-// fields render (seeded from the saved workspace) with only the name starred;
-// an empty name blocks Continue (field error, no persistence, no navigation);
-// the website is OPTIONAL for everyone — an empty one saves fine and simply
-// skips the background analysis; a successful save with a workspace present
-// goes updateWorkspace (incl. portfolio/planning_cycle/onboarding_step 2) +
-// upsertPrimaryProduct → background website analysis → push(/onboarding/
-// the PAYMENT GATE); a first-time save (no workspace) creates one with
-// account_type "company" (the personal split is retired).
+// Container mount test for onboarding step 01 — "Tell us about your company and
+// product".
 //
-// It leads the flow again since 2026-07-27, ahead of the import step, because
-// the name and website collected here are written into the prompt that step
-// hands out. The workspace may still already exist (a returning user, or one
-// who stepped back), so the seeding stays fill-only.
+// FOUR FIELDS SINCE 2026-09-03: company name*, company website, product name,
+// product website. Mission, strategy / OKRs, portfolio and planning cycle came
+// off this page and are edited in Settings; the tests that used to drive them
+// here are gone with them, and CompanyProfileSettings covers them now. Nothing
+// was migrated — those columns are untouched, so this file only stops asserting
+// that this step writes them.
 //
-// product-helpers (validateProductWebsite / normalizeProductWebsite) run REAL
-// — they're pure and accept an empty website.
+// Covers: the four fields render (seeded fill-only from the saved workspace)
+// with only the name starred and no trace of the removed ones; an empty name
+// blocks Continue; both websites are OPTIONAL — empty ones save fine and skip
+// the background analysis; a save with a workspace present splits the two URLs
+// across updateWorkspace (`website`) and upsertPrimaryProduct (`website`) and
+// kicks the analysis on the COMPANY site; the analysis falls back to the
+// product site when only that one is filled; a pre-split company seeds its
+// company-website box from the product row; a first-time save creates a
+// workspace carrying both URLs with account_type "company"; and — since the
+// workspace step was removed — this save also names the company's default
+// workspace "Main workspace" (best-effort, and only while it is still
+// unnamed).
+//
+// product-helpers (validateProductWebsite / normalizeProductWebsite) run REAL —
+// they're pure and accept an empty website.
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
@@ -32,7 +39,7 @@ const routerMock = { push: vi.fn(), replace: vi.fn() }
 const createWorkspaceMock = vi.fn()
 const updateWorkspaceMock = vi.fn()
 const upsertProductMock = vi.fn()
-const docUploadMock = vi.fn()
+const saveWorkspaceOwnedFieldsMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
@@ -43,14 +50,12 @@ vi.mock("../../../../lib/onboarding/store", () => ({
   createWorkspace: (...a: unknown[]) => createWorkspaceMock(...a),
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
   upsertPrimaryProduct: (...a: unknown[]) => upsertProductMock(...a),
+  saveWorkspaceOwnedFields: (...a: unknown[]) => saveWorkspaceOwnedFieldsMock(...a),
 }))
 vi.mock("../../../../lib/onboarding/useFormDraft", () => ({
   saveDraft: vi.fn(),
   loadDraft: () => null,
   clearDraft: vi.fn(),
-}))
-vi.mock("../../../../lib/api", () => ({
-  companyDocsApi: { upload: (...a: unknown[]) => docUploadMock(...a) },
 }))
 
 import { CompanyStep } from "../CompanyStep"
@@ -86,17 +91,14 @@ function mount(workspace: ReturnType<typeof makeWorkspace> | null = makeWorkspac
   return render(React.createElement(CompanyStep))
 }
 
-function nameInput(): HTMLInputElement {
-  return document.querySelector(
-    'input[placeholder="Legal or brand name of your organization"]',
-  ) as HTMLInputElement
-}
+const byPlaceholder = (p: string) =>
+  document.querySelector(`input[placeholder="${p}"]`) as HTMLInputElement
 
-function websiteInput(): HTMLInputElement {
-  return document.querySelector(
-    'input[placeholder="https://yourcompany.com"]',
-  ) as HTMLInputElement
-}
+const nameInput = () => byPlaceholder("Legal or brand name of your organization")
+const companySiteInput = () => byPlaceholder("https://yourcompany.com")
+const productNameInput = () =>
+  byPlaceholder("The product you're onboarding (you can add more later)")
+const productSiteInput = () => byPlaceholder("https://yourproduct.com")
 
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
@@ -106,40 +108,49 @@ function continueBtn(): HTMLButtonElement {
 
 beforeEach(() => {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
+  saveWorkspaceOwnedFieldsMock.mockResolvedValue(undefined)
 })
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  saveWorkspaceOwnedFieldsMock.mockResolvedValue(undefined)
 })
 
-describe("CompanyStep (onboarding step 02 — company name* + optional context)", () => {
-  it("renders name/website/mission/strategy fields seeded from the workspace — only the name is starred", () => {
+describe("CompanyStep (onboarding step 01 — company + product basics)", () => {
+  it("renders exactly the four fields, seeded from the workspace, with only the name starred", () => {
     mount()
     expect(screen.getByText(/Tell us about your/)).not.toBeNull()
     expect(nameInput()).not.toBeNull()
-    expect(websiteInput()).not.toBeNull()
-    // Seeded from the workspace: display_name in, no product website yet.
+    expect(companySiteInput()).not.toBeNull()
+    expect(productNameInput()).not.toBeNull()
+    expect(productSiteInput()).not.toBeNull()
+
+    // Seeded fill-only from the workspace: display_name in, no product yet.
     expect(nameInput().value).toBe("Acme")
-    expect(websiteInput().value).toBe("")
-    // Only the company name is required; the website is explicitly optional.
+    expect(companySiteInput().value).toBe("")
+    expect(productNameInput().value).toBe("")
+    expect(productSiteInput().value).toBe("")
+
+    // Only the company name is required; the other three are explicitly optional.
     const nameField = document.querySelector('[data-field="companyName"]') as HTMLElement
     expect(nameField.querySelector(".req")).not.toBeNull()
-    const websiteField = document.querySelector('[data-field="website"]') as HTMLElement
-    expect(websiteField.querySelector(".req")).toBeNull()
-    expect(websiteField.querySelector(".opt")).not.toBeNull()
-    // Strategy is visible; mission now sits behind the disclosure alongside
-    // portfolio + planning cycle, so the default card is name/website/strategy.
-    expect(
-      document.querySelector('[data-field="strategy"] textarea'),
-    ).not.toBeNull()
-    expect(
-      document.querySelector('textarea[placeholder="Why the company exists, in a sentence or two"]'),
-    ).toBeNull()
-    expect(
-      // Match the disclosure toggle by its stable "Add more" prefix — the
-      // descriptive suffix after it is editable copy and shouldn't break this.
-      screen.getByText(/Add more/),
-    ).not.toBeNull()
+    for (const f of ["companyWebsite", "productName", "productWebsite"]) {
+      const field = document.querySelector(`[data-field="${f}"]`) as HTMLElement
+      expect(field, f).not.toBeNull()
+      expect(field.querySelector(".req"), f).toBeNull()
+      expect(field.querySelector(".opt"), f).not.toBeNull()
+    }
+  })
+
+  it("no longer asks for strategy, mission, portfolio or a planning cycle", () => {
+    // They moved to Settings (Company Profile / Process & Planning) rather than
+    // being dropped — this asserts the STEP stopped asking, which is the whole
+    // change. A textarea anywhere on this page means one crept back.
+    mount()
+    expect(document.querySelector('[data-field="strategy"]')).toBeNull()
+    expect(document.querySelector("textarea")).toBeNull()
+    expect(screen.queryByText(/Add more/)).toBeNull()
+    expect(screen.queryByText(/Planning cycle/i)).toBeNull()
   })
 
   it("Continue with an empty company name shows a field error and does NOT persist or navigate", async () => {
@@ -155,7 +166,7 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("an EMPTY website saves fine (optional for everyone) — no analysis kicked", async () => {
+  it("EMPTY websites save fine (optional for everyone) — no analysis kicked", async () => {
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     upsertProductMock.mockResolvedValue(makeProduct())
     mount()
@@ -167,37 +178,107 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
     })
+    // Only the company's own columns — mission/strategy/portfolio/planning_cycle
+    // are no longer this step's business.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
-      mission: null,
-      strategy: null,
-      portfolio: null,
-      planning_cycle: null,
+      website: null,
       onboarding_step: 2,
     })
+    // Product name still falls back to the company name: products.name rejects
+    // an empty string.
     expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
       name: "Acme",
       website: null,
     })
-    // No website → the background analysis is never kicked.
     expect(analysisSpy).not.toHaveBeenCalled()
     expect(createWorkspaceMock).not.toHaveBeenCalled()
+    // `makeWorkspace()` carries `team_name: null` — the removed workspace step's
+    // sentinel — so this save also names the default workspace for them.
+    expect(saveWorkspaceOwnedFieldsMock).toHaveBeenCalledWith(
+      "Main workspace",
+      { team_scope: expect.stringContaining("You own the whole workflow") },
+    )
   })
 
-  it("a successful save with a workspace present goes updateWorkspace + upsertPrimaryProduct → analysis → import step", async () => {
+  it("does NOT rename a workspace someone has already named", async () => {
+    // A company past this point has a real name on its default workspace —
+    // walking back through the company step and saving again must not stomp it.
+    // The mocked `updateWorkspace` echoes it back, matching what the real
+    // endpoint does: it returns the CURRENT row, name included.
+    updateWorkspaceMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: 2, team_name: "Growth Pod" }),
+    )
+    upsertProductMock.mockResolvedValue(makeProduct())
+    mount(makeWorkspace({ team_name: "Growth Pod" }))
+
+    await act(async () => {
+      continueBtn().click()
+    })
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+    })
+    expect(saveWorkspaceOwnedFieldsMock).not.toHaveBeenCalled()
+  })
+
+  it("a failure naming the workspace never blocks Continue", async () => {
+    // Best-effort: a label on a row that already exists. Failing the whole
+    // company step over it would be the wrong trade.
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
-    upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.com" }))
+    upsertProductMock.mockResolvedValue(makeProduct())
+    saveWorkspaceOwnedFieldsMock.mockRejectedValue(new Error("network"))
     mount()
 
-    fireEvent.change(websiteInput(), { target: { value: "acme.com" } })
-    // Mission lives behind the "Add more" disclosure — open it first.
-    fireEvent.click(screen.getByText(/Add more/))
-    fireEvent.change(
-      document.querySelector(
-        'textarea[placeholder="Why the company exists, in a sentence or two"]',
-      ) as HTMLTextAreaElement,
-      { target: { value: "Make payments boring." } },
+    await act(async () => {
+      continueBtn().click()
+    })
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+    })
+    expect(saveWorkspaceOwnedFieldsMock).toHaveBeenCalled()
+  })
+
+  it("splits the two websites across the company and product rows, and analyses the COMPANY site", async () => {
+    // THE POINT OF THE NEW COLUMN. Both fields are on one page now, so a single
+    // shared `products.website` would have let whichever saved last win.
+    updateWorkspaceMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: 2, website: "https://acme.com" }),
     )
+    upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.app" }))
+    mount()
+
+    fireEvent.change(companySiteInput(), { target: { value: "acme.com" } })
+    fireEvent.change(productNameInput(), { target: { value: "Acme Pay" } })
+    fireEvent.change(productSiteInput(), { target: { value: "acme.app" } })
+    await act(async () => {
+      continueBtn().click()
+    })
+
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+    })
+    // Both normalized to https, and landing in DIFFERENT places.
+    expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
+      display_name: "Acme",
+      website: "https://acme.com",
+      onboarding_step: 2,
+    })
+    expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
+      name: "Acme Pay",
+      website: "https://acme.app",
+    })
+    // The sweep researches the ORGANIZATION, so it takes the company site.
+    expect(analysisSpy).toHaveBeenCalledWith("https://acme.com", "ws-1")
+  })
+
+  it("falls back to the product site for the analysis when only that one is filled", async () => {
+    // Nobody who fills in one field loses the prefill they used to get, and this
+    // is also the pre-split company's path: their URL lives on the product row.
+    updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
+    upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.app" }))
+    mount()
+
+    fireEvent.change(productSiteInput(), { target: { value: "acme.app" } })
     await act(async () => {
       continueBtn().click()
     })
@@ -207,27 +288,32 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
-      mission: "Make payments boring.",
-      strategy: null,
-      portfolio: null,
-      planning_cycle: null,
+      website: null,
       onboarding_step: 2,
     })
-    // The typed website is normalized to https and seeded onto the product.
-    expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
-      name: "Acme",
-      website: "https://acme.com",
-    })
-    // The analysis kicks in the BACKGROUND with the saved product website.
-    expect(analysisSpy).toHaveBeenCalledWith("https://acme.com", "ws-1")
-    expect(createWorkspaceMock).not.toHaveBeenCalled()
+    expect(analysisSpy).toHaveBeenCalledWith("https://acme.app", "ws-1")
   })
 
-  it("first-time save (no workspace yet) creates one with account_type 'company' — the personal split is retired", async () => {
+  it("seeds the company-website box from the product for a company onboarded before the split", () => {
+    // Their site was recorded on `products.website` by the single old field.
+    // Showing this box blank would read as having lost it.
+    mount(
+      makeWorkspace({
+        website: null,
+        product: makeProduct({ website: "https://legacy.com" }) as never,
+      }),
+    )
+    expect(companySiteInput().value).toBe("https://legacy.com")
+    expect(productSiteInput().value).toBe("https://legacy.com")
+  })
+
+  it("first-time save (no workspace yet) creates one carrying both URLs", async () => {
     createWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     mount(null)
 
     fireEvent.change(nameInput(), { target: { value: "Solo Co" } })
+    fireEvent.change(companySiteInput(), { target: { value: "solo.com" } })
+    fireEvent.change(productSiteInput(), { target: { value: "app.solo.com" } })
     await act(async () => {
       continueBtn().click()
     })
@@ -238,15 +324,16 @@ describe("CompanyStep (onboarding step 02 — company name* + optional context)"
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
     expect(arg.companyName).toBe("Solo Co")
+    expect(arg.website).toBe("https://solo.com")
+    // Untyped product name still falls back to the company name.
     expect(arg.productName).toBe("Solo Co")
-    expect(arg.productWebsite).toBeNull()
+    expect(arg.productWebsite).toBe("https://app.solo.com")
     // Sign-up always writes account_type "company" since v6.
     expect(arg.accountType).toBe("company")
     expect(arg.userId).toBe("u-1")
     // The resume marker points at the step AFTER this one — the import step,
     // whose prompt is filled with the name just entered.
     expect(arg.onboardingStep).toBe(2)
-    // No portfolio/planning cycle typed → no follow-up patch.
     expect(updateWorkspaceMock).not.toHaveBeenCalled()
   })
 

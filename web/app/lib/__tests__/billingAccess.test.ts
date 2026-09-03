@@ -6,7 +6,9 @@
 import { describe, expect, it } from "vitest"
 
 import {
+  BILLING_ENABLED,
   companyHasPaid,
+  lockModeFor,
   subscriptionGrantsAccess,
   trialDaysLeft,
   trialLabel,
@@ -59,20 +61,40 @@ describe("subscriptionGrantsAccess", () => {
   })
 })
 
-describe("companyHasPaid", () => {
-  it("is false for no company at all", () => {
-    expect(companyHasPaid(null)).toBe(false)
-  })
-
-  it("reads the plan and status off a company row", () => {
+// PAYMENTS ARE HIDDEN — `BILLING_ENABLED` is false. The RULE above is
+// untouched and still has to match backend/app/billing/plans.py; what changes
+// is the two ANSWERS the app's gates route on, which now wave everyone
+// through. The pre-hiding expectations are kept beside each, so flipping the
+// flag back is an obvious diff rather than an archaeology exercise.
+describe("companyHasPaid — payments hidden", () => {
+  it("waves everyone through, whatever the row says", () => {
+    // Was: null → false, {} → false, trialing → true, canceled → false.
+    // Nobody is asked for a card, so nobody can be behind on one.
+    expect(companyHasPaid(null)).toBe(true)
+    expect(companyHasPaid({})).toBe(true)
     expect(companyHasPaid({ plan: "starter", subscription_status: "trialing" })).toBe(true)
-    expect(companyHasPaid({ plan: "starter", subscription_status: "canceled" })).toBe(false)
+    expect(companyHasPaid({ plan: "starter", subscription_status: "canceled" })).toBe(true)
+    expect(companyHasPaid({ plan: "starter", subscription_status: "unpaid" })).toBe(true)
   })
 
-  it("is false for a company row that predates billing", () => {
-    // Columns added by the billing migration; a row written before it has
-    // neither. Falling closed is right — the gate sends them to pick a plan.
-    expect(companyHasPaid({})).toBe(false)
+  it("is the flag doing it, not the rule going soft", () => {
+    // If this ever fails, someone has loosened `subscriptionGrantsAccess`
+    // itself — and that one still has to mirror the backend exactly.
+    expect(BILLING_ENABLED).toBe(false)
+    expect(subscriptionGrantsAccess("starter", "canceled")).toBe(false)
+  })
+})
+
+describe("lockModeFor — payments hidden", () => {
+  it("never locks anyone out, whatever the server has configured", () => {
+    // Was: "hard" for a canceled company, which routed them to the billing
+    // screen and held them there. With no way to pay, that is a trap.
+    for (const configured of ["hard", "read_only", "off", null]) {
+      expect(
+        lockModeFor({ plan: "starter", subscription_status: "canceled" }, configured),
+        String(configured),
+      ).toBe("off")
+    }
   })
 })
 
@@ -116,6 +138,8 @@ describe("trialDaysLeft", () => {
   })
 })
 
+// The pill is silenced at its CALL SITE (Sidebar/ProductTour check the flag),
+// not here, precisely so the Billing pane above keeps reporting a real trial.
 describe("trialLabel", () => {
   it("says day, not days, at one", () => {
     expect(trialLabel(1)).toBe("1 day left")

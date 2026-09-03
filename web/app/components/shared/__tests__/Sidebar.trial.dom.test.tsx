@@ -54,6 +54,7 @@ vi.mock("../../../context/WorkspaceContext", () => ({
 }))
 
 import { Sidebar } from "../Sidebar"
+import { BILLING_ENABLED } from "../../../lib/billingAccess"
 
 /** A trial ending `days` from now, as the company row stores it.
  *
@@ -77,7 +78,11 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-describe("the trial countdown", () => {
+// DORMANT WHILE PAYMENTS ARE HIDDEN, not deleted. Every expectation below is
+// the behaviour the pill had and will have again — flipping `BILLING_ENABLED`
+// back to true is all it takes to put this block back in the run, which is
+// exactly why it is skipped rather than rewritten.
+describe.skipIf(!BILLING_ENABLED)("the trial countdown", () => {
   it("shows the days left while a trial is running", () => {
     workspace = trialing(6)
     render(React.createElement(Sidebar, { activeCompany: "acme" }))
@@ -115,6 +120,18 @@ describe("the trial countdown", () => {
     const { container } = render(React.createElement(Sidebar, { activeCompany: "acme" }))
     expect(container.querySelector(".sidebar--collapsed")).toBeTruthy()
     expect(container.querySelector(".sb-trial-num")!.textContent).toBe("6")
+  })
+})
+
+describe("payments hidden", () => {
+  it("renders no pill at all, mid-trial or not", () => {
+    // The rail is the one place a trial followed you around. With nothing to
+    // pay and nothing to lapse, a countdown is a question with no answer —
+    // and the product tour step anchored to `sidebar-trial` would have had
+    // nothing to point at.
+    workspace = trialing(5)
+    render(<Sidebar />)
+    expect(screen.queryByTestId("sidebar-trial")).toBeNull()
   })
 })
 

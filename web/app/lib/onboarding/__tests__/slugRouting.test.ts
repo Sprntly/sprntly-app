@@ -54,21 +54,18 @@ describe("clampStep — out-of-range persisted indices", () => {
 describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
     expect(slugForStep(1)).toBe("company")
-    expect(slugForStep(2)).toBe("import-context")
-    expect(slugForStep(3)).toBe("connectors")
-    expect(slugForStep(4)).toBe("api-key")
-    expect(slugForStep(5)).toBe("product")
-    expect(slugForStep(6)).toBe("workspace")
-    expect(slugForStep(7)).toBe("metrics")
-    expect(slugForStep(8)).toBe("invite")
-    expect(slugForStep(9)).toBe("review")
-    expect(slugForStep(10)).toBe("personalize")
+    expect(slugForStep(2)).toBe("connectors")
+    expect(slugForStep(3)).toBe("review")
+    expect(slugForStep(4)).toBe("personalize")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
-    // Indices past the end (older/longer flows) clamp to the last step.
-    expect(slugForStep(11)).toBe("personalize")
-    expect(slugForStep(12)).toBe("personalize")
+    // Indices past the end (older/longer flows) clamp to the last step. Markers
+    // from the ten-step flow were rebased in SQL (migration 20260903160000) so
+    // they name the right screen; this clamp is the backstop for anything that
+    // migration did not reach — a row restored from an old backup, say.
+    expect(slugForStep(5)).toBe("personalize")
+    expect(slugForStep(10)).toBe("personalize")
     expect(slugForStep(20)).toBe("personalize")
     expect(slugForStep(0)).toBe("company")
   })
@@ -89,24 +86,26 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 10 numbered slugs (incl. the kept api-key + import-context) and rejects analyzing / removed / unknown", () => {
+  it("accepts the 5 numbered slugs and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
-    // api-key is a numbered step again (restored 2026-07-19 as an optional step).
-    expect(isOnboardingStepSlug("api-key")).toBe(true)
     expect(isOnboardingStepSlug(ANALYZING_SLUG)).toBe(false)
+    // Cut from the flow on 2026-09-03. Everything they collected is edited in
+    // Settings; a typed URL must NOT resolve to a step the flow no longer has.
+    expect(isOnboardingStepSlug("import-context")).toBe(false)
+    expect(isOnboardingStepSlug("api-key")).toBe(false)
+    expect(isOnboardingStepSlug("product")).toBe(false)
+    expect(isOnboardingStepSlug("workspace")).toBe(false)
+    expect(isOnboardingStepSlug("metrics")).toBe(false)
+    expect(isOnboardingStepSlug("invite")).toBe(false)
     // The removed agent-naming step + retired routes are no longer numbered.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
     expect(isOnboardingStepSlug("business-info")).toBe(false)
     expect(isOnboardingStepSlug("business-context")).toBe(false)
     expect(isOnboardingStepSlug("first-brief")).toBe(false)
-    // `workspace` is a numbered step again — it now names the merged
-    // team/strategy/decisions card, NOT the retired workspace-naming closer
-    // (renaming an actual workspace still lives in Settings → Workspaces).
-    expect(isOnboardingStepSlug("workspace")).toBe(true)
     expect(isOnboardingStepSlug("personalize")).toBe(true)
-    // The steps folded into `workspace` are no longer routes of their own.
+    // The steps folded into the old `workspace` card were never routes either.
     expect(isOnboardingStepSlug("team")).toBe(false)
     expect(isOnboardingStepSlug("strategy")).toBe(false)
     expect(isOnboardingStepSlug("decisions")).toBe(false)

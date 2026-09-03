@@ -23,7 +23,9 @@ adjustment to get it back.
 # safe to call more than once. Do it when the first support ticket arrives, or
 # sooner if failure rates on prototype builds stay high.
 
-INERT UNLESS `BILLING_ENFORCED` IS SET. Both halves return immediately when
+INERT UNLESS BOTH `plans.BILLING_ENABLED` AND `BILLING_ENFORCED` ARE SET.
+The first is the payments-hidden switch and is currently False, which makes
+every call here a no-op whatever the environment says. Both halves return immediately when
 the flag is off, which is the default. That keeps CI, local dev and the initial
 production deploy of this feature completely unaffected — a paywall that
 switched itself on at merge would start refusing real customers before anyone
@@ -81,7 +83,7 @@ def require_credits(company_id: str, feature: str) -> None:
     a company sitting on leftover credits after cancelling cannot keep
     generating.
     """
-    if not settings.billing_enforced:
+    if not (plans.BILLING_ENABLED and settings.billing_enforced):
         return
 
     # Chat is exempt under read_only, and exempt from BOTH gates below: the
@@ -202,7 +204,7 @@ def charge(
     loudly and lets the work through. The gap shows up as a ledger row that
     never appeared, which the balance/`balance_after` pairing makes visible.
     """
-    if not settings.billing_enforced:
+    if not (plans.BILLING_ENABLED and settings.billing_enforced):
         return
 
     try:

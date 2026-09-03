@@ -74,13 +74,7 @@ export function projectPath(
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
-  "ob-import-context": "/onboarding/import-context",
   "ob-connectors": "/onboarding/connectors",
-  "ob-api-key": "/onboarding/api-key",
-  "ob-workspace": "/onboarding/workspace",
-  "ob-product": "/onboarding/product",
-  "ob-metrics": "/onboarding/metrics",
-  "ob-invite": "/onboarding/invite",
   "ob-review": "/onboarding/review",
   "ob-personalize": "/onboarding/personalize",
   chat: "/",

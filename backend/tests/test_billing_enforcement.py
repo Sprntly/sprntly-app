@@ -34,12 +34,34 @@ def broke():
 
 @pytest.fixture
 def enforced(monkeypatch):
+    # PAYMENTS HIDDEN: the fixture means "billing is switched on", and that is
+    # BOTH halves of the switch. Flipping only the env flag would leave every
+    # test below asserting against a module constant that is currently False —
+    # the whole paywall would read as working while it was inert. The
+    # payments-hidden default gets its own test instead, at the top of the file.
+    monkeypatch.setattr(plans, "BILLING_ENABLED", True)
     monkeypatch.setattr(settings, "billing_enforced", True)
 
 
 # ---------------------------------------------------------------------------
 # The default: off
 # ---------------------------------------------------------------------------
+
+
+def test_payments_hidden_refuses_nothing_even_with_the_env_flag_on(broke, monkeypatch):
+    """The payments-hidden switch outranks the environment, deliberately.
+
+    `BILLING_ENFORCED` is an env var and `plans.BILLING_ENABLED` is not, which
+    is the whole point: a stray `BILLING_ENFORCED=1` on a box running this
+    branch would otherwise 402 every generation while the web app shows no
+    trial, no countdown and no plan step to act on it — a wall with no door.
+    """
+    monkeypatch.setattr(settings, "billing_enforced", True)
+    billing_db.set_billing(broke, {"subscription_status": "canceled"})
+
+    assert plans.BILLING_ENABLED is False
+    enforce.bill(broke, "prd")  # must not raise
+    assert credits.balance(broke) == 0  # and must not debit
 
 
 def test_enforcement_is_off_by_default(broke):
@@ -197,6 +219,7 @@ def test_every_wired_surface_has_a_price():
 
 @pytest.fixture
 def read_only(monkeypatch, isolated_settings):
+    monkeypatch.setattr(plans, "BILLING_ENABLED", True)
     monkeypatch.setattr(settings, "billing_enforced", True)
     monkeypatch.setattr(settings, "subscription_lock_mode", "read_only")
 
@@ -243,6 +266,7 @@ def test_nothing_ELSE_survives_a_cancelled_subscription(read_only):
 def test_the_exemption_does_not_apply_in_hard_mode(monkeypatch, isolated_settings):
     """`hard` routes the whole app to Billing; an open chat box would
     contradict the lock."""
+    monkeypatch.setattr(plans, "BILLING_ENABLED", True)
     monkeypatch.setattr(settings, "billing_enforced", True)
     monkeypatch.setattr(settings, "subscription_lock_mode", "hard")
     cid = seed_company(user_id="u-hard", slug="hard-co")
@@ -253,6 +277,7 @@ def test_the_exemption_does_not_apply_in_hard_mode(monkeypatch, isolated_setting
 
 
 def test_the_exemption_does_not_apply_when_the_lock_is_off(monkeypatch, isolated_settings):
+    monkeypatch.setattr(plans, "BILLING_ENABLED", True)
     monkeypatch.setattr(settings, "billing_enforced", True)
     monkeypatch.setattr(settings, "subscription_lock_mode", "off")
     cid = seed_company(user_id="u-off", slug="off-co")

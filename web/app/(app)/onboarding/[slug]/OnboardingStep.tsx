@@ -3,16 +3,10 @@
 import { useEffect } from "react"
 import { useRouter } from "next/navigation"
 import {
-  ApiKey,
   CompanyStep,
   Connectors,
-  ImportContextStep,
-  InviteStep,
-  MetricsStep,
   PersonalizeStep,
-  ProductStep,
   ReviewStep,
-  WorkspaceStep,
 } from "../../../components/screens/onboarding"
 import {
   ONBOARDING_STEP_SLUGS,
@@ -21,55 +15,39 @@ import {
 
 /**
  * The ordered onboarding step list — the single source of truth pairing each
- * semantic slug with its screen component, in flow order (2026-07-21
- * screenshot spec):
+ * semantic slug with its screen component, in flow order.
  *
- *   1. company        → CompanyStep       (name*; website/strategy, mission +
- *                                        portfolio + planning cycle behind
- *                                        "Add more". Creates the company row.)
- *   2. import-context → ImportContextStep (bring your existing AI-assistant
- *                                        context in — copy the prompt, which
- *                                        arrives with the name and website
- *                                        from step 1 already written into it,
- *                                        run it in any assistant, upload the
- *                                        .md it returns. OPTIONAL: skipping
- *                                        means typing the later steps by hand)
- *   3. connectors     → Connectors        (connect your tools — all optional)
- *   4. api-key        → ApiKey            (own Claude/Anthropic key — OPTIONAL,
- *                                        skippable; also in Settings → Admin)
+ *   1. company     → CompanyStep     (company name* + website, product name +
+ *                                     website. Creates the company row and its
+ *                                     default "Main workspace", and kicks the
+ *                                     website analysis in the background.)
+ *   2. connectors  → Connectors      (connect your tools — all optional)
+ *   3. review      → ReviewStep      (accept the AI business context)
+ *   4. personalize → PersonalizeStep (what to surface + brief delivery; hands
+ *                                     off to /onboarding/define-metrics when
+ *                                     analytics is connected AND metrics have
+ *                                     been picked, otherwise completes
+ *                                     onboarding itself)
  *
- *   Steps 3-4 sit here BY DESIGN: they are the two the context import cannot
- *   prefill, so they cover its background extraction. Everything below opens
- *   with the extracted fields already in place.
- *
- *   5. product        → ProductStep       (name* + surfaces*; monetization/
- *                                        users/competitors optional)
- *   6. workspace      → WorkspaceStep     (name* + scope*; strategy/roadmap;
- *                                        sizing + extras behind "Add more")
- *   7. metrics        → MetricsStep       (pick up to 5 metrics* + framework*)
- *   8. invite         → InviteStep        (email + job role + permission, bulk
- *                                        paste, CSV)
- *   9. review         → ReviewStep        (accept the AI business context)
- *  10. personalize    → PersonalizeStep   (what to surface + brief delivery;
- *                                        hands off to /onboarding/define-metrics
- *                                        when analytics is connected, otherwise
- *                                        completes onboarding itself)
+ * CUT FROM TEN TO FOUR on 2026-09-03 (via five). import-context, api-key,
+ * product, workspace, metrics and invite were removed and their screen
+ * components deleted; everything they collected is edited in Settings
+ * instead — bulk teammate invite moved into Settings → Team & roles rather
+ * than being dropped. The flow was asking for OKRs, success metrics, a
+ * prioritization framework and a teammate list from someone who had not yet
+ * seen the product. See lib/onboarding/types.ts for the full map of what moved
+ * where.
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
- * `onboarding_step` is the 1-based index into both).
+ * `onboarding_step` is the 1-based index into both). Markers written by the
+ * ten-step flow were rebased in migration 20260903160000.
  */
 export const ONBOARDING_STEPS: ReadonlyArray<{
   slug: OnboardingStepSlug
   Component: React.ComponentType
 }> = [
   { slug: "company", Component: CompanyStep },
-  { slug: "import-context", Component: ImportContextStep },
   { slug: "connectors", Component: Connectors },
-  { slug: "api-key", Component: ApiKey },
-  { slug: "product", Component: ProductStep },
-  { slug: "workspace", Component: WorkspaceStep },
-  { slug: "metrics", Component: MetricsStep },
-  { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },
   { slug: "personalize", Component: PersonalizeStep },
 ]

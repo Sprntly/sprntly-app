@@ -2,22 +2,33 @@
 
 import { useEffect, useState } from "react"
 import { KpiTreeEditor, cleanKpiMetrics } from "../../../onboarding/KpiTreeEditor"
-import { KpiTreePreview } from "../../../onboarding/KpiTreePreview"
 import { useWorkspace } from "../../../../context/WorkspaceContext"
 import { saveKpiTree, saveMetricDefinitions } from "../../../../lib/onboarding/store"
-import type {
-  KpiMetric,
-  KpiTree,
-  MetricDefinition,
-} from "../../../../lib/onboarding/types"
+import type { KpiMetric, MetricDefinition } from "../../../../lib/onboarding/types"
 import { SettingsMessage, SettingsSection } from "./SettingsLayout"
 
-const NORTH_STAR_HINTS: Record<string, string[]> = {
-  "B2B SaaS": ["Net revenue retention", "Weekly active teams", "Activation rate"],
-  B2C: ["DAU/MAU ratio", "Day-30 retention", "Conversion rate"],
-  default: ["Day-30 retention", "NRR", "Weekly active users"],
-}
-
+/**
+ * Settings → Metrics.
+ *
+ * THE "KPI TREE" FRAMING CAME OFF THIS PANE (2026-09-03). It used to ask for a
+ * north star + description, a "supporting" metrics list, and rendered a tree
+ * Preview. Now it edits a plain metrics list and the metric definitions that
+ * attach to them — the two things something downstream actually consumes
+ * (define-metrics needs picked metrics; briefs and goal-fit scoring read the
+ * descriptions).
+ *
+ * THE NORTH STAR IS CARRIED, NOT ASKED. `northStar` / `northStarDescription`
+ * are still seeded from the workspace and written back on save, so a company
+ * that set one before this change keeps it (briefs still print it); they are
+ * just no longer rendered or required. A brand-new company saves an empty
+ * north star, which is what it had anyway — the backend reader tolerates it
+ * and can `infer_north_star` from the metrics.
+ *
+ * This is also the ONLY place metrics get picked since the onboarding metrics
+ * step was removed, so `canSave` must not depend on a north star nobody is
+ * asked for any more — it did, and would have made this list unsaveable for
+ * exactly the new users routed here.
+ */
 export function KpiSettings() {
   const { workspace, loading, refresh } = useWorkspace()
   const [northStar, setNorthStar] = useState("")
@@ -76,15 +87,9 @@ export function KpiSettings() {
     }
   }
 
-  const hints =
-    NORTH_STAR_HINTS[workspace?.industry ?? ""] ?? NORTH_STAR_HINTS.default
-  const tree: KpiTree = {
-    north_star: northStar,
-    north_star_description: northStarDescription,
-    metrics: cleanKpiMetrics(metrics),
-  }
   const namedCount = metrics.filter((m) => m.name.trim()).length
-  const canSave = northStar.trim().length > 0 && namedCount >= 2
+  // Metrics only — see the module doc for why the north star dropped out.
+  const canSave = namedCount >= 2
 
   async function onSave(e: React.FormEvent) {
     e.preventDefault()
@@ -102,7 +107,7 @@ export function KpiSettings() {
       await refresh()
       setSaved(true)
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not save KPI tree")
+      setError(e instanceof Error ? e.message : "Could not save metrics")
     } finally {
       setSaving(false)
     }
@@ -111,9 +116,9 @@ export function KpiSettings() {
   if (loading) return <p className="settings-loading">Loading…</p>
   if (!workspace) {
     return (
-      <SettingsSection title="KPI tree" sub="Complete onboarding first.">
+      <SettingsSection title="Metrics" sub="Complete onboarding first.">
         <p className="settings-placeholder">
-          <a href="/onboarding/company">Set up your KPI tree →</a>
+          <a href="/onboarding/company">Set up your metrics →</a>
         </p>
       </SettingsSection>
     )
@@ -122,23 +127,23 @@ export function KpiSettings() {
   return (
     <>
       <SettingsSection
-        title="KPI tree"
+        title="Metrics"
         sub="Edits apply to the next Brief and recommendations. Each metric is a name plus a short description used for goal-fit scoring."
       >
         <form onSubmit={onSave}>
           <KpiTreeEditor
+            showNorthStar={false}
             northStar={northStar}
             northStarDescription={northStarDescription}
             metrics={metrics}
-            hints={hints}
             onNorthStarChange={setNorthStar}
             onNorthStarDescriptionChange={setNorthStarDescription}
             onMetricsChange={setMetrics}
           />
           {error && <SettingsMessage kind="error">{error}</SettingsMessage>}
-          {saved && <SettingsMessage kind="success">KPI tree saved.</SettingsMessage>}
+          {saved && <SettingsMessage kind="success">Metrics saved.</SettingsMessage>}
           <button type="submit" className="btn btn-primary" disabled={saving || !canSave}>
-            {saving ? "Saving…" : "Save KPI tree"}
+            {saving ? "Saving…" : "Save metrics"}
           </button>
         </form>
       </SettingsSection>
@@ -186,9 +191,6 @@ export function KpiSettings() {
             </button>
           </form>
         )}
-      </SettingsSection>
-      <SettingsSection title="Preview" sub="How your tree appears in Briefs.">
-        <KpiTreePreview tree={tree} />
       </SettingsSection>
     </>
   )

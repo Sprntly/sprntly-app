@@ -27,7 +27,10 @@ import { registerSettingsCacheReset } from "../../../../lib/settingsCache"
 import { ROLE_OPTIONS } from "../../../../lib/onboarding/types"
 import {
   teamApi,
+  parseInvitesCsv,
+  parsePastedEmails,
   type InviteRole,
+  type InviteRow,
   type TeamInvite,
   type TeamMember,
   type TeamRole,
@@ -97,6 +100,21 @@ export type TeamSettingsViewProps = {
   inviteWorkspaceIds?: string[]
   onToggleInviteWorkspace?: (id: string) => void
 
+  // Bulk invite — paste or CSV, both behind one "Add multiple at once"
+  // disclosure beside the single-invite trigger. Ported from the retired
+  // onboarding InviteStep (2026-09-03): each row sends immediately (through
+  // the same POST /v1/team/invites the single form uses) rather than staging
+  // an editable table, since this pane already reports outcomes via a notice.
+  bulkOpen: boolean
+  onToggleBulk: () => void
+  bulkText: string
+  onChangeBulkText: (value: string) => void
+  onSubmitBulkPaste: () => void
+  bulkSubmitting: boolean
+  bulkNotice: string | null
+  csvInputRef: React.RefObject<HTMLInputElement | null>
+  onPickBulkCsv: (file: File | null) => void
+
   // Pending invite actions.
   onRevokeInvite: (inviteId: string) => void
   onResendInvite: (inviteId: string) => void
@@ -135,6 +153,15 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
     availableWorkspaces = [],
     inviteWorkspaceIds = [],
     onToggleInviteWorkspace,
+    bulkOpen,
+    onToggleBulk,
+    bulkText,
+    onChangeBulkText,
+    onSubmitBulkPaste,
+    bulkSubmitting,
+    bulkNotice,
+    csvInputRef,
+    onPickBulkCsv,
     onRevokeInvite,
     onResendInvite,
     onChangeMemberRole,
@@ -169,7 +196,7 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
             {pluralize(invites.length, "pending invite")}
           </div>
           {canManage && (
-            <div className="set-block-meta">
+            <div className="set-block-meta" style={{ display: "flex", gap: 10 }}>
               <button
                 type="button"
                 className="set-team-invite-trigger"
@@ -177,9 +204,64 @@ export function TeamSettingsView(props: TeamSettingsViewProps) {
               >
                 {showInviteForm ? "Cancel" : "+ Invite teammate"}
               </button>
+              <button
+                type="button"
+                className="set-team-invite-trigger"
+                aria-expanded={bulkOpen}
+                onClick={onToggleBulk}
+              >
+                {bulkOpen ? "Cancel" : "Add multiple at once"}
+              </button>
             </div>
           )}
         </div>
+
+        {canManage && bulkOpen && (
+          <div className="set-team-invite-form" style={{ flexDirection: "column", alignItems: "stretch", gap: 10 }}>
+            <div>
+              <textarea
+                className="input"
+                rows={2}
+                value={bulkText}
+                onChange={(e) => onChangeBulkText(e.target.value)}
+                placeholder="alex@company.com, sam@company.com, jordan@company.com"
+                aria-label="Paste multiple emails"
+                disabled={bulkSubmitting}
+              />
+              <div style={{ marginTop: 8, display: "flex", gap: 8, alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={onSubmitBulkPaste}
+                  disabled={bulkSubmitting || !bulkText.trim()}
+                >
+                  {bulkSubmitting ? "Sending…" : "Send invites"}
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-ghost"
+                  onClick={() => csvInputRef.current?.click()}
+                  disabled={bulkSubmitting}
+                >
+                  Import CSV
+                </button>
+                <input
+                  ref={csvInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  style={{ display: "none" }}
+                  onChange={(e) => onPickBulkCsv(e.target.files?.[0] ?? null)}
+                  aria-label="Import teammates CSV"
+                />
+              </div>
+              {bulkNotice && (
+                <p className="set-block-s-inline" role="status" style={{ marginTop: 6 }}>
+                  {bulkNotice}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
 
         {canManage && showInviteForm && (
           <form
@@ -851,6 +933,65 @@ export function TeamSettings() {
     )
   }
 
+  // Bulk invite (paste + CSV) — see the pure parsers in lib/teamApi.ts.
+  const [bulkOpen, setBulkOpen] = useState(false)
+  const [bulkText, setBulkText] = useState("")
+  const [bulkSubmitting, setBulkSubmitting] = useState(false)
+  const [bulkNotice, setBulkNotice] = useState<string | null>(null)
+  const csvInputRef = useRef<HTMLInputElement | null>(null)
+
+  /** Send every row, best-effort — one bad address must not sink the rest.
+   *  Shared by both bulk entry points (paste and CSV). */
+  async function sendBulkInvites(rows: InviteRow[]) {
+    setBulkSubmitting(true)
+    setBulkNotice(null)
+    try {
+      const failures: string[] = []
+      for (const row of rows) {
+        try {
+          await teamApi.invite(row.email, row.permission, inviteWorkspaceIds, row.jobRole)
+        } catch {
+          failures.push(row.email)
+        }
+      }
+      setBulkNotice(
+        failures.length === 0
+          ? `${rows.length} ${rows.length === 1 ? "invite" : "invites"} sent.`
+          : `Sent ${rows.length - failures.length}/${rows.length} — couldn't invite ${failures.join(", ")}.`,
+      )
+      await reload()
+    } finally {
+      setBulkSubmitting(false)
+    }
+  }
+
+  async function submitBulkPaste() {
+    const rows = parsePastedEmails(bulkText)
+    if (!rows.length) {
+      setBulkNotice("No valid email addresses in that paste.")
+      return
+    }
+    await sendBulkInvites(rows)
+    setBulkText("")
+  }
+
+  async function pickBulkCsv(file: File | null) {
+    if (!file) return
+    try {
+      const text = await file.text()
+      const rows = parseInvitesCsv(text)
+      if (!rows.length) {
+        setBulkNotice("No teammate rows found in that CSV — expected email, role, permission per line.")
+        return
+      }
+      await sendBulkInvites(rows)
+    } catch {
+      setBulkNotice(`Couldn't read "${file.name}" — is it a plain CSV?`)
+    } finally {
+      if (csvInputRef.current) csvInputRef.current.value = ""
+    }
+  }
+
   const currentUserId = auth.kind === "authed" ? auth.user.id : ""
   const currentRow = members.find((m) => m.user_id === currentUserId)
   const currentUserRole: TeamRole = (currentRow?.role as TeamRole) || "member"
@@ -1020,6 +1161,15 @@ export function TeamSettings() {
       availableWorkspaces={workspaces.map((w) => ({ id: w.id, name: w.name }))}
       inviteWorkspaceIds={inviteWorkspaceIds}
       onToggleInviteWorkspace={toggleInviteWorkspace}
+      bulkOpen={bulkOpen}
+      onToggleBulk={() => setBulkOpen((prev) => !prev)}
+      bulkText={bulkText}
+      onChangeBulkText={setBulkText}
+      onSubmitBulkPaste={() => void submitBulkPaste()}
+      bulkSubmitting={bulkSubmitting}
+      bulkNotice={bulkNotice}
+      csvInputRef={csvInputRef}
+      onPickBulkCsv={(f) => void pickBulkCsv(f)}
       onRevokeInvite={revoke}
       onResendInvite={resend}
       onChangeMemberRole={changeRole}

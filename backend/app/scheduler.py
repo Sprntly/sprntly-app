@@ -96,7 +96,7 @@ def _billing_allows_scheduled_work(company: dict) -> bool:
     `past_due` still runs, for the same reason it still grants access: Stripe is
     working the card and the customer has not gone anywhere.
     """
-    if not settings.billing_enforced:
+    if not (plans.BILLING_ENABLED and settings.billing_enforced):
         return True
     # ABSENT IS NOT LAPSED. `list_companies` selects these best-effort, and its
     # fallback select drops them entirely — so a schema quirk or an older test
@@ -790,6 +790,13 @@ async def _run_trial_ending_cycle() -> None:
 
     from app.billing import emails as billing_emails
     from app.db.companies import list_companies
+
+    # PAYMENTS HIDDEN: say nothing. Unlike the gates, this job keys on the
+    # company row alone, so a tenant left `trialing` in the database from
+    # before the switch would otherwise be mailed a countdown to a paywall the
+    # app no longer shows, with no screen to act on it.
+    if not plans.BILLING_ENABLED:
+        return
 
     try:
         companies = list_companies() or []

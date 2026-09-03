@@ -70,6 +70,7 @@ vi.mock("../../../../context/OnboardingContext", () => ({
 
 import { TRIAL_CREDITS } from "../../../../lib/billingPlans"
 import { PlanStep } from "../PlanStep"
+import { BILLING_ENABLED } from "../../../../lib/billingAccess"
 
 beforeEach(() => {
   search = ""
@@ -84,7 +85,26 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-describe("choosing a plan", () => {
+describe("payments hidden", () => {
+  it("moves straight on instead of asking anyone to pick a plan", () => {
+    // The guards never route here any more, so this only covers a typed URL or
+    // a stale bookmark. It must not be a dead end: a picker whose only exit is
+    // a checkout would strand someone in the middle of onboarding.
+    onboardingWorkspace = { id: "ws-1", display_name: "Acme", plan: "starter", subscription_status: null }
+    workspaceCtxWorkspace = { ...onboardingWorkspace }
+    render(<PlanStep />)
+    expect(push).toHaveBeenCalledTimes(1)
+    expect(String(push.mock.calls[0]![0])).toMatch(/^\/onboarding\//)
+    expect(checkout).not.toHaveBeenCalled()
+  })
+})
+
+// DORMANT WHILE PAYMENTS ARE HIDDEN. `companyHasPaid` answers true for
+// everyone, so this component advances the moment it mounts and never paints
+// a picker to assert against. The expectations are the ones the plan step had
+// and will have again — skipped rather than rewritten so flipping
+// `BILLING_ENABLED` back to true restores the whole file's coverage.
+describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
   it("offers only the plans the backend will actually sell", () => {
     // `plans.SELF_SERVE_PLANS` excludes Team and Enterprise, and a checkout
     // naming either is rejected — so a button for one would be a 400 waiting
@@ -148,7 +168,7 @@ describe("choosing a plan", () => {
   })
 })
 
-describe("a company that already pays", () => {
+describe.skipIf(!BILLING_ENABLED)("a company that already pays", () => {
   it("is forwarded straight through rather than asked to buy again", async () => {
     onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
     render(<PlanStep />)
@@ -168,7 +188,7 @@ describe("a company that already pays", () => {
   })
 })
 
-describe("the two contexts disagreeing", () => {
+describe.skipIf(!BILLING_ENABLED)("the two contexts disagreeing", () => {
   it("does not advance on the workspace context alone", async () => {
     // THE INFINITE REDIRECT LOOP. `OnboardingPaymentGuard` reads the ONBOARDING
     // context; this step used to read the workspace one. After checkout the
@@ -201,7 +221,7 @@ describe("the two contexts disagreeing", () => {
   })
 })
 
-describe("coming back from a successful Checkout", () => {
+describe.skipIf(!BILLING_ENABLED)("coming back from a successful Checkout", () => {
   it("waits for the webhook rather than trusting the redirect", async () => {
     // THE BUG THIS PREVENTS: Stripe redirects on payment acceptance, but the
     // company row is written by the webhook. Forwarding immediately would let
@@ -266,7 +286,7 @@ describe("coming back from a successful Checkout", () => {
   }, 45_000)
 })
 
-describe("someone who cannot buy", () => {
+describe.skipIf(!BILLING_ENABLED)("someone who cannot buy", () => {
   it("is told who can, instead of given a button that 403s", () => {
     // /v1/billing/checkout is owner-or-admin only. A plain member reaches this
     // screen the same way an admin does, because the gate is company-level.

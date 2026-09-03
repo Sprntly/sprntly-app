@@ -112,12 +112,18 @@ describe("ReviewStep (onboarding step 08 — AI business context, review & accep
     )
     const { container } = mount()
 
-    // Step 8 of the dots. While drafting the card keeps its shape — a shimmer
-    // standing in for the textarea plus an announced status — and Continue
-    // stays disabled rather than sitting live over an empty page.
+    // While drafting the card keeps its shape — a shimmer standing in for the
+    // textarea plus an announced status — and Continue stays disabled rather
+    // than sitting live over an empty page.
+    //
+    // The dots caught a real bug during this cut: `step={9}` was a literal
+    // left over from the ten-step flow and was never updated across two
+    // subsequent step-count changes, so the dots silently pointed at the
+    // wrong screen. It is derived (`stepForSlug`) now, so this asserts the
+    // CURRENT flow's index for review rather than pinning another literal.
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("9")
+    ).toBe("3")
     expect(draftMock).toHaveBeenCalledTimes(1)
     const skeleton = container.querySelector(".onb-draft-skel") as HTMLElement
     expect(skeleton).not.toBeNull()
@@ -208,14 +214,14 @@ describe("ReviewStep (onboarding step 08 — AI business context, review & accep
     })
   })
 
-  it("Back routes to the invite step", async () => {
+  it("Back routes to the connectors step", async () => {
     draftMock.mockResolvedValue({ draft: DRAFT_TEXT })
     mount()
     await waitFor(() => {
       expect(summaryTextarea()).not.toBeNull()
     })
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

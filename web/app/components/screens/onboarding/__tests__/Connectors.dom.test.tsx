@@ -20,8 +20,9 @@
 //     otherwise-unsupported provider/category visible)
 //   - connectable cards open the connect modal with the right provider
 //   - connectors are OPTIONAL: leaving with none stamps skipped_fields
-//   - leaving advances to step 4 and routes to /onboarding/api-key; Back goes
-//     to /onboarding/import-context (the step directly ahead of this one since
+//   - leaving advances to the review step and routes to /onboarding/review;
+//     Back goes to /onboarding/company (the step directly ahead of this one
+//     since import-context, api-key and invite were all removed by 2026-09-03,
 //     the 2026-07-27 company/import swap)
 //   - the no-workspace redirect happens in an EFFECT, never during render
 //
@@ -168,7 +169,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(rows()[2].getAttribute("data-conn")).toBe(SHOWN_CATEGORIES[2].key)
   })
 
-  it("renders the header + sub copy verbatim, on step 3 of the dots", () => {
+  it("renders the header + sub copy verbatim, on step 2 of the dots", () => {
     const { container } = mountLoaded()
     // Header: "Connect your tools." with the period inside the italic <em>.
     const h = container.querySelector(".onb-card .onb-h") as HTMLElement
@@ -178,10 +179,12 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(sub.textContent).toBe(
       "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
     )
-    // The chrome marks step 3 of the 10 numbered steps.
+    // The chrome marks step 2 of the 4 numbered steps (`stepForSlug`, not a
+    // literal — a hardcoded number here is exactly what silently drifted
+    // wrong across the last two step-count cuts and went uncaught).
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("3")
+    ).toBe("2")
     // Design accordion shell: onb-card → conn-steps → conn-step rows.
     expect(container.querySelector(".onb-card .conn-steps")).not.toBeNull()
     expect(container.querySelectorAll(".conn-steps .conn-step").length).toBeGreaterThan(0)
@@ -479,14 +482,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("advances to step 4 and routes to api-key once a connection is live (no skip marking)", async () => {
+  it("advances to the review step once a connection is live (no skip marking)", async () => {
     const { container } = mountLoaded([{ provider: "mixpanel", status: "active" }])
     await screen.findByText("Live")
     advanceToLastCategory(container)
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
@@ -497,8 +500,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     advanceToLastCategory(container)
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
     // Continue (not Skip) doesn't stamp the field as skipped, even at zero.
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -510,8 +513,8 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     fireEvent.click(footerSkip(container))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/api-key")
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
   })
 
@@ -521,19 +524,19 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     advanceToLastCategory(container)
     fireEvent.click(footerSkip(container))
     await waitFor(() => {
-      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 4)
+      expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("Back routes to the import step — the one directly ahead of this", () => {
+  it("Back routes to the company step — the one directly ahead of this", () => {
     // Each step's Back target is hand-written, so a flow reorder can silently
     // leave it pointing at the step that USED to precede this one and skip a
     // step on the way back. That is exactly what the 2026-07-27 company/import
     // swap did here.
     mountLoaded()
     fireEvent.click(screen.getByText("Back").closest("button") as HTMLElement)
-    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/import-context")
+    expect(routerMock.push).toHaveBeenCalledWith("/onboarding/company")
   })
 
   it("shows the loading shell while the workspace is loading", () => {

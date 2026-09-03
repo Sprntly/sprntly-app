@@ -38,6 +38,7 @@ vi.mock("../../../context/OnboardingContext", () => ({
 }))
 
 import OnboardingLayout from "../layout"
+import { BILLING_ENABLED } from "../../../lib/billingAccess"
 
 const paid = { id: "ws-1", plan: "starter", subscription_status: "active" }
 const unpaid = { id: "ws-1", plan: "starter", subscription_status: null }
@@ -54,7 +55,10 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-describe("an unpaid company cannot walk the steps", () => {
+// DORMANT WHILE PAYMENTS ARE HIDDEN — the gate is open, so there is no bounce
+// to assert. Every expectation here is the one the gate had and will have
+// again; the block below covers what replaces it meanwhile.
+describe.skipIf(!BILLING_ENABLED)("an unpaid company cannot walk the steps", () => {
   it("bounces a typed step URL back to the plan gate", async () => {
     onboarding = { loading: false, workspace: unpaid }
     mount()
@@ -83,6 +87,30 @@ describe("an unpaid company cannot walk the steps", () => {
       onboarding = { loading: false, workspace: unpaid }
       mount()
       await waitFor(() => expect(replace, step).toHaveBeenCalledWith("/onboarding/plan"))
+    }
+  })
+})
+
+describe.runIf(!BILLING_ENABLED)("payments hidden: the gate is open", () => {
+  it("walks every step without ever asking for a card", async () => {
+    // The mirror of the dormant block above. `companyHasPaid` answers true, so
+    // a company with no subscription at all paints the step it asked for and
+    // is never sent to /onboarding/plan — which is the whole point: onboarding
+    // runs company → … → finish with no payment screen in it.
+    for (const step of [
+      "/onboarding/import-context",
+      "/onboarding/connectors",
+      "/onboarding/product",
+      "/onboarding/review",
+      "/onboarding/define-metrics",
+    ]) {
+      cleanup()
+      replace.mockReset()
+      pathname = step
+      onboarding = { loading: false, workspace: unpaid }
+      const { getByText } = mount()
+      expect(getByText("STEP_CONTENT"), step).toBeTruthy()
+      expect(replace, step).not.toHaveBeenCalled()
     }
   })
 })

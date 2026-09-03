@@ -112,7 +112,11 @@ export function buildLayers(doc: BusinessContextDoc): BcLayer[] {
         f("identity.sub_vertical", "Sub-vertical", id.sub_vertical),
         f("identity.company_size", "Company size", id.company_size),
         f("identity.stage", "Stage", id.stage),
-        f("identity.hq_geography", "HQ geography", id.hq_geography),
+        // `identity.hq_geography` is deliberately NOT rendered (2026-09-03):
+        // where a company is headquartered has no bearing on what a PM tool
+        // surfaces. The leaf stays in the BusinessContext doc — still inferred
+        // and stored, nothing dropped — it just isn't a decision anyone is
+        // asked to make here.
         f("identity.markets_served", "Markets served", id.markets_served),
       ],
     },
@@ -127,8 +131,10 @@ export function buildLayers(doc: BusinessContextDoc): BcLayer[] {
         f("business_model.who_pays", "Who pays", bm.who_pays),
         f("business_model.who_uses", "Who uses", bm.who_uses),
         f("business_model.monetization_unit", "Monetization unit", bm.monetization_unit),
-        f("business_model.unit_economics_shape", "Unit economics", bm.unit_economics_shape),
-        f("business_model.good_outcome", "Good outcome", bm.good_outcome, true),
+        // `unit_economics_shape` and `good_outcome` are deliberately NOT
+        // rendered (2026-09-03) — finance-shaped questions a PM is not the
+        // right person to answer here. Both leaves stay in the doc, still
+        // inferred and stored; they just aren't asked for in Settings.
       ],
     },
     {
@@ -152,7 +158,8 @@ export function buildLayers(doc: BusinessContextDoc): BcLayer[] {
       fields: [
         f("product_value.what_it_does", "What it does", pv.what_it_does, true),
         f("product_value.core_value_moments", "Core value moments", pv.core_value_moments, true),
-        f("product_value.activation_definition", "Activation definition", pv.activation_definition, true),
+        // `activation_definition` is deliberately NOT rendered (2026-09-03).
+        // Leaf stays in the doc — still inferred and stored, not asked for here.
         f("product_value.key_features", "Key features", pv.key_features),
         f("product_value.platforms", "Platforms", pv.platforms),
       ],
