@@ -1699,7 +1699,7 @@ def test_synthesis_survives_a_gateway_that_dies(monkeypatch):
 
 
 def test_synthesis_never_moves_the_ranking():
-    """AC-6, extended to the synthesis pass: running it changes nothing about
+    """I10, extended to the synthesis pass: running it changes nothing about
     the pipeline's own frozen output."""
     corpus = _two_finding_corpus()
     before = build_findings(corpus, currency="accounts", now=NOW)
