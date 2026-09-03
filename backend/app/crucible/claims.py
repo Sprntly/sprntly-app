@@ -96,6 +96,13 @@ def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional
     unrelated numeric `properties` value under the same key by coincidence,
     so this only trusts the checklist-shaped kind the amount contract
     actually applies to.
+
+    Re-checks the SAME numeric/zero/NaN/inf exclusions the extractor's own
+    writer applies, rather than trusting an upstream write path to have
+    enforced them — this module reads `kg_signal` generically, not only rows
+    this repo's own extractor produced, and I2/I3 ("unmeasured is never
+    zero") has to hold here even if some other writer ever puts a literal
+    `0` in `properties["amount"]`.
     """
     if kind not in _GROUNDED_MAGNITUDE_KINDS:
         return None
@@ -103,6 +110,10 @@ def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional
     if isinstance(amount, bool) or not isinstance(amount, (int, float)):
         return None
     if amount != amount or amount in (float("inf"), float("-inf")):  # NaN/inf
+        return None
+    if amount == 0:
+        # A stated figure of zero is not a real quoted amount — treat it as
+        # absent, the same as any other missing figure.
         return None
     return float(amount)
 

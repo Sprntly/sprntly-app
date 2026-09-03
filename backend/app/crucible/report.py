@@ -1081,13 +1081,26 @@ def _finding_block(
     out.append(_p(" · ".join(meta)))
 
     # NAMED EVIDENCE, NEVER A PROJECTION. A grounded dollar figure — a
-    # number a customer actually stated on a call — is sized differently
-    # from `_reach` above: it is a SUM of real, quoted amounts across the
-    # accounts that named one, not the finding's own scored `Impact.value`
-    # (which stays reach-based/unsized exactly as before this evidence
-    # existed). Rendered as its own line, in its own words, so a reader
-    # cannot mistake "customers named $X" for "this is worth $X" — the
+    # number a customer actually stated, in a call OR in any other
+    # connected source's text — is sized differently from `_reach` above:
+    # it is a SUM of real, quoted amounts across the accounts that named
+    # one, not the finding's own scored `Impact.value` (which stays
+    # reach-based/unsized exactly as before this evidence existed).
+    # Rendered as its own line, in its own words, so a reader cannot
+    # mistake "customers named $X" for "this is worth $X" — the
     # distinction the evidence exists to preserve.
+    #
+    # NEVER NAMES A CHANNEL. `native_units` carries the SUM and the account
+    # count, not which connector(s) the contributing claims came from —
+    # that provenance is not threaded this far, and guessing it here (e.g.
+    # always saying "on calls") would assert something this function
+    # cannot actually know. A grounded figure is captured identically from
+    # a call, a Slack thread, an email or any other connected text (see
+    # `app.graph.extractor`'s open-extraction path); the sentence stays
+    # true regardless of which one it was by never naming one. Naming the
+    # actual source(s) would need that provenance carried through
+    # `pipeline`/`routes.crucible` into `native_units` first — a real
+    # follow-up, not something to guess at render time.
     commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
     commercial_usd = commercial.get("commercial_grounded_usd")
     if isinstance(commercial_usd, (int, float)):
@@ -1099,8 +1112,8 @@ def _finding_block(
         )
         out.append(_p(
             f"<strong>Customers named this evidence.</strong> Customers "
-            f"named ${commercial_usd:,.0f}{accounts_txt} on calls — a sum "
-            f"of figures actually quoted, not a projection."
+            f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
+            f"figures actually quoted, not a projection."
         ))
 
     # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.

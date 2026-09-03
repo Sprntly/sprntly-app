@@ -157,6 +157,26 @@ def test_no_grounded_figure_means_no_commercial_evidence_line():
     assert "Customers named" not in html
 
 
+def test_the_commercial_evidence_line_never_names_a_channel():
+    """`native_units` carries the sum and the account count, never which
+    connector(s) the contributing claims came from — a figure lands there
+    identically whether it was read from a call or from a Slack thread, an
+    email, or any other connected text (see the open-extraction path). The
+    sentence must not assert a channel it cannot actually know: rendering
+    a finding whose evidence in fact came from a non-call source (Slack)
+    must not read "on calls" or name any other specific channel."""
+    html = render_report_html(_run(), [_finding(
+        label="Slack-sourced renewal evidence",
+        surfaced_by=["slack/#renewals-acme"],
+        impact={"native_units": {"commercial_grounded_usd": 80000.0,
+                                  "commercial_grounded_accounts": 1.0}},
+    )])
+    assert "Customers named $80,000 across 1 named account" in html
+    assert "not a projection" in html
+    assert "on calls" not in html
+    assert "on a call" not in html
+
+
 def test_the_ruled_out_ledger_keeps_its_reasons():
     """A ranking whose rejections are invisible is one you have to take on
     faith."""
