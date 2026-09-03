@@ -1165,13 +1165,22 @@ _MAX_PROPERTY_TEXT_CHARS = 120
 
 
 def _is_number(value: object) -> bool:
-    """True for a real, finite `int`/`float` — `bool` excluded (Python's
-    `bool` IS an `int`, and a model returning `True` for "amount" must not
-    be coerced into a `1.0` dollar figure), NaN/inf excluded (never a real
-    quoted amount)."""
+    """True for a real, finite, NON-ZERO `int`/`float` — `bool` excluded
+    (Python's `bool` IS an `int`, and a model returning `True` for "amount"
+    must not be coerced into a `1.0` dollar figure), NaN/inf excluded (never
+    a real quoted amount), and `0` excluded: a stated figure of zero is not
+    a real quoted amount either — treat it as absent, the same as any other
+    missing figure (I2/I3). A model emitting `amount: 0` is a plausible
+    failure mode under JSON-schema-constrained numeric output even though
+    the prompt says never to; without this exclusion that value would
+    survive as a real "$0 quoted" claim and count toward
+    `commercial_grounded_claims`/`commercial_grounded_accounts` as though a
+    customer had actually named something."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return False
-    return value == value and value not in (float("inf"), float("-inf"))  # NaN != NaN
+    if value != value or value in (float("inf"), float("-inf")):  # NaN/inf
+        return False
+    return value != 0
 
 
 #: `kind`s a stated dollar figure can attach to via the OPEN extraction pass

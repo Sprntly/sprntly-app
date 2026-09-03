@@ -600,6 +600,27 @@ def test_commercial_amount_never_defaults_to_zero_when_absent(facade):
     assert "amount" not in sig.properties
 
 
+def test_commercial_amount_of_literal_zero_is_treated_as_absent(facade):
+    """A model emitting `amount: 0` — a plausible JSON-schema-constrained
+    failure mode for "no figure here" even though the prompt says never to
+    — must not read as a customer having quoted zero dollars. Same
+    exclusion as an invented string/bool/NaN, stated as its own case
+    because zero is a real, valid Python number and easy to let slip past
+    a numeric-type check that isn't also checking for it."""
+    entries = [_entry(
+        "commercial", content="zero amount from the model",
+        quote="we discussed pricing on the call",
+        properties={"amount": 0, "currency": "USD", "basis": "one-off"},
+    )]
+    text = "Rep: we discussed pricing on the call today."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "zero amount from the model")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+
+
 def test_commercial_amount_ignored_when_not_a_real_number(facade):
     """A model that writes a string, bool or NaN into `amount` gets the
     property dropped rather than a garbage value persisted."""

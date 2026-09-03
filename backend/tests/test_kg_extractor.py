@@ -576,6 +576,34 @@ def test_non_numeric_amount_is_dropped_not_persisted(facade):
         assert "amount" not in sig.properties, f"should reject amount={bad_amount!r}"
 
 
+def test_zero_amount_is_treated_as_absent_not_a_real_figure():
+    """Direct validator test, the shared function both extraction passes
+    call: I2/I3 says a missing figure is never a `0`, and the same rule
+    runs in the other direction too — a `0` a model emits is not treated as
+    a real, grounded figure either. Without this, a schema-constrained
+    model returning `amount: 0` as its failure mode for "no number here"
+    would read as a customer having quoted zero dollars."""
+    assert ex._grounded_amount_properties({"amount": 0, "currency": "USD"}) == {}
+    assert ex._grounded_amount_properties({"amount": 0.0}) == {}
+    assert not ex._is_number(0)
+    assert not ex._is_number(0.0)
+
+
+def test_zero_amount_is_dropped_end_to_end_through_extraction(facade):
+    items = [_kind_item(
+        "zero amount case", "commercial_term",
+        properties={"amount": 0, "currency": "USD", "basis": "one-off",
+                    "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "zero amount case")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
 def test_basis_and_certainty_outside_the_closed_vocabulary_are_dropped(facade):
     items = [_kind_item(
         "an odd basis and certainty", "commercial_term",

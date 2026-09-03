@@ -188,6 +188,30 @@ def test_a_non_numeric_amount_never_reclassifies_or_sets_magnitude(bad_amount):
     assert claim.magnitude is None
 
 
+@pytest.mark.parametrize("zero_amount", [0, 0.0])
+def test_a_literal_zero_amount_is_treated_as_no_figure_stated(zero_amount):
+    """I2/I3, re-checked at projection time and not just at the write
+    boundary: `_grounded_commercial_amount` must return `None` for a
+    literal `0` — treated exactly like a missing figure, never like a
+    real quoted $0 — even if some future writer other than this repo's own
+    extractor ever puts a `0` in `properties["amount"]`."""
+    from app.crucible.claims import _grounded_commercial_amount
+
+    assert _grounded_commercial_amount(
+        "commercial_term", {"amount": zero_amount}
+    ) is None
+
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue",
+        properties={"amount": zero_amount, "currency": "USD"},
+    ), {})
+    assert claim is not None
+    assert claim.type == "mechanism"
+    assert claim.authoritative is False
+    assert claim.strength == "reported"
+    assert claim.magnitude is None
+
+
 def test_a_grounded_amount_on_a_non_commercial_kind_is_never_treated_as_one():
     """The reclassification is gated on `kind`, not merely on the presence of
     an `amount` key — a coincidental numeric `properties["amount"]` on an
