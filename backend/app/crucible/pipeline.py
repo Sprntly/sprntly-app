@@ -18,10 +18,12 @@ question.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from bisect import bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
@@ -29,6 +31,7 @@ from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
+    SIZE_BANDS,  # noqa: F401  (re-exported: callers read the band vocabulary here)
     Adjudication,
     AssumedParam,
     Claim,
@@ -36,8 +39,10 @@ from app.crucible.types import (
     ConfidenceInputs,
     Finding,
     GoalCurrency,
+    GroundedFigure,
     Impact,
     ImpactInputs,
+    _band_for_rank,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +112,115 @@ UNGROUPED_STAGE = "ungrouped"
 AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 
 
+#: The `native_units` key carrying a finding's deduplicated, transcript-stated
+#: dollar sum. Named once so the code that WRITES the sum and the code that
+#: BANDS on it can never read different keys — a silent typo there would mean
+#: no dollar finding ever bands, and nothing would fail.
+GROUNDED_USD_UNIT = "commercial_grounded_usd"
+
+#: How much of that sum came off a paraphrase rather than a verified quote.
+#: A separate key rather than a flag so a renderer can hedge in proportion.
+GROUNDED_USD_DERIVED_UNIT = "commercial_grounded_usd_derived"
+
+#: The `certainty` marker a figure recovered from a written summary carries
+#: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
+#: imported because `backfill` is an operator tool that imports the graph
+#: extractor and a DB client; the read path must not pull that in to answer a
+#: question about one string. The value is pinned by a test on both sides.
+BACKFILL_CERTAINTY_MARKER = "derived-from-summary"
+
+
+def _account_key(accounts: Sequence[str]) -> str:
+    """A stable, opaque identity for the account(s) a figure belongs to.
+
+    STABLE, so two runs over the same corpus deduplicate identically —
+    Python's own `hash()` is salted per process and would make the output
+    depend on which process produced it, which is the reproducibility claim
+    this engine makes against asking a general model the same question.
+
+    OPAQUE, because this value rides on scored objects that get logged and
+    diffed. Deduplication needs to know two figures belong to the same
+    customer; nothing downstream needs to know which customer, and a digest
+    grants the first while refusing the second.
+    """
+    if not accounts:
+        return ""
+    joined = "\x1f".join(sorted(accounts))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def deduped_grounded_figures(group: Sequence[Claim]) -> tuple[GroundedFigure, ...]:
+    """The DISTINCT transcript-stated dollar figures among this finding's
+    claims — the single source of truth for the grounded sum, which is simply
+    these added up.
+
+    DO NOT "SIMPLIFY" THIS INTO `sum(c.magnitude for c in group)`. One deal
+    restated in five messages is five claims carrying one figure; adding them
+    gives five times the money, which turns HOW OFTEN something was said into
+    HOW BIG it is — corroboration deciding size, the single failure the
+    separation of impact from confidence exists to prevent. It was merely a
+    wrong display line while the sum was display-only. It is now also the
+    number that orders findings and the number summed toward a reader's
+    stated money target, so the same defect would inflate a target by
+    whatever the repetition rate happened to be.
+
+    The identity of a figure is `(the accounts it is attached to, the
+    amount)`:
+
+      * named account — the same amount on the same account is one figure,
+        however many claims restate it. Two accounts naming the same amount
+        stay two figures.
+      * no named account — the amount alone is the identity, which collapses
+        an anonymous restatement of one deal.
+      * an anonymous amount already attributed to some account is dropped
+        entirely. Most often that is the same deal in a message that did not
+        name the customer, and between double-counting a real figure and
+        under-counting a duplicate, only one of those errors inflates.
+
+    Currency needs no place in the key: a claim in another currency is
+    excluded outright, so everything reaching deduplication is one currency
+    by construction.
+
+    The cost is real and worth naming: one account that genuinely signs two
+    separate contracts for the identical amount is counted once. That is an
+    undercount of an unknowable, and this sum's job is to be a floor a reader
+    can trust, not a maximum.
+    """
+    attributed: dict[tuple[str, float], GroundedFigure] = {}
+    anonymous: dict[float, GroundedFigure] = {}
+    for c in group:
+        if c.magnitude is None:
+            continue
+        raw = c.raw or {}
+        if raw.get("currency") not in (None, "", "USD"):
+            continue
+        accounts = tuple(sorted(c.population.segments.get("accounts", ())))
+        key = _account_key(accounts)
+        derived = raw.get("certainty") == BACKFILL_CERTAINTY_MARKER
+        figure = GroundedFigure(
+            account_key=key, amount=float(c.magnitude), derived=derived,
+        )
+        if accounts:
+            existing = attributed.get((key, figure.amount))
+            # A figure seen both ways keeps the STRONGER provenance: if any
+            # claim carried it against a verified quote, the money is quoted
+            # money, and hedging it as derived would understate what we know.
+            if existing is None or (existing.derived and not derived):
+                attributed[(key, figure.amount)] = figure
+        else:
+            existing = anonymous.get(figure.amount)
+            if existing is None or (existing.derived and not derived):
+                anonymous[figure.amount] = figure
+
+    attributed_amounts = {amount for _key, amount in attributed}
+    out = list(attributed.values()) + [
+        f for amount, f in anonymous.items() if amount not in attributed_amounts
+    ]
+    # Sorted so the tuple is stable regardless of claim iteration order —
+    # these end up on a frozen, hashed, repr-compared object.
+    return tuple(sorted(out, key=lambda f: (-f.amount, f.account_key)))
+
+
 def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float]:
     """Real, transcript-stated dollar figures among THIS finding's claims —
     additive evidence carried alongside Impact on `native_units`, never
@@ -123,23 +237,188 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     explicit "USD" are summed. A claim naming a different currency is
     counted (`commercial_grounded_claims`) but excluded from the dollar sum
     rather than risk silently mixing currencies into one number.
+
+    DEDUPLICATED BEFORE SUMMING, AND THAT IS THE WHOLE POINT OF THE SUM —
+    the rule and the reasoning live on `deduped_grounded_figures`, which is
+    the single source of truth. This sum is literally those figures added up,
+    so the two can never disagree about what the money is.
     """
     grounded = [c for c in group if c.magnitude is not None]
     if not grounded:
         return {}
-    usd_amounts = [
-        c.magnitude for c in grounded
-        if (c.raw or {}).get("currency") in (None, "", "USD")
-    ]
+
     accounts_named: set[str] = set()
     for c in grounded:
         accounts_named.update(c.population.segments.get("accounts", ()))
+
+    figures = deduped_grounded_figures(group)
+
+    # STILL THE RAW CLAIM COUNT, deliberately. This is a statement about the
+    # evidence ("N claims carried a figure"), not about the money, and it is
+    # the one number here a reader should be able to reconcile against the
+    # claim list. It is also why nothing downstream may size a finding from
+    # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
-    if usd_amounts:
-        units["commercial_grounded_usd"] = float(sum(usd_amounts))
+    if figures:
+        units[GROUNDED_USD_UNIT] = float(sum(f.amount for f in figures))
+        derived_total = sum(f.amount for f in figures if f.derived)
+        if derived_total:
+            # The portion of the sum that came off a written summary rather
+            # than a verified quote. Carried as a NUMBER rather than a flag
+            # so a renderer can hedge in proportion — "$X of that" reads very
+            # differently from a blanket disclaimer over the whole figure.
+            units[GROUNDED_USD_DERIVED_UNIT] = float(derived_total)
     if accounts_named:
         units["commercial_grounded_accounts"] = float(len(accounts_named))
     return units
+
+
+def _rank_fractions(values: Sequence[float]) -> dict[float, float]:
+    """value -> where it sits within `values`, from just above 0 to 1.0 for
+    the largest.
+
+    FULL RESOLUTION, NOT THE QUARTILE. The quartile is what gets reported
+    (`types.SIZE_BANDS`); this is what gets sorted on. Quantising first and
+    then breaking the ties would mean falling through to the raw `value`,
+    which is denominated differently for different findings in the same run —
+    the exact cross-currency comparison the whole ordinal design exists to
+    avoid. Sorting on the fraction and reporting the quartile gets both: a
+    total order that never compares dollars to accounts, and an output number
+    that never implies more precision than the evidence carries.
+
+    Ties always share a fraction — the rank used is the count of the
+    population AT OR BELOW each value, so two findings of identical size can
+    never be separated by an accident of iteration order. That matters more
+    than it sounds: ordering has to be reproducible run over run, which is
+    the claim this engine makes against asking a general model the same
+    question.
+
+    The largest member of any population sits at 1.0, which is also true of a
+    population of one. That is deliberate rather than a degenerate case: a
+    lone quoted figure IS the largest quoted figure in the run. It does mean
+    a small figure ranks top when it is the only one, which is a property of
+    the DATA rather than of this function — `_log_size_bands` publishes the
+    population sizes and the figures behind them so that condition is visible
+    rather than inferred.
+    """
+    if not values:
+        return {}
+    ordered = sorted(values)
+    n = len(ordered)
+    return {
+        value: bisect_right(ordered, value) / n
+        for value in set(ordered)
+    }
+
+
+def _size_ranks(
+    findings: Sequence[Finding], provisional: Sequence[Impact],
+) -> list[Optional[float]]:
+    """The one cross-finding comparison in this pipeline, and the reason it
+    lives HERE rather than inside `score_impact`.
+
+    THE PROBLEM. A finding carrying a real quoted dollar figure but no named
+    account scores `value=None` — we know what a customer said and nothing
+    about how many accounts it touches — so it sorted below every finding we
+    could size, however trivially. Findings holding actual money ranked last,
+    which is the opposite of what a stated figure is worth. And the obvious
+    repair, adding the dollars to `value`, is worse than the disease: `value`
+    is denominated in accounts here, so dollars would win by six orders of
+    magnitude and naming any figure at all would beat every reach-based
+    finding in the corpus.
+
+    THE ANSWER IS ORDINAL, AND EACH FINDING COMPETES IN ITS OWN CURRENCY.
+    Dollar findings are ranked against the other dollar findings; reach
+    findings against the other reach findings. The top of the quoted figures
+    and the top of the reaches are both "the biggest of their kind", which IS
+    comparable, where their raw numbers are not. A finding that has both
+    takes the higher of its two ranks, so carrying more evidence can lift a
+    finding and can never demote one.
+
+    WHAT THIS DELIBERATELY DOES NOT DO. It does not guarantee a dollar
+    finding reaches the top of the list. If the quoted figures in a corpus
+    span a wide range, the smallest of them ranks low and stays there.
+    Guaranteeing the dollar line renders would mean a $5,000 one-off
+    outranking a forty-account finding, which is the loudest-problem failure
+    rebuilt with a currency symbol on it. The figure earns its place or it
+    does not.
+
+    I10 IS SATISFIED, and the direction matters. I10 forbids Stage 10 writing
+    BACKWARD into frozen scores; this reads forward, before the freeze:
+    inputs are compared, the answer is written into `ImpactInputs`, and only
+    then is anything scored. Ordering afterwards reads the frozen `Impact` and
+    mutates nothing, exactly as before.
+    """
+    dollar_values: list[float] = []
+    reach_values: list[float] = []
+    per_finding: list[tuple[Optional[float], Optional[float]]] = []
+    for finding, impact in zip(findings, provisional):
+        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        usd = float(usd) if isinstance(usd, (int, float)) else None
+        reach = impact.value
+        if usd is not None:
+            dollar_values.append(usd)
+        if reach is not None:
+            reach_values.append(reach)
+        per_finding.append((usd, reach))
+
+    dollar_ranks = _rank_fractions(dollar_values)
+    reach_ranks = _rank_fractions(reach_values)
+
+    ranks: list[Optional[float]] = []
+    for usd, reach in per_finding:
+        candidates = [
+            rank for rank in (
+                dollar_ranks.get(usd) if usd is not None else None,
+                reach_ranks.get(reach) if reach is not None else None,
+            )
+            if rank is not None
+        ]
+        ranks.append(max(candidates) if candidates else None)
+    return ranks
+
+
+def _log_size_bands(
+    findings: Sequence[Finding], ranks: Sequence[Optional[float]]
+) -> None:
+    """The figures behind each dollar band, and how many findings each
+    population holds, so a reader can check whether the ranking is doing
+    something sensible on a real corpus.
+
+    Without this the band is an unfalsifiable integer. The specific thing it
+    exists to expose: a position is only as meaningful as the population it
+    was taken against, so in a corpus with two quoted figures BOTH sit near
+    the top of "the quoted figures" and rank accordingly. That is correct by
+    the ordinal design and may still be wrong for a reader, and the only way
+    to tell is to see the amounts and the population sizes together — which
+    is why `dollar_population` is on this line and not left to be inferred
+    from the band histogram. Magnitudes and counts only; never a paraphrase,
+    an account name, or anything a customer said.
+    """
+    dollars_by_band: defaultdict[int, list[float]] = defaultdict(list)
+    reach_by_band: defaultdict[int, int] = defaultdict(int)
+    for finding, rank in zip(findings, ranks):
+        band = _band_for_rank(rank)
+        if band is None:
+            continue
+        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        if isinstance(usd, (int, float)):
+            dollars_by_band[band].append(float(usd))
+        else:
+            reach_by_band[band] += 1
+    if not dollars_by_band and not reach_by_band:
+        return
+    dollar_population = sum(len(v) for v in dollars_by_band.values())
+    reach_population = sum(reach_by_band.values())
+    logger.info(
+        "crucible_size_bands dollar_population=%s dollar_figures_by_band=%s "
+        "reach_population=%s reach_findings_by_band=%s unbanded=%s",
+        dollar_population,
+        {b: sorted(v, reverse=True) for b, v in sorted(dollars_by_band.items())},
+        reach_population,
+        dict(sorted(reach_by_band.items())),
+        sum(1 for r in ranks if r is None),
+    )
 
 
 @dataclass(frozen=True)
@@ -447,6 +726,9 @@ def build_findings(
                 value_per_unit=None,
                 assumed_params=assumed,
                 native_units=_grounded_commercial_native_units(group),
+                # The identities behind that sum, so anything summing ACROSS
+                # findings can deduplicate the same money one more time.
+                grounded_figures=deduped_grounded_figures(group),
             ),
             confidence_inputs=ConfidenceInputs(
                 strengths=tuple(c.strength for c in group),
@@ -468,8 +750,30 @@ def build_findings(
             adjudication=_adjudicate(group),
         )
         findings.append(finding)
-        impacts.append(score_impact(finding))
-        confidences.append(score_confidence(finding, now=now))
+
+    # ── The ordinal size band: the ONE cross-finding comparison ─────────────
+    #
+    # SCORED TWICE, ON PURPOSE, and only the second result ever escapes. The
+    # reach half of the band is `score_impact`'s own arithmetic, so the
+    # alternative was to re-derive `affected_population * movable_gap *
+    # value_per_unit` here — a second copy of the sizing formula, free to
+    # drift from the real one and wrong in a way no test would catch, because
+    # both copies would agree until someone changed one. Calling the real
+    # scorer for a throwaway pass costs nothing (it is pure arithmetic over a
+    # frozen dataclass) and there is then exactly one definition of size.
+    #
+    # The provisional impacts are discarded here and never reach a caller.
+    provisional = [score_impact(f) for f in findings]
+    ranks = _size_ranks(findings, provisional)
+    _log_size_bands(findings, ranks)
+    findings = [
+        f if rank is None else replace(
+            f, impact_inputs=replace(f.impact_inputs, size_rank=rank)
+        )
+        for f, rank in zip(findings, ranks)
+    ]
+    impacts = [score_impact(f) for f in findings]
+    confidences = [score_confidence(f, now=now) for f in findings]
 
     if len(rejected) > MAX_LISTED_REJECTIONS:
         rejected.sort(key=lambda r: (-len(r.claim_ids), r.label))
@@ -536,17 +840,50 @@ def _rank(
 ) -> list[int]:
     """Order by size, then by how sure — reading FROZEN scores (I10).
 
-    An unsizeable finding sorts last but is never dropped and never treated as
-    zero: "we could not size this" and "this is worth nothing" lead to opposite
-    decisions. An authoritative conflict outranks everything, because two
-    sources that may both speak disagreeing is worth more than either claim.
+    Size is read as `size_rank` — the finding's position among its OWN
+    currency's peers — and never as the raw `value`. That is the whole
+    change, and it is a change of unit rather than of policy. `value` is
+    denominated differently for different findings on the same run: accounts
+    for a reach-based finding, and nothing at all for one whose only evidence
+    is a quoted dollar figure. Sorting the whole list on it compared
+    incommensurable things, and put every finding we could not size in
+    accounts last by construction — including the ones holding real money.
+    `size_rank` is the same question asked in a unit every finding shares:
+    how big is this, relative to the things it can be compared to.
+
+    WHY NOT SORT ON THE QUARTILE AND BREAK TIES ON `value`. Because the tie
+    would be broken by exactly the comparison the quartile exists to avoid.
+    Measured on a probe corpus of 201 findings, a figure-only finding banded
+    top-quartile and then landed 51st, behind every reach finding in its own
+    band, because `value` was asked to rank "fifty accounts" against "no
+    account measure" and `None` loses that every time. The quartile is what
+    gets REPORTED (`types.SIZE_BANDS`); the underlying position is what
+    sorts.
+
+    This preserves reach-only ordering exactly, and provably: within one
+    currency `size_rank` is monotone in `value`, so reach findings come out
+    in precisely the order sorting on `value` alone produced. A finding with
+    no figure is exactly where it always was, relative to the others with no
+    figure.
+
+    An unranked finding — no grounded figure and no measured reach — sorts
+    last but is never dropped and never treated as zero: "we could not size
+    this" and "this is worth nothing" lead to opposite decisions. An
+    authoritative conflict still outranks everything, because two sources
+    that may both speak disagreeing is worth more than either claim.
     """
     def key(i: int):
         conflict = findings[i].adjudication == "conflict"
-        value = impacts[i].value
+        size_rank = impacts[i].size_rank
         return (
             0 if conflict else 1,
-            -(value if value is not None else -1),
+            # A real rank is always > 0, so an unranked finding sorting at 0
+            # lands behind every ranked one without a sentinel.
+            -(size_rank if size_rank is not None else 0.0),
+            # Cross-currency ties (the top of the figures and the top of the
+            # reaches both sit at 1.0) fall through to how SURE we are —
+            # the only remaining discriminator that means the same thing for
+            # both kinds of finding.
             -confidences[i].score,
         )
 

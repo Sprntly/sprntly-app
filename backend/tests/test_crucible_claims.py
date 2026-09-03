@@ -177,6 +177,70 @@ def test_a_commercial_term_without_a_grounded_amount_stays_a_mechanism_claim():
     assert claim.magnitude is None
 
 
+# ── A price becomes a deal value through `basis`, never through `kind` ──────
+#
+# The write side attaches a figure to `commercial_term` AND `pricing`; this
+# read side used to admit only the first, so most of what the extractor
+# captured was enriched and then discarded. The fix is NOT to admit `pricing`
+# wholesale: a per-seat rate is not a sum, and summing one would be a
+# projection wearing a quoted figure's clothes. The distinction is not
+# expressible in `kind` — it is one model judgement over a taxonomy whose own
+# prose blurs the two — so it is read off `basis`, a field of the same
+# grounded shape with a closed vocabulary the extractor's validator enforces.
+
+
+def test_the_sum_eligible_bases_are_real_members_of_the_extractors_vocabulary():
+    """Drift guard. These strings are declared here rather than imported, so
+    a rename on the write side must not leave this gate silently matching
+    nothing and discarding every price."""
+    from app.crucible.claims import _SUM_ELIGIBLE_BASIS
+    from app.graph.extractor import _COMMERCIAL_BASIS_VALUES
+
+    assert _SUM_ELIGIBLE_BASIS
+    assert _SUM_ELIGIBLE_BASIS <= _COMMERCIAL_BASIS_VALUES
+
+
+@pytest.mark.parametrize("basis", ["total-contract", "one-off"])
+def test_a_priced_figure_with_a_sum_eligible_basis_votes_on_size(basis):
+    """A total-contract or one-off price means what a deal value means: this
+    is what it costs, in total, once."""
+    claim = project_signal(sig(
+        kind="pricing", source_type="revenue",
+        properties={"amount": 120000, "currency": "USD", "basis": basis,
+                    "certainty": "quoted"},
+    ), {})
+    assert claim is not None
+    assert claim.type == "magnitude"
+    assert claim.magnitude == 120000.0
+
+
+@pytest.mark.parametrize("basis", ["per-seat", "per-year", None, "", "invented"])
+def test_a_rate_is_never_summed_as_a_deal_value(basis):
+    """`per-seat` without a stated seat count is a rate, not a sum; `per-year`
+    is a rate over a term nobody stated; a missing basis is UNMEASURED, and
+    unmeasured is never assumed favourably (I3)."""
+    claim = project_signal(sig(
+        kind="pricing", source_type="revenue",
+        properties={"amount": 120000, "currency": "USD", "basis": basis},
+    ), {})
+    assert claim is not None
+    assert claim.magnitude is None
+    assert claim.type == "mechanism"
+
+
+def test_a_commercial_term_figure_is_not_basis_gated():
+    """The asymmetry is deliberate: `commercial_term` is the taxonomy's own
+    name for a deal fact, so a figure on it already IS what `basis` is being
+    used to establish about a price."""
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue",
+        properties={"amount": 120000, "currency": "USD"},
+    ), {})
+    assert claim is not None
+    assert claim.type == "magnitude"
+    assert claim.magnitude == 120000.0
+
+
 @pytest.mark.parametrize("bad_amount", ["a lot", True, float("nan"), float("inf"), None, [1]])
 def test_a_non_numeric_amount_never_reclassifies_or_sets_magnitude(bad_amount):
     claim = project_signal(sig(

@@ -18,6 +18,8 @@ from app.crucible.pipeline import (
     ECHO_WINDOW,
     MIN_CLAIMS_PER_FINDING,
     NARRATED_DROPS,
+    SIZE_BANDS,
+    _rank_fractions,
     build_findings,
 )
 from app.crucible.types import Claim, PopulationFilter
@@ -222,6 +224,653 @@ def test_no_grounded_claims_leaves_native_units_empty():
               for i, d in enumerate([5, 60])]
     out = run(claims)
     assert out.impacts[0].native_units == {}
+
+
+# ── Repetition is not magnitude ──────────────────────────────────────────────
+#
+# The sum is deduplicated before it is taken, and that is not tidiness. One
+# deal restated in five messages is five claims carrying ONE figure; adding
+# them turns how often something was said into how big it is, which is
+# corroboration deciding size — the single failure the wall between impact
+# and confidence exists to prevent. It is only a display error while the sum
+# is display-only. It stops being one the moment anything downstream reads
+# the sum to order findings.
+
+
+def test_one_figure_restated_by_the_same_account_is_counted_once():
+    """THE DEFECT. Five messages about one $50,000 deal are not $250,000, and
+    no amount of restatement can make them so."""
+    claims = [
+        claim(f"c{i}", days_ago=d, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"})
+        for i, d in enumerate([5, 20, 40, 90, 150])
+    ]
+    out = run(claims, goal_accounts=None)
+    # One account only, so this cluster is refuted before it can be a
+    # finding — the dedup is asserted on the helper directly below. This
+    # case is kept at the pipeline level to pin the surrounding behaviour.
+    assert out.findings == ()
+
+
+def test_the_same_amount_from_two_accounts_is_two_real_figures():
+    """The control that stops the fix over-correcting. Two DIFFERENT
+    accounts each naming $50,000 genuinely is $100,000 of opportunity."""
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 100000.0
+
+
+def test_a_restated_figure_never_inflates_the_sum_across_accounts():
+    """Two accounts, one figure each, every one of them said three times.
+    The sum is the two figures, not the six claims."""
+    claims = []
+    for i, (account, amount) in enumerate(
+        [("Northwind", 50000.0), ("Acme", 30000.0)]
+    ):
+        for j, days in enumerate([5, 40, 120]):
+            claims.append(claim(
+                f"c{i}{j}", days_ago=days, accounts=(account,), ctype="magnitude",
+                source="revenue", magnitude=amount, raw={"currency": "USD"},
+            ))
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 80000.0
+    # The CLAIM count is deliberately still the raw count: it is a statement
+    # about the evidence, not about the money, and a reader must be able to
+    # reconcile it against the claim list.
+    assert units["commercial_grounded_claims"] == 6.0
+    assert units["commercial_grounded_accounts"] == 2.0
+
+
+def test_an_anonymous_restatement_of_an_attributed_figure_is_dropped():
+    """Most often the same deal in a message that did not name the customer.
+    Between double-counting a real figure and under-counting a duplicate,
+    only one of those errors inflates."""
+    claims = [
+        claim("c1", days_ago=5, accounts=("Northwind",), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=40, accounts=("Acme",), ctype="magnitude",
+              source="revenue", magnitude=30000.0, raw={"currency": "USD"}),
+        claim("c3", days_ago=90, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+
+
+def test_two_anonymous_statements_of_the_same_amount_are_one_figure():
+    claims = [
+        claim("c1", days_ago=5, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=60, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 50000.0
+
+
+def test_distinct_anonymous_amounts_are_all_summed():
+    claims = [
+        claim("c1", days_ago=5, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=50000.0, raw={"currency": "USD"}),
+        claim("c2", days_ago=60, accounts=(), ctype="magnitude",
+              source="revenue", magnitude=30000.0, raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    assert out.impacts[0].native_units["commercial_grounded_usd"] == 80000.0
+
+
+def test_the_deduped_sum_is_unchanged_by_how_many_claims_repeat_it():
+    """Stated as the property rather than as an example: the sum is a
+    function of the DISTINCT figures, so multiplying the number of claims
+    saying each one must not move it at all."""
+    def sum_for(repeats: int) -> float:
+        claims = []
+        for i, (account, amount) in enumerate(
+            [("Northwind", 50000.0), ("Acme", 30000.0)]
+        ):
+            for j in range(repeats):
+                claims.append(claim(
+                    # Spread well past ECHO_WINDOW so the cluster survives
+                    # refutation at every repeat count — the property under
+                    # test is the sum, not the echo check.
+                    f"c{i}{j}", days_ago=5 + 45 * (i + 2 * j),
+                    accounts=(account,),
+                    ctype="magnitude", source="revenue", magnitude=amount,
+                    raw={"currency": "USD"},
+                ))
+        return run(claims).impacts[0].native_units["commercial_grounded_usd"]
+
+    assert sum_for(1) == sum_for(2) == sum_for(5) == 80000.0
+
+
+# ── Provenance rides with the figure ─────────────────────────────────────────
+#
+# The backfill stamps a distinct `certainty` on any figure recovered from a
+# written summary, precisely so a reader could tell it from one captured
+# against a verified verbatim quote. Nothing read it, so the two were
+# indistinguishable downstream — the promise was stored and never kept.
+
+
+def test_the_derived_marker_matches_the_one_the_backfill_actually_writes():
+    """Pinned on BOTH sides. The read path declares the string rather than
+    importing the operator tool (which drags in the extractor and a DB
+    client), so the only thing keeping them in step is this assertion."""
+    from app.crucible.backfill import BACKFILL_CERTAINTY
+    from app.crucible.pipeline import BACKFILL_CERTAINTY_MARKER
+
+    assert BACKFILL_CERTAINTY_MARKER == BACKFILL_CERTAINTY
+
+
+def test_a_figure_read_back_from_a_summary_is_marked_derived():
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0],
+                            derived=True)
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert units["commercial_grounded_usd_derived"] == 340000.0
+    assert all(f.derived for f in out.impacts[0].grounded_figures)
+
+
+def test_a_quoted_figure_carries_no_derived_portion_at_all():
+    """Proportionate means silent when there is nothing to hedge — the key is
+    absent rather than present at zero, so a renderer cannot accidentally
+    hedge a fully quoted figure."""
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0])
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert "commercial_grounded_usd_derived" not in units
+
+
+def test_only_the_derived_portion_of_a_mixed_sum_is_marked():
+    quoted = _dollar_claims("q", "alpha", amounts=[250000.0])
+    derived = _dollar_claims("d", "alpha", amounts=[90000.0], derived=True)
+    # Same subject, so they cluster into one finding; dates already spread.
+    derived = [claim(
+        "d9", subject="alpha", days_ago=200, accounts=(), ctype="magnitude",
+        source="revenue", magnitude=90000.0,
+        raw={"currency": "USD", "certainty": "derived-from-summary"},
+    )]
+    out = run(quoted + derived)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 340000.0
+    assert units["commercial_grounded_usd_derived"] == 90000.0
+
+
+def test_the_same_figure_seen_both_ways_keeps_the_stronger_provenance():
+    """If any claim carried this money against a verified quote, it IS quoted
+    money. Hedging it because a summary restated it would understate what we
+    know."""
+    claims = [
+        claim("c1", subject="alpha", days_ago=5, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=50000.0,
+              raw={"currency": "USD", "certainty": "derived-from-summary"}),
+        claim("c2", subject="alpha", days_ago=60, accounts=("Northwind",),
+              ctype="magnitude", source="revenue", magnitude=50000.0,
+              raw={"currency": "USD", "certainty": "quoted"}),
+        claim("c3", subject="alpha", days_ago=120, accounts=("Acme",),
+              ctype="magnitude", source="revenue", magnitude=30000.0,
+              raw={"currency": "USD"}),
+    ]
+    out = run(claims)
+    units = out.impacts[0].native_units
+    assert units["commercial_grounded_usd"] == 80000.0
+    assert "commercial_grounded_usd_derived" not in units
+
+
+# ── Cross-finding identity: the reason figures travel as identities ─────────
+
+def test_the_figures_behind_the_sum_travel_with_the_impact():
+    """The sum alone cannot be deduplicated a second time. Carrying the
+    identities is what lets a consumer summing ACROSS findings apply the same
+    rule again — see `recommend._quoted_money_toward_target`."""
+    claims = _dollar_claims("d", "alpha", amounts=[250000.0, 90000.0])
+    out = run(claims)
+    figures = out.impacts[0].grounded_figures
+    assert sorted(f.amount for f in figures) == [90000.0, 250000.0]
+    assert sum(f.amount for f in figures) == (
+        out.impacts[0].native_units["commercial_grounded_usd"]
+    )
+
+
+def test_a_figure_identity_never_carries_the_account_name():
+    """These ride on scored objects that get logged and diffed. Deduplication
+    needs to know two figures belong to the same customer; nothing downstream
+    needs to know which customer."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=d, accounts=(a,),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"})
+        for i, (d, a, m) in enumerate(
+            [(5, "Northwind Trading", 50000.0), (60, "Acme Corp", 30000.0)]
+        )
+    ]
+    out = run(claims)
+    keys = {f.account_key for f in out.impacts[0].grounded_figures}
+    assert len(keys) == 2
+    blob = repr(out.impacts[0])
+    assert "Northwind" not in blob and "Acme" not in blob
+
+
+def test_the_account_key_is_stable_across_processes():
+    """Reproducibility is the claim this engine makes against asking a
+    general model the same question, so the key cannot come from Python's own
+    per-process-salted `hash()`."""
+    import subprocess
+    import sys
+
+    from app.crucible.pipeline import _account_key
+
+    here = _account_key(("Northwind Trading", "Acme Corp"))
+    out = subprocess.run(
+        [sys.executable, "-c",
+         "from app.crucible.pipeline import _account_key;"
+         "print(_account_key(('Northwind Trading', 'Acme Corp')))"],
+        capture_output=True, text=True, check=True,
+    )
+    assert out.stdout.strip() == here
+
+
+# ── The ordinal size band ────────────────────────────────────────────────────
+#
+# A finding carrying a real quoted figure but no named account scored
+# `value=None` and sorted below everything we could size, however trivially —
+# findings holding actual money ranked last. Adding the dollars to `value` is
+# worse than the disease: `value` is denominated in accounts here, so dollars
+# would win by six orders of magnitude and naming any figure at all would beat
+# every reach-based finding in the corpus. So the comparison is ORDINAL and
+# each finding competes in its own currency.
+
+
+def _dollar_claims(prefix, subject, *, amounts, accounts=None, derived=False):
+    """One finding's worth of quoted-figure claims.
+
+    NO NAMED ACCOUNTS BY DEFAULT, and that is what makes these tests mean
+    anything. A claim that names an account puts its finding in the REACH
+    population too, so the band would come back 4 from the reach side and a
+    test of dollar banding would pass without ever exercising it.
+    """
+    return [
+        claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i,
+              accounts=(accounts[i],) if accounts else (),
+              ctype="magnitude", source="revenue",
+              magnitude=amount,
+              raw={"currency": "USD",
+                   **({"certainty": "derived-from-summary"} if derived else {})})
+        for i, amount in enumerate(amounts)
+    ]
+
+
+def _reach_claims(prefix, subject, *, accounts):
+    """One finding's worth of reach claims: ALWAYS exactly two, sharing
+    `accounts` between them.
+
+    Two rather than one-per-account so that a finding's REACH can be varied
+    without also varying how many claims support it. Claim count feeds
+    confidence, and confidence is the final tie-break in ordering — so a
+    fixture that scales accounts and claims together confounds "did reach
+    move this finding" with "did confidence move this finding", and an
+    ordering assertion built on it proves neither.
+    """
+    accounts = tuple(accounts)
+    assert len(accounts) >= 2, "a single-account cluster is refuted, not ranked"
+    half = max(1, len(accounts) // 2)
+    return [
+        claim(f"{prefix}{i}", subject=subject, days_ago=5 + 45 * i, accounts=group)
+        for i, group in enumerate((accounts[:half], accounts[half:]))
+    ]
+
+
+def _by_label(out):
+    return {f.label: (f, im) for f, im in zip(out.findings, out.impacts)}
+
+
+# ── The ranking function itself ──────────────────────────────────────────────
+
+def test_an_empty_population_ranks_nothing():
+    assert _rank_fractions([]) == {}
+
+
+def test_the_only_member_of_a_population_sits_at_the_top_of_it():
+    """Deliberate, not a degenerate case: a lone quoted figure IS the largest
+    quoted figure in the run. The rank says only that — never that the figure
+    is large in absolute terms."""
+    assert _rank_fractions([42.0]) == {42.0: 1.0}
+
+
+def test_equal_sizes_always_share_a_rank():
+    """Ordering has to be reproducible run over run, which is the claim this
+    engine makes against asking a general model the same question. Two
+    findings of identical size must never be separated by an accident of
+    iteration order."""
+    ranks = _rank_fractions([5.0, 5.0, 5.0, 100.0])
+    assert len(set(ranks.values())) == 2
+    assert ranks[5.0] == 0.75
+    assert ranks[100.0] == 1.0
+
+
+def test_the_rank_never_falls_as_the_value_rises():
+    """Monotonicity is what makes reach-only ordering provably unchanged: if
+    rank never disagrees with value, sorting on rank IS sorting on value for
+    everything measured in the same currency."""
+    values = [1.0, 3.0, 7.0, 7.0, 12.0, 40.0, 900.0]
+    ranks = _rank_fractions(values)
+    ordered = [ranks[v] for v in sorted(set(values))]
+    assert ordered == sorted(ordered)
+    assert min(ordered) > 0.0 and max(ordered) == 1.0
+
+
+def test_the_reported_band_is_the_quartile_of_the_underlying_rank():
+    """The band is DERIVED, never stored beside the rank, so the number a
+    reader sees and the number that sorts cannot drift apart."""
+    from app.crucible.types import ImpactInputs
+
+    def band(rank):
+        return ImpactInputs(currency="accounts", affected_population=None,
+                            movable_gap=None, value_per_unit=None,
+                            size_rank=rank).size_band
+
+    assert band(None) is None
+    assert band(1.0) == SIZE_BANDS
+    assert band(0.76) == 4
+    assert band(0.75) == 3
+    assert band(0.5) == 2
+    assert band(0.25) == 1
+    # Clamped at both ends: a rank of exactly 0 is not band 0, and float
+    # drift just past 1.0 is not band 5.
+    assert band(0.0) == 1
+    assert band(1.0000000001) == SIZE_BANDS
+
+
+# ── I1's sibling: the band reads DEDUPED AMOUNTS, never claim counts ─────────
+#
+# This is why the deduplication had to land first. The band is the one number
+# in this pipeline computed by comparing findings against each other, so it is
+# the one place corroboration could re-enter size without touching a field
+# named like corroboration: if the sum it reads grew with restatement, then
+# "said more often" would band higher, and impact would be reading agreement.
+
+
+def test_the_band_is_identical_for_a_figure_stated_once_and_repeatedly():
+    """THE GUARD. Two findings holding the SAME money — one from two claims,
+    one from six — must band identically. Any difference is corroboration
+    deciding size."""
+    quiet = _dollar_claims("q", "alpha", amounts=[10000.0, 20000.0])
+    loud = _dollar_claims("l", "beta", amounts=[
+        10000.0, 10000.0, 10000.0, 20000.0, 20000.0, 20000.0,
+    ])
+    # A third, larger finding so the dollar population is not degenerate and
+    # the shared band is a real position rather than "everyone is band 4".
+    other = _dollar_claims("o", "gamma", amounts=[900000.0, 800000.0])
+    out = run(quiet + loud + other)
+    found = _by_label(out)
+    quiet_i, loud_i = found["alpha"][1], found["beta"][1]
+    # Same money, three times the agreement about it.
+    assert quiet_i.native_units["commercial_grounded_usd"] == 30000.0
+    assert loud_i.native_units["commercial_grounded_usd"] == 30000.0
+    assert quiet_i.native_units["commercial_grounded_claims"] == 2.0
+    assert loud_i.native_units["commercial_grounded_claims"] == 6.0
+    assert quiet_i.size_band == loud_i.size_band
+    assert quiet_i.size_band < found["gamma"][1].size_band
+
+
+def test_a_bigger_sum_bands_above_a_louder_one():
+    """The direction that proves the band reads MONEY. The finding with more
+    money and less agreement must band above the finding with less money and
+    more agreement — the exact inversion a corroboration-contaminated sizer
+    would get backwards."""
+    big_quiet = _dollar_claims("b", "alpha", amounts=[400000.0, 500000.0])
+    small_loud = _dollar_claims("s", "beta", amounts=[
+        500.0, 500.0, 500.0, 600.0, 600.0, 600.0,
+    ])
+    out = run(big_quiet + small_loud)
+    found = _by_label(out)
+    big, small = found["alpha"][1], found["beta"][1]
+    assert big.native_units["commercial_grounded_usd"] == 900000.0
+    assert small.native_units["commercial_grounded_usd"] == 1100.0
+    assert big.native_units["commercial_grounded_claims"] == 2.0
+    assert small.native_units["commercial_grounded_claims"] == 6.0
+    assert big.size_band > small.size_band
+
+
+# ── A quoted figure with no named account can finally rank ───────────────────
+
+def test_a_figure_only_finding_is_banded_and_still_honestly_unsized():
+    """Both halves matter. It BANDS, so it can rank at all. Its `value` stays
+    `None`, because we did not measure its reach and saying we did would be a
+    fabricated number wearing a quoted figure's credibility."""
+    claims = [
+        claim(f"c{i}", subject="alpha", days_ago=d, accounts=(),
+              ctype="magnitude", source="revenue", magnitude=m,
+              raw={"currency": "USD"})
+        for i, (d, m) in enumerate([(5, 250000.0), (60, 90000.0)])
+    ]
+    out = run(claims)
+    assert len(out.findings) == 1
+    impact = out.impacts[0]
+    assert impact.value is None
+    assert impact.affected_population is None
+    assert impact.size_band is not None
+    assert impact.native_units["commercial_grounded_usd"] == 340000.0
+
+
+def test_each_finding_is_banded_against_its_own_currencys_peers():
+    """D2 in one assertion. A tiny reach finding is the top of the REACH
+    population and a large one the top of the DOLLAR population; both land in
+    the top band, because "biggest of its kind" is the comparable statement
+    and their raw numbers are not."""
+    reach = _reach_claims("r", "alpha", accounts=("A1", "A2"))
+    dollars = _dollar_claims("d", "beta", amounts=[250000.0, 90000.0])
+    out = run(reach + dollars)
+    found = _by_label(out)
+    assert found["alpha"][1].value == 2.0
+    assert found["alpha"][1].size_band == SIZE_BANDS
+    assert found["beta"][1].value is None
+    assert found["beta"][1].size_band == SIZE_BANDS
+
+
+def test_carrying_a_figure_can_lift_a_finding_and_never_demotes_one():
+    """A finding in BOTH populations takes the higher of its two bands.
+    Evidence must never cost a finding its position: a reach finding that
+    also happens to carry a quoted figure cannot rank below the identical
+    finding without one.
+
+    `alpha` and `beta` have the SAME reach (two accounts each) and only
+    `alpha` carries a figure; `gamma` has more reach than either, so the
+    reach population is not degenerate and the two-account findings do not
+    start at the top band."""
+    with_figure = _dollar_claims(
+        "w", "alpha", amounts=[900000.0, 800000.0], accounts=("A1", "A2"),
+    )
+    plain = _reach_claims("p", "beta", accounts=("B1", "B2"))
+    wider = _reach_claims("g", "gamma", accounts=("C1", "C2", "C3", "C4"))
+    out = run(with_figure + plain + wider)
+    found = _by_label(out)
+    assert found["alpha"][1].value == found["beta"][1].value == 2.0
+    assert found["beta"][1].size_band < SIZE_BANDS, "reach population is not degenerate"
+    assert found["alpha"][1].size_band >= found["beta"][1].size_band
+    assert found["alpha"][1].size_band == SIZE_BANDS, "lifted by its own figure"
+
+
+# ── What the band must NOT change ────────────────────────────────────────────
+
+def test_reach_only_ordering_is_unchanged_by_the_band():
+    """The promise made to every finding with no figure. Because the band is
+    monotone in reach, sorting reach findings by band and then by value is the
+    same order as sorting them by value alone."""
+    claims = []
+    for n, subject in enumerate(("alpha", "beta", "gamma", "delta")):
+        # 2..5 accounts, so the reach values are 2.0, 3.0, 4.0, 5.0 and every
+        # cluster clears the two-claim / two-account bars.
+        claims.extend(_reach_claims(
+            subject[0], subject,
+            accounts=tuple(f"{subject}-{i}" for i in range(n + 2)),
+        ))
+    out = run(claims)
+    values = [im.value for im in out.impacts]
+    assert len(values) == 4
+    assert values == sorted(values, reverse=True)
+    assert values == [5.0, 4.0, 3.0, 2.0]
+
+
+def test_an_unbanded_finding_still_sorts_last_and_is_never_dropped():
+    """No figure and no measured reach is genuinely unrankable. It keeps its
+    place at the end of the list — never removed, never rendered as zero."""
+    sized = _reach_claims("s", "alpha", accounts=("A1", "A2"))
+    unsized = [
+        claim(f"u{i}", subject="beta", days_ago=d, accounts=())
+        for i, d in enumerate([5, 60])
+    ]
+    out = run(sized + unsized)
+    assert len(out.findings) == 2
+    assert out.impacts[-1].value is None
+    assert out.impacts[-1].size_band is None
+    assert out.findings[-1].label == "beta"
+
+
+def test_ordering_does_not_change_a_single_score(monkeypatch):
+    """I10 at the pipeline level, and it matters more now than it did: this
+    is the first change where the same function both feeds the scorer and
+    reads its output, so "ordering reads frozen scores and never writes back"
+    needs proving here and not only against a harness fake.
+
+    Run the pipeline normally, then again with ordering replaced by identity,
+    and demand the scores are byte-identical as a SET — the order changes,
+    every number in it does not.
+    """
+    import app.crucible.pipeline as pipeline_mod
+
+    claims = []
+    for n in range(4):
+        subject = f"reach-{n}"
+        claims.extend(_reach_claims(
+            subject, subject,
+            accounts=tuple(f"{subject}-a{i}" for i in range(n + 2)),
+        ))
+    claims.extend(_dollar_claims("m", "money", amounts=[250000.0, 90000.0]))
+
+    ranked = run(claims)
+    monkeypatch.setattr(
+        pipeline_mod, "_rank",
+        lambda findings, impacts, confidences, *, deep_cap: list(range(len(findings))),
+    )
+    unranked = run(claims)
+
+    assert [f.label for f in ranked.findings] != [f.label for f in unranked.findings], (
+        "ordering must actually have done something, or this proves nothing"
+    )
+    assert sorted(repr(i) for i in ranked.impacts) == sorted(
+        repr(i) for i in unranked.impacts
+    )
+    assert sorted(repr(c) for c in ranked.confidences) == sorted(
+        repr(c) for c in unranked.confidences
+    )
+
+
+def test_a_figure_only_finding_ranks_by_its_position_not_behind_its_whole_band():
+    """THE ORDERING PROPERTY, AND THE HISTORY BEHIND IT.
+
+    An earlier revision sorted on the QUARTILE and then broke ties on
+    `value`. Measured on a probe corpus of 201 findings, that put a
+    figure-only finding in the top band and then 51st overall — behind every
+    reach finding in its own band — because the tie-break asked `value` to
+    rank "fifty accounts" against "no account measure", and `None` loses that
+    every time. The quartile lifted the finding and the tie-break dropped it,
+    using exactly the cross-currency comparison the quartile existed to
+    avoid.
+
+    So the quartile became a REPORTING number and ordering moved to the
+    underlying position among a finding's own currency peers. Here the quoted
+    figure is the largest of its population and every reach finding is
+    smaller than the largest of its own, so the figure sorts at the very
+    front rather than behind the pack it was banded with.
+    """
+    claims = []
+    for n in range(8):
+        subject = f"reach-{n}"
+        claims.extend(_reach_claims(
+            subject, subject,
+            accounts=tuple(f"{subject}-a{i}" for i in range(n + 2)),
+        ))
+    claims.extend(_dollar_claims("m", "money", amounts=[250000.0, 90000.0]))
+
+    out = run(claims)
+    labels = [f.label for f in out.findings]
+    money_at = labels.index("money")
+    money_impact = out.impacts[money_at]
+
+    assert money_impact.value is None
+    assert money_impact.size_rank == 1.0
+    assert money_impact.size_band == SIZE_BANDS
+    # Nothing ahead of it may be ranked below it — the ordering is total and
+    # by rank, not by whether a finding happens to carry a `value`.
+    assert all(
+        i.size_rank >= money_impact.size_rank for i in out.impacts[:money_at]
+    )
+    assert money_at <= 1, "the top of its own currency should sort at the front"
+
+
+def test_a_figure_only_finding_does_not_sink_as_its_band_gets_more_crowded():
+    """THE PROPERTY THAT SEPARATES THE TWO DESIGNS, and the one an earlier
+    version of this test failed to actually test.
+
+    Under quartile-then-`value` ordering, a figure-only finding sat behind
+    EVERY valued finding in its band, so its position was a function of how
+    many findings happened to share that band — on a real corpus, a quarter
+    of everything. Ordering on the underlying position instead, only a
+    finding that genuinely ties it can precede it, and with distinct reach
+    values exactly one does.
+
+    So: grow the corpus so the top band holds more findings, and the
+    figure-only finding must not move.
+
+    (The first draft of this test scaled every reach value by 50x and
+    asserted the position was stable. It passed under BOTH designs — because
+    the ranking is relative, scaling everything changes nothing — so it
+    proved neither. Kept as a note: an ordering test that cannot fail on the
+    ordering it replaced is not testing the ordering.)
+    """
+    def money_position(reach_findings: int) -> tuple[int, int]:
+        claims = []
+        for n in range(reach_findings):
+            subject = f"reach-{n}"
+            claims.extend(_reach_claims(
+                subject, subject,
+                accounts=tuple(f"{subject}-a{i}" for i in range(n + 2)),
+            ))
+        claims.extend(_dollar_claims("m", "money", amounts=[250000.0, 90000.0]))
+        out = run(claims)
+        at = [f.label for f in out.findings].index("money")
+        top_band = sum(1 for i in out.impacts if i.size_band == SIZE_BANDS)
+        return at, top_band
+
+    four_at, four_top = money_position(4)
+    eight_at, eight_top = money_position(8)
+
+    assert eight_top > four_top, "the top band must actually have grown"
+    assert four_at == eight_at
+
+
+def test_a_small_quoted_figure_is_not_promoted_for_being_a_figure():
+    """THE FAILURE THE ORDINAL DESIGN EXISTS TO AVOID, pinned so nobody
+    "fixes" it back. Guaranteeing that a dollar line renders would mean a
+    small one-off outranking a much larger quoted deal purely for carrying a
+    currency symbol. The smallest of several quoted figures sits in a low
+    band and stays there."""
+    small = _dollar_claims("s", "alpha", amounts=[500.0, 500.0])
+    mid = _dollar_claims("m", "beta", amounts=[40000.0, 40000.0])
+    big = _dollar_claims("b", "gamma", amounts=[900000.0, 900000.0])
+    out = run(small + mid + big)
+    found = _by_label(out)
+    assert found["gamma"][1].size_band > found["alpha"][1].size_band
+    assert found["alpha"][1].size_band < SIZE_BANDS
+    assert [f.label for f in out.findings][:1] == ["gamma"]
 
 
 # ── Adjudication ─────────────────────────────────────────────────────────────

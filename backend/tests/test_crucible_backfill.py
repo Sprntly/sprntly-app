@@ -22,8 +22,13 @@ import pytest
 
 from app.crucible.backfill import (
     BACKFILL_CERTAINTY,
+    SKIP_IMPLAUSIBLE_MAGNITUDE,
+    SKIP_NON_DEAL_CONTEXT,
+    amount_distribution,
     decide_for_signal,
+    decide_purge_for_signal,
     find_dollar_figures,
+    scan_dollar_figures,
 )
 from app.graph.extractor import _AMOUNT_ELIGIBLE_KINDS, _COMMERCIAL_CERTAINTY_VALUES
 
@@ -117,23 +122,28 @@ def test_no_dollar_figure_in_plain_prose():
 # them, in these shapes: $NM, $NNM, $N.NM, $NB, $NNK, $NNNK. A mis-parsed
 # scale is a 1,000x-or-more magnitude error — "$1.5M" resolving to 1.5 or
 # 1500 instead of 1,500,000 is worse than no figure at all, because unlike a
-# missing figure a wrong one is invisible: it looks like data. This locks
-# down the exact shapes before `--apply` writes any of the 218 rows.
+# missing figure a wrong one is invisible: it looks like data.
+#
+# THAT INSTINCT WAS RIGHT AND ITS SCOPE WAS TOO NARROW, which the run that
+# followed proved. It asked only "is this figure resolved to the right
+# magnitude", and every one of these cases passed while the sweep imported a
+# fifty-billion-dollar market size as a customer-stated deal value. The
+# question it never asked is the one that matters just as much: IS THIS
+# FIGURE A DEAL FACT AT ALL. A valuation and a book of business are not, and
+# both were asserted here as correct parses. They are now asserted as
+# refusals, with the reason recorded — see the semantic-gate block below.
 
 def test_letter_scale_suffixes_resolve_to_the_right_magnitude():
     assert find_dollar_figures("renewed at $1.5M") == [1_500_000.0]
     assert find_dollar_figures("renewed at $2M") == [2_000_000.0]
-    assert find_dollar_figures("a $250M book of business") == [250_000_000.0]
     assert find_dollar_figures("quoted $50k for the pilot") == [50_000.0]
     assert find_dollar_figures("quoted $50K for the pilot") == [50_000.0]
     assert find_dollar_figures("a $250K expansion") == [250_000.0]
-    assert find_dollar_figures("a $1B contract") == [1_000_000_000.0]
 
 
 def test_word_scale_suffixes_with_a_space_resolve_to_the_right_magnitude():
     assert find_dollar_figures("closed at $1.5 million ARR") == [1_500_000.0]
     assert find_dollar_figures("saved $50 thousand a year") == [50_000.0]
-    assert find_dollar_figures("a $2 billion valuation") == [2_000_000_000.0]
 
 
 def test_scale_suffix_case_is_never_significant():
@@ -141,14 +151,142 @@ def test_scale_suffix_case_is_never_significant():
     assert find_dollar_figures("worth $50K") == [50_000.0]
     assert find_dollar_figures("worth $50m") == [50_000_000.0]
     assert find_dollar_figures("worth $50M") == [50_000_000.0]
-    assert find_dollar_figures("worth $50b") == [50_000_000_000.0]
-    assert find_dollar_figures("worth $50B") == [50_000_000_000.0]
     assert find_dollar_figures("worth $50 thousand") == [50_000.0]
     assert find_dollar_figures("worth $50 THOUSAND") == [50_000.0]
     assert find_dollar_figures("worth $50 Million") == [50_000_000.0]
     assert find_dollar_figures("worth $50 MILLION") == [50_000_000.0]
-    assert find_dollar_figures("worth $50 Billion") == [50_000_000_000.0]
-    assert find_dollar_figures("worth $50 BILLION") == [50_000_000_000.0]
+
+
+# ── The semantic gate: is this figure a DEAL FACT? ──────────────────────────
+#
+# At ingest that question is answered by the model under a prompt contract —
+# `amount` is attached only after it judges the item a commercial term. The
+# regex has no such gate, and this is the approximation of it. Every case
+# here is a REFUSAL WITH A RECORDED REASON rather than a clamp: a clamped
+# figure is a wrong figure that looks like data, and there is no honest way
+# to render "we shrank this number because it seemed too big".
+
+def test_a_book_of_business_is_not_a_deal_value():
+    """Previously asserted as a correct parse, at full magnitude. A book of
+    business is the size of a customer's own operation, not the size of
+    anything transacted with us."""
+    scan = scan_dollar_figures("a $250M book of business")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_NON_DEAL_CONTEXT,)
+
+
+def test_a_valuation_is_not_a_deal_value():
+    """Also previously asserted as a correct parse. The comment above it
+    worried about scale errors and never asked whether a valuation is a deal
+    value at all."""
+    scan = scan_dollar_figures("a $2 billion valuation")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_NON_DEAL_CONTEXT,)
+
+
+@pytest.mark.parametrize("text", [
+    "sizing the $4 billion market for this",
+    "the TAM here is $30M",
+    "they raised $12M in a Series B",
+    "fresh funding of $8M just landed",
+])
+def test_market_sizing_and_fundraising_figures_are_refused_with_a_reason(text):
+    scan = scan_dollar_figures(text)
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_NON_DEAL_CONTEXT,)
+
+
+def test_a_billions_scale_word_is_refused_even_with_no_stop_word_nearby():
+    """The scale word alone is enough. No quoted deal in this corpus is
+    billions, so the only work `b`/`billion` does is import figures about
+    the market rather than about a customer."""
+    scan = scan_dollar_figures("the contract came to $2 billion")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_IMPLAUSIBLE_MAGNITUDE,)
+
+
+def test_deleting_the_billion_scale_word_never_degrades_it_to_a_bare_figure():
+    """THE TRAP IN THE OBVIOUS FIX. Dropping `b`/`billion` from the scale
+    table alone would leave the pattern matching a bare "$2" out of "$2
+    billion" and enriching the row with 2.0 — trading an inflated figure for
+    a deflated one, both wrong, and the deflated one far harder to notice.
+    The scale word must still be consumed and the whole figure refused."""
+    scan = scan_dollar_figures("the contract came to $2 billion")
+    assert 2.0 not in scan.figures
+    assert scan.figures == ()
+
+
+def test_a_plainly_written_figure_above_the_ceiling_is_refused():
+    """A figure written out in full carries no scale word to catch it, so
+    the numeric ceiling is a separate gate from the scale-word one."""
+    scan = scan_dollar_figures("the agreement is for $4,000,000,000 flat")
+    assert scan.figures == ()
+    assert scan.skips == (SKIP_IMPLAUSIBLE_MAGNITUDE,)
+
+
+def test_a_large_but_plausible_deal_figure_still_parses():
+    """The control. The ceiling must not be so low that it eats the real
+    eight-figure shapes the corpus actually contains."""
+    assert find_dollar_figures("renewed at $12M for three years") == [12_000_000.0]
+    assert find_dollar_figures("the total was $99,000,000") == [99_000_000.0]
+
+
+def test_the_ceiling_refuses_rather_than_clamps():
+    """A clamped figure is a wrong figure wearing a real one's shape. The
+    refused magnitude must not reappear anywhere in the result, at any
+    size."""
+    scan = scan_dollar_figures("worth $50 billion")
+    assert scan.figures == ()
+    assert scan.skips and all(s == SKIP_IMPLAUSIBLE_MAGNITUDE for s in scan.skips)
+
+
+def test_a_stop_word_far_from_the_figure_does_not_veto_it():
+    """The stop-list reads a window around the match, not the whole
+    paraphrase. A figure whose own clause is clean is kept even when an
+    unrelated sentence much later happens to say "market"."""
+    text = (
+        "they signed at $80,000 for the year. "
+        + "x" * 200
+        + " separately, the market for this is growing."
+    )
+    assert find_dollar_figures(text) == [80_000.0]
+
+
+def test_the_stop_list_is_lossy_in_a_way_the_reason_count_makes_visible():
+    """Named honestly rather than hidden: a real deal figure stated in the
+    same breath as a market size is refused along with it. That is the
+    intended trade — a missing figure can be recovered by a better pass, a
+    wrong one cannot be recovered once it has been read as data — and the
+    per-reason counts are what make the size of the loss visible."""
+    scan = scan_dollar_figures("we closed $80,000 in a $4 billion market")
+    assert scan.figures == ()
+    assert SKIP_NON_DEAL_CONTEXT in scan.skips
+
+
+def test_a_signal_refused_on_semantics_is_not_reported_as_no_figure_found():
+    """"There was nothing here" and "there was something here and we judged
+    it not a deal fact" are different facts about the corpus, and only one of
+    them is a reason to improve the parser."""
+    refused = decide_for_signal({}, "the company hit a $2 billion valuation")
+    assert refused.outcome == SKIP_NON_DEAL_CONTEXT
+    assert refused.new_properties is None
+
+    nothing = decide_for_signal({}, "the customer seemed happy with the demo")
+    assert nothing.outcome == "no_figure_found"
+
+
+def test_a_surviving_figure_is_still_enriched_when_another_match_was_refused():
+    """One outcome per signal. A figure that passed every gate on its own —
+    including the context window around itself — is not punished for
+    something at the other end of the paraphrase."""
+    decision = decide_for_signal(
+        {},
+        "they signed at $80,000 for the year. "
+        + "x" * 200
+        + " separately, the market for this is growing.",
+    )
+    assert decision.outcome == "enriched"
+    assert decision.new_properties["amount"] == 80_000.0
 
 
 def test_a_bare_figure_with_no_scale_word_is_never_inflated():
@@ -509,3 +647,207 @@ def test_respects_the_limit_parameter(backfill_env, isolated_settings):
     result = backfill_env.run_backfill(company_id=company_id, apply=True, limit=1)
 
     assert result["examined"] == 1
+
+
+# ─── The value distribution: what the counts cannot tell you ────────────────
+#
+# The previous revision reported examined/enriched/skipped and nothing else,
+# and every one of those numbers was CORRECT on the run that wrote a
+# fifty-billion-dollar figure into a customer-stated field. Counts answer
+# "did the tool do what it was told". Only the distribution answers "was
+# what it wrote true", which is why it is a permanent part of the report and
+# not a diagnostic someone remembers to ask for.
+
+def test_the_distribution_is_none_when_nothing_was_minted():
+    assert amount_distribution([]) is None
+
+
+def test_the_distribution_reports_min_median_max_and_the_top_ten():
+    dist = amount_distribution([float(n) for n in range(1, 16)])
+    assert dist["count"] == 15
+    assert dist["min"] == 1.0
+    assert dist["max"] == 15.0
+    assert dist["median"] == 8.0
+    assert dist["top_10"] == [15.0, 14.0, 13.0, 12.0, 11.0, 10.0, 9.0, 8.0, 7.0, 6.0]
+
+
+def test_a_run_reports_the_distribution_of_what_it_minted(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-dist"
+    for amount in ("$1,000", "$50,000", "$9,000"):
+        _insert_signal(client, company_id=company_id, content=f"closed at {amount}")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["amounts"]["count"] == 3
+    assert result["amounts"]["min"] == 1000.0
+    assert result["amounts"]["median"] == 9000.0
+    assert result["amounts"]["max"] == 50000.0
+
+
+def test_a_dry_run_reports_the_distribution_too(backfill_env, isolated_settings):
+    """THE READING THAT WOULD HAVE CAUGHT THE BAD RUN. A dry run is where an
+    operator is supposed to see the magnitudes before anything is written, so
+    withholding the distribution until `--apply` would put the number on the
+    wrong side of the decision it exists to inform."""
+    client = isolated_settings["supabase"]
+    company_id = "company-dist-dry"
+    _insert_signal(client, company_id=company_id, content="renewed at $75,000")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=False)
+
+    assert result["mode"] == "dry_run"
+    assert result["amounts"]["max"] == 75000.0
+    row = _get_signal(
+        client,
+        client.table("kg_signal").select("id").eq("enterprise_id", company_id)
+        .execute().data[0]["id"],
+    )
+    assert row["properties"].get("amount") is None
+
+
+def test_the_new_skip_reasons_are_counted_in_the_audit_breakdown(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-reasons"
+    _insert_signal(client, company_id=company_id, content="a $2 billion valuation was floated")
+    _insert_signal(client, company_id=company_id, content="the agreement is for $4,000,000,000 flat")
+    _insert_signal(client, company_id=company_id, content="closed at $30,000")
+
+    result = backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    assert result["enriched"] == 1
+    assert result["skipped"][SKIP_NON_DEAL_CONTEXT] == 1
+    assert result["skipped"][SKIP_IMPLAUSIBLE_MAGNITUDE] == 1
+    assert result["total_skipped"] == 2
+    run = (
+        client.table("crucible_backfill_runs").select("*")
+        .eq("company_id", company_id).execute().data[0]
+    )
+    assert run["skipped_counts"][SKIP_NON_DEAL_CONTEXT] == 1
+    assert run["skipped_counts"][SKIP_IMPLAUSIBLE_MAGNITUDE] == 1
+
+
+# ─── The undo: purge_backfilled_amounts ─────────────────────────────────────
+#
+# The idempotency guard that makes a re-run safe is exactly what makes a
+# CORRECTED re-run useless: a row already carrying `amount` is skipped
+# forever. Without an undo, the sweep's first mistake is permanent.
+
+def test_the_purge_decision_only_matches_rows_this_sweep_minted():
+    assert decide_purge_for_signal(
+        {"amount": 1.0, "currency": "USD", "certainty": "quoted"}
+    ) is None
+    assert decide_purge_for_signal({"amount": 1.0, "currency": "USD"}) is None
+    assert decide_purge_for_signal({}) is None
+    assert decide_purge_for_signal(None) is None
+
+
+def test_the_purge_decision_clears_exactly_the_three_keys_it_wrote():
+    cleared = decide_purge_for_signal({
+        "amount": 50.0, "currency": "USD", "certainty": BACKFILL_CERTAINTY,
+        "basis": None, "reality_confidence": 0.8,
+    })
+    assert cleared == {"basis": None, "reality_confidence": 0.8}
+
+
+def test_purge_dry_run_clears_nothing(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-purge-dry"
+    sig_id = _insert_signal(client, company_id=company_id, content="closed at $40,000")
+    backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    result = backfill_env.purge_backfilled_amounts(company_id=company_id, apply=False)
+
+    assert result["cleared"] == 1
+    assert result["amounts"]["max"] == 40000.0
+    assert _get_signal(client, sig_id)["properties"]["amount"] == 40000.0
+
+
+def test_purge_apply_clears_the_row_and_lets_a_re_run_repair_it(backfill_env, isolated_settings):
+    """THE WHOLE REASON THE UNDO EXISTS, end to end: enrich, purge, re-run,
+    and observe the second sweep actually touch the row instead of skipping
+    it as already-enriched."""
+    client = isolated_settings["supabase"]
+    company_id = "company-purge-apply"
+    sig_id = _insert_signal(client, company_id=company_id, content="closed at $40,000")
+    backfill_env.run_backfill(company_id=company_id, apply=True)
+
+    blocked = backfill_env.run_backfill(company_id=company_id, apply=True)
+    assert blocked["enriched"] == 0
+    assert blocked["skipped"]["already_has_amount"] == 1
+
+    purge = backfill_env.purge_backfilled_amounts(company_id=company_id, apply=True)
+    assert purge["cleared"] == 1
+    props = _get_signal(client, sig_id)["properties"]
+    assert "amount" not in props
+    assert "currency" not in props
+    assert "certainty" not in props
+
+    repaired = backfill_env.run_backfill(company_id=company_id, apply=True)
+    assert repaired["enriched"] == 1
+
+
+def test_purge_never_touches_an_ingest_time_figure(backfill_env, isolated_settings):
+    """The line that must never move. An ingest-time amount came off a
+    customer's own verbatim-grounded words; nothing in an undo may reach
+    it."""
+    client = isolated_settings["supabase"]
+    company_id = "company-purge-ingest"
+    sig_id = _insert_signal(
+        client, company_id=company_id, content="they mentioned $99,000 once",
+        properties={"amount": 30000.0, "currency": "USD", "certainty": "quoted"},
+    )
+
+    result = backfill_env.purge_backfilled_amounts(company_id=company_id, apply=True)
+
+    assert result["cleared"] == 0
+    props = _get_signal(client, sig_id)["properties"]
+    assert props["amount"] == 30000.0
+    assert props["certainty"] == "quoted"
+
+
+def test_purge_is_scoped_to_one_company(backfill_env, isolated_settings):
+    """The sentinel is global and the database is shared. A predicate that
+    matched on `certainty` alone would be correct-looking and would reach
+    another tenant's rows."""
+    client = isolated_settings["supabase"]
+    target = "company-purge-target"
+    other = "company-purge-other"
+    other_sig = _insert_signal(client, company_id=other, content="closed at $5,000")
+    _insert_signal(client, company_id=target, content="closed at $7,000")
+    backfill_env.run_backfill(company_id=other, apply=True)
+    backfill_env.run_backfill(company_id=target, apply=True)
+
+    result = backfill_env.purge_backfilled_amounts(company_id=target, apply=True)
+
+    assert result["cleared"] == 1
+    other_props = _get_signal(client, other_sig)["properties"]
+    assert other_props["amount"] == 5000.0
+    assert other_props["certainty"] == BACKFILL_CERTAINTY
+
+
+def test_purge_leaves_every_other_property_and_column_untouched(backfill_env, isolated_settings):
+    client = isolated_settings["supabase"]
+    company_id = "company-purge-blast"
+    sig_id = _insert_signal(
+        client, company_id=company_id, kind="pricing", source_type="revenue",
+        content="settled on $14,250 for the pilot",
+        properties={"reality_confidence": 0.9},
+    )
+    backfill_env.run_backfill(company_id=company_id, apply=True)
+    before = _get_signal(client, sig_id)
+
+    backfill_env.purge_backfilled_amounts(company_id=company_id, apply=True)
+
+    after = _get_signal(client, sig_id)
+    for col in ("content", "kind", "source_type", "enterprise_id", "valid_at"):
+        assert after[col] == before[col], f"{col} must never change"
+    assert set(before["properties"]) - set(after["properties"]) == {
+        "amount", "currency", "certainty"
+    }
+    assert after["properties"]["reality_confidence"] == 0.9
+
+
+def test_purge_requires_a_company(backfill_env):
+    with pytest.raises(ValueError):
+        backfill_env.purge_backfilled_amounts(company_id="", apply=False)

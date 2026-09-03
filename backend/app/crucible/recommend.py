@@ -45,7 +45,13 @@ from dataclasses import dataclass, replace
 from typing import Optional, Sequence
 
 from app.crucible.lint import lint_claim
-from app.crucible.types import Claim, Confidence, Finding, Impact
+from app.crucible.types import (
+    Claim,
+    Confidence,
+    Finding,
+    GroundedFigure,
+    Impact,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -448,6 +454,124 @@ def _unit_matches(unit: str, currency: str) -> bool:
     return False
 
 
+def _money_phrase(amount: float) -> str:
+    return f"${amount:,.0f}"
+
+
+def _quoted_money_toward_target(
+    ranked_impacts: Sequence[Impact], target: float, *, max_count: int,
+) -> Optional["RecommendationCount"]:
+    """Sum the figures people ACTUALLY STATED toward a money target, in rank
+    order. Returns `None` when the corpus holds no quoted figures at all, so
+    the caller's existing refusal stays exactly as it was.
+
+    THE LANGUAGE IS THE DELIVERABLE HERE, NOT THE ARITHMETIC. Summing real
+    quoted values is legitimate; extrapolating from them is forbidden. So
+    every sentence this produces says what it is — figures people stated,
+    totalled — and none of them says "we expect", "projected", or anything
+    that would let a reader take a number nobody said out of this report.
+    The gap to a target is never closed by inference: if the quoted figures
+    fall short, that is what it says.
+
+    DEDUPLICATED ACROSS FINDINGS, NOT JUST WITHIN THEM. Each finding's own
+    sum is already deduplicated, but clustering keys on subject, so the same
+    deal described by two different signals can land in two different
+    findings — a renewal figure legitimately appears under both a pricing
+    theme and a churn theme. Adding the findings' totals would then count
+    that money twice, against a target where double-counting is the
+    difference between "covered" and "half covered". So the identities are
+    replayed here and the same rule applied one more time. This is only
+    possible because the figures travel as identities rather than as a
+    single number, and only correct because they were deduplicated within a
+    finding first.
+    """
+    seen: set[tuple[str, float]] = set()
+    counted: list[GroundedFigure] = []
+    findings_used = 0
+    running = 0.0
+    for imp in ranked_impacts:
+        if running >= target:
+            break
+        contributed = False
+        for figure in imp.grounded_figures:
+            identity = (figure.account_key, figure.amount)
+            if identity in seen:
+                continue
+            seen.add(identity)
+            counted.append(figure)
+            running += figure.amount
+            contributed = True
+        if contributed:
+            findings_used += 1
+
+    if not counted:
+        return None
+
+    n = max(1, min(findings_used or 1, max_count))
+    named_accounts = len({f.account_key for f in counted if f.account_key})
+    reached = running >= target
+    target_text = _money_phrase(target)
+    total_text = _money_phrase(running)
+    across = (
+        f" across {named_accounts} named account"
+        f"{'' if named_accounts == 1 else 's'}"
+        if named_accounts else ""
+    )
+
+    if reached and findings_used == 1:
+        # SAID PLAINLY RATHER THAN PADDED. One finding covering the whole
+        # target is a strong claim resting entirely on the accuracy of the
+        # figures behind it, so those figures are shown rather than
+        # summarised — a reader who can see "$60,000 + $50,000" can judge it
+        # in a way that "$110,000" does not allow.
+        figures_text = " + ".join(_money_phrase(f.amount) for f in counted)
+        basis = (
+            f"you named a target of {target_text}; quoted figures on the top "
+            f"finding alone total {total_text}{across} ({figures_text}), which "
+            f"meets it on its own. These are figures people actually stated, "
+            f"added up — not a projection."
+        )
+    elif reached:
+        basis = (
+            f"you named a target of {target_text}; quoted figures across the "
+            f"top {n} findings total {total_text}{across}, which meets it. "
+            f"These are figures people actually stated, added up — not a "
+            f"projection."
+        )
+    else:
+        basis = (
+            f"you named a target of {target_text}; every quoted figure in "
+            f"this corpus totals {total_text}{across} — short of it. Nothing "
+            f"here is projected to close the gap; these are only the figures "
+            f"people actually stated."
+        )
+
+    derived_total = sum(f.amount for f in counted if f.derived)
+    if derived_total:
+        # PROPORTIONATE, AND SPECIFIC ABOUT WHICH RISK. A figure recovered
+        # from a written summary came from text that was itself written under
+        # a grounding gate, so the exposure is transcription error, not
+        # invention — a blanket "this may be unreliable" would overstate it,
+        # and saying nothing would understate a materially weaker claim.
+        basis += (
+            f" {_money_phrase(derived_total)} of that was read back from "
+            f"written summaries rather than matched to a verified quote."
+        )
+        without_derived = running - derived_total
+        if reached and without_derived < target:
+            # The target is met ONLY because of the hedged figures. Stated
+            # outright: "your target is covered" is a much stronger claim
+            # than "a figure was named", and a reader must not have to do
+            # this subtraction themselves to discover it.
+            basis += (
+                f" Without those, the quoted figures total "
+                f"{_money_phrase(without_derived)}, which would not meet your "
+                f"target."
+            )
+
+    return RecommendationCount(n, basis, target_unsizeable=not reached)
+
+
 @dataclass(frozen=True)
 class RecommendationCount:
     """How many findings get a deep recommendation, and why — rendered
@@ -522,6 +646,26 @@ def resolve_recommendation_count(
     target = _named_target(count_text)
     if target is not None:
         value, unit = target
+        if unit == "dollars":
+            # THE MONEY PATH, TRIED FIRST AND ONLY FOR A MONEY TARGET.
+            #
+            # A finding whose only evidence is a quoted dollar figure has no
+            # named account, so it is honestly unsizeable in the corpus's own
+            # currency and carries `value = None` (I3). It is therefore absent
+            # from `sizeable` below, and `corpus_currency` — read off the
+            # first SIZED finding — says "accounts". The result was that a
+            # reader asking "how do we drive $100,000 in revenue?" was told
+            # this corpus cannot size findings in dollars, while genuinely
+            # quoted dollars sat ranked at the top of the same report.
+            #
+            # Returning `None` here when the corpus holds no quoted figures is
+            # what keeps the refusal below fully intact. This does not weaken
+            # it; it stops it firing when we actually do have dollars.
+            money = _quoted_money_toward_target(
+                ranked_impacts, value, max_count=max_count,
+            )
+            if money is not None:
+                return money
         sizeable = [imp for imp in ranked_impacts if imp.value is not None]
         corpus_currency = sizeable[0].currency if sizeable else None
         if not sizeable or not _unit_matches(unit, corpus_currency or ""):

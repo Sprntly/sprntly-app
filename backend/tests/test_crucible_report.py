@@ -214,6 +214,65 @@ def test_a_single_grounded_account_is_singular_too():
     assert "1 named accounts" not in html
 
 
+def test_a_wholly_derived_figure_never_claims_customers_named_it():
+    """A figure read back out of a written summary is not the same evidence
+    as one captured against a verified verbatim quote. "Customers named $X"
+    is only true of the quoted kind, and the wording has to stop saying it
+    when the figures are derived."""
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 150000.0,
+                          "commercial_grounded_usd_derived": 150000.0,
+                          "commercial_grounded_accounts": 2.0},
+    })])
+    assert "Customers named" not in html
+    assert "Figures stated in the source material" in html
+    assert "$150,000" in html
+    assert "read back from written summaries" in html
+    assert "only as accurate as the summary" in html
+    assert "not a projection" in html
+
+
+def test_a_partly_derived_figure_hedges_only_the_derived_portion():
+    """Proportionate, not blanket: the quoted majority keeps its own
+    wording and the derived part is named as an amount, so a reader can
+    weigh it instead of discounting the whole line."""
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 150000.0,
+                          "commercial_grounded_usd_derived": 40000.0,
+                          "commercial_grounded_accounts": 2.0},
+    })])
+    assert "Customers named $150,000 across 2 named accounts" in html
+    assert "$40,000 of that was read back from written summaries" in html
+
+
+def test_a_fully_quoted_figure_carries_no_hedge():
+    """The regression guard on the hedge itself: silent when there is
+    nothing to hedge, so the disclosure keeps its meaning."""
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 150000.0,
+                          "commercial_grounded_accounts": 2.0},
+    })])
+    assert "Customers named $150,000" in html
+    assert "read back from written summaries" not in html
+
+
+def test_the_derived_hedge_names_transcription_risk_not_invention():
+    """The summary was itself written under a grounding gate, so the number
+    came from real text and could only have been copied wrong. Wording that
+    implied the figure might be invented would overstate the risk as badly
+    as silence understates it."""
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 90000.0,
+                          "commercial_grounded_usd_derived": 90000.0},
+    })])
+    # Anchored on the positive first: an absence-only assertion would pass
+    # just as happily if the hedge never rendered at all.
+    assert "read back from written summaries" in html
+    for overstatement in ("unverified", "unreliable", "may not be real",
+                          "possibly fabricated", "cannot be trusted"):
+        assert overstatement not in html.lower(), overstatement
+
+
 def test_no_grounded_figure_means_no_commercial_evidence_line():
     """A finding with no `native_units` (every finding before this ticket,
     and every finding whose claims never stated a figure) renders exactly

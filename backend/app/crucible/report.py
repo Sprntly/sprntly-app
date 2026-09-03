@@ -1129,11 +1129,44 @@ def _finding_block(
             if isinstance(accounts_n, (int, float)) and accounts_n
             else ""
         )
-        out.append(_p(
-            f"<strong>Customers named this evidence.</strong> Customers "
-            f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
-            f"figures actually quoted, not a projection."
-        ))
+        # PROVENANCE IS PART OF THE CLAIM, NOT A FOOTNOTE. A figure recovered
+        # from a written summary is not the same evidence as one captured
+        # against a verified verbatim quote: the summary was itself written
+        # under a grounding gate, so the number came from real text, but it
+        # was copied once more than a quoted figure was and could have been
+        # copied wrong. "Customers named $X" is only true of the quoted kind.
+        #
+        # Proportionate, and specific about WHICH risk. The exposure is
+        # transcription error, not invention, so a blanket "this may be
+        # unreliable" would overstate it — and saying nothing at all would
+        # let a derived figure wear a quoted figure's credibility, which is
+        # the promise this line was making and not keeping.
+        derived_usd = commercial.get("commercial_grounded_usd_derived")
+        derived_usd = (
+            float(derived_usd) if isinstance(derived_usd, (int, float)) else 0.0
+        )
+        if derived_usd >= commercial_usd:
+            out.append(_p(
+                f"<strong>Figures stated in the source material.</strong> "
+                f"${commercial_usd:,.0f}{accounts_txt} — a sum of figures "
+                f"stated, not a projection. These were read back from written "
+                f"summaries rather than matched to a verified quote, so each "
+                f"is only as accurate as the summary it came from."
+            ))
+        elif derived_usd:
+            out.append(_p(
+                f"<strong>Customers named this evidence.</strong> Customers "
+                f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
+                f"figures actually quoted, not a projection. "
+                f"${derived_usd:,.0f} of that was read back from written "
+                f"summaries rather than matched to a verified quote."
+            ))
+        else:
+            out.append(_p(
+                f"<strong>Customers named this evidence.</strong> Customers "
+                f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
+                f"figures actually quoted, not a projection."
+            ))
 
     # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.
     #
