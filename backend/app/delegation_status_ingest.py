@@ -19,6 +19,23 @@ delegations delivered into THIS conversation via
 empty, `maybe_ingest_status` returns WITHOUT ever calling the LLM. This is
 what keeps the classifier from firing on ordinary chat traffic.
 
+Linkage gap (`delivered_conversation_id IS NULL`): that column is an FK to
+`conversations` with `on delete set null` — if the assignee's individual
+project chat row is ever deleted (e.g. a chat reset) and recreated, any
+STILL-OPEN delegation that had pointed at the old row goes link-less
+forever; a strict `== conversation_id` match would silently never classify
+it again. `list_status_for_assignee` already scopes candidates to THIS
+`project_id` + THIS assignee, and the caller of `maybe_ingest_status`
+(`ask_job_runner.py`, gated on `context_source.kind == "project"`, see
+`context_assembler_project.py`) only ever passes the replier's OWN
+individual project chat conversation — there is no group-chat surface
+left to conflate with (retired). So a link-less row is unambiguously
+"this assignee's open task in this project", and the conversation it is
+being classified in is unambiguously the assignee's own — accepting it as
+a candidate here reproduces the exact multi-candidate disambiguation the
+classifier already does for two ordinary open tasks sharing one
+individual chat, never a NEW cross-conversation or cross-user match.
+
 Soft-done contradiction rule (the inbound half of the soft-done handshake
 the outbound follow-up sweep depends on): ANY status-changing reply is
 fresh evidence contradicting an earlier INFERRED completion. So every
@@ -468,7 +485,14 @@ def maybe_ingest_status(
         row
         for row in open_rows
         if row.get("status") in delegation_events_db.OPEN_STATES
-        and row.get("delivered_conversation_id") == conversation_id
+        and (
+            row.get("delivered_conversation_id") == conversation_id
+            # Link-less row (see module docstring): still THIS assignee's
+            # open task in THIS project (list_status_for_assignee's own
+            # filter), classified in THIS conversation which is always
+            # their own individual project chat — never a broader match.
+            or row.get("delivered_conversation_id") is None
+        )
     ]
     if not open_rows:
         return  # AC10 — zero LLM calls when there is no open delegation to classify against
