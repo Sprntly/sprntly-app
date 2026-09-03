@@ -489,6 +489,85 @@ def _figures_phrase(figures: Sequence[GroundedFigure]) -> str:
     return text
 
 
+def aggregate_price_range(
+    pairs: Sequence[tuple[float, float]],
+) -> Optional[tuple[float, float, int]]:
+    """The one aggregation rule for a corpus-wide list-pricing range: a min
+    of mins, a max of maxes, and how many pairs there were. `None` for an
+    empty sequence.
+
+    SHARED BY BOTH RENDERERS OF LIST PRICING, so the arithmetic can never
+    independently drift between them: `quoted_list_pricing_basis` below (the
+    live panel) and `report.py`'s `_list_pricing` (the exported document)
+    both call this rather than each computing their own version of the same
+    two extremes.
+
+    ONLY WHAT CAN BE AGGREGATED WITHOUT DOUBLE COUNTING — see
+    `quoted_list_pricing_basis`'s docstring for why a sum is never the right
+    operation here.
+    """
+    if not pairs:
+        return None
+    mins = [lo for lo, _ in pairs]
+    maxes = [hi for _, hi in pairs]
+    return min(mins), max(maxes), len(pairs)
+
+
+def quoted_list_pricing_basis(impacts: Sequence[Impact]) -> Optional[str]:
+    """Corpus-wide list pricing, in the live panel's own words — the exact
+    prose `report.py`'s `_list_pricing`/`_findings_section` already produce
+    for the exported document, so the two surfaces never disagree.
+
+    UNCONDITIONAL, UNLIKE THE COMMITTED-MONEY BASIS ABOVE. Money toward a
+    target only exists to answer a target somebody named, so it is computed
+    inside `resolve_recommendation_count`'s money-target branch and is silent
+    on every other run. List pricing is not a property of one theme or one
+    goal-dollar-target — `report.py`'s own words: "it is what the product
+    costs, and it turns up wherever pricing was discussed" — so this is
+    called every run, gated on nothing but whether any finding carries
+    pricing units at all.
+
+    READS `Impact.native_units`, not the dict shape `report.py`'s
+    `_list_pricing` reads off a stored finding row. Same data, two different
+    shapes at two different pipeline stages: this runs on the frozen
+    `Impact` objects `resolve_recommendation_count` already takes, before
+    anything is serialised for storage.
+
+    ONLY THE TWO EXTREMES, NEVER A SUM — the same non-additivity rule
+    `_list_pricing` documents: a $30,000 tier quoted to sixteen accounts is
+    sixteen genuine mentions of one rate-card entry, not $480,000 of
+    anything. `aggregate_price_range` is the one place that rule is coded.
+
+    `None` when no impact in the sequence carries list-pricing units,
+    mirroring `_list_pricing`'s own `None` return so a caller can skip
+    cleanly.
+    """
+    pairs: list[tuple[float, float]] = []
+    for imp in impacts:
+        lo = imp.native_units.get("commercial_list_price_min")
+        hi = imp.native_units.get("commercial_list_price_max")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            pairs.append((float(lo), float(hi)))
+    aggregated = aggregate_price_range(pairs)
+    if aggregated is None:
+        return None
+    low, high, carrying = aggregated
+    span = f"${low:,.0f}" if low == high else f"${low:,.0f}–${high:,.0f}"
+    # SAYS HOW MANY IT SPEAKS FOR, same rule as the committed-money basis
+    # above and `_list_pricing`'s own paragraph: a hoisted sentence that
+    # overstates its own scope is the exact failure this whole feature
+    # exists to correct.
+    where = (
+        "one finding below" if carrying == 1 else f"{carrying} of the findings below"
+    )
+    return (
+        f"List pricing was quoted in {where}. {span}. "
+        f"This is what was quoted, not what was agreed — the same price "
+        f"offered to several accounts is one rate card, so these are never "
+        f"added together or added to any figure above."
+    )
+
+
 def _quoted_money_toward_target(
     ranked_impacts: Sequence[Impact], target: float, *, max_count: int,
 ) -> Optional["RecommendationCount"]:

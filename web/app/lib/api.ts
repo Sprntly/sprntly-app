@@ -987,6 +987,12 @@ export type GoalRunDetail = GoalRun & {
      *  sentence, not a bare number, computed from the goal's own ask. Empty
      *  on a run stored before the deep pass shipped. */
     recommendation_basis?: string
+    /** Corpus-wide list pricing, in the same words the exported document's
+     *  own list-pricing paragraph already uses — computed UNCONDITIONALLY
+     *  (unlike `recommendation_basis` above, which only exists to answer a
+     *  named money target), so it renders on every run that has any pricing
+     *  units at all. Absent on a run stored before this shipped. */
+    list_pricing_basis?: string
     /** True only when `judge_relevance` completed without raising on THIS
      *  run — never guessed from whether anything ended up set aside, so a
      *  gate that judged everything `true` still reads as having run. Absent
