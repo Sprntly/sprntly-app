@@ -47,7 +47,7 @@ from typing import Optional, Sequence
 from app.crucible.lint import lint_claim
 from app.crucible.moscow import (
     TYPE_BUCKET_BLOCKER, TYPE_BUCKET_NEITHER, TYPE_BUCKET_PREFERENCE,
-    type_bucket,
+    document_count, type_bucket,
 )
 from app.crucible.types import (
     Claim,
@@ -891,14 +891,23 @@ def resolve_recommendation_count(
             named_as = (
                 f"{value:,.0f} {unit}" if unit != "percent" else f"{value:g}%"
             )
+            # THE NEGATION LIVES IN THE OBJECT, NOT IN THE TRAILING CLAUSE.
+            # Written as `sizes findings {corpus_desc}` with `corpus_desc` =
+            # "at all — nothing here could be sized", this rendered "but this
+            # corpus sizes findings at all", which asserts the exact opposite
+            # of what the branch was entered to say. The em-dash clause that
+            # follows contradicted it, so the sentence disagreed with itself
+            # in nine words. Both branches now carry their own object.
             corpus_desc = (
-                f"in {corpus_currency}" if corpus_currency else
-                "at all — nothing here could be sized"
+                f"sizes findings in {corpus_currency}, not in {unit}"
+                if corpus_currency else
+                f"sizes no findings at all — nothing here could be sized, in "
+                f"{unit} or in anything else"
             )
             return RecommendationCount(
                 default,
-                f"you named a target of {named_as}, but this corpus sizes "
-                f"findings {corpus_desc}, not in {unit} — summing toward "
+                f"you named a target of {named_as}, but this corpus "
+                f"{corpus_desc} — summing toward "
                 f"your target would say more than the evidence supports, so "
                 f"this defaults to the top {default}.",
                 target_unsizeable=True,
@@ -1295,6 +1304,14 @@ _BAND_ORDER = {"low": 0, "medium": 1, "high": 2}
 #: to follow "this one" / "that one". Keyed on `moscow.type_bucket`'s own
 #: return values, so a bucket cannot be described as one thing here and
 #: sorted as another there.
+#: The same buckets said of a PAIR, for the sentence that explains why the
+#: bucket did NOT separate two findings. "neither" has no plural form worth
+#: writing here, so it is absent and the caller falls back.
+_BUCKET_PHRASE_PLURAL = {
+    TYPE_BUCKET_BLOCKER: "state blockers",
+    TYPE_BUCKET_PREFERENCE: "state preferences",
+}
+
 _BUCKET_PHRASE = {
     TYPE_BUCKET_BLOCKER:
         "states a blocker — something is stopping an account today",
@@ -1385,12 +1402,65 @@ def _compare(
             f"{confidence_top.band} against {confidence_second.band} — "
             f"since neither could be sized apart."
         )
+
+    # ── THE SAME-BUCKET CASE, WHICH IS THE COMMON ONE. ────────────────────
+    #
+    # Putting the bucket first in `pipeline._rank`'s key had a consequence
+    # nobody costed: it CLUSTERS. Adjacent findings now almost always share a
+    # bucket, so the top two are usually both stated blockers and the branch
+    # above that explains the bucket is unreachable for them. Measured on a
+    # real run: rank 1 and rank 2 were both blockers, both unsized, both
+    # medium — every branch fell through and the report printed the same
+    # "read it as a position in a list, not as a verdict" line it printed
+    # before any of this. The ranking fix made the explanation fix
+    # unreachable.
+    #
+    # So when the bucket does not separate them, say what does. Both of the
+    # signals below are FROZEN values already on the page — the source
+    # documents each finding names, and how many claims back it — and neither
+    # is a new judgement (I2): nothing is scored here, two existing numbers
+    # are compared and the larger is named.
+    #
+    # EMITTED ONLY WHEN THE SIGNAL POINTS THE SAME WAY AS THE ORDER, hence
+    # the strict `>` on each. `_rank`'s remaining discriminator at this depth
+    # is `Confidence.score`, which is internal and never rendered, and
+    # document count is one input to it among several — so a signal that
+    # favoured `second` would be a true sentence that read as a contradiction
+    # of the list it sits in. Where nothing points the right way, the honest
+    # fallback still runs; it is now the last resort rather than the first
+    # branch reached.
+    same_bucket_lead = (
+        f"Both {_BUCKET_PHRASE_PLURAL[bucket_top]}, so the kind of claim does "
+        f"not separate them"
+        if bucket_top == bucket_second
+        and bucket_top in _BUCKET_PHRASE_PLURAL
+        else "Reach and confidence band do not separate these two"
+    )
+
+    docs_top = document_count(top.confidence_inputs.surfaced_by)
+    docs_second = document_count(second.confidence_inputs.surfaced_by)
+    if docs_top > docs_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}. What does: "
+            f"more of your sources independently raise this one — "
+            f"{docs_top} source document{'' if docs_top == 1 else 's'} "
+            f"against {docs_second}."
+        )
+
+    claims_top, claims_second = len(top.claim_ids), len(second.claim_ids)
+    if claims_top > claims_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}, and the same "
+            f"number of sources raise each. What does: more of the corpus is "
+            f"about this one — {claims_top} claims against {claims_second}."
+        )
+
     return (
         f"Ranked above “{second_label}” by the run's own scoring. "
-        f"The two are close on what this report shows — reach and "
-        f"confidence band are tied or both unmeasured — so the order here "
-        f"rests on a finer signal this report does not print; read it as a "
-        f"position in a list, not as a verdict on which matters more."
+        f"{same_bucket_lead}, neither could be sized, and the same evidence "
+        f"backs each — so the order here rests on a finer signal this report "
+        f"does not print. Read the gap between these two as narrow; the "
+        f"ranking still put this one first."
     )
 
 

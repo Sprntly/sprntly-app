@@ -43,10 +43,13 @@
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
 import {
   CALL_COUNT_FLOOR_NOTE, MAX_MOSCOW_ROWS, hasCallCount, moscowFor,
+  typeBucket,
 } from "../../lib/goalMoscow"
 import {
-  DATA_GAPS_HEADING, dataGapsFor, optionNumbers,
+  DATA_GAPS_HEADING, ONE_TOPIC_NOTE, dataGapsFor, optionNumbers,
+  optionsAreOneTopic,
 } from "../../lib/goalDataGaps"
+import { stop, stripClaimRefs, upperFirst } from "../../lib/goalProse"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
 import { findingsHeading } from "../../lib/goalFindingsHeading"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
@@ -113,6 +116,7 @@ const EMPTY_GAPS: readonly string[] = []
 function ReportFinding({
   f, rank, sharedWeakest = false, sharedCap = false,
   sharedAssumptions = false, option = 0, dataGaps = [],
+  oneTopic = false, oneTopicNote = "",
 }: {
   f: GoalFinding
   rank: number
@@ -124,6 +128,13 @@ function ReportFinding({
    *  every other card. Assembled deterministically by `dataGapsFor` from
    *  fields the engine already produced; no model call. */
   dataGaps?: readonly string[]
+  /** Set on EVERY card of a run whose top two write-ups name the same topic.
+   *  Suppresses "Why this over the next" — there is no "next" being offered as
+   *  an alternative, and a sentence reaching for a distinction that does not
+   *  exist is worse than silence. */
+  oneTopic?: boolean
+  /** Rendered once, on the recommended card, in place of that comparison. */
+  oneTopicNote?: string
   /** Hoisted to the top of the section because every finding assumes the
    *  identical thing. Suppressed here rather than emptied upstream, so the
    *  finding itself is untouched and the two renderers cannot disagree about
@@ -179,9 +190,9 @@ function ReportFinding({
             : option === 1
               ? "Option 1 — recommended."
               : `Option ${option} — alternative.`}</strong>{" "}
-            {f.deep_recommendation!.action}</p>
+            {stripClaimRefs(f.deep_recommendation!.action)}</p>
           <p className="ga-finding-rec-why">
-            <em>Why.</em> {f.deep_recommendation!.because}
+            <em>Why.</em> {stripClaimRefs(f.deep_recommendation!.because)}
           </p>
           {f.deep_recommendation!.changes.length ? (
             <>
@@ -189,7 +200,7 @@ function ReportFinding({
               <ul className="ga-assumed" data-testid="goal-finding-changes">
                 {f.deep_recommendation!.changes.map((c, i) => (
                   <li key={i}>
-                    {c.text} <em>— from: “{c.cited_claim}”</em>
+                    {stripClaimRefs(c.text)} <em>— from: “{c.cited_claim}”</em>
                   </li>
                 ))}
               </ul>
@@ -211,13 +222,21 @@ function ReportFinding({
           ) : null}
           {f.deep_recommendation!.what_would_falsify ? (
             <p className="ga-weakest" data-testid="goal-finding-kill-signal">
-              <b>Kill signal.</b> {f.deep_recommendation!.what_would_falsify}{" "}
+              <b>Kill signal.</b> {stripClaimRefs(f.deep_recommendation!.what_would_falsify)}{" "}
               <em>{KILL_SIGNAL_CAVEAT}</em>
             </p>
           ) : null}
-          {f.deep_recommendation!.comparison ? (
+          {/* SUPPRESSED WHEN THERE IS NO "NEXT" BEING OFFERED — see
+              `oneTopic`. The note itself renders once, on the recommended
+              card. Mirrors `report.py`'s `_finding_block`. */}
+          {f.deep_recommendation!.comparison && !oneTopic ? (
             <p className="ga-weakest" data-testid="goal-finding-comparison">
               <b>Why this over the next.</b> {f.deep_recommendation!.comparison}
+            </p>
+          ) : null}
+          {oneTopicNote ? (
+            <p className="ga-weakest" data-testid="goal-finding-one-topic">
+              <b>Why there is only one.</b> {oneTopicNote}
             </p>
           ) : null}
           {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────
@@ -246,9 +265,9 @@ function ReportFinding({
       ) : (f.recommendation?.action || "").trim()
         && (f.recommendation?.because || "").trim() ? (
         <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
-          <p><strong>Recommended.</strong> {f.recommendation!.action}</p>
+          <p><strong>Recommended.</strong> {stripClaimRefs(f.recommendation!.action)}</p>
           <p className="ga-finding-rec-why">
-            <em>Why.</em> {f.recommendation!.because}
+            <em>Why.</em> {stripClaimRefs(f.recommendation!.because)}
           </p>
           {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED —
               not left as a bare fact in "How many got a full recommendation"
@@ -544,6 +563,22 @@ export function GoalAnalysisReport({
   // exported document cannot label the same run differently.
   const options = optionNumbers(findings)
   const [recommendedGapsIndex, recommendedGaps] = dataGapsFor(findings)
+  // ONE TOPIC NAMED TWICE IS NOT TWO OPTIONS. When the engine's own
+  // `sameTopic` says the top two write-ups are the same subject, the Option
+  // labels come off and the recommended card explains the absence instead of
+  // comparing against a sibling that is not an alternative. Presentation only
+  // — findings, ranking and binding are untouched. Mirrors `report.py`.
+  const oneTopic = optionsAreOneTopic(findings)
+  // STATED ONLY WHEN THE CORPUS HAS MORE THAN ONE BUCKET. On a run of nothing
+  // but blockers the claim-type term did no work, and saying it ordered the
+  // list would be an overstatement in the other direction. Mirrors
+  // `report.py`'s `_findings_section`.
+  const bucketClause =
+    new Set(
+      findings.map((f) => typeBucket((f as { claim_types?: string[] }).claim_types ?? [])),
+    ).size > 1
+      ? "What blocks an account is placed above what an account only asks for, whatever their sizes. "
+      : ""
   const unsized = findings.filter((f) => f.impact_value == null).length
   const anythingSized = unsized < findings.length
   // HOW MUCH OF THE UNSIZED DISCLOSURE THE HEADLINE ALREADY MADE. Mirrors
@@ -1023,8 +1058,13 @@ export function GoalAnalysisReport({
 
       {recommendationBasis ? (
         <p className="ga-doc-note" data-testid="goal-recommendation-basis">
+          {/* CAPITALISED AND TERMINATED, because it follows a bold full stop
+              and is therefore the start of a sentence. `recommendationBasis`
+              is authored as a clause — it also renders mid-sentence elsewhere
+              — so left alone it produced "How many got a full recommendation.
+              you named a target of…". Mirrors `report.py`. */}
           <strong>How many got a full recommendation.</strong>{" "}
-          {recommendationBasis}
+          {stop(upperFirst(recommendationBasis))}
         </p>
       ) : null}
 
@@ -1068,40 +1108,51 @@ export function GoalAnalysisReport({
                       size is unknown, not zero.
                     </>
                   ) : null}{" "}
-                  An authoritative disagreement is placed
-                  above everything that is not one, because two sources that may
+                  {bucketClause}An authoritative disagreement is placed
+                  above both, because two sources that may
                   both speak contradicting each other is worth more than either
                   of them alone.
                 </>
               ) : (
                 <>
-                  Ranked by reach — how many accounts each theme touches. An
-                  authoritative disagreement is placed above everything that is
-                  not one, because two sources that may both speak contradicting
-                  each other is worth more than either of them alone.
+                  Ranked by reach — how many accounts each theme touches.{" "}
+                  {bucketClause}An
+                  authoritative disagreement is placed above both, because two
+                  sources that may both speak contradicting each other is worth
+                  more than either of them alone.
                 </>
               )
             ) : (
               <>
-                Not ranked by reach: nothing here could be sized, so these are
-                ordered by confidence.
-                {/* AND WHETHER THAT ORDER CARRIES ANYTHING. `_rank`'s last term
-                    is a confidence SCORE, which is never rendered — the reader
-                    sees bands. With no outcome evidence anywhere every band
-                    comes out the same, so a list that LOOKS ranked gets read as
-                    ranked. Position is the most persuasive thing on a page. */}
+                {/* WHAT THE ORDER ACTUALLY IS, before any caveat about it.
+                    `_rank`'s key is (conflict, claim-type bucket, reach,
+                    confidence), and this paragraph used to omit the bucket
+                    entirely — so on a corpus nothing could size it said the
+                    list was "ordered by confidence" when what had ordered it
+                    was blockers above preferences. Mirrors `report.py`. */}
+                Not ranked by reach: nothing here could be sized.{" "}
+                {bucketClause}An authoritative disagreement is placed above
+                both, because two sources that may both speak contradicting
+                each other is worth more than either of them alone.
+                {/* AND WHETHER WHAT IS LEFT CARRIES ANYTHING. `_rank`'s last
+                    term is a confidence SCORE, never rendered — the reader
+                    sees bands, and with no outcome evidence anywhere every
+                    band comes out the same, so a caveat is owed. But the
+                    caveat used to read "not as a verdict on which matters
+                    more", printed inches under a recommendation BOUND to
+                    position 1 — the page telling a reader to act on a ranking
+                    while disowning it. Blockers genuinely do sort above
+                    preferences now, so position carries real meaning down to
+                    where the bucket runs out. Scoped to what is still true. */}
                 {oneBand ? (
                   <>
-                    {" "}Every finding here carries the same confidence band, so
-                    that order rests on a score this report does not show you —
-                    read the position as a place in a list, not as a verdict on
-                    which matters more.
+                    {" "}Past that, findings of the same kind are ordered by a
+                    confidence score this report does not print, and every
+                    finding here carries the same confidence band — so read the
+                    gap between two neighbours in the same group as narrow,
+                    rather than as a verdict on which matters more.
                   </>
-                ) : null}{" "}
-                An authoritative disagreement is still placed above everything
-                that is not one, because two sources that may both speak
-                contradicting each other is worth more than either of them
-                alone.
+                ) : null}
               </>
             )}
           </p>
@@ -1159,6 +1210,10 @@ export function GoalAnalysisReport({
                 option={options[i]}
                 dataGaps={
                   i === recommendedGapsIndex ? recommendedGaps : EMPTY_GAPS
+                }
+                oneTopic={oneTopic}
+                oneTopicNote={
+                  oneTopic && i === recommendedGapsIndex ? ONE_TOPIC_NOTE : ""
                 }
               />
             ))}
@@ -1333,7 +1388,10 @@ export function GoalAnalysisReport({
             {gaps.map((g, i) => (
               <li key={i} data-testid="goal-gap">
                 <p className="ga-doc-gap-q">{g.question}</p>
-                <p className="ga-doc-gap-why">Not answerable here, because {g.because}.</p>
+                {/* `stop`, not a bare ".": `g.because` carries the framework
+                    reason on the framework gap, which ends in its own full
+                    stop, so this rendered "…what it only asks for..". */}
+                <p className="ga-doc-gap-why">{stop(`Not answerable here, because ${g.because}`)}</p>
                 <p className="ga-doc-gap-fix">
                   <span className="ga-sources-label">To close it</span>{" "}
                   {g.remedy}

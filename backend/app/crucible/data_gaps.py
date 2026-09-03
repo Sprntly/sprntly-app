@@ -30,6 +30,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Sequence
 
+from app.crucible.kg_themes import content_tokens, same_topic
 from app.crucible.moscow import (
     TYPE_BUCKET_BLOCKER, bucket_for, document_count, type_bucket,
 )
@@ -110,43 +111,125 @@ def data_gaps_for(
     run recommended nothing, and `(i, ())` when it recommended something with
     no gaps left to name. Deterministic; same inputs, same list, every time.
 
-    Order is fixed and meaningful: what we could not MEASURE, then what the
-    write-up itself said was still open, then the corroboration caveat. The
-    first is the one a reader can most cheaply close.
+    ORDER IS THE WHOLE SAFETY PROPERTY HERE, not a matter of taste.
+
+    Two of these gaps are ENGINE-DERIVED — facts about the evidence that the
+    pipeline computed and that nothing else on the page states: that the
+    recommended finding could not be sized, and that the blocker it rests on
+    is backed by a single document. The rest are the MODEL's open questions,
+    which are prose, and of which there can be any number.
+
+    Sorted the obvious way — measurement, then questions, then caveat — a
+    real run put one unsized gap and five model questions in front of the
+    corroboration caveat, `[:MAX_DATA_GAPS]` cut at exactly six, and the
+    document recommended a blocker resting on ONE source document under a
+    heading reading "close these before you spend" that never mentioned it.
+    The two facts a reader most needs were the two the cap could reach.
+
+    So the engine-derived gaps go FIRST and are never counted against the
+    cap; only the model's questions are truncated. Truncating prose is a
+    presentation decision. Truncating "this rests on one document" is a
+    disclosure failure wearing a presentation decision's clothes.
     """
     i = recommended_index(findings)
     if i < 0:
         return -1, ()
     f = findings[i]
-    gaps: list[str] = []
+    # NEVER TRUNCATED — see the docstring. Facts about the evidence.
+    engine_gaps: list[str] = []
+    # Truncated to whatever the cap leaves. The model's prose.
+    model_gaps: list[str] = []
 
     if f.get("impact_value") is None:
         unit = (str(f.get("currency") or "accounts")).strip() or "accounts"
         noun = "accounts" if unit == "accounts" else unit.replace("_", " ")
-        gaps.append(
+        engine_gaps.append(
             f"Which {noun} is this about? Nothing connected put a number on "
             f"how far this reaches, so its size here is unknown — which is "
             f"not the same as small."
         )
 
-    for q in _as_list(_deep(f).get("open_questions")):
-        q = (q or "").strip() if isinstance(q, str) else ""
-        if q:
-            gaps.append(q)
-
     if _bucket_of(f) == "MUST?" and thin_flag_discriminates(findings):
-        gaps.append(
+        engine_gaps.append(
             "One source document backs this blocker, where other blockers on "
             "this run are backed by more. Confirm it against a second source "
             "before you commit to it."
         )
 
-    return i, tuple(gaps[:MAX_DATA_GAPS])
+    for q in _as_list(_deep(f).get("open_questions")):
+        q = (q or "").strip() if isinstance(q, str) else ""
+        if q:
+            model_gaps.append(q)
+
+    # THE CAP APPLIES TO THE MODEL'S QUESTIONS ONLY, and `max(0, ...)` rather
+    # than a bare subtraction so that a run with more engine gaps than the cap
+    # drops every question rather than slicing with a negative bound — which
+    # silently keeps the LAST few instead of none.
+    room = max(0, MAX_DATA_GAPS - len(engine_gaps))
+    return i, tuple(engine_gaps + model_gaps[:room])
+
+
+def _label_of(finding: Mapping) -> str:
+    return (str(finding.get("label") or "").strip()
+            or str(finding.get("statement") or "").strip())
+
+
+def options_are_one_topic(findings: Sequence[Mapping]) -> bool:
+    """Whether the top two write-ups are the SAME topic named twice.
+
+    A real run rendered Option 1 "enterprise compliance / citation chains"
+    and Option 2 "court-admissible citation chains" — and the engine's own
+    predicate says those are one topic:
+
+        same_topic(content_tokens("enterprise compliance / citation chains"),
+                   content_tokens("court-admissible citation chains")) is True
+
+    They reached the reader as separate options only because the clique
+    builder is greedy first-fit, so which group a label lands in depends on
+    the order candidates were offered in. Presenting them as a CHOICE is the
+    worst available outcome: the reader is asked to pick between two names
+    for one thing, under a "why this over the next" sentence that has to
+    admit it has no reason, because there genuinely is none.
+
+    ANSWERED IN THE RENDERER, NOT BY CHANGING THE MERGE. Widening the merge
+    to catch this pair would change which findings exist, which recommendation
+    binds to rank 1, and every count on the page. This changes only whether
+    two write-ups are PRESENTED as alternatives. `same_topic` and
+    `content_tokens` are imported from `kg_themes`, never reimplemented — a
+    second copy of the predicate would be free to disagree with the one that
+    formed the groups, and then the page would offer a choice the engine had
+    already refused to make, or refuse one it had made.
+    """
+    deep = [f for f in findings if _has_deep(f)]
+    if len(deep) < 2:
+        return False
+    return same_topic(
+        content_tokens(_label_of(deep[0])), content_tokens(_label_of(deep[1])),
+    )
+
+
+#: What the report says INSTEAD of a second option, when the corpus produced
+#: two names for one topic. Said plainly: an absent alternative that is not
+#: explained reads as a rendering bug, and a reader who saw two options in a
+#: previous run needs to know why this one has one.
+ONE_TOPIC_NOTE = (
+    "Only one recommendation is offered here. The next-ranked write-up names "
+    "the same topic as this one rather than a different approach to it, so "
+    "presenting the two as alternatives would be a choice the evidence does "
+    "not actually offer."
+)
 
 
 def option_numbers(findings: Sequence[Mapping]) -> tuple[int, ...]:
     """`Option N` for each finding, positionally — `0` for one that is not an
     option at all.
+
+    RETURNS ALL ZEROS WHEN THE TOP TWO ARE ONE TOPIC (`options_are_one_topic`)
+    — the write-ups still render, they simply stop being labelled as a choice
+    between alternatives, and `ONE_TOPIC_NOTE` says why. Numbering is a claim
+    that the numbered things differ; making it silently when they do not is
+    what produced "Option 1: enterprise compliance / citation chains" beside
+    "Option 2: court-admissible citation chains".
 
     A LABELLING CHANGE, AND ONLY THAT. The options ARE the deep write-ups the
     run already produced, numbered in the run's own frozen rank order (I10);
@@ -162,6 +245,8 @@ def option_numbers(findings: Sequence[Mapping]) -> tuple[int, ...]:
     computed — and the `_compare` sentence under Option 1 is the reason for
     the preference, already written and already shown.
     """
+    if options_are_one_topic(findings):
+        return tuple(0 for _ in findings)
     out: list[int] = []
     n = 0
     for f in findings:

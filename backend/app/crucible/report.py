@@ -35,13 +35,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
 from app.crucible.data_gaps import (
-    DATA_GAPS_HEADING, data_gaps_for, option_numbers,
+    DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_numbers,
+    options_are_one_topic,
 )
-from app.crucible.moscow import CALL_COUNT_FLOOR_NOTE, has_call_count
+from app.crucible.moscow import (
+    CALL_COUNT_FLOOR_NOTE, has_call_count, type_bucket,
+)
 
 #: Rendered into `custom_artifacts.title`. The goal text follows it, so a
 #: reader scanning the shared library can tell one run's report from another's.
@@ -372,9 +376,13 @@ def _recommendation_basis_section(basis: str) -> str:
     basis = (basis or "").strip()
     if not basis:
         return ""
+    # CAPITALISED AND TERMINATED, because it follows a bold full stop and is
+    # therefore the start of a sentence. `basis` is authored as a clause — it
+    # also renders mid-sentence elsewhere — so left alone it produced
+    # "How many got a full recommendation. you named a target of…".
     return _p(
         f"<strong>How many got a full recommendation.</strong> "
-        f"{_esc_clipped(basis, MAX_STATEMENT_CHARS)}"
+        f"{_stop(_upper_first(_esc_clipped(basis, MAX_STATEMENT_CHARS)))}"
     )
 
 
@@ -411,7 +419,7 @@ def _synthesized_recommendation_section(synth: dict) -> str:
         f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
     ))
     out.append(_p(
-        f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
+        f"<em>Why.</em> {_esc_clipped(because, MAX_ARGUMENT_CHARS)}"
     ))
     citations = [
         c for c in _as_list(synth.get("citations"))
@@ -934,6 +942,25 @@ def _headline_section(findings: list[dict]) -> str:
 #: unlimited space for it.
 MAX_STATEMENT_CHARS = 400
 
+#: THE ONE FIELD ALLOWED TO BE AN ARGUMENT RATHER THAN A STATEMENT: the
+#: synthesized recommendation's `because`, and only that.
+#:
+#: There is exactly ONE of these per report — `_synthesized_recommendation_
+#: section` renders the single top-line recommendation — so raising its
+#: ceiling costs the block budget one paragraph, not one per finding. And it
+#: is the paragraph the whole document exists to deliver: on a real run the
+#: model wrote 1,508 characters setting out TWO interlocking blockers, and
+#: `MAX_STATEMENT_CHARS` cut it inside the first, taking with it the second —
+#: which is to say the report deleted the reason its own recommendation
+#: exists, and did so silently.
+#:
+#: 1,600 rather than "unbounded": this is still a stored, model-authored
+#: string with no upstream cap, and the shed ladder is a fallback for a
+#: document that is too big, not a licence to have no ceiling at all. Every
+#: OTHER model-authored field stays at `MAX_STATEMENT_CHARS`, including the
+#: per-finding `because`, of which there can be one per full block.
+MAX_ARGUMENT_CHARS = 1_600
+
 #: THE CAVEAT THAT TRAVELS WITH EVERY KILL SIGNAL. A kill signal here is
 #: derived from a corpus of what people said — there is no metric series
 #: behind it and nothing watches it — so the line is a belief a reader can go
@@ -950,32 +977,110 @@ KILL_SIGNAL_CAVEAT = (
 )
 
 
+#: An inline claim-id reference in model-authored prose: `[<uuid>]`, usually
+#: several in a row. The deep pass is asked to cite, and it cites INLINE as
+#: well as in the `changes[]` structure the citation gate reads — so a
+#: sentence reaches the page as "…on procurement grounds alone
+#: [16e40304-1113-5253-b624-f300317b5fdd][189ac9b0-0aec-52b0-8069-a16f542c19bc].
+#: Second, …". Nothing stripped them; the only reason a reader had not seen
+#: one is that truncation happened to cut before they appeared, which is not a
+#: guarantee of anything.
+#:
+#: MATCHED ON THE UUID SHAPE, NOT ON BRACKETS. Stripping every `[...]` would
+#: eat legitimate prose — a bracketed aside, a `[sic]`, a quoted source that
+#: uses brackets — so this only removes a bracket group whose entire contents
+#: is a claim id. Leading whitespace goes with it, so removing a mid-sentence
+#: citation does not leave the space that preceded it stranded before a
+#: full stop.
+#:
+#: THE CITATIONS ARE NOT LOST. Every accepted `change` renders its claim id's
+#: own assertion text beside it ("— from: “…”"), which is the provenance a
+#: reader can actually use. The inline brackets are leakage from the model's
+#: scratchpad, not a second, better citation.
+_CLAIM_REF = re.compile(
+    r"\s*\[[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\]"
+)
+
+
+def strip_claim_refs(text: str) -> str:
+    """Model-authored prose with its inline `[claim-id]` references removed.
+
+    Applied at the render boundary rather than in `recommend.py`, for the same
+    reason the lint runs there: the stored recommendation stays exactly what
+    the model returned, and every renderer strips independently, so neither
+    can be the one that forgot.
+    """
+    return _CLAIM_REF.sub("", text or "")
+
+
+#: Sentence-final punctuation. A string already ending in one of these does
+#: not get another appended.
+_TERMINALS = ".!?…"
+
+
+def _stop(text: str) -> str:
+    """`text` with exactly one closing full stop.
+
+    Several sentences here are built as "lead-in {value}." where `value` is
+    free text that MAY already be a complete sentence. `cannot_answer`'s
+    `because` is one — for the framework gap it carries
+    `framework_choice.reason`, which ends in its own full stop — so the page
+    rendered "…what it only asks for..". Appending unconditionally is the bug;
+    never appending leaves the branches whose value has no terminator hanging.
+    """
+    t = (text or "").rstrip()
+    if not t:
+        return t
+    return t if t[-1] in _TERMINALS else t + "."
+
+
+def _upper_first(text: str) -> str:
+    """`text` with its first letter capitalised, and nothing else touched.
+
+    NOT `.capitalize()`, which lowercases the remainder and would turn "RICE
+    cannot size this" into "Rice cannot size this". Several of these strings
+    are written as CLAUSES because they also render mid-sentence elsewhere;
+    where one follows a bold full stop it has to start a sentence, and
+    "How many got a full recommendation. you named a target of…" is the
+    result of leaving it alone.
+    """
+    t = (text or "").lstrip()
+    return t[:1].upper() + t[1:] if t else t
+
+
 def _clip(text: str, limit: int) -> str:
-    """`text`, bounded, cut on a word boundary."""
-    t = " ".join((text or "").split())
+    """`text`, bounded, cut on a word boundary, with claim-id refs stripped.
+
+    STRIPPED BEFORE CLIPPING, so a citation the reader will never see does not
+    spend forty characters of a four-hundred-character budget.
+    """
+    t = " ".join(strip_claim_refs(text or "").split())
     return t if len(t) <= limit else t[:limit].rsplit(" ", 1)[0] + "…"
 
 
 def _esc_clipped(value: Any, limit: int) -> str:
-    """Escaped text whose ESCAPED length is <= `limit`.
+    """`limit` characters of text, escaped — clipped on the RAW string.
 
-    `_clip` then `_esc` bounds the wrong string: escaping expands, and the
-    worst case is 6x (`"` -> `&quot;`), so a 400-char clip can still emit 2,400
-    characters. Every size claim in this module is about rendered bytes, so the
-    bound has to be applied to the rendered form.
+    CLIPPING ESCAPED OUTPUT IS THE BUG THIS REPLACES. The previous version
+    clipped raw, escaped, and then — because escaping expands (`M&A` ->
+    `M&amp;A`) — cut a second time to hold the ESCAPED length under `limit`.
+    That second cut had none of the first one's care: it landed mid-word and
+    it discarded the ellipsis `_clip` had already added, so the flagship
+    paragraph of a real report ended "…architecturally tied to one vend" and
+    ran straight into the next heading with no space and no mark that anything
+    had been removed. A reader cannot tell that from a sentence the model
+    simply ended badly.
 
-    Cutting escaped text can land inside an entity and emit `&am`, so a trailing
-    partial entity is dropped. An entity is at most 6 characters, hence the
-    window.
+    So the bound is on the raw string only, and the escaped result may exceed
+    `limit` — by up to 6x in a pathological input of pure quote characters.
+    That is deliberate and consistent with the rest of this module: see
+    `_SHED_LADDER`, which already records that a truthful static bound "is not
+    worth having" and that the size guarantee here is EMPIRICAL — render,
+    measure, shed. A budget defended by mangling the one sentence the report
+    exists to deliver is not a budget worth defending.
     """
-    out = _esc(_clip(value if isinstance(value, str) else str(value or ""), limit))
-    if len(out) <= limit:
-        return out
-    out = out[:limit]
-    amp = out.rfind("&")
-    if amp != -1 and ";" not in out[amp:] and len(out) - amp <= 6:
-        out = out[:amp]
-    return out
+    return _esc(_clip(value if isinstance(value, str) else str(value or ""), limit))
 
 
 def _statement_text(finding: dict) -> str:
@@ -1044,6 +1149,8 @@ def _finding_block(
     shared_assumptions: bool = False,
     option: int = 0,
     data_gaps: Sequence[str] = (),
+    one_topic: bool = False,
+    one_topic_note: str = "",
 ) -> str:
     # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
     # across 11 accounts concern “Sales Pipeline” — for example, “…”" — so the
@@ -1149,11 +1256,23 @@ def _finding_block(
                 f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)} "
                 f"<em>{KILL_SIGNAL_CAVEAT}</em>"
             ))
+        # SUPPRESSED WHEN THERE IS NO "NEXT" BEING OFFERED. `one_topic` is set
+        # on EVERY card of a run whose top two write-ups name the same topic —
+        # not just the recommended one — because the alternatives were not
+        # labelled as a choice anywhere on the page. "Why this over the next"
+        # answering a question the page no longer asks is worse than silence:
+        # the sentence would be reaching for a distinction that does not
+        # exist. The note itself renders once, on the recommended card.
         comparison = (deep.get("comparison") or "").strip()
-        if comparison:
+        if comparison and not one_topic:
             out.append(_p(
                 f"<strong>Why this over the next.</strong> "
                 f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
+            ))
+        elif one_topic_note:
+            out.append(_p(
+                f"<strong>Why there is only one.</strong> "
+                f"{_esc(one_topic_note)}"
             ))
         # ── WHAT WE DO NOT KNOW ABOUT THE THING WE JUST RECOMMENDED. ───────
         #
@@ -1564,40 +1683,62 @@ def _findings_section(
         )
     else:
         unsized_clause = ""
+    # WHAT THE ORDER ACTUALLY IS, said before any caveat about it. `_rank`'s
+    # key is (conflict, claim-type bucket, reach, confidence), and the bucket
+    # term is the one this paragraph used to omit entirely — so on a corpus
+    # nothing could size, the document said it was "ordered by confidence"
+    # when what had in fact ordered it was blockers above preferences. Stated
+    # only when the corpus HAS more than one bucket: on a run of nothing but
+    # blockers the term did no work, and claiming it did would be the same
+    # kind of overstatement in the other direction.
+    buckets = {
+        type_bucket([str(t) for t in _as_list(f.get("claim_types"))])
+        for f in findings
+    }
+    bucket_clause = (
+        " What blocks an account is placed above what an account only asks "
+        "for, whatever their sizes."
+        if len(buckets) > 1 else ""
+    )
+    conflict_clause = (
+        " An authoritative disagreement is placed above both, because two "
+        "sources that may both speak contradicting each other is worth more "
+        "than either of them alone."
+    )
     if anything_sized:
         out.append(_p(
             "Ranked by reach — how many accounts each theme touches"
-            + unsized_clause
-            + ". An authoritative disagreement is placed above everything that "
-              "is not one, because two sources that may both speak "
-              "contradicting each other is worth more than either of them "
-              "alone."
+            + unsized_clause + "." + bucket_clause + conflict_clause
         ))
     else:
-        # AND SAY WHETHER THAT ORDER CARRIES ANYTHING. `_rank`'s last term is a
-        # confidence SCORE, which is real and is never rendered — the reader
+        # AND SAY WHETHER WHAT IS LEFT CARRIES ANYTHING. `_rank`'s last term is
+        # a confidence SCORE, which is real and is never rendered — the reader
         # sees bands. On a corpus with no outcome evidence anywhere every band
-        # comes out the same, so "ordered by confidence" describes an ordering
-        # they cannot check against a single thing on the page, and a list that
-        # LOOKS ranked gets read as ranked. Position is the most persuasive
-        # thing in a document; claiming it means something it does not is the
-        # same defect as the headline calling an unsized row the largest.
+        # comes out the same, so a caveat is owed. But the caveat used to be
+        # "read the position as a place in a list, not as a verdict on which
+        # matters more", printed a few inches under a recommendation BOUND to
+        # position 1 — a document telling a reader to act on a ranking and, in
+        # the same breath, twice disowning it. That is now too strong as well
+        # as unhelpful: blockers genuinely do sort above preferences, so
+        # position carries real meaning down to the point where the bucket
+        # runs out. Scoped to what is still true — the order WITHIN a bucket,
+        # once the bands also tie, is the part resting on an unprinted score —
+        # and phrased as a narrow gap rather than as a warning not to read the
+        # list at all.
         bands = {(f.get("confidence_band") or "").strip() for f in findings}
         one_band = len(bands) == 1 and len(findings) > 1
         out.append(_p(
-            "Not ranked by reach: nothing here could be sized, so these are "
-            "ordered by confidence."
+            "Not ranked by reach: nothing here could be sized."
+            + bucket_clause
+            + conflict_clause
             + (
-                " Every finding here carries the same confidence band, so that "
-                "order rests on a score this report does not show you — read "
-                "the position as a place in a list, not as a verdict on which "
-                "matters more."
+                " Past that, findings of the same kind are ordered by a "
+                "confidence score this report does not print, and every "
+                "finding here carries the same confidence band — so read the "
+                "gap between two neighbours in the same group as narrow, "
+                "rather than as a verdict on which matters more."
                 if one_band else ""
             )
-            + " An authoritative disagreement is still "
-              "placed above everything that is not one, because two sources that "
-              "may both speak contradicting each other is worth more than either "
-              "of them alone."
         ))
 
     if shared_weakest:
@@ -1608,13 +1749,13 @@ def _findings_section(
             # A CLAUSE, NOT A NEW SENTENCE. `cap_reason` arrives uncapitalised
             # ("capped at medium: …"), so a full stop before it rendered
             # "…the diagnosis are not. capped at medium".
-            + (f"; {_esc(shared_cap)}." if shared_cap else ".")
+            + (_stop(f"; {_esc(shared_cap)}") if shared_cap else ".")
         ))
     elif shared_cap:
         out.append(_p(
             "<strong>Every finding below is capped the same way</strong>, so it "
             "is stated here once rather than on each of them: "
-            + _esc(shared_cap) + "."
+            + _stop(_esc(shared_cap))
         ))
 
     shared_assumptions, shared_count = _shared_assumptions(findings)
@@ -1686,6 +1827,13 @@ def _findings_section(
     # produced (`data_gaps`): no model call, no grouping, nothing chosen (I2).
     options = option_numbers(full)
     gaps_index, gaps = data_gaps_for(full)
+    # ONE TOPIC NAMED TWICE IS NOT TWO OPTIONS. When the engine's own
+    # `same_topic` says the top two write-ups are the same subject, the
+    # Option labels come off (`option_numbers` returns all zeros) and the
+    # recommended card explains the absence instead of comparing against a
+    # sibling that is not an alternative. Presentation only — the findings,
+    # the ranking and the binding are untouched.
+    one_topic = options_are_one_topic(full)
     out.extend(
         _finding_block(
             f, i + 1,
@@ -1693,6 +1841,10 @@ def _findings_section(
             shared_assumptions=bool(shared_assumptions),
             option=options[i],
             data_gaps=gaps if i == gaps_index else (),
+            one_topic=one_topic,
+            one_topic_note=(
+                ONE_TOPIC_NOTE if one_topic and i == gaps_index else ""
+            ),
         )
         for i, f in enumerate(full)
     )
@@ -1903,10 +2055,10 @@ def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
                 f"<strong>{_esc_clipped(gap.get('question'), MAX_GAP_CHARS)}"
                 f"</strong>"
             ))
-            out.append(_p(
+            out.append(_p(_stop(
                 f"Not answerable here, because "
-                f"{_esc_clipped(gap.get('because'), MAX_GAP_CHARS)}."
-            ))
+                f"{_esc_clipped(gap.get('because'), MAX_GAP_CHARS)}"
+            )))
             out.append(_p(
                 f"<em>To close it</em> "
                 f"{_esc_clipped(gap.get('remedy'), MAX_GAP_CHARS)}"
