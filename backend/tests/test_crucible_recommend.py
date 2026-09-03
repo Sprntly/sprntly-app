@@ -167,15 +167,20 @@ import app.crucible.recommend as recommend_mod
 from app.crucible.recommend import (
     DEEP_RECOMMENDATION_SCHEMA,
     MAX_DEEP_RECOMMENDED,
+    SYNTHESIS_SCHEMA,
+    DeepChange,
     DeepRecommendation,
     RecommendationCount,
+    SynthesizedRecommendation,
     _compare,
     _deep_acceptable,
     _grounded_in,
     _named_count,
     _named_target,
+    _synthesis_acceptable,
     aggregate_price_range,
     build_deep_recommendations,
+    build_synthesized_recommendation,
     quoted_list_pricing_basis,
     resolve_recommendation_count,
 )
@@ -1501,3 +1506,214 @@ def test_quoted_list_pricing_basis_never_sums_the_ranges():
     basis = quoted_list_pricing_basis(impacts)
     for forbidden in ("$480,000", "$195,000"):
         assert forbidden not in basis, forbidden
+
+
+# ── One recommendation for the whole document (item 1) ───────────────────────
+#
+# `build_synthesized_recommendation` narrates the deep pass's own output into
+# one top-line recommendation — never a second ranking (I2), and every
+# citation must trace to a claim id a per-finding deep recommendation already
+# cited.
+
+def _deep(finding_id, *claim_ids):
+    return DeepRecommendation(
+        finding_id=finding_id, action=f"Act on {finding_id}",
+        because=f"Evidence behind {finding_id}",
+        changes=tuple(
+            DeepChange(text=f"change for {cid}", claim_id=cid,
+                       cited_claim=f"claim text {cid}")
+            for cid in claim_ids
+        ),
+    )
+
+
+def test_synthesis_schema_declares_no_decision_field():
+    """I2, checked against the ACTUAL schema sent to the model — same harness
+    the deep pass's own schema is checked with."""
+    assert_llm_schema_returns_no_decision(
+        SYNTHESIS_SCHEMA, "crucible.recommend.synthesis",
+    )
+
+
+def test_synthesis_system_prompt_states_the_no_reranking_and_citation_rules():
+    """Property test on the prompt content, per the standing rule for
+    LLM-facing description quality — the boundary `_DEEP_SYSTEM` already
+    states must be restated here, not merely enforced after the fact."""
+    text = recommend_mod._SYNTHESIS_SYSTEM
+    assert len(text) > 200
+    assert "re-rank" in text.lower()
+    assert "claim id" in text.lower()
+    assert "never invent" in text.lower()
+
+
+def test_zero_deep_recommendations_synthesizes_nothing():
+    _, result = _build_two()
+    out = build_synthesized_recommendation(
+        enterprise_id="e", goal_text="g", definition_text="d",
+        findings=result.findings, deep_by_id={}, claims=_two_finding_corpus(),
+    )
+    assert out is None
+
+
+def test_exactly_one_deep_recommendation_is_not_synthesized_with_itself(
+    monkeypatch,
+):
+    """"If there's exactly one, it is already 'the' recommendation" — no
+    model call is made at all."""
+    _, result = _build_two()
+    deep_by_id = {result.findings[0].id: _deep(result.findings[0].id, "c1")}
+
+    def boom(**kw):
+        raise AssertionError("a single deep recommendation must not call the model")
+
+    monkeypatch.setattr(recommend_mod, "_offline", lambda: False)
+    monkeypatch.setattr("app.graph.gateway.llm_call", boom)
+
+    out = build_synthesized_recommendation(
+        enterprise_id="e", goal_text="g", definition_text="d",
+        findings=result.findings, deep_by_id=deep_by_id,
+        claims=_two_finding_corpus(),
+    )
+    assert out is None
+
+
+def test_two_deep_recommendations_are_synthesized(monkeypatch):
+    _, result = _build_two()
+    deep_by_id = {
+        result.findings[0].id: _deep(result.findings[0].id, "c1"),
+        result.findings[1].id: _deep(result.findings[1].id, "d1"),
+    }
+
+    def fake_llm_call(**kwargs):
+        assert kwargs["json_schema"] is SYNTHESIS_SCHEMA
+        prompt_input = kwargs["input"]
+        assert "[c1]" in prompt_input and "[d1]" in prompt_input
+
+        class _R:
+            output = {
+                "action": "Fix the export timeout and shorten onboarding together",
+                "because": "Both findings point at the same renewal risk",
+                "citations": [
+                    {"claim_id": "c1",
+                     "evidence": "export runs time out past 10k rows"},
+                    {"claim_id": "d1",
+                     "evidence": "onboarding takes six weeks to complete"},
+                ],
+            }
+        return _R()
+
+    monkeypatch.setattr(recommend_mod, "_offline", lambda: False)
+    monkeypatch.setattr("app.graph.gateway.llm_call", fake_llm_call)
+
+    out = build_synthesized_recommendation(
+        enterprise_id="e", goal_text="g", definition_text="d",
+        findings=result.findings, deep_by_id=deep_by_id,
+        claims=_two_finding_corpus(),
+    )
+    assert out is not None
+    assert isinstance(out, SynthesizedRecommendation)
+    assert {c.claim_id for c in out.citations} == {"c1", "d1"}
+
+
+def test_a_synthesis_citation_not_already_cited_by_a_deep_rec_is_dropped():
+    """The gate this ticket most needs to hold: a citation the synthesis
+    invents — a real claim id, but one no per-finding deep recommendation
+    being combined actually cited — must be dropped, not trusted."""
+    claims_by_id = {c.id: c for c in _two_finding_corpus()}
+    allowed = {"c1"}  # only c1 was cited by a per-finding deep recommendation
+    rec = {
+        "action": "Do the combined thing",
+        "because": "Because of the evidence",
+        "citations": [
+            # d1 IS a real claim id in this corpus, but it was never cited by
+            # any deep recommendation being synthesized here.
+            {"claim_id": "d1", "evidence": "onboarding takes six weeks to complete"},
+        ],
+    }
+    out = _synthesis_acceptable(rec, "reported", allowed, claims_by_id)
+    assert out is None
+
+
+def test_a_synthesis_citation_whose_evidence_does_not_overlap_is_dropped():
+    claims_by_id = {c.id: c for c in _two_finding_corpus()}
+    rec = {
+        "action": "Do the combined thing",
+        "because": "Because of the evidence",
+        "citations": [
+            {"claim_id": "c1",
+             "evidence": "Bluebook citation formatting is an industry standard"},
+        ],
+    }
+    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    assert out is None
+
+
+def test_a_synthesis_quoting_a_figure_is_dropped():
+    claims_by_id = {c.id: c for c in _two_finding_corpus()}
+    rec = {
+        "action": "Recover $50K in retained ARR",
+        "because": "Because of the evidence",
+        "citations": [
+            {"claim_id": "c1", "evidence": "export runs time out past 10k rows"},
+        ],
+    }
+    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    assert out is None
+
+
+def test_a_grounded_synthesis_citation_is_kept():
+    claims_by_id = {c.id: c for c in _two_finding_corpus()}
+    rec = {
+        "action": "Fix the export timeout",
+        "because": "Three accounts hit the same timeout",
+        "citations": [
+            {"claim_id": "c1", "evidence": "export runs time out past 10k rows"},
+        ],
+    }
+    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    assert out is not None
+    assert out.citations[0].claim_id == "c1"
+    assert out.citations[0].cited_claim == "export runs time out past 10k rows"
+
+
+def test_synthesis_survives_a_gateway_that_dies(monkeypatch):
+    """TOTAL, same contract as the flat and deep passes."""
+    _, result = _build_two()
+    deep_by_id = {
+        result.findings[0].id: _deep(result.findings[0].id, "c1"),
+        result.findings[1].id: _deep(result.findings[1].id, "d1"),
+    }
+
+    def boom(**kw):
+        raise RuntimeError("gateway down")
+
+    monkeypatch.setattr(recommend_mod, "_offline", lambda: False)
+    monkeypatch.setattr("app.graph.gateway.llm_call", boom)
+
+    out = build_synthesized_recommendation(
+        enterprise_id="e", goal_text="g", definition_text="d",
+        findings=result.findings, deep_by_id=deep_by_id,
+        claims=_two_finding_corpus(),
+    )
+    assert out is None
+
+
+def test_synthesis_never_moves_the_ranking():
+    """AC-6, extended to the synthesis pass: running it changes nothing about
+    the pipeline's own frozen output."""
+    corpus = _two_finding_corpus()
+    before = build_findings(corpus, currency="accounts", now=NOW)
+    deep_by_id = {
+        before.findings[0].id: _deep(before.findings[0].id, "c1"),
+        before.findings[1].id: _deep(before.findings[1].id, "d1"),
+    }
+    assert deep_by_id  # the fixture must actually produce findings
+    _ = build_synthesized_recommendation(
+        enterprise_id="e", goal_text="g", definition_text="d",
+        findings=before.findings, deep_by_id=deep_by_id, claims=corpus,
+    )
+    after = build_findings(corpus, currency="accounts", now=NOW)
+    assert [f.id for f in after.findings] == [f.id for f in before.findings]
+    assert [i.value for i in after.impacts] == [i.value for i in before.impacts]
+    assert [c.band for c in after.confidences] == [c.band for c in before.confidences]
+    assert [c.score for c in after.confidences] == [c.score for c in before.confidences]
