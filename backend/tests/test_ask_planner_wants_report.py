@@ -160,4 +160,4 @@ def test_the_prompt_version_moved_with_the_field():
     wanted."""
     from app.ask_planner import _PROMPT_VERSION
 
-    assert _PROMPT_VERSION == "ask-planner-v19"
+    assert _PROMPT_VERSION == "ask-planner-v21"

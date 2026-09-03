@@ -47,6 +47,7 @@ from app.prompts import (
     ASK_SYSTEM_LIBRARY_ADDENDUM,
     ASK_SYSTEM_LIVE_SWEEP_ADDENDUM,
     ASK_SYSTEM_BACKLOG_ADDENDUM,
+    ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM,
     ASK_SYSTEM_PROJECTS_ADDENDUM,
     ASK_SYSTEM_TEAM_ADDENDUM,
     connected_sources_line,
@@ -2067,6 +2068,7 @@ def compose_ask_answer(
     team_context_fn=None,
     projects_context_fn=None,
     backlog_context_fn=None,
+    knowledge_base_context_fn=None,
     library_only: bool = False,
     on_delta=None,
     on_phase=None,
@@ -2151,7 +2153,14 @@ def compose_ask_answer(
     the reason the three above have one, and its list is exhaustive in the same
     way: a Jira issue the sweep found is not a backlog idea.
 
-    `library_only` covers ALL FOUR of those blocks, despite its name: they are
+    `knowledge_base_context_fn`, when given, is a thunk producing the block
+    describing WHAT SPRNTLY HAS LEARNED for this company (app/
+    knowledge_base_context.py) — what the product memory is, and how much is in
+    it, by source and by subject. Its own parameter for the same reason as the
+    four above: a question about what Sprntly knows AT ALL is answered from
+    counts, where every retrieval path beside it answers about one topic.
+
+    `library_only` covers ALL FIVE of those blocks, despite its name: they are
     the exhaustive reads of Sprntly's OWN records, and a question about any of
     them is narrowed away from the corpus, the KG and the document index by the
     same verdict (`qa_agent._library_only_plan` / `_team_only_plan` /
@@ -2236,6 +2245,8 @@ def compose_ask_answer(
         wave1["projects"] = projects_context_fn
     if backlog_context_fn is not None:
         wave1["backlog"] = backlog_context_fn
+    if knowledge_base_context_fn is not None:
+        wave1["knowledge_base"] = knowledge_base_context_fn
     if wants_corpus_and_kg:
         wave1["corpus"] = lambda: load_corpus(dataset)
 
@@ -2280,6 +2291,7 @@ def compose_ask_answer(
     team_context = gathered.get("team") or ""
     projects_context = gathered.get("projects") or ""
     backlog_context = gathered.get("backlog") or ""
+    knowledge_base_context = gathered.get("knowledge_base") or ""
     corpus = gathered.get("corpus") if wants_corpus_and_kg else None
 
     # WAVE 2 — the two consumers of the vector, which do not feed each other.
@@ -2340,9 +2352,12 @@ def compose_ask_answer(
                   # "Is this already on the backlog" is asked from beside a PRD
                   # as often as from the main chat.
                   + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
+                  + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
+                     if knowledge_base_context else "")
                   + today_line() + connected_sources_line(enterprise_id))
         own_records = "\n\n---\n\n".join(
-            p for p in (library_context, team_context, projects_context, backlog_context)
+            p for p in (library_context, team_context, projects_context,
+                        backlog_context, knowledge_base_context)
             if p
         )
         if own_records:
@@ -2389,6 +2404,8 @@ def compose_ask_answer(
             context_sections.append(projects_context)
         if backlog_context:
             context_sections.append(backlog_context)
+        if knowledge_base_context:
+            context_sections.append(knowledge_base_context)
 
         if context_sections:
             # Each addendum is gated on ITS OWN section being present. The KG
@@ -2403,6 +2420,8 @@ def compose_ask_answer(
                       + (ASK_SYSTEM_TEAM_ADDENDUM if team_context else "")
                       + (ASK_SYSTEM_PROJECTS_ADDENDUM if projects_context else "")
                       + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
+                      + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
+                         if knowledge_base_context else "")
                       + today_line() + connected_sources_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question

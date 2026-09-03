@@ -233,14 +233,23 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     go, so its pipeline picks say nothing about whether a document was
 #     wanted; the two must not be pooled. (v17 is #1459's — the attached-
 #     document brief — which this deliberately does not renumber.)
-#   v19: the analyse_goal menu learned that PRIORITISATION IS NOT A GOAL.
+#   v20: `include_knowledge_base` — a question about what Sprntly KNOWS, as
+#     opposed to one answered from what it knows. Reported: "the chat system
+#     does not understand KG". Asked what its memory holds, the assistant had
+#     nothing to say: every retrieval path answers about a TOPIC, and none can
+#     say how much there is or where it came from. A v19 row had no way to ask
+#     for that block, so its answers to those questions were ungrounded by
+#     construction; the two must not be pooled. (v18 is #1460's wants_report
+#     and v19 is #1461's prioritisation rule; both land ahead of this one.)
+#   v21: the analyse_goal menu learned that PRIORITISATION IS NOT A GOAL.
 #     Reported: "help me prioritise the roadmap for Q4" started a Goal
 #     Analysis run — a definition gate in front of a question with no metric
 #     to define — and its panel landed over whichever thread the reader had
-#     moved to. A v18 row could send a ranking question either way; a v19 row
-#     is told which, so the two must not be pooled. (v18 is #1460's — the
-#     wants_report field — which lands ahead of this one.)
-_PROMPT_VERSION = "ask-planner-v19"
+#     moved to. A v20 row could send a ranking question either way; a v21 row
+#     is told which, so the two must not be pooled. (v19 was this change's
+#     number while it queued behind #1460 and #1462; it never shipped, so no
+#     row carries it.)
+_PROMPT_VERSION = "ask-planner-v21"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -778,6 +787,16 @@ _PLANNER_SCHEMA: dict = {
                 "the question is ABOUT projects, false for everything else."
             ),
         },
+        "include_knowledge_base": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs a description of WHAT SPRNTLY HAS "
+                "LEARNED for this company and how much is in it — true when "
+                "the question is ABOUT that memory itself ('what do you know "
+                "about us', 'what is in my knowledge base'), false when the "
+                "question is about the product, which is nearly always."
+            ),
+        },
         "include_backlog": {
             "type": "boolean",
             "description": (
@@ -841,7 +860,8 @@ _PLANNER_SCHEMA: dict = {
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "wants_report", "sources",
         "include_knowledge_graph", "include_library", "include_team",
-        "include_projects", "include_backlog", "web_search", "in_scope",
+        "include_projects", "include_backlog", "include_knowledge_base",
+        "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -918,18 +938,32 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
-- edit_artifact — the user wants the REPORT or the DOCUMENT open beside this
-  chat CHANGED: "convert the RICE section into a table", "cut the appendix",
-  "rewrite the summary for an exec", "add a risks section to that report",
-  "make the report shorter". Set `instruction` to the change, self-contained.
-  A LINE ABOVE NAMING A REPORT OR A DOCUMENT IS THE PRECONDITION, and there
-  are two of them. "Active tab: report #45 … is open beside this chat" is the
+- edit_artifact — the user wants the REPORT, the DOCUMENT or the EVIDENCE
+  PAGE open beside this chat CHANGED: "convert the RICE section into a table",
+  "cut the appendix", "rewrite the summary for an exec", "add a risks section
+  to that report", "make the report shorter", "improve the evidence with a
+  chart of the data in it", "add a chart to the evidence". Set `instruction`
+  to the change, self-contained.
+  A CHART IS AN EDIT TO THE DOCUMENT, NOT A REPLY. "Improve the evidence with
+  an analytical chart" asks for the chart to end up IN the evidence page —
+  answering it in the chat gives the reader a picture beside the document it
+  belongs in, which is the reported failure this action closes for evidence.
+  The same is true of a table, a section, a summary or a diagram: if it
+  belongs in the document, this is the action.
+  A LINE ABOVE NAMING A REPORT, A DOCUMENT OR AN EVIDENCE PAGE IS THE
+  PRECONDITION, and there are two of them. "Active tab: report #45 … is open beside this chat" is the
   reader looking at it. "In this chat: report #45 … was produced in this
   conversation" is a document this thread made that is not on screen — still a
   referent, because "that report" in the chat that wrote it means that report.
   Either one is enough to choose this action; with NEITHER line present there
   is nothing to edit and the request is `answer`. A PRD open instead is
   edit_prd — the two are different documents behind different editors.
+  WHEN A PRD AND AN EVIDENCE PAGE ARE BOTH OPEN, the words decide, and they
+  usually say which outright: "improve the evidence…" / "add a chart to the
+  evidence" is edit_artifact against the evidence page, and "make this PRD
+  shorter" / "add a rollout section" is edit_prd. An instruction naming
+  neither belongs to the PRD — it is the document the reader is working on,
+  and the evidence exists to support it.
   A QUESTION ABOUT the open document is `answer`, not this: "what does the
   report say about pricing?" and "is the RICE section right?" want prose in the
   chat. Only an instruction to CHANGE it is this action.
@@ -1615,6 +1649,41 @@ grounding, and a connected tracker full of "projects" is the exact wrong answer.
 The exception is a question that names the connected tool itself ("what Jira
 projects can we push to") — that is the tracker, not this.
 
+=== QUESTIONS ABOUT WHAT SPRNTLY KNOWS ===
+
+Sprntly keeps a MEMORY for each company: everything it has extracted from the
+sources they connected — customer conversations, team chat, tickets, analytics,
+revenue, documents — as dated, sourced facts, plus the themes, accounts and
+decisions those facts are about. It is what every answer here is grounded on.
+
+A question about THE MEMORY ITSELF is a different question from one answered
+FROM it, and only the first sets include_knowledge_base=true:
+
+  * "what do you know about us", "what is in your memory", "what have you
+    learned so far", "how much data do you have on us", "what is my knowledge
+    base / knowledge graph / KG", "where does what you know come from",
+    "how up to date is what you know" — TRUE. These ask what the memory holds,
+    and the answer is counts and sources, not signals about a topic.
+  * "what are customers complaining about", "what do we know about export
+    failures", "what is our churn" — FALSE, and these are the overwhelming
+    majority. They are answered FROM the memory with
+    include_knowledge_graph=true, which is a different field and a different
+    job: that one retrieves what is relevant to a topic, this one describes
+    the whole.
+
+READERS NAME IT MANY WAYS and several of them are our internal words —
+"knowledge graph", "KG", "the graph", "your brain", "the knowledge base". Every
+one of those is this, and a question using them is answerable, not out of
+scope. The answer describes their product memory in plain language.
+
+Set include_knowledge_graph=false alongside it, pick NO sources and name NO
+documents, on the same rule as the library, the team, projects and the backlog:
+the block is the whole grounding for these, and retrieved signals about a topic
+answer a question nobody asked. A question that genuinely crosses both — "what
+do you know about Acme, and how much of it is recent?" — keeps the graph.
+
+The action stays `answer`: a question about what we know is still a question.
+
 === QUESTIONS ABOUT THE BACKLOG ===
 
 THE BACKLOG is Sprntly's pool of product ideas: the themes the weekly
@@ -1685,6 +1754,11 @@ class Plan:
     include_team: bool = False
     include_projects: bool = False
     include_backlog: bool = False
+    #: Whether the answer needs a description of the company's product memory
+    #: ITSELF — what it holds and where it came from — rather than signals
+    #: retrieved from it (`include_knowledge_graph`, which is the field for
+    #: every ordinary question). See `knowledge_base_context.py`.
+    include_knowledge_base: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1751,6 +1825,7 @@ class Plan:
             "team": self.include_team,
             "projects": self.include_projects,
             "backlog": self.include_backlog,
+            "knowledge_base": self.include_knowledge_base,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -1900,10 +1975,14 @@ def _open_artifact_block(
     if open_artifact:
         kind = str(open_artifact.get("kind") or "").strip().lower()
         oid = open_artifact.get("id")
-        # Only the two kinds the editor can actually act on. An unknown kind is
+        # Only the kinds the editor can actually act on. An unknown kind is
         # dropped rather than rendered: a line naming something no action can
         # target invites the model to choose one that will then be refused.
-        if kind in {"report", "document"} and oid is not None:
+        # `evidence` joined the set when evidence pages gained an editor
+        # (`artifact_chat_edit.edit_evidence_scoped`) — before that, a request
+        # to change the evidence open on screen had nowhere to go, and the
+        # chat wrote the change into the conversation instead.
+        if kind in {"report", "document", "evidence"} and oid is not None:
             raw = str(open_artifact.get("title") or "").strip()
             # One line, bounded: the title is customer text landing in a prompt,
             # and a newline inside it could forge a section header here.
@@ -2645,6 +2724,7 @@ def apply_gates(
         include_team=bool(out.get("include_team")),
         include_projects=bool(out.get("include_projects")),
         include_backlog=bool(out.get("include_backlog")),
+        include_knowledge_base=bool(out.get("include_knowledge_base")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
