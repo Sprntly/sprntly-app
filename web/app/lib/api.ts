@@ -513,6 +513,43 @@ export const ideationApi = {
    *  the full visible order; each item's rank becomes its position. */
   reorder: (orderedIds: string[]) =>
     api.post<IdeationList>("/v1/ideation/reorder", { ordered_ids: orderedIds }),
+  /** The chat's `backlog_action`: resolve a sentence about the backlog into
+   *  operations to apply plus the questions it left open. PLAN ONLY — nothing
+   *  is written until the caller runs the ops through create/setStatus/reorder
+   *  above, which is what keeps one write path for the screen and the chat. */
+  chatPlan: (instruction: string) =>
+    api.post<BacklogPlan>("/v1/ideation/chat-plan", { instruction }),
+}
+
+/** One change the backlog plan resolved unambiguously. `add` carries the idea
+ *  (and its type when the request made it plain), `status` the item and where
+ *  it moves, `reorder` the FULL new ranking — a partial one is rejected server
+ *  side, since ranks are written by position. */
+export type BacklogPlanOp =
+  | { op: "add"; title: string; tag: IdeationTag | null }
+  | { op: "status"; item_id: string; status: "in_progress" | "done" | "dismissed"; title?: string }
+  | { op: "reorder"; ordered_ids: string[] }
+
+/** One thing the request left open, shaped for the chat's QuestionPopup — the
+ *  same contract `TicketAssignQuestion` uses, so both render through one
+ *  component. `fills` says which field the answer supplies: "item_id" asks
+ *  WHICH idea (and the question carries the `status` to apply once picked),
+ *  "tag" asks what TYPE a new idea is (and carries its `title`). */
+export type BacklogPlanQuestion = {
+  header: string
+  prompt: string
+  fills: "item_id" | "tag"
+  op: "add" | "status"
+  status: "in_progress" | "done" | "dismissed" | null
+  title: string | null
+  multi: boolean
+  options: { value: string; label: string; description: string | null }[]
+}
+
+export type BacklogPlan = {
+  operations: BacklogPlanOp[]
+  questions: BacklogPlanQuestion[]
+  note: string
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -1551,6 +1588,18 @@ export type ChatIntentEnvelope = {
      *  untitled container is worse than a question back. The client confirms
      *  in the thread and opens the new project. */
     | "create_project"
+    /** "Add dark mode to the backlog", "mark the export bug as done",
+     *  "re-sequence by impact" — CHANGE the company's backlog. `instruction`
+     *  carries the request in the user's own words and is the whole argument;
+     *  an instruction-less change is downgraded to `answer` server-side, which
+     *  can ask which idea they meant (that answer now carries the backlog).
+     *
+     *  The client resolves the sentence against the live backlog
+     *  (`ideationApi.chatPlan`) and applies the result through the ordinary
+     *  ideation routes, asking through the question popup for whatever the
+     *  request left open. READING the backlog is not this intent — that is a
+     *  plain `answer` whose grounding includes the backlog block. */
+    | "backlog_action"
     /** The private project chat's classify route ONLY (`POST /{project_id}/
      *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
      *  main chat runs, so a `switch (envelope.intent)` consumer that never

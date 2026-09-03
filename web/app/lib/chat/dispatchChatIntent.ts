@@ -76,6 +76,15 @@ export interface ChatIntentExecutors {
    *  already-open PRD) decides which of its flows to run. */
   onGenerateTickets: (envelope: ChatIntentEnvelope) => void
   onGeneratePrd: (envelope: ChatIntentEnvelope) => void
+  /** backlog_action: change the company's backlog — add an idea, move one to
+   *  done / in progress / dismissed, or re-sequence it. `instruction` is the
+   *  whole argument; the executor resolves it against the live backlog and
+   *  asks through the question popup for whatever it left open.
+   *
+   *  Optional: a surface with no question dock (the brief chat, the AI bar)
+   *  falls through to its grounded ask rather than half-applying a change it
+   *  cannot finish asking about. */
+  onBacklogAction?: (instruction: string) => void
   onOpenArtifact: (open: NonNullable<ChatIntentEnvelope["open"]>) => void
   /** change_prd_template: switch the target PRD into a different uploaded
    *  format in place. `prdId` mirrors `onEditPrd`'s own resolved-target
@@ -253,6 +262,20 @@ export function dispatchChatIntent(
     case "generate_prd":
       executors.onGeneratePrd(envelope)
       return { handled: true }
+
+    case "backlog_action":
+      // Guarded on BOTH halves, like every other optional-executor case: the
+      // slot (a surface with no dock cannot finish the asking half) and the
+      // argument (the backend downgrades an instruction-less change to
+      // `answer`, so an envelope arriving here without one is an older
+      // backend). Falling through lets the answer — which now carries the
+      // backlog block — ask which idea they meant.
+      if (executors.onBacklogAction && envelope.instruction) {
+        executors.onBacklogAction(envelope.instruction)
+        return { handled: true }
+      }
+      executors.onAnswer()
+      return { handled: false }
 
     case "change_prd_template":
       if (ctx.hasEditTarget && envelope.artifact_template_id) {

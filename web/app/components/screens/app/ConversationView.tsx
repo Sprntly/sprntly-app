@@ -49,7 +49,7 @@ import { ChatBubble } from "../../shared/ChatBubble"
 import { ChatShell } from "../../shared/chat-shell/ChatShell"
 import type { MapMainTurnsDeps } from "../../shared/chat-shell/types"
 import { AGENT_NAME } from "../../../lib/agent"
-import { slackShareApi, type ChatArtifactItem, type OpenArtifactCandidate, type SkillInfo, type TicketAssignQuestion } from "../../../lib/api"
+import { slackShareApi, type BacklogPlanQuestion, type ChatArtifactItem, type OpenArtifactCandidate, type SkillInfo, type TicketAssignQuestion } from "../../../lib/api"
 import type { ChatHomeCard } from "../../../types/content"
 import type { HomeChipItem } from "../../../lib/homeChips"
 import type { useNextPrompts } from "../../shared/chat-shell/useNextPrompts"
@@ -139,6 +139,12 @@ export interface ConversationViewHostProps {
   pendingClarifyTurn: ThreadTurn | null
   setClarifyPopupDismissed: Dispatch<SetStateAction<Record<string, boolean>>>
   assignPopupOpen: boolean
+  /** The backlog batch's open questions (which idea / what type), and its two
+   *  terminals. Same contract as the assign trio beside it. */
+  backlogPopupOpen: boolean
+  pendingBacklogState: { questions: BacklogPlanQuestion[]; applied: string[]; turnId: string } | undefined
+  completeBacklog: (tabId: string, answers: PopupAnswer[]) => void | Promise<void>
+  cancelBacklog: (tabId: string) => void
   pendingAssignState: { questions: TicketAssignQuestion[]; applied: string[]; turnId: string } | undefined
   activeTabId: string | null
   completeAssign: (tabId: string, answers: PopupAnswer[]) => void | Promise<void>
@@ -230,6 +236,10 @@ export function ConversationView(props: ConversationViewProps) {
     pendingClarifyTurn,
     setClarifyPopupDismissed,
     assignPopupOpen,
+    backlogPopupOpen,
+    pendingBacklogState,
+    completeBacklog,
+    cancelBacklog,
     pendingAssignState,
     activeTabId,
     completeAssign,
@@ -489,6 +499,34 @@ export function ConversationView(props: ConversationViewProps) {
           fallbackHeader="Assign"
           onComplete={(answers) => void completeAssign(activeTabId, answers)}
           onDismiss={() => cancelAssign(activeTabId)}
+        />
+      ) : null}
+      {/* The backlog batch. Same posture as the assign popup above it: picks
+          are LOCAL until the last question settles, then completeBacklog
+          applies every resolved operation through the ordinary ideation
+          routes and posts the summary. Closing early therefore changes
+          nothing. */}
+      {backlogPopupOpen && pendingBacklogState && activeTabId ? (
+        <QuestionPopup
+          questions={pendingBacklogState.questions.map((q) => ({
+            header: q.header,
+            prompt: q.prompt,
+            options: q.options.map((o) => ({
+              label: o.label,
+              description: o.description ?? null,
+              value: o.value,
+            })),
+            // The options ARE the answer space: free text here could not be
+            // resolved to a backlog row or to one of the three types.
+            allowOther: false,
+            // "Mark these three done" → the backend marks the item question
+            // multi, and the card renders as tick-several-confirm-once
+            // instead of a single pick that could only honour one idea.
+            multiSelect: !!q.multi,
+          }))}
+          fallbackHeader="Backlog"
+          onComplete={(answers) => void completeBacklog(activeTabId, answers)}
+          onDismiss={() => cancelBacklog(activeTabId)}
         />
       ) : null}
       {/* The share question — which channel, or which document.

@@ -37,7 +37,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
+  type AskResponse, type BacklogPlanQuestion, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
   type ChatArtifactItem, type SlackShareTargetRef,
 } from "../../../../lib/api"
 import { type PopupAnswer } from "../../../shared/QuestionPopup"
@@ -48,6 +48,7 @@ import {
   type PendingShareState,
 } from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../../shared/chat-shell/conversation/useAssignCompletion"
+import { useBacklogCompletion } from "../../../shared/chat-shell/conversation/useBacklogCompletion"
 import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
 import { runClarifiedGeneration } from "../../../shared/chat-shell/conversation/clarifiedGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
@@ -55,7 +56,7 @@ import { GROUNDED_PROGRESS_ENABLED } from "../../../../lib/friendlyPhase"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
-import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
+import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction, runBacklogAction } from "../../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../../shared/chat-shell/conversation/resolveShareRef"
 import { useDocumentReopenProbe } from "../../../shared/chat-shell/conversation/useDocumentReopenProbe"
 import { matchReportByTitle } from "../../../shared/chat-shell/conversation/matchReportByTitle"
@@ -90,6 +91,7 @@ export type ProjectConversationProps = ConversationViewProps & {
 
 type PendingClarify = { task: string; sourceDocs?: { name: string; content: string }[]; turnId: string }
 type PendingAssign = { questions: TicketAssignQuestion[]; applied: string[]; turnId: string }
+type PendingBacklog = { questions: BacklogPlanQuestion[]; applied: string[]; turnId: string }
 type PendingShare = { turnId: string; kind: "channel" | "target"; header: string; prompt: string; options: { label: string; description?: string | null; value: string }[] }
 
 /** Answers → the same prose the clarify card records (the popup pre-filters
@@ -263,6 +265,7 @@ export function useProjectConversation(
   const [meta, setMeta] = useState<Partial<ChatTab>>({})
   const [pendingClarify, setPendingClarify] = useState<PendingClarify | null>(null)
   const [pendingAssign, setPendingAssign] = useState<PendingAssign | undefined>(undefined)
+  const [pendingBacklog, setPendingBacklog] = useState<PendingBacklog | undefined>(undefined)
   const [pendingShare, setPendingShare] = useState<PendingShare | undefined>(undefined)
   // The attachment overlay's own state — the project surface's copy of the
   // state main keeps on ChatScreen. The click handler (mapDeps.setViewerAttachment)
@@ -294,6 +297,8 @@ export function useProjectConversation(
   pendingShareRef.current = pendingShare
   const pendingAssignRef = useRef(pendingAssign)
   pendingAssignRef.current = pendingAssign
+  const pendingBacklogRef = useRef(pendingBacklog)
+  pendingBacklogRef.current = pendingBacklog
   const stoppedRef = useRef(false)
   const askingRef = useRef<Set<string>>(new Set())
   const busySetRef = useRef<Set<string>>(new Set())
@@ -1127,6 +1132,18 @@ export function useProjectConversation(
               })
               settlePendingSend()
             },
+            onBacklogAction: (instruction) => {
+              void runBacklogAction(trimmed, instruction, {
+                emitTurn,
+                runActionTurn: (q, w) => engine.runActionTurnInTab(convKey, q, w),
+                canAskInDock: true,
+                onDockQuestion: (turnId, question) => {
+                  if (question.kind !== "backlog") return
+                  setPendingBacklog({ questions: question.questions, applied: question.applied, turnId })
+                },
+              })
+              settlePendingSend()
+            },
             onAnswer: () => {},
           }),
         )
@@ -1390,6 +1407,24 @@ export function useProjectConversation(
     finalizeTurn: assignFinalizeTurn,
   })
 
+  // ── Backlog: the same landing, one surface over ────────────────────────────
+  // The backlog is COMPANY-scoped, not project-scoped, so a change asked for
+  // in a project chat is the same change asked for in the main chat — which is
+  // exactly why this surface wires the action rather than falling through:
+  // declining here would tell someone in a project that the product cannot do
+  // something it does. Three seams are the assign ones verbatim (they are
+  // about this conversation, not about what was asked); only the pending pair
+  // differs.
+  const backlogGetPending = useCallback(() => pendingBacklogRef.current, [])
+  const backlogClearPending = useCallback(() => setPendingBacklog(undefined), [])
+  const { completeBacklog, cancelBacklog } = useBacklogCompletion({
+    getPendingBacklog: backlogGetPending,
+    clearPendingBacklog: backlogClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
+
   // ── Host-bag assembly ──────────────────────────────────────────────────────
   const activeTab = useMemo(() => ({
     id: convKey, hydrating: hydrating && thread.length === 0,
@@ -1501,6 +1536,10 @@ export function useProjectConversation(
     // the chosen channel/document, both mirroring main over this conversation.
     assignPopupOpen: !!pendingAssign,
     pendingAssignState: pendingAssign,
+    backlogPopupOpen: !pendingAssign && !!pendingBacklog,
+    pendingBacklogState: pendingBacklog,
+    completeBacklog,
+    cancelBacklog,
     activeTabId: convKey,
     completeAssign,
     cancelAssign,

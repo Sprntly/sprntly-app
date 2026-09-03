@@ -20,10 +20,14 @@
  */
 
 import {
+  ideationApi,
   slackShareApi,
   ticketDataApi,
   type AskResponse,
+  type BacklogPlanOp,
+  type BacklogPlanQuestion,
   type ChatIntentEnvelope,
+  type IdeationTag,
   type PrdRecord,
   type SlackShareTargetRef,
   type TicketAssignQuestion,
@@ -41,6 +45,7 @@ export type ActionTurnPatch = Partial<ThreadTurn> & { reply: AskResponse }
 export type DockQuestion =
   | { kind: "slack_channel"; question: SlackShareQuestion }
   | { kind: "assign"; questions: TicketAssignQuestion[]; applied: string[] }
+  | { kind: "backlog"; questions: BacklogPlanQuestion[]; applied: string[] }
 
 /**
  * The per-surface configuration an action reads. The caller (main, private)
@@ -298,6 +303,142 @@ export async function runAssignTicketsAction(
       applied: box.pending.applied,
     })
   }
+}
+
+/** Apply ONE resolved backlog operation and describe what it did, or null when
+ *  the write failed. Shared by the immediate half of `runBacklogAction` and by
+ *  the surface's popup completion, so a change made by answering a question is
+ *  written exactly the way an unambiguous one is. */
+export async function applyBacklogOp(op: BacklogPlanOp): Promise<string | null> {
+  try {
+    if (op.op === "add") {
+      const row = await ideationApi.create(op.title, op.tag)
+      return `added “${row.title || op.title}”`
+    }
+    if (op.op === "status") {
+      await ideationApi.setStatus(op.item_id, op.status)
+      const word = op.status === "in_progress" ? "in progress" : op.status
+      return `“${op.title || "that idea"}” → ${word}`
+    }
+    await ideationApi.reorder(op.ordered_ids)
+    return `re-ordered the backlog (${op.ordered_ids.length} ideas)`
+  } catch {
+    return null
+  }
+}
+
+/**
+ * "Add dark mode to the backlog", "mark the CSV export bug as done",
+ * "re-sequence by impact" — resolve the sentence against the LIVE backlog
+ * (`ideationApi.chatPlan`), apply every unambiguous operation immediately, and
+ * — on a surface that can ask — raise the rest as a dock question the user
+ * steps through. Same shape as `runAssignTicketsAction`, which resolves the
+ * same way against a PRD's tickets, and the same posture for a surface that
+ * cannot ask: apply what is unambiguous and say so honestly rather than leave
+ * a dead popup.
+ *
+ * The plan is advisory; the WRITES go through the ordinary ideation routes
+ * (`applyBacklogOp`), so the chat gains no write path the Backlog screen does
+ * not already have.
+ */
+export async function runBacklogAction(
+  query: string,
+  instruction: string,
+  config: ActionConfig,
+): Promise<void> {
+  if (!config.runActionTurn) return
+  const box: { pending: { questions: BacklogPlanQuestion[]; applied: string[] } | null } = {
+    pending: null,
+  }
+  const { turnId } = await config.runActionTurn(query, async () => {
+    try {
+      const plan = await ideationApi.chatPlan(instruction)
+      // Sequential on purpose, exactly as the assign flow is: a handful of
+      // writes at most, and a per-idea failure must be attributable to its
+      // idea rather than lost in a race.
+      const applied: string[] = []
+      let failures = 0
+      for (const op of plan.operations) {
+        const line = await applyBacklogOp(op)
+        if (line) applied.push(line)
+        else failures += 1
+      }
+      const noteLine = [
+        plan.note,
+        failures
+          ? `${failures} change${failures === 1 ? "" : "s"} couldn't be saved — try ${failures === 1 ? "it" : "those"} from the Backlog screen.`
+          : "",
+      ]
+        .filter(Boolean)
+        .join(" ")
+      const doneBlock = applied.length ? `Done:\n${applied.map((l) => `- ${l}`).join("\n")}` : ""
+      if (plan.questions.length) {
+        if (config.canAskInDock) {
+          box.pending = { questions: plan.questions, applied }
+          const qWord =
+            plan.questions.length === 1 ? "one more answer" : `${plan.questions.length} quick answers`
+          return {
+            reply: asReply(
+              `${noteLine ? `${noteLine}\n\n` : ""}${doneBlock ? `${doneBlock}\n\n` : ""}I need ${qWord} to finish — pick below; I'll apply everything once you've been through them.`,
+            ),
+          }
+        }
+        return {
+          reply: asReply(
+            `${noteLine ? `${noteLine}\n\n` : ""}${doneBlock ? `${doneBlock}\n\n` : ""}The rest need a choice I can't collect in this chat yet — finish them from the main chat or the Backlog screen.`,
+          ),
+        }
+      }
+      if (applied.length || noteLine) {
+        return {
+          reply: asReply(`${doneBlock}${doneBlock && noteLine ? "\n\n" : ""}${noteLine}`),
+        }
+      }
+      return {
+        reply: asReply(
+          "I couldn't work out what to change on the backlog — try naming the idea and what should happen to it, e.g. “mark the CSV export bug as done”.",
+        ),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      return { reply: asReply(`I couldn't plan that backlog change — ${msg}. Nothing was changed.`) }
+    }
+  })
+  if (box.pending && config.canAskInDock) {
+    config.onDockQuestion?.(turnId, {
+      kind: "backlog",
+      questions: box.pending.questions,
+      applied: box.pending.applied,
+    })
+  }
+}
+
+/** Turn one answered backlog question into the operation it completes. The
+ *  question carries the half-built op (`op`, plus `status` or `title`) and
+ *  `fills` names the field the picks supply — so an item_id question answered
+ *  with three ideas becomes three status moves, and a tag question answered
+ *  with one type becomes one add. Values that are not a known tag are dropped
+ *  rather than sent: the API 400s an unknown tag. */
+export function backlogOpsFromAnswers(
+  question: BacklogPlanQuestion,
+  values: string[],
+): BacklogPlanOp[] {
+  if (question.fills === "item_id") {
+    if (question.op !== "status" || !question.status) return []
+    const status = question.status
+    return values.map((item_id) => ({
+      op: "status" as const,
+      item_id,
+      status,
+      title: question.options.find((o) => o.value === item_id)?.label,
+    }))
+  }
+  const title = question.title
+  if (!title) return []
+  const tag = values.find((v) =>
+    ["something_broken", "something_new", "something_better"].includes(v),
+  ) as IdeationTag | undefined
+  return [{ op: "add", title, tag: tag ?? null }]
 }
 
 const KIND_NOUN: Record<string, [string, string]> = {

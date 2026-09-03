@@ -212,7 +212,15 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     this action at all; widening on v4's rule — a v15 row answers a
 #     question no v14 row was asked ("is this a hand-off to a teammate, not a
 #     ticket-ownership change") — so the two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v15"
+#   v16: the menu gained `backlog_action` plus `include_backlog` — the
+#     product's BACKLOG, which no earlier version could read or change. "add
+#     dark mode to the backlog" and "mark the export bug as done" used to land
+#     on `answer`, where the best available outcome was prose about a change
+#     nothing made, and "what's in my backlog" was answered out of the
+#     knowledge graph with a synced Jira board. Exclusive on v7's rule for the
+#     read flag (the block is the whole grounding) and widening on v4's rule
+#     both ways, so v15 and v16 rows must not be pooled.
+_PROMPT_VERSION = "ask-planner-v16"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -391,6 +399,14 @@ _ACTIONS: frozenset[str] = frozenset({
     # Its argument is `task` — what the project is ABOUT, in the user's words,
     # which becomes its name.
     "create_project",
+    # CHANGE the backlog — add an idea, move one to done / in progress /
+    # dismissed, or re-order it. Its argument is `instruction` (the request,
+    # self-contained: which ideas were named and what should happen to them),
+    # the same shape `assign_tickets` takes and for the same reason: resolving
+    # a phrase like "the export bug" to a row is a live read plus a judgement,
+    # and it may need to ASK. READING the backlog is not this action — that is
+    # `answer` with include_backlog=true, which needs no argument at all.
+    "backlog_action",
 })
 
 #: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
@@ -444,6 +460,11 @@ _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     # to hand off — same rule again, and `delegate` is downgraded to `answer`
     # rather than dispatched with nothing for the tool loop to act on.
     "delegate",
+    # A backlog change with no instruction has nothing to change. `answer` is
+    # the recoverable landing here in the strongest sense: it carries the
+    # backlog block, so the reply can list what is on it and ask which idea
+    # they meant.
+    "backlog_action",
 })
 #: `open_artifact` without a subject to look up is not an open request — the
 #: same "an action whose ARGUMENT is missing is worse than no action" rule the
@@ -717,6 +738,15 @@ _PLANNER_SCHEMA: dict = {
                 "the question is ABOUT projects, false for everything else."
             ),
         },
+        "include_backlog": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs this company's BACKLOG — what the "
+                "backlog is and the ideas currently on it, in rank order — "
+                "true when the question is ABOUT the backlog, false for "
+                "everything else."
+            ),
+        },
         "web_search": {
             "type": "boolean",
             "description": "Whether the public web should be searched.",
@@ -771,7 +801,7 @@ _PLANNER_SCHEMA: dict = {
         "company_skill_id", "company_confidence",
         "pipeline_id", "confidence", "sources",
         "include_knowledge_graph", "include_library", "include_team",
-        "include_projects", "web_search", "in_scope",
+        "include_projects", "include_backlog", "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -904,6 +934,21 @@ or wants an answer.
   generate_prd, whichever fits. Only the container is this action, and a
   question about projects ("what is a project", "what projects do I have") is
   `answer` with include_projects=true.
+- backlog_action — CHANGE this company's backlog: add an idea to it, move an
+  idea to done / in progress / dismissed, or re-order it. "add dark mode to the
+  backlog", "put the top three complaints on the backlog", "mark the CSV export
+  bug as done", "move the mobile idea to in progress", "drop the SSO idea",
+  "re-sequence the backlog by impact", "push revenue items up".
+  Set `instruction` to the request in the USER'S OWN WORDS, self-contained:
+  which ideas were named and what should happen to them. The execution layer
+  reads the live backlog, resolves the phrasing against it, and ASKS when a
+  name matches several ideas or none — so name what they said rather than
+  guessing an id, and never refuse for ambiguity here.
+  READING IS NOT THIS ACTION. "what's in my backlog", "what should we work on
+  next" and "is X on the backlog" are `answer` with include_backlog=true. Only
+  a request to CHANGE it is this one.
+  NOR IS BUILDING FROM IT. "generate a PRD for the top backlog idea" is
+  generate_prd — the backlog is where the subject came from, not what changes.
 - analyse_goal — a business GOAL the user wants MOVED: "increase revenue by
   5%", "reduce churn", "improve activation this quarter", "get retention up".
   ASKED AS A QUESTION IS STILL A GOAL, and this is the most common way people
@@ -1464,6 +1509,26 @@ grounding, and a connected tracker full of "projects" is the exact wrong answer.
 The exception is a question that names the connected tool itself ("what Jira
 projects can we push to") — that is the tracker, not this.
 
+=== QUESTIONS ABOUT THE BACKLOG ===
+
+THE BACKLOG is Sprntly's pool of product ideas: the themes the weekly
+prioritization ranked but the current Top Insights brief did NOT pick, plus any
+idea a person added by hand. Each carries a rank (lower is higher priority), a
+type (Bug / New initiative / UI) and a status. It is NOT a Jira backlog, not a
+sprint board, and NOT this workspace's tickets — those are generated from a PRD.
+
+Set include_backlog=true for: "what's in my backlog", "what is the backlog",
+"what should we work on next", "what's the top idea", "is X already on the
+backlog", "how many ideas do we have", "what did we ship". Also set it on a
+message that asks to CHANGE the backlog, so the confirmation can say what is
+already there.
+
+For these, set include_knowledge_graph=false, pick NO sources and name NO
+documents, on the same rule as the library, the team and projects: the block is
+the whole grounding, and a connected tracker full of "backlog" is the exact
+wrong answer. The exception is a question that names the connected tool itself
+("what's in our Jira backlog") — that is the tracker, not this.
+
 It is false for everything else, including a message that merely mentions work
 happening on something.
 
@@ -1507,6 +1572,7 @@ class Plan:
     include_library: bool = False
     include_team: bool = False
     include_projects: bool = False
+    include_backlog: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1572,6 +1638,7 @@ class Plan:
             "library": self.include_library,
             "team": self.include_team,
             "projects": self.include_projects,
+            "backlog": self.include_backlog,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -2380,6 +2447,7 @@ def apply_gates(
         include_library=include_library,
         include_team=bool(out.get("include_team")),
         include_projects=bool(out.get("include_projects")),
+        include_backlog=bool(out.get("include_backlog")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
@@ -3258,6 +3326,7 @@ def _log_comparison(
             "include_library": planned.include_library,
             "include_team": planned.include_team,
             "include_projects": planned.include_projects,
+            "include_backlog": planned.include_backlog,
             "artifact_template_id": planned.artifact_template_id,
             "template_query": planned.template_query,
             "web_search": planned.web_search,

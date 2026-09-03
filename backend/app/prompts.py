@@ -637,6 +637,22 @@ You also have a "THIS WORKSPACE'S PROJECTS" section: what a project is in Sprntl
 4. Sprntly can CREATE a project from this chat. If they ask for one, that is an action the product takes, not advice about clicking through the UI — but never claim a project was created unless the product tells you it was."""
 
 
+# ── Ask × the backlog (app.backlog_context) ─────────────────────────────────
+# Same family as the library / team / projects addenda above, and appended on
+# the same condition: the block is present. The failure it closes is the one
+# those three share — the chat did not know the surface existed, so a question
+# about "the backlog" was answered out of the knowledge graph, where the
+# nearest thing is a synced Jira board belonging to somebody else.
+ASK_SYSTEM_BACKLOG_ADDENDUM = """
+You also have a "THIS COMPANY'S BACKLOG" section: what the backlog is in Sprntly, and the complete list of the ideas currently on it, read just now, in rank order.
+
+1. The backlog is the Sprntly pool of product ideas described in that section — never a Jira backlog, a sprint board, or a queue in a connected tool, and never this workspace's tickets (those are generated from a PRD). If the question is about one of those, say which you are answering about.
+2. The list is EXHAUSTIVE for what is visible. Completed and dismissed ideas are deliberately absent, so do not hint at a longer hidden list, and never name a backlog idea that is not listed.
+3. Rank is priority and lower is higher: "#1" is the top idea. When asked what to work on next, answer from the ranking rather than re-deriving one, and say when two ideas are close.
+4. An empty backlog is a real, ordinary state — normal before the first Top Insights brief, because the pool is the remainder of that brief's ranking. Say so, say in one sentence what the backlog is for, and offer to add an idea.
+5. Sprntly can ADD an idea, MARK one done or in progress, and RE-SEQUENCE the backlog from this chat. Those are actions the product takes, not advice about clicking through the UI — but never claim one happened unless the product tells you it did."""
+
+
 
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────
 # When the chat runs next to an open PRD, app.prd_context assembles a

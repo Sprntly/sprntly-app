@@ -51,7 +51,7 @@ import { buildQuotedMessage } from "../../../lib/chatQuote"
 import { dispatchChatIntent, type ChatIntentExecutors } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import {
-  runEditPrdAction, runShareToSlackAction, runAssignTicketsAction,
+  runEditPrdAction, runShareToSlackAction, runAssignTicketsAction, runBacklogAction,
   runCreateProjectAction,
 } from "../../shared/chat-shell/conversation/actions"
 import { projectPath } from "../../../lib/routes"
@@ -876,6 +876,26 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                     setTabs((prev) => prev.map((t) =>
                       t.id === tabId
                         ? { ...t, pendingAssign: { questions: question.questions, applied: question.applied, turnId } }
+                        : t))
+                  },
+                })
+                settlePendingSend()
+              },
+              // "Add dark mode to the backlog", "mark the export bug as done",
+              // "re-sequence by impact" — the backlog is company-scoped, so
+              // this runs the same way from any tab. The dock question (which
+              // idea / what type) parks on THIS tab, like the assign batch.
+              onBacklogAction: (instruction) => {
+                const tabId = activeTab?.id ?? targetTabId
+                void runBacklogAction(trimmed, instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "backlog") return
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId
+                        ? { ...t, pendingBacklog: { questions: question.questions, applied: question.applied, turnId } }
                         : t))
                   },
                 })
