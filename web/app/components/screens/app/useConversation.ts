@@ -438,7 +438,9 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   // and the deltas render there instead of scrolling through the chat the
   // document is about to appear beside. `null` ends the run: settled, failed or
   // stopped, all of which mean the panel stops writing.
-  const onReportStream = useCallback((markdown: string | null, produced?: boolean) => {
+  const onReportStream = useCallback((
+    markdown: string | null, produced?: boolean, tabId?: string,
+  ) => {
     if (markdown !== null) {
       setContent({ reportPartialMd: markdown })
       return
@@ -462,8 +464,18 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     // pipeline, a question its query mode claims, a shape rule the endpoint
     // has not learned yet — ends as a panel that closes rather than an empty
     // one the reader has to dismiss.
-    if (produced === false) closeContentPanel()
-  }, [setContent, closeContentPanel])
+    if (produced === false) {
+      closeContentPanel()
+      // …and the tab's standing request goes with it. `panelWanted` survives
+      // being shown (a reader may leave and return many times while a report
+      // writes), so without this the panel would come back on every later
+      // visit to a thread whose report was never written.
+      if (tabId) {
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId ? { ...t, panelWanted: undefined } : t))
+      }
+    }
+  }, [setContent, closeContentPanel, setTabs])
 
   const onAnswer = useCallback((res: AskResponse) => {
     if (res._report) setContent({ reportsRefreshKey: Date.now() })

@@ -637,3 +637,50 @@ describe("ChatScreen — a report panel opened while the reader is elsewhere", (
       expect(screen.getByTestId("panel-probe").textContent).toBe("reports"))
   })
 })
+
+
+// Leaving TWICE. The first cut of the held-panel restore cleared the request as
+// it showed it, so the second return had nothing to restore from — and a run
+// still in flight has no artifact yet for any of the ordinary reopen paths to
+// work with. Reported as: "I went to the new tab, came back, it came up. I went
+// to the new tab, came back — it's not showing anymore, but it's showing that
+// it's generating."
+describe("ChatScreen — coming back to a generating tab more than once", () => {
+  it("shows the panel on every return while the run is still in flight", async () => {
+    // The report never settles during this test, so the tab is mid-run
+    // throughout — exactly the window with no landed artifact to fall back on.
+    runAskGeneration.mockImplementationOnce(() => new Promise(() => {}))
+    resolveIntent.mockResolvedValueOnce({
+      intent: "answer", confidence: 0.9, task: null, instruction: null,
+      reason: "a calls question", source: "planner",
+      prd_id: null, prd_title: null, report: true,
+    })
+    renderChat()
+
+    await typeAndSend("give me a voice of customer report for last week")
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    await waitFor(() =>
+      expect(screen.getByTestId("panel-probe").textContent).toBe("reports"))
+
+    const newTabBtn = document.querySelector(".chat-tab")!
+      .parentElement!.querySelector('button[aria-label="New chat"]') as HTMLButtonElement
+    await act(async () => { fireEvent.click(newTabBtn) })
+    const asking = () => Array.from(document.querySelectorAll(".chat-tab"))
+      .find((t) => !t.hasAttribute("data-tab-pinned") && !t.textContent?.includes("New chat"))!
+    const away = () => Array.from(document.querySelectorAll(".chat-tab"))
+      .find((t) => t.textContent?.includes("New chat"))!
+
+    // Round one: away, then back.
+    expect(screen.getByTestId("panel-probe").textContent).toBe("closed")
+    await act(async () => { fireEvent.click(asking()) })
+    await waitFor(() =>
+      expect(screen.getByTestId("panel-probe").textContent).toBe("reports"))
+
+    // Round two — the one that regressed.
+    await act(async () => { fireEvent.click(away()) })
+    expect(screen.getByTestId("panel-probe").textContent).toBe("closed")
+    await act(async () => { fireEvent.click(asking()) })
+    await waitFor(() =>
+      expect(screen.getByTestId("panel-probe").textContent).toBe("reports"))
+  })
+})

@@ -69,7 +69,9 @@ export interface UseMainConversationDeps {
    *  second argument says whether a report document actually landed — false
    *  means the turn opened a Reports panel and then answered in the thread
    *  instead, which is a panel the surface should take back down. */
-  onReportStream?: (markdown: string | null, produced?: boolean) => void
+  onReportStream?: (
+    markdown: string | null, produced?: boolean, tabId?: string,
+  ) => void
   /** The settled answer, handed over once it is on screen. Main uses it to
    *  refetch the thread's reports when the answer IS a report: capture is a
    *  SERVER-side step that runs after the answer, so no client state otherwise
@@ -299,7 +301,7 @@ export function useMainConversation(deps: UseMainConversationDeps): MainConversa
           // source, a question its query mode answers inline) and reply with
           // ordinary text, so "the run ended" and "a report exists" are two
           // different facts and the panel depends on the second.
-          if (reportRun) onReportStream?.(null, res._report === true)
+          if (reportRun) onReportStream?.(null, res._report === true, tabId)
           onAnswer?.(res)
           // Suggestions are fetched HERE — after the answer is on screen — and
           // deliberately not awaited by the turn: it is already complete, so a
