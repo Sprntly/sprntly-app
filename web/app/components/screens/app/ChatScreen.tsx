@@ -4650,20 +4650,33 @@ export function ChatScreen() {
   // closure + the in-memory asking/busy markers do NOT. If a pending ask_id was
   // persisted (jobResume), re-enter the visibility-aware poll against the
   // existing status endpoint — NOT re-POST — and re-show the "asking…" state.
-  // Runs once per tab per mount.
+  // Runs once per tab, and re-scans whenever `tabs` changes — NOT just on mount.
+  // The tabs this reads are restored from sessionStorage under a key that
+  // includes the signed-in user id, and `useAuth()` starts at {kind:"loading"}
+  // on every page load. So the first render always keys off "anon", misses, and
+  // renders zero tabs; the real ones arrive a beat later when auth lands and the
+  // key-change effect above refills them. Depending only on `activeCompany`
+  // (which does not change when auth settles) meant this scan ran exactly once,
+  // against an EMPTY list, and never again — the persisted ask_id sat in
+  // localStorage, the server finished the answer, and the thread kept showing a
+  // question with no reply until the user sent something else. Every existing
+  // test mocks auth as already-settled, so the suite could not see it.
   const resumedAskTabsRef = useRef<Set<string>>(new Set())
   useEffect(() => {
-    for (const tab of tabsRef.current) {
+    for (const tab of tabs) {
       if (resumedAskTabsRef.current.has(tab.id)) continue
-      const pending = getPendingAsk(activeCompany, tab.id)
-      if (!pending) continue
-      const askId = Number(pending.id)
-      if (!Number.isFinite(askId)) continue
+      // The two in-memory guards run BEFORE the localStorage read: this effect
+      // now re-runs on every thread patch (~7/s while an answer streams), and a
+      // tab that already has its reply must not cost a storage hit each time.
       // Re-attach only when the last turn is still awaiting a reply (the
       // canonical "asking…" marker that survives in the persisted thread).
       const last = tab.thread[tab.thread.length - 1]
       if (!last || last.reply !== undefined || last.error !== undefined || last.stopped) continue
       if (askingTabsRef.current.has(tab.id)) continue
+      const pending = getPendingAsk(activeCompany, tab.id)
+      if (!pending) continue
+      const askId = Number(pending.id)
+      if (!Number.isFinite(askId)) continue
       resumedAskTabsRef.current.add(tab.id)
       const turnId = last.id
       const targetTabId = tab.id
@@ -4782,7 +4795,7 @@ export function ChatScreen() {
         }
       })()
     }
-  }, [activeCompany, finalizeConversationTurn])
+  }, [tabs, activeCompany, finalizeConversationTurn])
 
   // ── Goal Analysis: restore-after-reload + start (main-wrapper concerns) ─────
   // main declared its bespoke submit / slash-palette / plus-menu / skill
