@@ -1415,20 +1415,40 @@ def _compare(
     # before any of this. The ranking fix made the explanation fix
     # unreachable.
     #
-    # So when the bucket does not separate them, say what does. Both of the
-    # signals below are FROZEN values already on the page — the source
-    # documents each finding names, and how many claims back it — and neither
-    # is a new judgement (I2): nothing is scored here, two existing numbers
-    # are compared and the larger is named.
+    # So when the bucket does not separate them, say what does — and be
+    # careful about the difference between "what decided this" and "a way in
+    # which these two differ". Every value read below is FROZEN and already
+    # accounted for on the page; nothing is scored here (I2), two existing
+    # numbers are compared and the larger is named.
     #
-    # EMITTED ONLY WHEN THE SIGNAL POINTS THE SAME WAY AS THE ORDER, hence
-    # the strict `>` on each. `_rank`'s remaining discriminator at this depth
-    # is `Confidence.score`, which is internal and never rendered, and
-    # document count is one input to it among several — so a signal that
-    # favoured `second` would be a true sentence that read as a contradiction
-    # of the list it sits in. Where nothing points the right way, the honest
-    # fallback still runs; it is now the last resort rather than the first
-    # branch reached.
+    # ONE OF THESE SIGNALS IS CAUSAL AND THE OTHERS ARE NOT, and saying so is
+    # the whole point of the ordering below. At this depth `_rank`'s only
+    # remaining term is `-Confidence.score`, and `scoring.score_confidence`
+    # builds that from five weighted components plus ONE corroboration bonus:
+    #
+    #     corroboration = min(0.15, 0.05 * (independent_authoritative_
+    #                                       source_types - 1))
+    #
+    # That bonus is the ONLY term in the whole score that rewards agreement,
+    # so where the two findings differ on `independent_authoritative_source_
+    # types` and tie on everything earlier in the key, that difference IS the
+    # reason for the order and can carry a causal sentence.
+    #
+    # Document count and claim count cannot. Decomposed on a real run whose
+    # top two tied on every earlier term, the score gap was 0.004467:
+    # corroboration +0.0500 (two authoritative source types against one),
+    # coverage -0.0462, recency +0.0006. Rank 1 had 26 claims to rank 2's 5 —
+    # and claim count is COVERAGE'S DENOMINATOR, so those 26 claims made rank
+    # 1's coverage WORSE (20 of 26 authoritative = 0.769, against 5 of 5 =
+    # 1.00). "More of the corpus is about this one" named a signal that
+    # pushed the other way and presented it as the reason.
+    #
+    # A strict `>` stops the sentence CONTRADICTING the visible order. It does
+    # not stop it asserting a cause that is not the cause, which is a quieter
+    # failure and a worse one: a reader cannot catch it by looking at the
+    # list. So the non-causal branches say "one difference" and name where the
+    # order actually came from, and only the corroboration branch says "what
+    # decides it".
     same_bucket_lead = (
         f"Both {_BUCKET_PHRASE_PLURAL[bucket_top]}, so the kind of claim does "
         f"not separate them"
@@ -1436,23 +1456,46 @@ def _compare(
         and bucket_top in _BUCKET_PHRASE_PLURAL
         else "Reach and confidence band do not separate these two"
     )
+    #: Said after every non-causal difference, so a reader is never invited to
+    #: read one named number as the reason for the ordering.
+    not_the_reason = (
+        "The order itself comes from the run's combined scoring, which this "
+        "report does not print."
+    )
+
+    # THE CAUSAL BRANCH. See above: this is the only corroboration term in the
+    # score, so a difference here is a difference in the thing that sorted.
+    kinds_top = top.confidence_inputs.independent_authoritative_source_types
+    kinds_second = second.confidence_inputs.independent_authoritative_source_types
+    if kinds_top > kinds_second:
+        return (
+            f"Ranked above “{second_label}”. {same_bucket_lead}. What decides "
+            f"it: independent KINDS of authoritative source — "
+            f"{kinds_top} of them raise this one, against {kinds_second} for "
+            f"the other. Agreement across different kinds of source is the "
+            f"one thing the scoring rewards beyond the evidence itself, and "
+            f"here it is what put this first."
+        )
 
     docs_top = document_count(top.confidence_inputs.surfaced_by)
     docs_second = document_count(second.confidence_inputs.surfaced_by)
     if docs_top > docs_second:
         return (
-            f"Ranked above “{second_label}”. {same_bucket_lead}. What does: "
-            f"more of your sources independently raise this one — "
-            f"{docs_top} source document{'' if docs_top == 1 else 's'} "
-            f"against {docs_second}."
+            f"Ranked above “{second_label}”. {same_bucket_lead}, and the same "
+            f"kinds of source speak to each. One difference: more of your "
+            f"documents independently raise this one — {docs_top} source "
+            f"document{'' if docs_top == 1 else 's'} against {docs_second}. "
+            f"{not_the_reason}"
         )
 
     claims_top, claims_second = len(top.claim_ids), len(second.claim_ids)
     if claims_top > claims_second:
         return (
             f"Ranked above “{second_label}”. {same_bucket_lead}, and the same "
-            f"number of sources raise each. What does: more of the corpus is "
-            f"about this one — {claims_top} claims against {claims_second}."
+            f"sources speak to each. One difference: more of the corpus is "
+            f"about this one — {claims_top} claims against {claims_second}. "
+            f"That is volume rather than agreement, and volume is not what "
+            f"the scoring rewards. {not_the_reason}"
         )
 
     return (

@@ -174,62 +174,137 @@ def _label_of(finding: Mapping) -> str:
             or str(finding.get("statement") or "").strip())
 
 
+#: How much of two ACTIONS' combined vocabulary must be shared before they are
+#: one build described twice rather than two builds in one domain.
+#:
+#: PROPORTIONAL, NOT AN ABSOLUTE COUNT, because the input changed. `kg_themes.
+#: same_topic` qualifies on two shared content words, which is calibrated for
+#: the 2-4 word theme LABELS it was written for. An action is a sentence: two
+#: shared words out of thirty-five is noise, and applying the label rule to
+#: prose collapsed two materially different builds — a multi-vendor provenance
+#: layer and a standalone citation-chain capability — because their labels both
+#: contained "citation chains".
+#:
+#: JACCARD, NOT THE OVERLAP COEFFICIENT. Jaccard is symmetric; overlap divides
+#: by the shorter side, so a short generic action is a near-subset of any
+#: longer one containing it and would collapse pairs purely for being terse.
+#: `kg_themes` documents that exact donation effect as the reason its own
+#: group cap exists, and prose gives it more room to operate, not less.
+#:
+#: 0.6 MEASURED, NOT GUESSED. On the pair that exposed this, the two genuinely
+#: different builds score 0.129; a true restatement of one action scores 0.727.
+#: The threshold sits between them with 4.6x headroom below and 1.2x above.
+#: Conservative in the direction that matters: `kg_themes._STOPWORDS` is nine
+#: words tuned for labels, so on prose function words like "as" and "from"
+#: count as content and INFLATE this ratio — which pushes toward collapsing,
+#: so a high bar is the safe side of that error.
+ACTION_TOPIC_OVERLAP = 0.6
+
+
+def _actions_are_one_build(a: str, b: str) -> bool:
+    """Whether two deep ACTIONS describe the same build.
+
+    Tokenised with `kg_themes.content_tokens` — the imported one, so
+    normalisation, case-folding and separator flattening cannot drift from the
+    engine's. Only the DECISION RULE differs, and only because the input is
+    prose rather than a label; see `ACTION_TOPIC_OVERLAP`.
+    """
+    ta, tb = content_tokens(a), content_tokens(b)
+    if not ta or not tb:
+        return False
+    union = ta | tb
+    return (len(ta & tb) / len(union)) >= ACTION_TOPIC_OVERLAP if union else False
+
+
 def options_are_one_topic(findings: Sequence[Mapping]) -> bool:
-    """Whether the top two write-ups are the SAME topic named twice.
+    """Whether the top two write-ups are one thing described twice.
 
-    A real run rendered Option 1 "enterprise compliance / citation chains"
-    and Option 2 "court-admissible citation chains" — and the engine's own
-    predicate says those are one topic:
+    REQUIRES BOTH THE LABELS AND THE ACTIONS TO AGREE, deliberately.
 
-        same_topic(content_tokens("enterprise compliance / citation chains"),
-                   content_tokens("court-admissible citation chains")) is True
+    The labels alone were the original test and they are the wrong question.
+    What the page presents as a choice is the ACTIONS — what to build — and a
+    real run offered "Build a multi-vendor, compliance-grade provenance layer
+    …with court-admissible citation chains" beside "Build a court-admissible
+    citation chain feature as a distinct, first-class capability separate from
+    RAG retrieval quality improvements". Those are different builds. Their
+    labels shared exactly `{citation, chains}` — precisely
+    `kg_themes._MIN_SHARED_TOKENS` — so the label test collapsed them.
 
-    They reached the reader as separate options only because the clique
-    builder is greedy first-fit, so which group a label lands in depends on
-    the order candidates were offered in. Presenting them as a CHOICE is the
-    worst available outcome: the reader is asked to pick between two names
-    for one thing, under a "why this over the next" sentence that has to
-    admit it has no reason, because there genuinely is none.
+    Requiring both is strictly more conservative than either, and the asymmetry
+    of the two errors justifies it. Collapsing two different builds hides a
+    real choice from the reader and cannot be recovered from the page.
+    Declining to collapse two similar ones costs a duplicated card — and since
+    the comparison paragraph now always renders, the reader is still told which
+    comes first and why. The cheap error is the one to prefer.
 
     ANSWERED IN THE RENDERER, NOT BY CHANGING THE MERGE. Widening the merge
-    to catch this pair would change which findings exist, which recommendation
-    binds to rank 1, and every count on the page. This changes only whether
-    two write-ups are PRESENTED as alternatives. `same_topic` and
-    `content_tokens` are imported from `kg_themes`, never reimplemented — a
-    second copy of the predicate would be free to disagree with the one that
-    formed the groups, and then the page would offer a choice the engine had
-    already refused to make, or refuse one it had made.
+    would change which findings exist, which recommendation binds to rank 1,
+    and every count on the page. This changes only how two write-ups are
+    PRESENTED. `same_topic` and `content_tokens` are imported from
+    `kg_themes`, never reimplemented.
     """
     deep = [f for f in findings if _has_deep(f)]
     if len(deep) < 2:
         return False
-    return same_topic(
+    if not same_topic(
         content_tokens(_label_of(deep[0])), content_tokens(_label_of(deep[1])),
+    ):
+        return False
+    return _actions_are_one_build(
+        str(_deep(deep[0]).get("action") or ""),
+        str(_deep(deep[1]).get("action") or ""),
     )
 
 
-#: What the report says INSTEAD of a second option, when the corpus produced
-#: two names for one topic. Said plainly: an absent alternative that is not
-#: explained reads as a rendering bug, and a reader who saw two options in a
-#: previous run needs to know why this one has one.
+#: What the report says instead of a second OPTION LABEL when the corpus
+#: produced one build described twice. It never replaces the comparison: "why
+#: this one first" is the question the reader came with, and it is answered
+#: whether or not the two turn out to be alternatives.
 ONE_TOPIC_NOTE = (
-    "Only one recommendation is offered here. The next-ranked write-up names "
-    "the same topic as this one rather than a different approach to it, so "
-    "presenting the two as alternatives would be a choice the evidence does "
-    "not actually offer."
+    "These two write-ups describe the same build rather than a choice between "
+    "approaches, so they are not offered as alternatives. The comparison "
+    "below still says which comes first, and why."
 )
+
+
+def option_header(option: int, total: int, one_topic: bool) -> str:
+    """The heading for one deep write-up's card.
+
+    EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION. Returning all-zero
+    option numbers under one-topic made every deep card fall back to the same
+    "Recommended — the full write-up" header, so a real page carried that
+    phrase twice and, counting the short-form cards, the word "Recommended"
+    seven times. A reader could not tell what they were being asked to do.
+
+    So the numbering never disappears — it decides which card is first — and
+    only its PRESENTATION changes: numbered options when the two are a real
+    choice, and a plainly subordinate header for the second when they are not.
+    """
+    if option <= 0:
+        return ""
+    if one_topic:
+        return (
+            "Recommended — the full write-up." if option == 1
+            else "Also written up — the same build, not an alternative."
+        )
+    if total <= 1:
+        return "Recommended — the full write-up."
+    return (
+        "Option 1 — recommended." if option == 1
+        else f"Option {option} — alternative."
+    )
 
 
 def option_numbers(findings: Sequence[Mapping]) -> tuple[int, ...]:
     """`Option N` for each finding, positionally — `0` for one that is not an
     option at all.
 
-    RETURNS ALL ZEROS WHEN THE TOP TWO ARE ONE TOPIC (`options_are_one_topic`)
-    — the write-ups still render, they simply stop being labelled as a choice
-    between alternatives, and `ONE_TOPIC_NOTE` says why. Numbering is a claim
-    that the numbered things differ; making it silently when they do not is
-    what produced "Option 1: enterprise compliance / citation chains" beside
-    "Option 2: court-admissible citation chains".
+    ALWAYS NUMBERS, even when the two are one build described twice. The
+    number is what decides which card is FIRST and which is subordinate;
+    whether it is shown as "Option 1" or absorbed into a plainer header is
+    `option_header`'s decision, not this one. An earlier version returned all
+    zeros in that case, which silently sent both cards down the
+    single-write-up path and headed both of them "Recommended".
 
     A LABELLING CHANGE, AND ONLY THAT. The options ARE the deep write-ups the
     run already produced, numbered in the run's own frozen rank order (I10);
@@ -245,8 +320,6 @@ def option_numbers(findings: Sequence[Mapping]) -> tuple[int, ...]:
     computed — and the `_compare` sentence under Option 1 is the reason for
     the preference, already written and already shown.
     """
-    if options_are_one_topic(findings):
-        return tuple(0 for _ in findings)
     out: list[int] = []
     n = 0
     for f in findings:

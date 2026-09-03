@@ -140,42 +140,93 @@ function labelOf(f: GoalFinding): string {
   return (f.label || "").trim() || (f.statement || "").trim()
 }
 
-/** Whether the top two write-ups are the SAME topic named twice.
+/** How much of two ACTIONS' combined vocabulary must be shared before they
+ *  are one build described twice rather than two builds in one domain.
  *
- *  A real run rendered Option 1 "enterprise compliance / citation chains" and
- *  Option 2 "court-admissible citation chains" — and the engine's own
- *  predicate says those are one topic. They reached the reader as separate
- *  options only because the clique builder is greedy first-fit, so which group
- *  a label lands in depends on the order candidates were offered in.
- *  Presenting them as a CHOICE is the worst available outcome: the reader is
- *  asked to pick between two names for one thing, under a "why this over the
- *  next" that has to admit it has no reason, because there is none.
+ *  PROPORTIONAL, NOT AN ABSOLUTE COUNT, because the input changed.
+ *  `sameTopic` qualifies on two shared content words, calibrated for the 2-4
+ *  word theme LABELS it was written for. An action is a sentence: two shared
+ *  words out of thirty-five is noise, and the label rule applied to prose
+ *  collapsed two materially different builds.
  *
- *  ANSWERED IN THE RENDERER, NOT BY CHANGING THE MERGE — widening the merge
- *  would change which findings exist and which recommendation binds to rank 1.
- *  Mirrors `data_gaps.options_are_one_topic`. */
+ *  JACCARD, NOT THE OVERLAP COEFFICIENT — Jaccard is symmetric, where overlap
+ *  divides by the shorter side and would collapse pairs for being terse.
+ *  0.6 MEASURED: the two different builds score 0.129, a true restatement
+ *  0.727. Mirrors `data_gaps.ACTION_TOPIC_OVERLAP`. */
+export const ACTION_TOPIC_OVERLAP = 0.6
+
+function actionsAreOneBuild(a: string, b: string): boolean {
+  const ta = contentTokens(a)
+  const tb = contentTokens(b)
+  if (!ta.size || !tb.size) return false
+  let shared = 0
+  for (const t of ta) if (tb.has(t)) shared += 1
+  const union = new Set([...ta, ...tb]).size
+  return union > 0 && shared / union >= ACTION_TOPIC_OVERLAP
+}
+
+/** Whether the top two write-ups are one thing described twice.
+ *
+ *  REQUIRES BOTH THE LABELS AND THE ACTIONS TO AGREE. The labels alone were
+ *  the original test and they are the wrong question: what the page presents
+ *  as a choice is the ACTIONS. A real run offered "Build a multi-vendor,
+ *  compliance-grade provenance layer…" beside "Build a court-admissible
+ *  citation chain feature as a distinct, first-class capability separate
+ *  from RAG retrieval quality improvements" — different builds whose labels
+ *  shared exactly two content words, so the label test collapsed them.
+ *
+ *  The two errors are not symmetric: collapsing two different builds hides a
+ *  real choice and cannot be recovered from the page, while declining to
+ *  collapse two similar ones costs a duplicated card — and the comparison
+ *  paragraph now always renders, so the reader is still told which comes
+ *  first and why. Mirrors `data_gaps.options_are_one_topic`. */
 export function optionsAreOneTopic(findings: readonly GoalFinding[]): boolean {
   const deep = findings.filter(hasDeep)
   if (deep.length < 2) return false
-  return sameTopic(contentTokens(labelOf(deep[0])), contentTokens(labelOf(deep[1])))
+  if (!sameTopic(contentTokens(labelOf(deep[0])), contentTokens(labelOf(deep[1])))) {
+    return false
+  }
+  return actionsAreOneBuild(
+    deep[0].deep_recommendation?.action ?? "",
+    deep[1].deep_recommendation?.action ?? "",
+  )
 }
 
-/** What the report says INSTEAD of a second option. Said plainly: an absent
- *  alternative that is not explained reads as a rendering bug. Verbatim from
- *  `data_gaps.ONE_TOPIC_NOTE`. */
+/** What the report says instead of a second OPTION LABEL. It never replaces
+ *  the comparison: "why this one first" is the question the reader came with.
+ *  Verbatim from `data_gaps.ONE_TOPIC_NOTE`. */
 export const ONE_TOPIC_NOTE =
-  "Only one recommendation is offered here. The next-ranked write-up names "
-  + "the same topic as this one rather than a different approach to it, so "
-  + "presenting the two as alternatives would be a choice the evidence does "
-  + "not actually offer."
+  "These two write-ups describe the same build rather than a choice between "
+  + "approaches, so they are not offered as alternatives. The comparison "
+  + "below still says which comes first, and why."
+
+/** The heading for one deep write-up's card.
+ *
+ *  EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION. Returning all-zero
+ *  option numbers under one-topic made every deep card fall back to the same
+ *  "Recommended — the full write-up" header, so a real page carried that
+ *  phrase twice. The numbering never disappears — it decides which card is
+ *  first — and only its PRESENTATION changes. Mirrors
+ *  `data_gaps.option_header`. */
+export function optionHeader(
+  option: number, total: number, oneTopic: boolean,
+): string {
+  if (option <= 0) return ""
+  if (oneTopic) {
+    return option === 1
+      ? "Recommended — the full write-up."
+      : "Also written up — the same build, not an alternative."
+  }
+  if (total <= 1) return "Recommended — the full write-up."
+  return option === 1 ? "Option 1 — recommended." : `Option ${option} — alternative.`
+}
 
 export function optionNumbers(findings: readonly GoalFinding[]): number[] {
-  // ALL ZEROS WHEN THE TOP TWO ARE ONE TOPIC — the write-ups still render,
-  // they simply stop being labelled as a choice. Numbering is a claim that the
-  // numbered things differ; making it silently when they do not is what
-  // produced "Option 1: enterprise compliance / citation chains" beside
-  // "Option 2: court-admissible citation chains".
-  if (optionsAreOneTopic(findings)) return findings.map(() => 0)
+  // ALWAYS NUMBERS, even when the two are one build described twice. The
+  // number decides which card is FIRST and which is subordinate; whether it
+  // shows as "Option 1" or is absorbed into a plainer header is
+  // `optionHeader`'s decision. Returning all zeros here sent both cards down
+  // the single-write-up path and headed both "Recommended".
   let n = 0
   return findings.map((f) => (hasDeep(f) ? ++n : 0))
 }

@@ -46,8 +46,8 @@ import {
   typeBucket,
 } from "../../lib/goalMoscow"
 import {
-  DATA_GAPS_HEADING, ONE_TOPIC_NOTE, dataGapsFor, optionNumbers,
-  optionsAreOneTopic,
+  DATA_GAPS_HEADING, ONE_TOPIC_NOTE, dataGapsFor, optionHeader,
+  optionNumbers, optionsAreOneTopic,
 } from "../../lib/goalDataGaps"
 import { stop, stripClaimRefs, upperFirst } from "../../lib/goalProse"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
@@ -116,7 +116,7 @@ const EMPTY_GAPS: readonly string[] = []
 function ReportFinding({
   f, rank, sharedWeakest = false, sharedCap = false,
   sharedAssumptions = false, option = 0, dataGaps = [],
-  oneTopic = false, oneTopicNote = "",
+  oneTopic = false, oneTopicNote = "", optionTotal = 0,
 }: {
   f: GoalFinding
   rank: number
@@ -133,6 +133,9 @@ function ReportFinding({
    *  an alternative, and a sentence reaching for a distinction that does not
    *  exist is worse than silence. */
   oneTopic?: boolean
+  /** How many deep write-ups this run rendered — decides whether a single one
+   *  is headed as "the" recommendation or as "Option 1" of several. */
+  optionTotal?: number
   /** Rendered once, on the recommended card, in place of that comparison. */
   oneTopicNote?: string
   /** Hoisted to the top of the section because every finding assumes the
@@ -185,11 +188,7 @@ function ReportFinding({
               single recommendation is bound to and carries the "Why this over
               the next" sentence below. Mirrors `report.py`'s
               `_finding_block`. */}
-          <p><strong>{option === 0
-            ? "Recommended — the full write-up."
-            : option === 1
-              ? "Option 1 — recommended."
-              : `Option ${option} — alternative.`}</strong>{" "}
+          <p><strong>{optionHeader(option, optionTotal, oneTopic)}</strong>{" "}
             {stripClaimRefs(f.deep_recommendation!.action)}</p>
           <p className="ga-finding-rec-why">
             <em>Why.</em> {stripClaimRefs(f.deep_recommendation!.because)}
@@ -226,17 +225,22 @@ function ReportFinding({
               <em>{KILL_SIGNAL_CAVEAT}</em>
             </p>
           ) : null}
-          {/* SUPPRESSED WHEN THERE IS NO "NEXT" BEING OFFERED — see
-              `oneTopic`. The note itself renders once, on the recommended
-              card. Mirrors `report.py`'s `_finding_block`. */}
-          {f.deep_recommendation!.comparison && !oneTopic ? (
+          {/* ALWAYS RENDERED WHEN IT EXISTS. This paragraph is the
+              deliverable — "once we pick the top two, then we could just
+              compare them" — and an earlier pass suppressed it on exactly the
+              runs it was written for: the one-topic branch took it down along
+              with the option labels, so the engine computed the sentence and
+              the page never printed it. Whether two write-ups are
+              alternatives, and which comes first, are different questions.
+              The one-topic note sits BESIDE it, never instead of it. */}
+          {f.deep_recommendation!.comparison ? (
             <p className="ga-weakest" data-testid="goal-finding-comparison">
               <b>Why this over the next.</b> {f.deep_recommendation!.comparison}
             </p>
           ) : null}
           {oneTopicNote ? (
             <p className="ga-weakest" data-testid="goal-finding-one-topic">
-              <b>Why there is only one.</b> {oneTopicNote}
+              <b>Why these are not two options.</b> {oneTopicNote}
             </p>
           ) : null}
           {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────
@@ -265,7 +269,10 @@ function ReportFinding({
       ) : (f.recommendation?.action || "").trim()
         && (f.recommendation?.because || "").trim() ? (
         <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
-          <p><strong>Recommended.</strong> {stripClaimRefs(f.recommendation!.action)}</p>
+          {/* NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. Both passes
+              used it, so a page with two write-ups and five short-form cards
+              said "Recommended" seven times. Mirrors `report.py`. */}
+          <p><strong>Suggested.</strong> {stripClaimRefs(f.recommendation!.action)}</p>
           <p className="ga-finding-rec-why">
             <em>Why.</em> {stripClaimRefs(f.recommendation!.because)}
           </p>
@@ -569,6 +576,7 @@ export function GoalAnalysisReport({
   // comparing against a sibling that is not an alternative. Presentation only
   // — findings, ranking and binding are untouched. Mirrors `report.py`.
   const oneTopic = optionsAreOneTopic(findings)
+  const optionTotal = options.length ? Math.max(...options) : 0
   // STATED ONLY WHEN THE CORPUS HAS MORE THAN ONE BUCKET. On a run of nothing
   // but blockers the claim-type term did no work, and saying it ordered the
   // list would be an overstatement in the other direction. Mirrors
@@ -1002,7 +1010,9 @@ export function GoalAnalysisReport({
               ) : (
                 <>
                   It is listed first{lead}. Nothing in this reading could be
-                  sized, so these are ordered by confidence rather than by size
+                  sized, so what orders these is the kind of claim behind each
+                  one — what blocks an account above what an account only asks
+                  for — with how sure we are breaking ties inside a kind
                   — the order says how sure each one is, not how big.
                 </>
               )}
@@ -1212,6 +1222,7 @@ export function GoalAnalysisReport({
                   i === recommendedGapsIndex ? recommendedGaps : EMPTY_GAPS
                 }
                 oneTopic={oneTopic}
+                optionTotal={optionTotal}
                 oneTopicNote={
                   oneTopic && i === recommendedGapsIndex ? ONE_TOPIC_NOTE : ""
                 }

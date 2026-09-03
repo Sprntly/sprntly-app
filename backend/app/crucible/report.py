@@ -40,8 +40,8 @@ from html import escape
 from typing import Any, Iterable, Optional, Sequence
 
 from app.crucible.data_gaps import (
-    DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_numbers,
-    options_are_one_topic,
+    DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_header,
+    option_numbers, options_are_one_topic,
 )
 from app.crucible.moscow import (
     CALL_COUNT_FLOOR_NOTE, has_call_count, type_bucket,
@@ -916,15 +916,21 @@ def _headline_section(findings: list[dict]) -> str:
               "a measurement of it."
         )
     else:
-        # Nothing anywhere could be sized. The size term is then constant and
-        # the sort is strictly confidence-descending — which is a real order,
-        # just not the one the heading implies. Saying "arbitrary" here was
-        # itself false.
+        # Nothing anywhere could be sized, so the size term is constant — but
+        # the sort is NOT "strictly confidence-descending", which is what this
+        # comment used to say and what the sentence below used to assert.
+        # `_rank`'s key is (conflict, claim-type bucket, reach, confidence):
+        # with reach constant, what orders the list is the BUCKET, and
+        # confidence only breaks ties inside one. Describing it as ordered by
+        # confidence told a reader the order says how SURE each finding is,
+        # when what it mostly says is what KIND of claim each one is — the
+        # opposite emphasis, on the sentence that introduces the whole list.
         tail = (
             "It is listed first" + lead
-            + ". Nothing in this reading could be sized, so these are ordered "
-              "by confidence rather than by size — the order says how sure "
-              "each one is, not how big."
+            + ". Nothing in this reading could be sized, so what orders these "
+              "is the kind of claim behind each one — what blocks an account "
+              "above what an account only asks for — with how sure we are "
+              "breaking ties inside a kind."
         )
     out.append(_p(tail))
     return "".join(out)
@@ -1148,6 +1154,7 @@ def _finding_block(
     shared_weakest: bool = False, shared_cap: bool = False,
     shared_assumptions: bool = False,
     option: int = 0,
+    option_total: int = 0,
     data_gaps: Sequence[str] = (),
     one_topic: bool = False,
     one_topic_note: str = "",
@@ -1195,19 +1202,16 @@ def _finding_block(
         # was whether a "What to change" list happened to follow, which a
         # reader has no reason to go looking for. This is the deeper of the
         # two passes — the full write-up, not a one-liner — and it says so.
-        # OPTION N, NOT A REPEATED "Recommended". Every deep write-up used
-        # the identical header, so a column of them read as a list to work
-        # through rather than as a choice between named alternatives with a
-        # stated preference. `option` comes from `data_gaps.option_numbers` —
-        # the run's own frozen rank order (I10), numbered; option 1 is the one
-        # the single recommendation is bound to, and it carries the "Why this
-        # over the next" sentence below. Purely a label: nothing here groups,
-        # scores or chooses, and no model is consulted (I2).
-        header = (
-            "Recommended — the full write-up." if not option
-            else f"Option {option} — recommended." if option == 1
-            else f"Option {option} — alternative."
-        )
+        # EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION, and which
+        # header each card gets is `data_gaps.option_header`'s decision, so
+        # the panel and this document cannot word it differently. Numbered
+        # options when the two write-ups are a real choice; a plainly
+        # subordinate header for the second when they describe one build.
+        # Zeroing the numbering under one-topic sent BOTH cards down the
+        # single-write-up path and headed both "Recommended", which is the
+        # opposite of what that branch was for. Purely a label: nothing here
+        # groups, scores or chooses, and no model is consulted (I2).
+        header = option_header(option, option_total, one_topic)
         out.append(_p(
             f"<strong>{header}</strong> "
             f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
@@ -1256,22 +1260,24 @@ def _finding_block(
                 f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)} "
                 f"<em>{KILL_SIGNAL_CAVEAT}</em>"
             ))
-        # SUPPRESSED WHEN THERE IS NO "NEXT" BEING OFFERED. `one_topic` is set
-        # on EVERY card of a run whose top two write-ups name the same topic —
-        # not just the recommended one — because the alternatives were not
-        # labelled as a choice anywhere on the page. "Why this over the next"
-        # answering a question the page no longer asks is worse than silence:
-        # the sentence would be reaching for a distinction that does not
-        # exist. The note itself renders once, on the recommended card.
+        # ALWAYS RENDERED WHEN IT EXISTS. This paragraph is the deliverable —
+        # "once we pick the top two, then we could just compare them" — and an
+        # earlier pass suppressed it on exactly the runs it was written for:
+        # the one-topic branch took the comparison down along with the option
+        # labels, so the engine computed the sentence and the page never
+        # printed it. Whether two write-ups are alternatives, and which of
+        # them comes first, are different questions; the second is the one the
+        # reader came with. The one-topic note sits BESIDE it, never instead
+        # of it.
         comparison = (deep.get("comparison") or "").strip()
-        if comparison and not one_topic:
+        if comparison:
             out.append(_p(
                 f"<strong>Why this over the next.</strong> "
                 f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
             ))
-        elif one_topic_note:
+        if one_topic_note:
             out.append(_p(
-                f"<strong>Why there is only one.</strong> "
+                f"<strong>Why these are not two options.</strong> "
                 f"{_esc(one_topic_note)}"
             ))
         # ── WHAT WE DO NOT KNOW ABOUT THE THING WE JUST RECOMMENDED. ───────
@@ -1294,8 +1300,13 @@ def _finding_block(
                 _esc_clipped(g, MAX_STATEMENT_CHARS) for g in data_gaps
             ))
     elif action and because:
+        # NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. Both passes used
+        # it, so a page carrying two write-ups and five short-form cards said
+        # "Recommended" seven times and a reader could not tell which of them
+        # was the ask. This is the one-line pass over a finding that did NOT
+        # get a full write-up, and it now says so.
         out.append(_p(
-            f"<strong>Recommended.</strong> "
+            f"<strong>Suggested.</strong> "
             f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
         ))
         out.append(_p(
@@ -1839,7 +1850,7 @@ def _findings_section(
             f, i + 1,
             shared_weakest=bool(shared_weakest), shared_cap=bool(shared_cap),
             shared_assumptions=bool(shared_assumptions),
-            option=options[i],
+            option=options[i], option_total=(max(options) if options else 0),
             data_gaps=gaps if i == gaps_index else (),
             one_topic=one_topic,
             one_topic_note=(
@@ -1859,14 +1870,40 @@ def _findings_section(
         # dropped" and was then followed by 400 rows and a sentence conceding
         # 281 were missing. The document contradicted itself in two adjacent
         # paragraphs, on the very run cited as evidence that it was fine.
+        # TWO FALSE CLAIMS AND A COLLISION, all in one sentence.
+        #
+        # "a full write-up is reserved for the {len(full)} the ranking put
+        # first" described a cap on CARDS as though it were a cap on
+        # write-ups. It is not: `resolve_recommendation_count` decides how
+        # many findings get a deep write-up, and on a real run that was 2 of
+        # the 10 cards rendered — so the third card had no write-up at all
+        # while this sentence promised ten. `deep_written` counts what
+        # actually happened rather than restating a different cap.
+        #
+        # "they rank lower by confidence, not by size" was the same error as
+        # the headline tail above: with nothing sized, the term doing the
+        # ordering is the CLAIM-TYPE BUCKET, not confidence.
+        #
+        # And "full write-up" is the deep card's own header word, so the
+        # phrase read as a promise about the cards directly above it. These
+        # are detail cards; that is what they are called here.
+        deep_written = sum(
+            1 for f in full
+            if (_as_dict(f.get("deep_recommendation")).get("action") or "").strip()
+        )
         out.append(_p(
             f"The next {len(listed)} findings are listed below in rank order "
-            f"rather than in full — a full write-up is reserved for the "
-            f"{len(full)} the ranking put first"
+            f"rather than as detail cards — the {len(full)} the ranking put "
+            f"first get one"
             + (
-                " and they rank lower by reach" if anything_sized
-                else " — they rank lower by confidence, not by size, which "
-                     "nothing here had"
+                f", and {deep_written} of those carry a full write-up"
+                if deep_written else ""
+            )
+            + (
+                " — these rank lower by reach" if anything_sized
+                else " — these rank lower by the kind of claim behind them, "
+                     "and by how sure we are within a kind; not by size, "
+                     "which nothing here had"
             )
             + ". Every one of them is still on the run itself."
         ))
