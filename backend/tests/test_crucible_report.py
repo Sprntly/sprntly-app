@@ -124,6 +124,39 @@ def test_a_conflict_is_called_a_conflict():
     assert "sources disagree" in html
 
 
+def test_a_grounded_commercial_figure_is_named_as_evidence_not_a_projection():
+    """A real, transcript-stated dollar figure — carried on
+    `impact.native_units` (see `pipeline._grounded_commercial_native_units`)
+    — reads as evidence a customer stated, never as a sized/projected
+    value: it must appear distinctly from `_reach`'s own line and must not
+    use projection language ("worth", "potential", "will")."""
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 150000.0,
+                          "commercial_grounded_accounts": 2.0},
+    })])
+    assert "Customers named" in html
+    assert "$150,000" in html
+    assert "2 named accounts" in html
+    assert "not a projection" in html
+
+
+def test_a_single_grounded_account_is_singular_too():
+    html = render_report_html(_run(), [_finding(impact={
+        "native_units": {"commercial_grounded_usd": 100000.0,
+                          "commercial_grounded_accounts": 1.0},
+    })])
+    assert "1 named account" in html
+    assert "1 named accounts" not in html
+
+
+def test_no_grounded_figure_means_no_commercial_evidence_line():
+    """A finding with no `native_units` (every finding before this ticket,
+    and every finding whose claims never stated a figure) renders exactly
+    as before — the new line is silent, not empty scaffolding."""
+    html = render_report_html(_run(), [_finding()])
+    assert "Customers named" not in html
+
+
 def test_the_ruled_out_ledger_keeps_its_reasons():
     """A ranking whose rejections are invisible is one you have to take on
     faith."""
@@ -1242,7 +1275,7 @@ def test_the_recommendation_leads_the_card_and_carries_its_justification():
 def test_a_deep_recommendation_says_it_is_the_full_write_up():
     """The deep and flat passes used to share the identical
     "Recommended." header, with a "What to change" list as the only visible
-    discriminator. The deep pass — the full write-up, AC-1 — says so now."""
+    discriminator. The deep pass — the full write-up — says so now."""
     run = _run()
     run["prioritisation"] = {
         **_as_meta(run),
@@ -1469,7 +1502,7 @@ def test_the_table_does_not_reorder_the_findings():
 
 
 def test_the_report_states_why_this_framework_was_chosen():
-    """AC-2: the chosen framework and the reason it was chosen appear in the
+    """The chosen framework and the reason it was chosen appear in the
     plan AND in the final report — not just its name in a heading."""
     run = _rice_run()
     run["prioritisation"]["plan"]["framework_reason"] = (

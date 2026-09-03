@@ -74,7 +74,17 @@ _EXTRACT_SCHEMA = {
                                    "Numeric/categorical details, e.g. {\"revenue_at_risk_usd\": 1400000}. "
                                    "For an action item that names any of them, carry the "
                                    "attribution: {\"owner\": \"Jane Doe\", \"due\": \"Friday\", "
-                                   "\"status\": \"open\"}."},
+                                   "\"status\": \"open\"}. "
+                                   "For 'commercial_term' or 'pricing', additionally, only when the "
+                                   "document actually states a figure: {\"amount\": 100000, "
+                                   "\"currency\": \"USD\", \"basis\": "
+                                   "\"one-off|per-year|per-seat|total-contract\", \"certainty\": "
+                                   "\"quoted|asked|estimated-by-speaker\"}. `amount` must be the real "
+                                   "number stated — never invented, and never computed by "
+                                   "multiplying or extrapolating from a smaller figure the document "
+                                   "gives (e.g. never turn a per-seat price into a total by assuming "
+                                   "a seat count nobody stated). If no figure is stated, omit "
+                                   "`amount` entirely — never write 0."},
                     "confidence": {"type": "number"},
                     "reality_confidence": {"type": "number", "description":
                                            "0-1. How certain this is a REAL fact "
@@ -92,6 +102,52 @@ _EXTRACT_SCHEMA = {
     },
     "required": ["signals"],
 }
+
+# A stated dollar figure is captured here too — deliberately NOT a buying-
+# intent band. The checklist pass's intent scoring is a DIRECTED ask over one
+# whole, coherent call transcript, with its own verbatim-quote grounding gate
+# verifying every item before it is written. This open pass has neither: it
+# runs across arbitrary, often-batched text from any connector (several
+# unrelated Slack messages, tickets, or emails in one call-budget batch), for
+# every fact class at once, with NO per-item quote-grounding check at all —
+# "amount" is cheap to validate as real ("is this a number the text stated"),
+# but "buying intent" is a judgement call with no comparably cheap check
+# against fabrication. Widening intent scoring to every `sentiment`/
+# `deal_blocker` signal from every connector this pass reads (roadmap
+# ingest, research sweeps, category uploads — none of them a buyer
+# conversation) is a materially larger precision risk than the calls-only
+# checklist pass takes on its own narrower, quote-verified surface. Scoped
+# to commercial amounts only; revisit if a grounding gate is ever added to
+# this pass generally.
+#
+# COVERAGE, STATED PLAINLY (checked against `app.kg_ingest.runner` and the
+# two connectors that bypass its registry):
+#   * Call providers (fireflies/zoom/google_meet) — this schema addition is
+#     a no-op for them BY DESIGN. Their main-pass input is a cheap, cost-
+#     motivated CONDENSED digest that is explicitly instructed to drop
+#     numbers ("a separate, directed pass already reads the full transcript
+#     for prices... do NOT try to preserve those here" — see
+#     `_CALL_SUMMARY_SYSTEM`), so there is nothing here for the model to
+#     find. The checklist pass (full transcript, quote-verified) remains
+#     the sole, unchanged number-catcher for calls — see its own module
+#     note above.
+#   * clickup/asana/jira/hubspot/github/sprinklr/superset — every record's
+#     FULL rendered text reaches this pass (`runner._batches` only closes a
+#     BATCH early to respect a char budget across several records; it never
+#     truncates a single record). Fully covered, no caveat.
+#   * uploads/confluence — same as above, full text, no caveat.
+#   * Slack (`kg_ingest.slack_extract`) and Google Drive
+#     (`kg_ingest.drive_extract`) bypass this registry entirely and each
+#     cap a single document/channel at `_MAX_KG_CHARS` (60,000 chars),
+#     TRUNCATING — not condensing — anything past that point before this
+#     pass ever sees it. A figure inside the kept portion is captured like
+#     any other provider; one written only past a channel's or document's
+#     first 60k characters is missed. Pre-existing (every other fact class
+#     already had this limit), not introduced here, and not something this
+#     change works around.
+#   * No standalone "email" connector exists in this codebase today —
+#     e-mail content that reaches the graph rides HubSpot's own notes/email
+#     ingestion, which is the full-text, no-caveat path above.
 
 _SYSTEM = """You extract structured product signals from a company document for a \
 product-management knowledge graph. Extract every distinct, evidence-bearing fact. \
@@ -620,6 +676,21 @@ def _write_items(
         # existing `properties` jsonb (no migration). Absent → plainly real, so
         # no key is stamped rather than guessing a default here.
         props = dict(item.get("properties") or {})
+        if item.get("kind") in _AMOUNT_ELIGIBLE_KINDS:
+            # A stated dollar figure gets the SAME validation here that the
+            # checklist pass applies to its own commercial shape — this is
+            # the ONE write path both extraction passes share, so a figure
+            # from a call and a figure from any other connector's text
+            # cannot drift into two different shapes or two different
+            # guards. Every OTHER key in `properties` is left exactly as
+            # this pass has always written it (open extraction's own
+            # `properties` field stays the general-purpose one it always
+            # was for every other fact) — only `amount`/`currency`/`basis`/
+            # `certainty` are touched, and only when a real number backs
+            # them (I2/I3).
+            for key in ("amount", "currency", "basis", "certainty"):
+                props.pop(key, None)
+            props.update(_grounded_amount_properties(item.get("properties") or {}))
         rc = item.get("reality_confidence")
         if isinstance(rc, (int, float)):
             props["reality_confidence"] = float(rc)
@@ -803,8 +874,31 @@ _CHECKLIST_SCHEMA = {
                                    "For 'commitment': {\"owner\": \"Jane Doe\", "
                                    "\"due\": \"Friday\", \"status\": \"open\"} where named. "
                                    "For 'timeline': {\"urgency\": \"...\", "
-                                   "\"trigger_date\": \"...\"} where named. Omit/empty "
-                                   "otherwise."},
+                                   "\"trigger_date\": \"...\"} where named. "
+                                   "For 'commercial' or 'partnership_commercial': "
+                                   "{\"amount\": 100000, \"currency\": \"USD\", \"basis\": "
+                                   "\"one-off|per-year|per-seat|total-contract\", "
+                                   "\"certainty\": \"quoted|asked|estimated-by-speaker\"} "
+                                   "where a speaker ACTUALLY STATES a figure. `amount` must "
+                                   "be the real number a speaker said — never invented, and "
+                                   "never computed by multiplying or extrapolating from a "
+                                   "smaller figure they gave (e.g. never turn a per-seat "
+                                   "price into a total by assuming a seat count nobody "
+                                   "stated). If no figure was stated, omit `amount` entirely "
+                                   "— never write 0. "
+                                   "For 'objection', 'sentiment' or 'commitment', "
+                                   "ADDITIONALLY, only when the language actually supports "
+                                   "scoring buying intent: {\"intent_band\": "
+                                   "\"high|medium|low\", \"intent_basis\": \"a short reason "
+                                   "in YOUR OWN WORDS — never copied verbatim from the "
+                                   "transcript\"}. \"high\" = an explicit readiness-to-buy "
+                                   "statement (e.g. 'if I have this, I'll buy tomorrow'); "
+                                   "\"low\" = mild or hedged interest (e.g. 'this would be "
+                                   "nice'); \"medium\" = stated interest with no clear buy/"
+                                   "no-buy signal either way. Leave both fields unset if the "
+                                   "language does not support a call — never guess a band to "
+                                   "fill the slot. "
+                                   "Omit/empty entirely for any category not listed above."},
                 },
                 "required": ["category", "discussed", "content", "verbatim_quote"],
             },
@@ -1024,6 +1118,163 @@ def run_checklist_pass(
     )
 
 
+# ── Structured-properties sanitizer (grounded commercial figures + buying- ──
+# intent bands) ───────────────────────────────────────────────────────────
+#
+# `properties` on a checklist item is a free-form `object` in the schema
+# above (same as the pre-existing 'commitment'/'timeline' shapes) — nothing
+# at the schema level stops a model from ignoring the prose contract and
+# writing something else into it, including a copy of the transcript
+# sentence it was told to use ONLY for `verbatim_quote`. The grounding gate
+# in `_finish_checklist` verifies `verbatim_quote`, not `properties`, so this
+# is the second, code-level line: every property VALUE this pass writes is
+# constrained to a short, closed-vocabulary or numeric shape before it ever
+# reaches a Signal. An item whose `properties` do not fit the shape keeps its
+# grounded `content`/quote-verified core and simply loses the extra
+# structure — never a reason to drop the whole item, and never a reason to
+# fall back to writing the raw value unfiltered.
+
+#: Closed vocabulary for a grounded commercial figure's shape. Closed
+#: rather than free text so a model cannot smuggle a longer string ("roughly,
+#: give or take, they weren't totally sure") into a field this system
+#: renders as a short category.
+_COMMERCIAL_BASIS_VALUES = frozenset({
+    "one-off", "per-year", "per-seat", "total-contract",
+})
+_COMMERCIAL_CERTAINTY_VALUES = frozenset({
+    "quoted", "asked", "estimated-by-speaker",
+})
+#: The two checklist categories a commercial figure can attach to — the
+#: primary one and the partnership/ecosystem sibling, both minted as
+#: `commercial_term` (see `_CHECKLIST_CATEGORIES`).
+_COMMERCIAL_PROPERTY_CATEGORIES = frozenset({"commercial", "partnership_commercial"})
+
+#: Closed vocabulary for the buying-intent band — a three-way split
+#: (explicit readiness / hedged interest / neither).
+_INTENT_BAND_VALUES = frozenset({"high", "medium", "low"})
+#: The three categories buying-intent language actually shows up in — same
+#: set the ticket names, not every checklist category.
+_INTENT_PROPERTY_CATEGORIES = frozenset({"objection", "sentiment", "commitment"})
+
+#: A free-text property value this long has stopped being a short reason
+#: phrase and started being prose — the shape a smuggled transcript sentence
+#: would take. The longest legitimate value today ("estimated-by-speaker")
+#: is 20 characters; this leaves generous room for a real `intent_basis`
+#: while still refusing anything sentence-length.
+_MAX_PROPERTY_TEXT_CHARS = 120
+
+
+def _is_number(value: object) -> bool:
+    """True for a real, finite `int`/`float` — `bool` excluded (Python's
+    `bool` IS an `int`, and a model returning `True` for "amount" must not
+    be coerced into a `1.0` dollar figure), NaN/inf excluded (never a real
+    quoted amount)."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    return value == value and value not in (float("inf"), float("-inf"))  # NaN != NaN
+
+
+#: `kind`s a stated dollar figure can attach to via the OPEN extraction pass
+#: (`extract_document`) — `commercial_term` and `pricing`, the two
+#: dollar-figure-bearing kinds in `_EXTRACT_SCHEMA`'s own taxonomy. The
+#: checklist pass's `commercial`/`partnership_commercial` categories both
+#: mint `commercial_term` too (see `_CHECKLIST_CATEGORIES`), so a figure
+#: from EITHER pass lands on a `kind` this same set already covers — one
+#: gate, not two.
+_AMOUNT_ELIGIBLE_KINDS: frozenset[str] = frozenset({"commercial_term", "pricing"})
+
+
+def _grounded_amount_properties(props: dict) -> dict:
+    """The one, shared amount/currency/basis/certainty validator.
+
+    Used from TWO places — the checklist pass's own category-shape sanitizer
+    below, and `_write_items`'s kind-gated cleaning for the open extraction
+    pass — so a figure read from a call and a figure read from a Slack
+    thread, an email, or any other connector's text land in the identical
+    shape and pass the identical gate rather than two guards that could
+    quietly drift apart.
+
+    Never invents, never defaults a missing figure to `0` (I2/I3): `amount`
+    is present in the result only when the input already carries a real,
+    finite number, and `currency`/`basis`/`certainty` are only ever written
+    alongside a real `amount` — a basis or a currency with no number behind
+    it is not a grounded figure.
+    """
+    out: dict = {}
+    amount = props.get("amount")
+    if _is_number(amount):
+        out["amount"] = float(amount)
+        currency = props.get("currency")
+        if isinstance(currency, str) and 1 <= len(currency.strip()) <= 8:
+            out["currency"] = currency.strip().upper()
+        basis = props.get("basis")
+        if basis in _COMMERCIAL_BASIS_VALUES:
+            out["basis"] = basis
+        certainty = props.get("certainty")
+        if certainty in _COMMERCIAL_CERTAINTY_VALUES:
+            out["certainty"] = certainty
+    return out
+
+
+def _is_short_paraphrase(basis: str, text: str) -> bool:
+    """True iff `basis` reads like a short reason phrase rather than a
+    verbatim (or lightly-edited) chunk of the TRANSCRIPT copy-pasted into a
+    different field — a second path into persisting the speech itself,
+    forbidden here exactly as it is for `verbatim_quote`.
+
+    Checked against the FULL transcript, not just this item's own
+    `verbatim_quote` — a smuggled excerpt could be lifted from anywhere in
+    the call, not only the sentence this particular fact was grounded in.
+    Reuses `_quote_is_grounded` itself: if `basis` is "grounded" in that
+    function's sense (a literal or lightly-reformatted match somewhere in
+    the transcript), it is not a paraphrase — it is transcript text.
+    """
+    if len(basis) > _MAX_PROPERTY_TEXT_CHARS:
+        return False
+    return not _quote_is_grounded(basis, text)
+
+
+def _sanitize_checklist_properties(category: str, props: dict, text: str) -> dict:
+    """The code-level half of the `properties` contract — see the module
+    note above. Builds a NEW dict containing only the keys/shapes each
+    category is documented to carry; anything else the model wrote
+    (including a longer free-text value that could be a smuggled quote) is
+    dropped rather than passed through. Never raises.
+
+    ``text``: the FULL transcript (same one the grounding gate checks
+    `verbatim_quote` against) — see `_is_short_paraphrase`.
+    """
+    if not props:
+        return {}
+    out: dict = {}
+
+    if category == "commitment":
+        for key in ("owner", "due", "status"):
+            if key in props:
+                out[key] = props[key]
+    elif category == "timeline":
+        for key in ("urgency", "trigger_date"):
+            if key in props:
+                out[key] = props[key]
+
+    if category in _COMMERCIAL_PROPERTY_CATEGORIES:
+        # The shared validator — see its own docstring for why this is not
+        # reimplemented here.
+        out.update(_grounded_amount_properties(props))
+
+    if category in _INTENT_PROPERTY_CATEGORIES:
+        band = props.get("intent_band")
+        if band in _INTENT_BAND_VALUES:
+            out["intent_band"] = band
+            basis = props.get("intent_basis")
+            if isinstance(basis, str):
+                basis = basis.strip()
+                if basis and _is_short_paraphrase(basis, text):
+                    out["intent_basis"] = basis
+
+    return out
+
+
 def _checklist_input(doc_name: str, text: str) -> str:
     """The exact `input` string `run_checklist_pass`'s live call sends to
     `llm_call` — factored out so `build_checklist_request` builds identically
@@ -1110,7 +1361,9 @@ def _finish_checklist(
                 category, enterprise_id, doc_name,
             )
             continue
-        props = dict(entry.get("properties") or {})
+        props = _sanitize_checklist_properties(
+            category, dict(entry.get("properties") or {}), text
+        )
         items.append({
             "kind": kind,
             "content": content,

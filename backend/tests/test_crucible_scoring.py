@@ -118,6 +118,26 @@ def test_a_measured_zero_survives_as_zero():
     assert score_impact(a_finding(impact=inputs)).value == 0.0
 
 
+def test_grounded_commercial_native_units_pass_through_untouched():
+    """`native_units` is where a finding's grounded commercial evidence
+    rides (see `pipeline._grounded_commercial_native_units`) — `score_impact`
+    must carry it straight through to `Impact` exactly as given, the same
+    way `currency`/`assumed_params` already do, and must not let it touch
+    `value` (never extrapolated into the reach-based sizing)."""
+    inputs = ImpactInputs(
+        currency="accounts", affected_population=2.0, movable_gap=1.0,
+        value_per_unit=None,
+        native_units={"commercial_grounded_usd": 150000.0,
+                      "commercial_grounded_accounts": 2.0},
+    )
+    impact = score_impact(a_finding(impact=inputs))
+    assert impact.native_units == {"commercial_grounded_usd": 150000.0,
+                                    "commercial_grounded_accounts": 2.0}
+    # Reach-based sizing (2 accounts x full gap) is untouched by the
+    # presence of a grounded dollar figure alongside it.
+    assert impact.value == 2.0
+
+
 # ══ Confidence ═══════════════════════════════════════════════════════════════
 
 def test_corroboration_is_capped_and_cannot_dominate():
