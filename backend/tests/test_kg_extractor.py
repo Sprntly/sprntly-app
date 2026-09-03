@@ -493,6 +493,154 @@ def test_vendor_side_kinds_and_owner_properties_persist(facade):
     assert owner_sig.properties.get("status") == "open"
 
 
+# ── A stated commercial figure survives open extraction too — the same ──────
+# closed vocabularies and the same validator the checklist pass uses,
+# regardless of which connector the text came from.
+
+
+def test_open_pass_schema_documents_the_same_commercial_shape():
+    """Content property test on the LLM-facing schema: the properties field
+    for `commercial_term`/`pricing` documents the identical shape (and the
+    identical closed vocabularies) as the checklist pass's own — a figure
+    from Slack and a figure from a call must read the same downstream."""
+    props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
+    desc = props["properties"]["description"].lower()
+    for token in ("amount", "currency", "basis", "certainty",
+                  "one-off", "per-year", "per-seat", "total-contract",
+                  "quoted", "asked", "estimated-by-speaker", "commercial_term",
+                  "pricing"):
+        assert token in desc, f"properties description should mention {token!r}"
+    assert "never" in desc
+    assert "extrapolat" in desc
+
+
+def test_a_stated_figure_from_a_non_call_document_carries_the_grounded_shape(facade):
+    """The whole point of the extension: a `commercial_term` signal minted by
+    the OPEN pass — the only pass that ever reads Slack/email/Drive/Jira/
+    GitHub/HubSpot/Confluence text — gets the same amount/currency/basis/
+    certainty shape the checklist pass already gives calls."""
+    items = [_kind_item(
+        "the renewal is worth $80,000 for the year", "commercial_term",
+        properties={"amount": 80000, "currency": "USD", "basis": "per-year",
+                    "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "the renewal is worth $80,000 for the year")
+    assert sig is not None
+    assert sig.properties["amount"] == 80000.0
+    assert sig.properties["currency"] == "USD"
+    assert sig.properties["basis"] == "per-year"
+    assert sig.properties["certainty"] == "quoted"
+
+
+def test_pricing_kind_also_carries_the_grounded_shape(facade):
+    """`pricing` is the OTHER dollar-figure kind in the open taxonomy
+    (our own price, as opposed to `commercial_term`'s broader commercial
+    note) — same validator, same shape."""
+    items = [_kind_item(
+        "our enterprise tier is $50,000 total contract value", "pricing",
+        properties={"amount": 50000, "currency": "USD",
+                    "basis": "total-contract", "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "our enterprise tier is $50,000 total contract value")
+    assert sig is not None
+    assert sig.properties["amount"] == 50000.0
+    assert sig.properties["basis"] == "total-contract"
+
+
+def test_no_figure_stated_omits_amount_never_defaults_to_zero(facade):
+    """I2/I3, proven on the open pass exactly as it holds on the checklist
+    pass: no number in `properties` means no `amount` key at all."""
+    items = [_kind_item(
+        "pricing was discussed but no figure was named", "commercial_term",
+        properties={"currency": "USD", "basis": "one-off"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "pricing was discussed but no figure was named")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+
+
+def test_non_numeric_amount_is_dropped_not_persisted(facade):
+    for bad_amount in ("a lot", True, float("nan")):
+        items = [_kind_item(
+            f"bad amount case {bad_amount!r}", "commercial_term",
+            properties={"amount": bad_amount, "currency": "USD"},
+        )]
+        _extract(facade, items)
+        sig = _sig(facade, f"bad amount case {bad_amount!r}")
+        assert sig is not None
+        assert "amount" not in sig.properties, f"should reject amount={bad_amount!r}"
+
+
+def test_basis_and_certainty_outside_the_closed_vocabulary_are_dropped(facade):
+    items = [_kind_item(
+        "an odd basis and certainty", "commercial_term",
+        properties={"amount": 60000, "basis": "roughly-guessed",
+                    "certainty": "pretty-sure"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "an odd basis and certainty")
+    assert sig is not None
+    assert sig.properties["amount"] == 60000.0
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
+def test_other_properties_on_a_commercial_signal_are_untouched(facade):
+    """The validator touches ONLY amount/currency/basis/certainty — every
+    other key the model wrote (the open pass's general-purpose properties
+    field, unchanged for everything else) survives exactly as before this
+    extension."""
+    items = [_kind_item(
+        "renewal deal with extra detail", "commercial_term",
+        properties={"amount": 90000, "currency": "USD", "basis": "per-year",
+                    "certainty": "quoted", "seats": 120,
+                    "revenue_at_risk_usd": 90000},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "renewal deal with extra detail")
+    assert sig is not None
+    assert sig.properties["amount"] == 90000.0
+    assert sig.properties["seats"] == 120
+    assert sig.properties["revenue_at_risk_usd"] == 90000
+
+
+def test_a_non_commercial_kind_carrying_an_amount_key_is_left_alone(facade):
+    """The gate is on `kind`, not on the mere presence of an `amount` key —
+    a coincidental numeric `properties["amount"]` on an unrelated kind (e.g.
+    a feature request that happens to mention a number in its own tracking
+    metadata) must not be validated away or reshaped; this kind never had
+    the commercial contract applied to it, before or after this change."""
+    items = [_kind_item(
+        "customers want a bulk export button", "feature_request",
+        properties={"amount": "not-a-real-figure", "votes": 12},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "customers want a bulk export button")
+    assert sig is not None
+    assert sig.properties["amount"] == "not-a-real-figure"
+    assert sig.properties["votes"] == 12
+
+
+def test_checklist_and_open_pass_validators_agree_on_the_same_raw_input():
+    """The parity the extension exists to guarantee: the checklist pass's
+    category-shape sanitizer and the open pass's kind-gated cleaner share
+    ONE validator (`_grounded_amount_properties`) — feeding both the exact
+    same raw properties dict must produce the exact same cleaned shape."""
+    raw = {"amount": 75000, "currency": "usd", "basis": "total-contract",
+           "certainty": "quoted", "extra": "ignored-by-checklist-shape"}
+    from_checklist = ex._sanitize_checklist_properties("commercial", raw, "any text")
+    from_open_pass = ex._grounded_amount_properties(raw)
+    assert from_checklist == from_open_pass == {
+        "amount": 75000.0, "currency": "USD", "basis": "total-contract",
+        "certainty": "quoted",
+    }
+
+
 # A REAL-LLM eval: it exercises the actual broadened prompt + schema against
 # Anthropic and asserts the vendor-side + owner-attributed signals are minted.
 # Skipped by default because it spends a real API call; run it with a live key:
@@ -577,6 +725,47 @@ def test_fireflies_transcript_only_fact_is_extracted_real_llm():
     assert "download" in blob, (
         f"expected a signal for the transcript-only download-button ask, "
         f"got signals={signals}")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_a_stated_figure_in_a_non_call_document_is_captured_real_llm():
+    """The extension this ticket adds, proven against the real model rather
+    than a stubbed response: a Slack-thread-shaped document — never a call,
+    never routed through the checklist pass — still yields a
+    `commercial_term`/`pricing` signal with the same grounded amount shape.
+    No call-specific formatting anywhere in the input."""
+    from app.graph.gateway import llm_call
+
+    slack_thread = (
+        "#renewals-acme\n"
+        "alex (account exec): quick update on Acme — they came back on the "
+        "renewal and agreed to $80,000 for the year, total contract value. "
+        "confirmed in writing this morning.\n"
+        "priya (cs lead): great, I'll get the paperwork moving.\n"
+    )
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='slack-sync-batch-0'>\n{slack_thread}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    commercial = [
+        s for s in signals
+        if s.get("kind") in ("commercial_term", "pricing")
+        and isinstance(s.get("properties"), dict)
+        and s["properties"].get("amount")
+    ]
+    assert commercial, f"expected a grounded commercial signal, got {signals}"
+    props = commercial[0]["properties"]
+    assert float(props["amount"]) == 80000.0
+    assert props.get("basis") in ex._COMMERCIAL_BASIS_VALUES
+    assert props.get("certainty") in ex._COMMERCIAL_CERTAINTY_VALUES
 
 
 # ── source_call_id / per-call traceability (source_ref) ──────────────────────
