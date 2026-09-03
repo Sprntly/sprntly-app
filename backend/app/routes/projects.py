@@ -34,11 +34,12 @@ from app.db import project_delegations as project_delegations_db
 from app.db import project_memory_entries as memory_db
 from app.db import projects as projects_db
 from app.db import team as team_db
+from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
 from app.db import workspaces as workspaces_db
 from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
 from app.db.companies import get_seat_limit
 from app.db.prds import save_prd_version, update_prd_content
-from app.team_email import send_invite_email
+from app.team_email import dispatch_invite_email
 from app.deps.ownership import require_owned_evidence, require_owned_prd
 from app import drip_email
 from app import project_delegation
@@ -332,9 +333,12 @@ def add_member(
     of the old global `user_id_for_email` (which resolved any company's email
     → a cross-company user could be added). Only an existing project member
     (`t_member`, idempotent) or an in-tenant existing user (`t_workspace`/
-    `t_company`) is added; a foreign-company or non-user email → 404, no
-    write, no cross-tenant existence disclosure. The success response is
-    byte-identical to before (the member row / the existing member row).
+    `t_company`) is added; a non-user email → 404, no write. A foreign-company
+    email → 409 with the same clear "already belongs to another company"
+    message `routes/team.py`'s direct invite gives, rather than the generic
+    404 (still no disclosure for genuinely-unknown emails). The success
+    response is byte-identical to before (the member row / the existing
+    member row).
 
     Inviting a not-yet-existing user by email is the tag endpoint's job
     (`POST .../tag`, which creates a project-carrying invite) — this route
@@ -367,8 +371,15 @@ def add_member(
             project_id=project_id, project_name=project["name"],
         )
         return member
-    # t_newuser / t_refuse (foreign company, or no in-tenant account) — no add,
-    # no disclosure of which reason applied.
+    if tier == projects_db.TIER_REFUSE and res.get("reason") == "other_company":
+        # Foreign-company email: the invitee already has an account on a
+        # DIFFERENT Sprntly company, so the clear reason (mirrors
+        # routes/team.py's direct invite, same message) is more useful than
+        # the generic 404 below — and reveals nothing about THIS tenant's
+        # own directory, only that the email is taken elsewhere.
+        raise HTTPException(409, CROSS_COMPANY_INVITE_MESSAGE)
+    # t_newuser / other t_refuse reasons (no_match, ambiguous, no_project) —
+    # no add, no disclosure of which reason applied.
     raise HTTPException(404, "No account in your company for that email")
 
 
@@ -392,9 +403,11 @@ def _invite_carrying_project(
     reserves a seat, so a full company 409s before the row is created.
 
     Degrade-not-error (AD-TNM6): the invite ROW is written BEFORE the email
-    attempt, so a FAILED send never loses the invite and never 500s the tag —
-    the caller gets `email_status` and the person can be re-notified from Team
-    settings (no raw accept link is exposed)."""
+    is dispatched, so a failed send never loses the invite and never 500s the
+    tag — the caller gets `email_status` (optimistic `QUEUED` in production,
+    per `team_email.dispatch_invite_email`; the real outcome is logged, not
+    returned) and the person can be re-notified from Team settings (no raw
+    accept link is exposed)."""
     company_id = project["company_id"]
     workspace_id = project["workspace_id"]
 
@@ -433,7 +446,12 @@ def _invite_carrying_project(
     except Exception:  # noqa: BLE001
         invitee_first = ""
 
-    status = send_invite_email(
+    # Off the request thread (B5a) — dispatch_invite_email returns QUEUED
+    # immediately in production (real SENT/SENT_EXISTING/FAILED only under
+    # pytest, inline); the invite row above is already written, so a later
+    # send failure is discoverable from Team settings' resend affordance,
+    # exactly as a synchronous FAILED already was.
+    status = dispatch_invite_email(
         email,
         inviter_first_name=inviter_first,
         workspace_name=workspace_name,
@@ -474,7 +492,10 @@ def tag_candidate_route(
     `_require_project_member` (tenant + membership, ANY member — DE-GATED per
     AD-TNM4, no admin/owner check) BEFORE `resolve_candidate` touches any
     identity. Every add/invite re-asserts tenancy immediately before the
-    write; a refuse never writes and never discloses which reason applied."""
+    write; a refuse never writes. The one reason a refuse now discloses is
+    `other_company` (the email already belongs to a different Sprntly
+    company) — every other refuse reason (no_match/ambiguous/no_project)
+    stays opaque."""
     project = _require_project_member(project_id, ctx)  # GATE 1
     res = projects_db.resolve_candidate(project_id, payload.needle)
     tier = res["tier"]
@@ -530,8 +551,13 @@ def tag_candidate_route(
             project, res["email"], ctx.user_id, existing_member=False
         )
 
-    # t_refuse — one opaque 403, no write, no disclosure of which reason
-    # (cross_company / other_company / no_match / ambiguous / no_project).
+    if tier == projects_db.TIER_REFUSE and res.get("reason") == "other_company":
+        # Foreign-company email — same clear reason as add_member's t_refuse
+        # branch above and routes/team.py's direct invite (same shared
+        # message). Every other t_refuse reason keeps the opaque 403 below.
+        raise HTTPException(409, CROSS_COMPANY_INVITE_MESSAGE)
+    # t_refuse (other reasons) — one opaque 403, no write, no disclosure of
+    # which reason (no_match / ambiguous / no_project).
     raise HTTPException(403, "That person can't be added to this project")
 
 

@@ -171,6 +171,16 @@ def member_exists_for_email(*, company_id: str, email: str) -> bool:
     return bool(member_rows)
 
 
+# The one clear-cross-company-refusal message, shared by every invite surface
+# that can hit it (`routes/team.py`'s direct invite, and `routes/projects.py`'s
+# add-member/tag invite paths) so the wording never drifts between them.
+CROSS_COMPANY_INVITE_MESSAGE = (
+    "That email already belongs to another company on Sprntly. An "
+    "account can only be part of one company for now, so they can't "
+    "be invited to this workspace — try a different email for them."
+)
+
+
 @retry_on_disconnect
 def email_belongs_to_other_company(*, company_id: str, email: str) -> bool:
     """True iff this email's profile is a member of a company OTHER than
