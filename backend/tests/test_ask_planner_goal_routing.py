@@ -183,4 +183,4 @@ def test_the_prompt_version_moved_with_the_menu():
     version before it was never asked."""
     from app.ask_planner import _PROMPT_VERSION
 
-    assert _PROMPT_VERSION == "ask-planner-v16"
+    assert _PROMPT_VERSION == "ask-planner-v18"

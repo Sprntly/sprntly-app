@@ -3058,3 +3058,75 @@ def test_a_report_pipeline_that_is_not_voc_is_untouched():
     assert ci._is_report_pipeline(
         "competitive-intelligence-review", "summarize what Acme shipped as a table"
     ) is True
+
+
+# ── the planner decides where the answer goes (v18) ──────────────────────────
+# `is_voc_query` reads the question's surface words, so every phrasing that
+# meant "answer me in the chat" had to be found and added one at a time — two
+# were added on 2026-09-03 alone, each after a reader watched a Reports panel
+# fill with a document they never asked for. `wants_report` is the planner's
+# own verdict, taken from the whole sentence, and when it is supplied it is
+# what forks this module. Callers with no plan (the regex ladder, the
+# scheduled runs, every test above) pass nothing and keep the old rules.
+
+
+def test_the_plan_can_send_a_report_worded_ask_to_the_thread(monkeypatch):
+    """The direction that matters. This question NAMES the document, so the
+    regex would build one; the planner read the sentence and said otherwise."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    captured = _stub_voc_pass(monkeypatch)
+    question = "give me a voice of customer report for last week"
+    assert cd.is_voc_query(question) is False  # …the regex says document
+    p = cd.answer(enterprise_id="co", question=question, wants_report=False)
+    assert not p.get("_report")
+    # …and it is the pointed answer, not the document-scale synthesis.
+    assert captured["max_tokens"] != 12000
+
+
+def test_the_plan_can_send_a_question_worded_ask_to_the_report(monkeypatch):
+    """And the other way, or it is a veto rather than a decision: a request for
+    the document phrased without any of the regex's words still writes one."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_voc_pass(monkeypatch)
+    # "summarize" makes the regex say thread; the sentence asks for a document
+    # to share, which is the half of the ask a word list cannot see.
+    question = "summarize last month's customer calls into a document I can share"
+    assert cd.is_voc_query(question) is True  # …the regex says thread
+    p = cd.answer(enterprise_id="co", question=question, wants_report=True)
+    assert p.get("_report") is True
+
+
+def test_no_plan_keeps_the_regex_exactly_as_it_was(monkeypatch):
+    """The no-plan callers are unchanged — that is what makes this additive."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_voc_pass(monkeypatch)
+    assert cd.answer(
+        enterprise_id="co",
+        question="give me a voice of customer report for last week",
+    ).get("_report") is True
+    assert not cd.answer(
+        enterprise_id="co", question="summarize the calls from last week",
+    ).get("_report")
+
+
+def test_the_reported_question_answers_in_the_thread(monkeypatch):
+    """The owner's sentence, verbatim, with the plan the planner now returns
+    for it: the pipeline still fetches every call in the month, and the answer
+    lands in the chat."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    captured = _stub_voc_pass(monkeypatch)
+    p = cd.answer(
+        enterprise_id="co",
+        question=(
+            "look at all customer conversation in the last month and show me "
+            "what product features users are asking for"
+        ),
+        wants_report=False,
+    )
+    assert not p.get("_report")
+    # …and it read the calls. A thread answer is not a thinner answer.
+    assert "Call 1" in captured["input"]
