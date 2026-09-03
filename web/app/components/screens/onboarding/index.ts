@@ -1,22 +1,18 @@
 export { YourName } from "./YourName"
-// v7 flow (screenshot spec 2026-07-21), keeping the optional api-key step the
-// spec omits: company → product → metrics → api-key → connectors → workspace →
-// invite → review → personalize, then the unnumbered define-metrics sub-flow
-// completes onboarding. The api-key step is OPTIONAL/skippable (also editable
-// in Settings → Admin).
+// The four-step flow (2026-09-03): company → connectors → review →
+// personalize, then the unnumbered define-metrics sub-flow. import-context,
+// api-key, product, workspace, metrics and invite were removed and their
+// screens deleted with them — everything they collected is edited in
+// Settings, and the workspace they used to ask you to name is created as
+// "Main workspace". Bulk teammate invite (paste + CSV) moved to Settings →
+// Team & roles rather than being dropped. See lib/onboarding/types.ts for the
+// full map of what went where.
 export { CompanyStep } from "./CompanyStep"
-// Step 2 (client feedback 2026-07-22): bring your existing AI-assistant context
-// in instead of retyping it. Optional — "Fill it in manually" walks past it.
-export { ImportContextStep } from "./ImportContextStep"
-export { ProductStep } from "./ProductStep"
-export { MetricsStep } from "./MetricsStep"
-export { ApiKey } from "./ApiKey"
-// Metrics is not a numbered route — its helpers (candidate seeding/merging)
-// are reused by MetricsStep. Kept exported for that reuse + tests.
+// Metrics is not a numbered route — its candidate seeding/merging helpers are
+// reused by the define-metrics sub-flow, which is why it outlived the metrics
+// STEP deleted around it.
 export { Metrics } from "./Metrics"
 export { Connectors } from "./Connectors"
-export { WorkspaceStep } from "./WorkspaceStep"
-export { InviteStep } from "./InviteStep"
 export { ReviewStep } from "./ReviewStep"
 export { PersonalizeStep } from "./PersonalizeStep"
 // DefineMetrics is not a numbered route — the personalize step hands off to it

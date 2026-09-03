@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow (v6 screenshot spec
-// 2026-07-17 + the restored optional api-key step 2026-07-19, 10 steps):
-//   company -> import-context -> connectors -> api-key ->
-//   product -> workspace -> metrics -> invite -> review -> personalize
-// (api-key is an OPTIONAL/skippable step — also editable in Settings → Admin.
-//  Still retired: the closing workspace-naming step. The review step closes the
-//  numbered flow, then the UNNUMBERED define-metrics sub-flow completes
-//  onboarding.)
+// Integrity tests for the semantic-slug onboarding flow — 4 steps since
+// 2026-09-03 (invite went last, folded into Settings → Team & roles):
+//   company -> connectors -> review -> personalize
+// import-context, api-key, product, workspace, metrics and invite were
+// removed; everything they collected is edited in Settings (see
+// lib/onboarding/types.ts for the full map of what moved where). The review
+// step closes the numbered flow, then the UNNUMBERED define-metrics sub-flow
+// completes onboarding.
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -26,14 +26,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 // without dragging in their hooks/contexts.
 vi.mock("../../screens/onboarding", () => ({
   CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
-  ImportContextStep: () =>
-    React.createElement("div", { "data-screen": "import-context" }),
-  ProductStep: () => React.createElement("div", { "data-screen": "product" }),
-  MetricsStep: () => React.createElement("div", { "data-screen": "metrics" }),
-  ApiKey: () => React.createElement("div", { "data-screen": "api-key" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
-  WorkspaceStep: () => React.createElement("div", { "data-screen": "workspace" }),
-  InviteStep: () => React.createElement("div", { "data-screen": "invite" }),
   ReviewStep: () => React.createElement("div", { "data-screen": "review" }),
   PersonalizeStep: () =>
     React.createElement("div", { "data-screen": "personalize" }),
@@ -55,33 +48,18 @@ afterEach(() => {
 // The expected slug → screen order is exactly ONBOARDING_STEP_SLUGS (each slug
 // renders the screen with the same data-screen marker).
 const EXPECTED_ORDER = [
-  // `company` leads (back at the front 2026-07-27). The prompt the import step
-  // hands out opens by naming the company it is about, and this is the step
-  // that collects the name and website written into it.
+  // The company row does not exist until this step saves, and the background
+  // website analysis it kicks off is what `review` later reads — so it still
+  // leads.
   "company",
-  // Inserted 2026-07-22 (client feedback): bring your existing AI-assistant
-  // context in instead of retyping it. Optional.
-  "import-context",
-  // Reordered 2026-07-22 (client feedback): connectors + api-key are pulled up
-  // to sit right behind the import + company pair — they are the two steps an
-  // import cannot prefill, so they cover its background LLM extraction.
-  // Everything the import DOES prefill (workspace scope, product, metrics)
-  // follows behind them.
   "connectors",
-  "api-key",
-  // Swapped 2026-07-28 (client feedback): `product` now leads `workspace`, so
-  // the product is named before the team's slice of it is scoped.
-  "product",
-  "workspace",
-  "metrics",
-  "invite",
   "review",
   "personalize",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 10 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(10)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 4 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(4)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
@@ -118,12 +96,17 @@ describe("onboarding flow order — slug → screen", () => {
   })
 
   it("does not expose the dropped/folded pages as steps", () => {
-    // api-key is a numbered step. `workspace` IS a step now, but it is the
-    // merged team/strategy/decisions card — the three slugs it replaced must
-    // not resolve. business-info split into company/product/metrics; the
-    // business-context review became the numbered review step;
-    // first-brief/coworkers stay retired.
+    // Removed 2026-09-03, plus the older retirements: business-info split into
+    // company/product/metrics and then product/metrics were removed in turn;
+    // the business-context review became the numbered review step;
+    // first-brief/coworkers/team/strategy/decisions stay retired.
     for (const slug of [
+      "import-context",
+      "api-key",
+      "product",
+      "workspace",
+      "metrics",
+      "invite",
       "team",
       "strategy",
       "decisions",

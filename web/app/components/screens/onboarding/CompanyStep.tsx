@@ -1,12 +1,11 @@
 "use client"
 
-import { useEffect, useRef, useState } from "react"
+import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
 import { ONBOARDING_PLAN_PATH } from "../../../lib/billingPlans"
 import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
-import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { useOnboarding } from "../../../context/OnboardingContext"
 import {
   validateProductWebsite,
@@ -14,39 +13,56 @@ import {
 } from "../../../lib/onboarding/product-helpers"
 import {
   createWorkspace,
+  saveWorkspaceOwnedFields,
   updateWorkspace,
   upsertPrimaryProduct,
 } from "../../../lib/onboarding/store"
-import { PLANNING_CYCLES, stepForSlug } from "../../../lib/onboarding/types"
+import {
+  DEFAULT_WORKSPACE_NAME,
+  DEFAULT_WORKSPACE_SCOPE,
+  stepForSlug,
+} from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
-import { companyDocsApi } from "../../../lib/api"
-import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "company-step"
 
 /**
- * Onboarding step 01 — "Tell us about your company" (v6 screenshot spec
- * 2026-07-17; back at the front of the flow 2026-07-27).
+ * Onboarding step 01 — "Tell us about your company and product".
  *
- * Fields: company name* (the only mandatory one), company website, mission &
- * vision, and strategy / OKRs (typed, or a doc upload alongside), plus an
- * "Add more" disclosure holding portfolio and planning cycle.
+ * FOUR FIELDS, NOTHING ELSE (2026-09-03): company name*, company website,
+ * product name, product website. Mission & vision, strategy / OKRs and the
+ * "Add more" disclosure (portfolio, planning cycle) came off this page and are
+ * edited in Settings instead — Company Profile owns mission / strategy /
+ * portfolio, Process & Planning owns the planning cycle, and all four still
+ * read and write the columns they always did. NOTHING WAS MIGRATED: the data
+ * did not move, only the place you type it. A company onboarded before this
+ * ship keeps every value it entered and finds it in Settings.
  *
- * On Continue we persist the company (+ product website seed), kick the
- * website analysis in the BACKGROUND (no interstitial — the result lands on
- * the onboarding context for later steps/settings), and advance to the import
- * step.
+ * WHY: this is the first screen after signup, and it was asking someone who has
+ * not seen the product yet to write down their OKRs. Name and URL are what the
+ * next step actually needs; strategy is something you come back and fill in
+ * once you know what it is for.
  *
- * IT RUNS FIRST SO THE IMPORT STEP CAN USE WHAT IT COLLECTS. The prompt that
- * step hands out opens by asking which company the file is about; the name and
- * website typed here are written into it, so the assistant starts with the
- * entity locked instead of inferring it. That is also why the two fields are
- * saved before we navigate rather than on the far side of the flow.
+ * THE TWO WEBSITES ARE DIFFERENT COLUMNS, and that part is new. Until now the
+ * field labelled "Company website" wrote to `products.website` — the product's
+ * URL wearing a company label, which was harmless while only one of them was
+ * ever shown. With both on one page it stops being harmless: whichever saved
+ * last would clobber the other. `companies.website` (migration
+ * 20260903150000) is the company's own, and it is nullable because every
+ * company onboarded before today has its site recorded on the product instead.
+ *
+ * IT RUNS FIRST BECAUSE EVERYTHING ELSE IS KEYED ON WHAT IT COLLECTS: the
+ * company row does not exist until this step saves, and the website analysis it
+ * kicks off in the background is what the review step later reads.
+ *
+ * IT ALSO NAMES THE WORKSPACE. The step that used to ask was removed with the
+ * rest, so this creates the company's "Main workspace" — see
+ * DEFAULT_WORKSPACE_NAME — best-effort, and only while it is still unnamed.
  *
  * The workspace may already exist when this loads — a returning user, or one
  * who went back a step — so the fields seed FILL-ONLY from `workspace`, both to
- * show what was saved and so the import's background extraction landing while
- * this step is open can't overwrite what is being typed.
+ * show what was saved and so nothing landing asynchronously can overwrite what
+ * is being typed.
  */
 export function CompanyStep() {
   const auth = useAuth()
@@ -55,36 +71,33 @@ export function CompanyStep() {
 
   const draft = loadDraft(DRAFT_KEY)
   const [companyName, setCompanyName] = useState((draft?.companyName as string) ?? "")
-  const [website, setWebsite] = useState((draft?.website as string) ?? "")
-  const [mission, setMission] = useState((draft?.mission as string) ?? "")
-  const [strategy, setStrategy] = useState((draft?.strategy as string) ?? "")
-  const [portfolio, setPortfolio] = useState((draft?.portfolio as string) ?? "")
-  const [planningCycle, setPlanningCycle] = useState(
-    (draft?.planningCycle as string) ?? "",
+  const [companyWebsite, setCompanyWebsite] = useState(
+    (draft?.companyWebsite as string) ?? "",
   )
-
-  // Optional strategy-doc upload next to the typed field (doc_type
-  // company_strategy — same endpoint the old strategy step used).
-  const strategyFileRef = useRef<HTMLInputElement | null>(null)
-  const [strategyDocNotice, setStrategyDocNotice] = useState<string | null>(null)
-  const [strategyDocUploading, setStrategyDocUploading] = useState(false)
+  const [productName, setProductName] = useState((draft?.productName as string) ?? "")
+  const [productWebsite, setProductWebsite] = useState(
+    (draft?.productWebsite as string) ?? "",
+  )
 
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
   // Seed from the saved workspace, filling only fields still empty — the same
-  // rule the product/workspace/metrics steps use. It runs on every `workspace`
-  // change rather than once, which is what lets the import that landed on step
-  // 1 (and the background extraction that finishes while this step is open) pop
-  // its values in; a restored draft and anything already typed always win.
+  // rule the remaining steps use. It runs on every `workspace` change rather
+  // than once, so a background extraction finishing while this step is open
+  // pops its values in; a restored draft and anything already typed always win.
+  //
+  // The company website falls back to the PRODUCT's for a company onboarded
+  // before the two were separate columns: their site is on the product row, and
+  // showing this field blank would read as having lost it.
   useEffect(() => {
     if (!workspace) return
     setCompanyName((v) => v || workspace.display_name)
-    setWebsite((v) => v || (workspace.product?.website ?? ""))
-    setMission((v) => v || (workspace.mission ?? ""))
-    setStrategy((v) => v || (workspace.strategy ?? ""))
-    setPortfolio((v) => v || (workspace.portfolio ?? ""))
-    setPlanningCycle((v) => v || (workspace.planning_cycle ?? ""))
+    setCompanyWebsite(
+      (v) => v || workspace.website || (workspace.product?.website ?? ""),
+    )
+    setProductName((v) => v || (workspace.product?.name ?? ""))
+    setProductWebsite((v) => v || (workspace.product?.website ?? ""))
   }, [workspace]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // Save draft on visibility change (tab switch / minimize) — not per keystroke.
@@ -93,16 +106,14 @@ export function CompanyStep() {
       if (document.hidden)
         saveDraft(DRAFT_KEY, {
           companyName,
-          website,
-          mission,
-          strategy,
-          portfolio,
-          planningCycle,
+          companyWebsite,
+          productName,
+          productWebsite,
         })
     }
     document.addEventListener("visibilitychange", onHide)
     return () => document.removeEventListener("visibilitychange", onHide)
-  }, [companyName, website, mission, strategy, portfolio, planningCycle])
+  }, [companyName, companyWebsite, productName, productWebsite])
 
   const { errors, validate, clearError, containerRef } = useFieldValidation(() => [
     {
@@ -112,85 +123,93 @@ export function CompanyStep() {
     },
   ])
 
-  async function onPickStrategyDoc(file: File | null) {
-    if (!file) return
-    setStrategyDocNotice(null)
-    setStrategyDocUploading(true)
-    try {
-      await companyDocsApi.upload(file, "company_strategy")
-      setStrategyDocNotice(`${file.name} · uploaded just now.`)
-    } catch {
-      setStrategyDocNotice(
-        `Couldn't upload "${file.name}" just now — you can re-try here or add it later in Settings.`,
-      )
-    } finally {
-      setStrategyDocUploading(false)
-    }
-  }
-
   async function save() {
     if (auth.kind !== "authed") return
     setError(null)
     if (!validate().ok) return
-    // Shape-check the website whenever one was typed.
-    const websiteErr = validateProductWebsite(website)
-    if (websiteErr) {
-      setError(websiteErr)
+    // Shape-check whichever URLs were typed. `validateProductWebsite` is named
+    // for the field it was written for; the rule is a plain URL check and the
+    // company site has to clear the same bar.
+    const companySiteErr = validateProductWebsite(companyWebsite)
+    if (companySiteErr) {
+      setError(companySiteErr.replace(/product website/i, "company website"))
       return
     }
-    const normalizedSite = normalizeProductWebsite(website)
+    const productSiteErr = validateProductWebsite(productWebsite)
+    if (productSiteErr) {
+      setError(productSiteErr)
+      return
+    }
+    const normalizedCompanySite = normalizeProductWebsite(companyWebsite)
+    const normalizedProductSite = normalizeProductWebsite(productWebsite)
     setSaving(true)
-    const nextStep = stepForSlug("import-context") ?? 2
+    const nextStep = stepForSlug("connectors") ?? 2
     try {
       let ws = workspace
       if (workspace) {
         const updated = await updateWorkspace(workspace.id, {
           display_name: companyName.trim(),
-          mission: mission.trim() || null,
-          strategy: strategy.trim() || null,
-          portfolio: portfolio.trim() || null,
-          planning_cycle: planningCycle || null,
+          website: normalizedCompanySite || null,
           onboarding_step: nextStep,
         })
+        // The product name still falls back to the company name: `products.name`
+        // rejects an empty string, and the product step behind this one is where
+        // someone names it properly.
         const product = await upsertPrimaryProduct(workspace.id, {
-          name: workspace.product?.name ?? companyName.trim(),
-          website: normalizedSite || workspace.product?.website || null,
+          name: productName.trim() || workspace.product?.name || companyName.trim(),
+          website: normalizedProductSite || workspace.product?.website || null,
         })
         ws = { ...updated, product }
         setWorkspace(ws)
       } else {
-        const created = await createWorkspace({
+        ws = await createWorkspace({
           companyName,
-          // The product step refines this; the company name is the natural seed.
-          productName: companyName,
-          productWebsite: normalizedSite,
+          website: normalizedCompanySite,
+          productName: productName.trim() || companyName,
+          productWebsite: normalizedProductSite,
           accountType: "company",
-          mission,
-          strategy,
           userId: auth.user.id,
           onboardingStep: nextStep,
         })
-        // Portfolio + planning cycle aren't createWorkspace params — patch them
-        // on right after (still one Continue for the user).
-        ws =
-          portfolio.trim() || planningCycle
-            ? {
-                ...(await updateWorkspace(created.id, {
-                  portfolio: portfolio.trim() || null,
-                  planning_cycle: planningCycle || null,
-                })),
-                product: created.product,
-              }
-            : created
         setWorkspace(ws)
+      }
+      // NAME THE WORKSPACE FOR THEM. The step that used to ask was removed —
+      // see DEFAULT_WORKSPACE_NAME for why — so the company's default workspace
+      // would otherwise keep the "Default" sentinel and read as unnamed
+      // everywhere it is shown.
+      //
+      // Only while it is still unnamed, so someone who has since renamed it and
+      // walks back through this step does not have their name replaced. And
+      // BEST-EFFORT: this is a label on a row that already exists, and failing
+      // the whole company step over it would be the wrong trade.
+      if (ws && ws.team_name == null) {
+        try {
+          await saveWorkspaceOwnedFields(DEFAULT_WORKSPACE_NAME, {
+            team_scope: DEFAULT_WORKSPACE_SCOPE,
+          })
+          ws = { ...ws, team_name: DEFAULT_WORKSPACE_NAME, team_scope: DEFAULT_WORKSPACE_SCOPE }
+          setWorkspace(ws)
+        } catch {
+          /* named later by the same check on the next pass — never blocks */
+        }
       }
       clearDraft(DRAFT_KEY)
       // Kick off the website analysis in the BACKGROUND and move on. The job
       // runs server-side; the provider outlives this navigation.
-      const analysisSite = ws?.product?.website ?? normalizedSite
+      //
+      // THE COMPANY SITE FIRST, the product's as the fallback. The sweep
+      // researches the ORGANIZATION — industry, positioning, competitors — so
+      // the company URL is the better subject. The fallback is what keeps the
+      // prefill working for someone who fills in only the product, and for every
+      // company whose site is recorded on the product row from before the split.
+      const analysisSite =
+        ws?.website
+        || ws?.product?.website
+        || normalizedCompanySite
+        || normalizedProductSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
       // The PAYMENT GATE sits between company creation and the rest of the
-      // flow. `onboarding_step` above is still import-context on purpose: the
+      // flow. `onboarding_step` above is still the NEXT step on purpose: the
       // gate is unnumbered, so the persisted marker names the step they will
       // resume ONCE they have paid, and postLoginPath keeps routing them back
       // here until they have. Someone who abandons at Checkout therefore comes
@@ -198,7 +217,8 @@ export function CompanyStep() {
       // company row — the reason to put payment this early — already exists.
       //
       // The gate forwards straight through for a company that already has a
-      // live subscription, so an invited teammate never sees it.
+      // live subscription, so an invited teammate never sees it. With payments
+      // hidden it forwards for everyone (see lib/billingAccess).
       router.push(ONBOARDING_PLAN_PATH)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
@@ -210,15 +230,15 @@ export function CompanyStep() {
 
   return (
     <OnboardingChrome
-      step={1}
+      step={stepForSlug("company") ?? 1}
       saveLabel="Saved · auto-saves"
       title={
         <>
-          Tell us about your <em>company.</em>
+          Tell us about your <em>company and product.</em>
         </>
       }
-      subtitle="Add what you can — expand the optional sections to make it sharper."
-      footerMeta="Company"
+      subtitle="Just the basics — everything else is in Settings, whenever you want it."
+      footerMeta="Company & Product"
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
@@ -247,15 +267,15 @@ export function CompanyStep() {
             )}
           </div>
 
-          <div className="field" data-field="website">
+          <div className="field" data-field="companyWebsite">
             <div className="field-l">
               Company website <span className="opt">optional</span>
             </div>
             <input
               className="inp"
               type="url"
-              value={website}
-              onChange={(e) => setWebsite(e.target.value)}
+              value={companyWebsite}
+              onChange={(e) => setCompanyWebsite(e.target.value)}
               placeholder="https://yourcompany.com"
               autoComplete="url"
             />
@@ -265,104 +285,33 @@ export function CompanyStep() {
             </p>
           </div>
 
-          <div className="field full" data-field="strategy">
-            <div
-              className="field-l"
-              style={{
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}
-            >
-              <span>
-                Strategy / OKRs <span className="opt">optional</span>
-              </span>
-              <button
-                type="button"
-                className="btn btn-ghost"
-                onClick={() => strategyFileRef.current?.click()}
-                disabled={strategyDocUploading}
-              >
-                {strategyDocUploading ? "Uploading…" : "Upload"}
-              </button>
+          <div className="field" data-field="productName">
+            <div className="field-l">
+              Product name <span className="opt">optional</span>
             </div>
-            <textarea
-              className="inp"
-              rows={4}
-              value={strategy}
-              onChange={(e) => setStrategy(e.target.value)}
-              maxLength={2000}
-              placeholder="Type your strategy, or upload a strategy doc / board deck."
-            />
             <input
-              ref={strategyFileRef}
-              type="file"
-              style={{ display: "none" }}
-              onChange={(e) => void onPickStrategyDoc(e.target.files?.[0] ?? null)}
-              aria-label="Strategy document"
+              className="inp"
+              value={productName}
+              onChange={(e) => setProductName(e.target.value)}
+              maxLength={100}
+              placeholder="The product you're onboarding (you can add more later)"
             />
-            {strategyDocNotice && (
-              <p className="onb-field-hint" role="status">
-                {strategyDocNotice}
-              </p>
-            )}
+          </div>
+
+          <div className="field" data-field="productWebsite">
+            <div className="field-l">
+              Product website <span className="opt">optional</span>
+            </div>
+            <input
+              className="inp"
+              type="url"
+              value={productWebsite}
+              onChange={(e) => setProductWebsite(e.target.value)}
+              placeholder="https://yourproduct.com"
+              autoComplete="url"
+            />
           </div>
         </div>
-
-        <OptionalDisclosure label="Add more ">
-          <div className="form-grid">
-            <div className="field full">
-              <div className="field-l">
-                Mission &amp; vision <span className="opt">optional</span>
-              </div>
-              <textarea
-                className="inp"
-                rows={3}
-                value={mission}
-                onChange={(e) => setMission(e.target.value)}
-                maxLength={500}
-                placeholder="Why the company exists, in a sentence or two"
-              />
-            </div>
-            <div className="field full">
-              <div className="field-l">
-                Portfolio <span className="opt">— products in your portfolio</span>
-              </div>
-              <textarea
-                className="inp"
-                rows={2}
-                value={portfolio}
-                onChange={(e) => setPortfolio(e.target.value)}
-                maxLength={500}
-                placeholder="e.g. the apps, devices, and services in your family"
-              />
-            </div>
-            <div className="field full" data-field="planningCycle">
-              <div className="field-l">Planning cycle</div>
-              <div className="metric-chips">
-                {PLANNING_CYCLES.map((opt) => {
-                  const isSel = planningCycle === opt.value
-                  return (
-                    <button
-                      type="button"
-                      key={opt.value}
-                      className={`metric ${isSel ? "sel" : ""}`}
-                      aria-pressed={isSel}
-                      onClick={() => setPlanningCycle(isSel ? "" : opt.value)}
-                    >
-                      {isSel && (
-                        <span className="mt-ic" aria-hidden>
-                          <Check style={{ width: 11, height: 11 }} />
-                        </span>
-                      )}
-                      {opt.label}
-                    </button>
-                  )
-                })}
-              </div>
-            </div>
-          </div>
-        </OptionalDisclosure>
       </div>
     </OnboardingChrome>
   )

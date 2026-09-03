@@ -18,7 +18,10 @@ import {
 } from "../../../lib/onboarding/kpiTreeApi"
 
 /**
- * Onboarding metrics page (route /onboarding/metrics).
+ * The metrics picker. NO LONGER A ROUTE — the /onboarding/metrics step was
+ * removed on 2026-09-03 and metrics are chosen in Settings → KPI Settings. This
+ * survives because the define-metrics sub-flow reuses its candidate seeding and
+ * merging helpers.
  *
  * REDESIGN (product-approved): the explicit North-Star + supporting-metric
  * split is GONE. The user now picks 3 to 5 metrics (3 minimum, 5 max — a 6th

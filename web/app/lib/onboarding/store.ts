@@ -100,6 +100,10 @@ function rowToCompany(
     competitors: Array.isArray(row.competitors) ? (row.competitors as string[]) : [],
     tech_stack: Array.isArray(row.tech_stack) ? (row.tech_stack as string[]) : [],
     okrs: (row.okrs as string | null) ?? null,
+    // The COMPANY's site, distinct from `product.website` since 2026-09-03.
+    // Null on every row onboarded before that; the website analysis falls back
+    // to the product's, which is where the single old field wrote.
+    website: (row.website as string | null) ?? null,
     mission: (row.mission as string | null) ?? null,
     strategy: (row.strategy as string | null) ?? null,
     portfolio: (row.portfolio as string | null) ?? null,
@@ -428,6 +432,9 @@ export async function createWorkspace(input: {
   /** Blank → no primary product is created yet (products_name_nonempty). */
   productName: string
   productWebsite?: string | null
+  /** The COMPANY's own site. Separate from `productWebsite` — see the
+   *  companies.website migration. */
+  website?: string | null
   /** The signup choice, denormalized from profiles.account_type so
    *  company-scoped reads never need a join. */
   accountType?: AccountType | null
@@ -465,6 +472,7 @@ export async function createWorkspace(input: {
         created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
+        website: input.website?.trim() || null,
         account_type: input.accountType ?? "company",
         mission: input.mission?.trim() || null,
         strategy: input.strategy?.trim() || null,

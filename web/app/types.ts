@@ -9,13 +9,7 @@ export type ScreenId =
   // can't prefill (connectors, api-key) cover its background extraction — see
   // ONBOARDING_STEP_SLUGS.
   | "ob-company"
-  | "ob-import-context"
   | "ob-connectors"
-  | "ob-api-key"
-  | "ob-workspace"
-  | "ob-product"
-  | "ob-metrics"
-  | "ob-invite"
   | "ob-review"
   | "ob-personalize"
   | "chat"
@@ -52,13 +46,7 @@ export type ScreenId =
 // The NUMBERED onboarding screens, in flow order.
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-company",
-  "ob-import-context",
   "ob-connectors",
-  "ob-api-key",
-  "ob-workspace",
-  "ob-product",
-  "ob-metrics",
-  "ob-invite",
   "ob-review",
   "ob-personalize",
 ]
@@ -88,16 +76,10 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 10",
-  "ob-import-context": "Setup · Step 2 of 10",
-  "ob-connectors": "Setup · Step 3 of 10",
-  "ob-api-key": "Setup · Step 4 of 10",
-  "ob-workspace": "Setup · Step 5 of 10",
-  "ob-product": "Setup · Step 6 of 10",
-  "ob-metrics": "Setup · Step 7 of 10",
-  "ob-invite": "Setup · Step 8 of 10",
-  "ob-review": "Setup · Step 9 of 10",
-  "ob-personalize": "Setup · Step 10 of 10",
+  "ob-company": "Setup · Step 1 of 4",
+  "ob-connectors": "Setup · Step 2 of 4",
+  "ob-review": "Setup · Step 3 of 4",
+  "ob-personalize": "Setup · Step 4 of 4",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

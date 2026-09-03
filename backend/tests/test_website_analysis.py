@@ -8,7 +8,10 @@ Asserts: structured shape from a mocked fetch + mocked gateway; graceful
 degrade (no raise) on SSRF-blocked / no-URL / unreachable / LLM-error inputs;
 persistence to companies.business_context; suggested_metrics {metric,description}
 shape; never-fabricate pass-through (null model fields → unknown, not invented);
-route require_company gating + tenant scoping.
+route require_company gating + tenant scoping; and (2026-09-03) the five fields
+scraped for the onboarding steps that were cut down to name + website —
+mission / portfolio / competitors / monetization / users_description — landing
+on the raw companies/products columns Settings itself renders, gap-only.
 """
 from __future__ import annotations
 
@@ -59,6 +62,31 @@ _FULL_OUTPUT = {
     ],
     "provenance": "name + url given; industry/business_type/metrics inferred from site.",
 }
+
+# The same fixture, plus the five fields cut from the onboarding steps
+# (2026-09-03) that are now scraped instead of typed.
+_FULL_OUTPUT_WITH_ONBOARDING_FIELDS = {
+    **_FULL_OUTPUT,
+    "mission": "Keep every field technician's day running on time.",
+    "portfolio": "Also ships a lightweight dispatch app for solo operators.",
+    "competitors": ["ServiceTitan", "Housecall Pro", "ServiceTitan"],  # dup on purpose
+    "monetization": "seat",
+    "users_description": "Dispatchers and field technicians at HVAC contractors.",
+}
+
+
+def _seed_product(db, company_id: str, **columns):
+    """A primary product row for `_fill_onboarding_gaps` to patch."""
+    db.table("products").insert(
+        {
+            "id": f"prod-{company_id}",
+            "company_id": company_id,
+            "name": "Acme",
+            "website": "https://acme.com",
+            "is_primary": True,
+            **columns,
+        }
+    ).execute()
 
 
 @pytest.fixture
@@ -192,6 +220,123 @@ def test_persist_does_not_overwrite_user_fields(seeded_company, monkeypatch):
     assert after.identity.industry.value == "Healthcare"  # user value untouched
     assert after.identity.industry.src == "user"
     assert after.business_model.model_type.value == "SaaS"  # gap filled
+
+
+# --------------------------------------------------------------------------- #
+# 2b. The onboarding-column scrape (2026-09-03) — mission / portfolio /
+#     competitors / monetization / users_description, written straight onto
+#     companies/products, gap-only. Separate from `_persist_business_context`
+#     above: that call only reaches the chat-facing BusinessContext doc, which
+#     Settings never reads.
+# --------------------------------------------------------------------------- #
+def test_scraped_fields_returned_in_the_response(seeded_company, monkeypatch):
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT_WITH_ONBOARDING_FIELDS)):
+        out = wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+    assert out["mission"] == "Keep every field technician's day running on time."
+    assert out["portfolio"] == "Also ships a lightweight dispatch app for solo operators."
+    # Deduped, order preserved, case-insensitive — the fixture repeats "ServiceTitan".
+    assert out["competitors"] == ["ServiceTitan", "Housecall Pro"]
+    assert out["monetization"] == "seat"
+    assert out["users_description"] == "Dispatchers and field technicians at HVAC contractors."
+
+
+def test_scraped_fields_fill_empty_company_and_product_columns(seeded_company, monkeypatch):
+    """The whole point: a company that never opens Settings still has these
+    filled in when it eventually does."""
+    _seed_product(seeded_company, _COMPANY_ID)
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT_WITH_ONBOARDING_FIELDS)):
+        wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+    company = seeded_company.table("companies").select("*").eq("id", _COMPANY_ID).execute().data[0]
+    assert company["mission"] == "Keep every field technician's day running on time."
+    assert company["portfolio"] == "Also ships a lightweight dispatch app for solo operators."
+    assert company["competitors"] == ["ServiceTitan", "Housecall Pro"]
+
+    product = seeded_company.table("products").select("*").eq("id", f"prod-{_COMPANY_ID}").execute().data[0]
+    assert product["monetization"] == ["seat"]  # single-element array — matches the manual-entry shape
+    assert product["users_description"] == "Dispatchers and field technicians at HVAC contractors."
+
+
+def test_scrape_does_not_overwrite_typed_onboarding_fields(seeded_company, monkeypatch):
+    """A person who already typed their mission (or anything else here) before
+    the scrape lands — or before it ever ran — keeps exactly what they typed."""
+    seeded_company.table("companies").update(
+        {"mission": "Written by a human.", "competitors": ["HandTyped Inc"]}
+    ).eq("id", _COMPANY_ID).execute()
+    _seed_product(seeded_company, _COMPANY_ID, users_description="Also written by a human.")
+
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT_WITH_ONBOARDING_FIELDS)):
+        wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+    company = seeded_company.table("companies").select("*").eq("id", _COMPANY_ID).execute().data[0]
+    assert company["mission"] == "Written by a human."
+    assert company["competitors"] == ["HandTyped Inc"]
+    # portfolio was empty → still filled, proving the guard is per-field, not
+    # "skip the whole row because something on it is user-authored".
+    assert company["portfolio"] == "Also ships a lightweight dispatch app for solo operators."
+
+    product = seeded_company.table("products").select("*").eq("id", f"prod-{_COMPANY_ID}").execute().data[0]
+    assert product["users_description"] == "Also written by a human."
+    assert product["monetization"] == ["seat"]  # empty → still filled
+
+
+def test_scrape_names_no_competitors_by_default(seeded_company, monkeypatch):
+    """The never-fabricate rule biting hardest on the new fields: a site with no
+    comparison page names nothing, and nothing is invented from category."""
+    sparse = {**_FULL_OUTPUT, "mission": None, "portfolio": None, "competitors": [],
+              "monetization": None, "users_description": None}
+    _seed_product(seeded_company, _COMPANY_ID)
+    _patch_fetch(monkeypatch, {"acme.com": "Acme field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(sparse)):
+        out = wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+    assert out["mission"] is None
+    assert out["competitors"] == []
+    assert out["monetization"] is None
+    company = seeded_company.table("companies").select("*").eq("id", _COMPANY_ID).execute().data[0]
+    # Untouched — nothing to fill, so no write at all.
+    assert not company.get("mission")
+    assert not (company.get("competitors") or [])
+
+
+def test_scrape_drops_a_monetization_value_the_frontend_does_not_render():
+    """Guards the schema's own enum: a value outside MONETIZATION_VALUES (a
+    forced-JSON slip, or a caller bypassing the schema entirely) must not reach
+    the column — it would fill `products.monetization` with a value Settings'
+    chip picker can never show as selected."""
+    assert wa._normalize_monetization("seat") == "seat"
+    assert wa._normalize_monetization("enterprise-license") is None
+    assert wa._normalize_monetization(None) is None
+
+
+def test_scrape_has_nothing_to_patch_when_the_company_has_no_product_yet(seeded_company, monkeypatch):
+    """No primary product row (a company mid-signup, before its product was
+    created) → the company-level fields still fill; the product-level ones are
+    skipped rather than raising."""
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT_WITH_ONBOARDING_FIELDS)):
+        wa.analyze_website(_COMPANY_ID, "https://acme.com")  # must not raise
+
+    company = seeded_company.table("companies").select("*").eq("id", _COMPANY_ID).execute().data[0]
+    assert company["mission"] == "Keep every field technician's day running on time."
+
+
+def test_scrape_write_failure_does_not_break_the_analysis_result(seeded_company, monkeypatch):
+    """A DB error while filling the onboarding columns is swallowed — the
+    analysis the caller is waiting on must still come back."""
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    monkeypatch.setattr(
+        wa, "_primary_product_gaps",
+        lambda cid: (_ for _ in ()).throw(RuntimeError("db down")),
+    )
+    with patch.object(wa, "llm_call", return_value=_llm_result(_FULL_OUTPUT_WITH_ONBOARDING_FIELDS)):
+        out = wa.analyze_website(_COMPANY_ID, "https://acme.com")
+    assert out["ok"] is True
+    assert out["mission"] == "Keep every field technician's day running on time."
 
 
 # --------------------------------------------------------------------------- #

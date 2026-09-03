@@ -6,9 +6,14 @@
 // Covers:
 //   - insight-type chips + free-text note, persisted into the EXISTING
 //     companies.notification_settings blob (never clobbering sibling keys)
-//   - the delivery disclosure: frequency / destination / day / time / timezone,
-//     written with the same keys Settings → Comms & Brief uses
-//   - Microsoft Teams renders disabled — there is no backend delivery path
+//   - delivery: frequency / destination / day / time / timezone, OPEN by
+//     default (2026-09-03) rather than behind a click, written with the same
+//     keys Settings → Comms & Brief uses
+//   - Microsoft Teams is not offered at all (2026-09-03) — no backend delivery
+//     path, so it is left out rather than shown disabled
+//   - Slack is NEVER the pre-selected chip (2026-09-03): picking it while
+//     unconnected opens the same connect modal Connectors uses, so choosing
+//     Slack and connecting it happen in one motion
 //   - THE GATE, which moved here from ReviewStep when personalize was inserted
 //     between review and the define-metrics sub-flow: with a live analytics
 //     connection Continue hands off to /onboarding/define-metrics; without one
@@ -57,6 +62,18 @@ vi.mock("../../../connectors/SlackChannelPicker", () => ({
   SlackChannelPicker: () =>
     React.createElement("div", { "data-testid": "slack-picker" }),
 }))
+// The real modal drags in OAuth wiring + provider config slots — stub to a
+// marker so tests can assert open/provider at the container boundary, same as
+// Connectors.dom.test.tsx.
+vi.mock("../../../connectors/ConnectorConnectModal", () => ({
+  ConnectorConnectModal: (props: { providerId: string | null }) =>
+    props.providerId
+      ? React.createElement("div", {
+          "data-testid": "connect-modal",
+          "data-provider": props.providerId,
+        })
+      : null,
+}))
 
 import { PersonalizeStep } from "../PersonalizeStep"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
@@ -65,6 +82,14 @@ import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 function analyticsConnected() {
   connectorsListMock.mockResolvedValue({
     connections: [{ provider: "posthog", status: "active", types: ["analytics"] }],
+  })
+}
+
+/** A live, personally-installed Slack connection (delivery reads THIS, not the
+ *  company-shared row — see PersonalizeStep's own `slack` memo). */
+function slackConnected() {
+  connectorsListMock.mockResolvedValue({
+    connections: [{ provider: "slack", status: "active", types: [] }],
   })
 }
 
@@ -96,24 +121,20 @@ function chip(label: string): HTMLButtonElement {
   return btn as HTMLButtonElement
 }
 
-/** Delivery (frequency / destination / day / time / tz) sits behind a
- *  disclosure, collapsed by default — open it before querying those chips. */
-function openDelivery() {
-  fireEvent.click(screen.getByText(/Delivery — when & where/))
-}
-
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
 })
 
 describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
-  it("renders on step 9 of the dots with the insight chips", async () => {
+  it("renders on the last dot with the insight chips", async () => {
+    // Derived (`stepForSlug`), not a literal — see Connectors.dom.test.tsx's
+    // matching comment for why that distinction matters here.
     analyticsConnected()
     const { container } = mount()
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("10")
+    ).toBe("4")
     expect(
       (container.querySelector(".onb-card .onb-h") as HTMLElement).textContent,
     ).toBe("Personalize your workspace.")
@@ -138,20 +159,77 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
-  it("renders Microsoft Teams disabled — there is no delivery path for it yet", async () => {
+  it("delivery is visible on arrival — no click needed to reach frequency/destination", async () => {
+    // The whole point of opening it by default: a PM must be able to pick a
+    // schedule without discovering there was something to expand.
     analyticsConnected()
     mount()
-    openDelivery()
-    expect(chip("Microsoft Teams").disabled).toBe(true)
-    // Slack and Email are real choices.
-    expect(chip("Slack").disabled).toBe(false)
-    expect(chip("Email").disabled).toBe(false)
+    expect(chip("Weekly")).not.toBeNull()
+    expect(chip("Slack")).not.toBeNull()
+    expect(chip("Email")).not.toBeNull()
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
   })
 
-  it("with analytics live, Continue saves preferences and hands off to define-metrics", async () => {
+  it("does not offer Microsoft Teams at all — no backend delivery path", async () => {
     analyticsConnected()
-    const workspaceUnderTest = makeWorkspace({ onboarding_step: 9 })
+    const { container } = mount()
+    expect(screen.queryByText(/Microsoft Teams/)).toBeNull()
+    expect(
+      Array.from(container.querySelectorAll('[data-field="destination"] button')).map(
+        (b) => b.textContent,
+      ),
+    ).toEqual(["Slack", "Email"])
+  })
+
+  it("Slack is never pre-selected — no destination chip is selected on arrival", async () => {
+    analyticsConnected()
+    mount()
+    expect(chip("Slack").getAttribute("aria-pressed")).toBe("false")
+    expect(chip("Email").getAttribute("aria-pressed")).toBe("false")
+    // Nothing to connect and no channel picker until Slack is actually chosen.
+    expect(screen.queryByTestId("slack-picker")).toBeNull()
+    expect(screen.queryByTestId("connect-modal")).toBeNull()
+  })
+
+  it("picking Slack while it isn't connected opens the connect modal", async () => {
+    analyticsConnected() // no Slack connection in the connector list
+    mount()
+    fireEvent.click(chip("Slack"))
+
+    expect(chip("Slack").getAttribute("aria-pressed")).toBe("true")
+    const modal = screen.getByTestId("connect-modal")
+    expect(modal.getAttribute("data-provider")).toBe("slack")
+    // Not connected yet, so the picker doesn't render — the hint + its own
+    // "Connect Slack" button do, as a second way in if the modal is dismissed.
+    expect(screen.queryByTestId("slack-picker")).toBeNull()
+    expect(screen.getByText(/Slack isn.t connected yet/)).not.toBeNull()
+    expect(screen.getByText("Connect Slack")).not.toBeNull()
+  })
+
+  it("picking Slack while it IS connected shows the channel picker, no modal", async () => {
+    slackConnected()
+    mount()
+    await waitFor(() => expect(connectorsListMock).toHaveBeenCalled())
+    fireEvent.click(chip("Slack"))
+
+    expect(screen.getByTestId("slack-picker")).not.toBeNull()
+    expect(screen.queryByTestId("connect-modal")).toBeNull()
+  })
+
+  it("with analytics live AND metrics picked, Continue hands off to define-metrics", async () => {
+    // BOTH are required since 2026-09-03. The step that picked metrics was
+    // removed, so a fresh signup reaches here with an empty list and the
+    // sub-flow — which confirms a definition per picked metric — would open on
+    // nothing. Metrics are chosen in Settings → KPI Settings now.
+    analyticsConnected()
+    const workspaceUnderTest = makeWorkspace({
+      onboarding_step: 5,
+      kpi_tree: {
+        north_star: "",
+        north_star_description: "",
+        metrics: [{ name: "Activation rate", description: "" }],
+      },
+    })
     mount(workspaceUnderTest)
     await waitFor(() => expect(continueBtn().disabled).toBe(false))
 

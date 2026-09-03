@@ -56,6 +56,7 @@ export function makeWorkspace(
     competitors: [],
     tech_stack: [],
     okrs: null,
+    website: null,
     mission: null,
     strategy: null,
     portfolio: null,

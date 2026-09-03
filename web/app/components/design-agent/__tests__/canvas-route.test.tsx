@@ -71,10 +71,17 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
     ["/sources", "sources"],
     ["/onboarding/company", "ob-company"],
     ["/onboarding/review", "ob-review"],
-    // `workspace` is a real step in onboarding v7 (the merged
-    // team/strategy/decisions card), not the retired workspace-NAMING closer.
-    ["/onboarding/workspace", "ob-workspace"],
-    // The three steps it replaced no longer resolve.
+    // Removed from the flow on 2026-09-03 (invite last, folded into
+    // Settings → Team & roles) — their routes fall through like any other
+    // retired step, which is what stops a stale bookmark rendering a screen
+    // the flow no longer has.
+    ["/onboarding/workspace", "chat"],
+    ["/onboarding/import-context", "chat"],
+    ["/onboarding/api-key", "chat"],
+    ["/onboarding/product", "chat"],
+    ["/onboarding/metrics", "chat"],
+    ["/onboarding/invite", "chat"],
+    // The three steps the old workspace card replaced never resolved either.
     ["/onboarding/team", "chat"],
     ["/onboarding/strategy", "chat"],
     ["/onboarding/decisions", "chat"],

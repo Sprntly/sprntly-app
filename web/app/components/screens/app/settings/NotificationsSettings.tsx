@@ -254,7 +254,7 @@ export function NotificationsSettings() {
         <div className="pset-body">
           <SettingsSection title="Comms & Brief" sub="Complete onboarding first.">
             <p className="settings-placeholder">
-              <a href="/onboarding/workspace">Finish onboarding →</a>
+              <a href="/onboarding/company">Finish onboarding →</a>
             </p>
           </SettingsSection>
         </div>

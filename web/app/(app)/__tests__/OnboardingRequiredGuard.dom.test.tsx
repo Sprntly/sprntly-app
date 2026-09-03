@@ -100,9 +100,9 @@ describe("OnboardingRequiredGuard", () => {
       },
     }
     const { queryByText } = renderGuard()
-    // Step 3 → the third slug ("connectors"), mapped locally via slugForStep.
+    // Step 3 → the third slug ("review"), mapped locally via slugForStep.
     await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/onboarding/connectors"),
+      expect(replace).toHaveBeenCalledWith("/onboarding/review"),
     )
     // The cache was re-checked first, and the postLoginPath waterfall (getUser
     // → workspace fetch → invite accept) never ran for a known-workspace user.
@@ -218,7 +218,7 @@ describe("OnboardingRequiredGuard", () => {
     renderGuard()
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/onboarding/plan"))
     // NOT the resume step — the gate comes first.
-    expect(replace).not.toHaveBeenCalledWith("/onboarding/connectors")
+    expect(replace).not.toHaveBeenCalledWith("/onboarding/review")
   })
 
   it("does not gate a plan that was never sold through Stripe", async () => {
@@ -234,7 +234,7 @@ describe("OnboardingRequiredGuard", () => {
     }
     renderGuard()
     await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/onboarding/connectors"),
+      expect(replace).toHaveBeenCalledWith("/onboarding/review"),
     )
   })
 

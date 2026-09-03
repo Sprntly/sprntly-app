@@ -43,7 +43,8 @@ import {
  * counter track position within the step.
  *
  * WHY THIS SITS AT STEP 3, right after the context import: this step and the
- * api-key step after it are the only two the import cannot prefill — one wires
+ * api-key step that used to follow it were the two the (now removed) context
+ * import could not prefill — one wires
  * OAuth, the other takes a secret — so they are the two worth spending the
  * background extraction's latency on. The user works through these categories
  * while the LLM reads their uploaded file; every step from metrics onward
@@ -355,10 +356,10 @@ export function Connectors() {
       // stale literal here silently resumes the user onto the wrong step.
       const updated = await advanceOnboardingStep(
         workspace.id,
-        stepForSlug("api-key") ?? 4,
+        stepForSlug("review") ?? 3,
       )
       setWorkspace(updated)
-      router.push("/onboarding/api-key")
+      router.push("/onboarding/review")
     } finally {
       setSaving(false)
     }
@@ -421,7 +422,7 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={3}
+      step={stepForSlug("connectors") ?? 2}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -437,7 +438,7 @@ export function Connectors() {
           reviewed
         </>
       }
-      onBack={() => router.push("/onboarding/import-context")}
+      onBack={() => router.push("/onboarding/company")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
       continueLabel={leavesStep ? "Continue to your key" : "Continue"}
