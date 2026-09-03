@@ -12,6 +12,12 @@ type Props = {
   onMetricsChange: (metrics: KpiMetric[]) => void
   northStarError?: string
   metricsError?: string
+  /** Render the north-star block. Settings → Metrics passes `false`
+   *  (2026-09-03): the "KPI tree" framing came off that pane and it now edits
+   *  a plain metrics list, while the north star is carried through unchanged
+   *  rather than asked for. Defaults to `true` so every other caller and the
+   *  editor's own tests are untouched. */
+  showNorthStar?: boolean
 }
 
 /** Drop blank metrics; metrics are equal (no weights anymore). */
@@ -31,6 +37,7 @@ export function KpiTreeEditor({
   onMetricsChange,
   northStarError,
   metricsError,
+  showNorthStar = true,
 }: Props) {
   function updateMetric(i: number, patch: Partial<KpiMetric>) {
     onMetricsChange(metrics.map((m, idx) => (idx === i ? { ...m, ...patch } : m)))
@@ -43,29 +50,34 @@ export function KpiTreeEditor({
 
   return (
     <>
-      <div className={`field ${northStarError ? "has-error" : ""}`} data-field="northStar">
-        <label className="field-label">North star metric *</label>
-        <input
-          className="input"
-          value={northStar}
-          onChange={(e) => onNorthStarChange(e.target.value)}
-          placeholder="e.g. Day-30 retention"
-        />
-        {hints.length > 0 && (
-          <div className="ob-hints">Suggestions: {hints.join(" · ")}</div>
-        )}
-        {northStarError && <p className="field-error">{northStarError}</p>}
-        <textarea
-          className="input"
-          placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
-          value={northStarDescription}
-          rows={2}
-          maxLength={400}
-          onChange={(e) => onNorthStarDescriptionChange?.(e.target.value)}
-        />
-      </div>
+      {showNorthStar && (
+        <div className={`field ${northStarError ? "has-error" : ""}`} data-field="northStar">
+          <label className="field-label">North star metric *</label>
+          <input
+            className="input"
+            value={northStar}
+            onChange={(e) => onNorthStarChange(e.target.value)}
+            placeholder="e.g. Day-30 retention"
+          />
+          {hints.length > 0 && (
+            <div className="ob-hints">Suggestions: {hints.join(" · ")}</div>
+          )}
+          {northStarError && <p className="field-error">{northStarError}</p>}
+          <textarea
+            className="input"
+            placeholder="Describe what this metric means and why it matters (context for goal-fit scoring)"
+            value={northStarDescription}
+            rows={2}
+            maxLength={400}
+            onChange={(e) => onNorthStarDescriptionChange?.(e.target.value)}
+          />
+        </div>
+      )}
       <div className={`field ${metricsError ? "has-error" : ""}`} data-field="metrics">
-        <label className="field-label">Supporting metrics (2–4) *</label>
+        {/* "Supporting" only makes sense relative to a north star on screen. */}
+        <label className="field-label">
+          {showNorthStar ? "Supporting metrics (2–4) *" : "Metrics (2–4) *"}
+        </label>
         {metrics.map((m, i) => (
           <div key={i} className="ob-metric-block">
             <input
