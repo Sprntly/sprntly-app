@@ -1168,49 +1168,6 @@ def _finding_block(
                 f"figures actually quoted, not a projection."
             ))
 
-    # LIST PRICING: A RANGE, IN ITS OWN PARAGRAPH, WITH NO TOTAL.
-    #
-    # THE READER MUST NOT BE ABLE TO ADD THIS TO THE LINE ABOVE. One is a sum
-    # of money people committed to; the other is a rate card quoted to N
-    # accounts, whose total is meaningless — a $30,000 tier quoted sixteen
-    # times is not $480,000. Three things keep them apart, and all three are
-    # deliberate:
-    #
-    #   * a RANGE and a SUM are structurally non-additive, so the arithmetic
-    #     a reader might attempt has no obvious form;
-    #   * this is its own paragraph, never a clause beside the committed
-    #     figure — two numbers in one sentence is an invitation to add them;
-    #   * each line says which KIND of money it is in its own words, rather
-    #     than leaving a reader to infer it from the number.
-    #
-    # No total is printed here, and none should be added later.
-    price_min = commercial.get("commercial_list_price_min")
-    price_max = commercial.get("commercial_list_price_max")
-    if isinstance(price_min, (int, float)) and isinstance(price_max, (int, float)):
-        distinct = commercial.get("commercial_list_price_distinct")
-        priced_accounts = commercial.get("commercial_list_price_accounts")
-        span = (
-            f"${price_min:,.0f}"
-            if price_min == price_max else
-            f"${price_min:,.0f}–${price_max:,.0f}"
-        )
-        across = (
-            f" across {int(priced_accounts)} account"
-            f"{'' if priced_accounts == 1 else 's'}"
-            if isinstance(priced_accounts, (int, float)) and priced_accounts
-            else ""
-        )
-        shape = (
-            f" from {int(distinct)} distinct price points"
-            if isinstance(distinct, (int, float)) and distinct > 1 else ""
-        )
-        out.append(_p(
-            f"<strong>List pricing quoted here.</strong> {span}{across}"
-            f"{shape}. This is what was quoted, not what was agreed — the "
-            f"same price offered to several accounts is one rate card, so "
-            f"these are not added together."
-        ))
-
     # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote.
     #
     # Only when the heading is the label: with the sentence as the heading the
@@ -1386,6 +1343,42 @@ _SHED_LADDER = (
 )
 
 
+def _list_pricing(findings: list[dict]) -> Optional[tuple[float, float, int]]:
+    """Corpus-wide list pricing: the two ends of the range, and how many
+    findings carry one. `None` when no finding does.
+
+    HOISTED TO THE CORPUS, AND THAT IS THE FIX FOR A REAL RENDERING BUG. This
+    sentence used to live inside a finding's own write-up — and only the top
+    handful of findings get one, while list pricing sits on whichever
+    findings the pricing conversations happened to cluster into. On a live
+    run twelve findings carried correctly-shaped pricing units and the line
+    rendered for none of them, because not one of the twelve was in the top
+    ten.
+
+    It also belongs here on the merits. A rate card is not a property of one
+    theme; it is what the product costs, and it turns up wherever pricing was
+    discussed.
+
+    ONLY WHAT CAN BE AGGREGATED WITHOUT DOUBLE COUNTING. The two ends are a
+    min of mins and a max of maxes, which is exact. Per-finding distinct-price
+    and account counts are NOT summed here — the same price quoted in two
+    findings would be counted twice — so the only count reported is one this
+    function can be sure of: how many findings carry pricing at all.
+    """
+    mins: list[float] = []
+    maxes: list[float] = []
+    for f in findings:
+        units = _as_dict(_as_dict(f.get("impact")).get("native_units"))
+        lo = units.get("commercial_list_price_min")
+        hi = units.get("commercial_list_price_max")
+        if isinstance(lo, (int, float)) and isinstance(hi, (int, float)):
+            mins.append(float(lo))
+            maxes.append(float(hi))
+    if not mins:
+        return None
+    return min(mins), max(maxes), len(mins)
+
+
 def _findings_section(
     findings: list[dict],
     # The EDITORIAL cap is the default, so a future caller that forgets to pass
@@ -1514,6 +1507,44 @@ def _findings_section(
             f"<strong>{_esc_clipped(name, MAX_PARAM_NAME_CHARS)}</strong>"
             f": {_esc_clipped(basis, MAX_PARAM_BASIS_CHARS)}"
             for name, basis in shared_assumptions[:MAX_ASSUMED_PARAMS]
+        ))
+
+    # LIST PRICING: A RANGE, IN ITS OWN PARAGRAPH, WITH NO TOTAL.
+    #
+    # THE READER MUST NOT BE ABLE TO ADD THIS TO A COMMITTED FIGURE. One is a
+    # sum of money people agreed to; the other is a rate card quoted to
+    # whoever asked, whose total is meaningless — a $30,000 tier quoted
+    # sixteen times is not $480,000. Three things keep them apart, all
+    # deliberate:
+    #
+    #   * a RANGE and a SUM are structurally non-additive, so the arithmetic
+    #     a reader might attempt has no obvious form;
+    #   * this is its own paragraph in its own place, never a clause beside a
+    #     committed figure — two numbers in one sentence is an invitation to
+    #     add them;
+    #   * each says which KIND of money it is in its own words, rather than
+    #     leaving a reader to infer it from the number.
+    #
+    # No total is printed here, and none should be added later.
+    pricing = _list_pricing(findings)
+    if pricing is not None:
+        low, high, carrying = pricing
+        span = (
+            f"${low:,.0f}" if low == high else f"${low:,.0f}–${high:,.0f}"
+        )
+        # SAYS HOW MANY IT SPEAKS FOR, the same way the assumptions hoist
+        # above does — a hoisted sentence that overstates its own scope is
+        # the failure this whole pass has been correcting.
+        where = (
+            "one finding below"
+            if carrying == 1 else
+            f"{carrying} of the findings below"
+        )
+        out.append(_p(
+            f"<strong>List pricing was quoted in {where}.</strong> {span}. "
+            f"This is what was quoted, not what was agreed — the same price "
+            f"offered to several accounts is one rate card, so these are "
+            f"never added together or added to any figure above."
         ))
 
     full = findings[:full_cap]
