@@ -180,6 +180,25 @@ function ReportFinding({
           <p className="ga-finding-rec-why">
             <em>Why.</em> {f.recommendation!.because}
           </p>
+          {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED —
+              not left as a bare fact in "How many got a full recommendation"
+              while this card sits below it looking like an unexplained
+              absence. `deep_attempted` is only set on a finding that was IN
+              the top N a count named or defaulted to but whose evidence did
+              not clear the citation gate (or a deep pass that failed
+              outright) — never on one simply ranked past N. Mirrors
+              `report.py`'s `_finding_block`; the specific reason lives once,
+              in the recommendation-basis note above, and this points there
+              rather than restating it. */}
+          {f.deep_attempted ? (
+            <p className="ga-weakest" data-testid="goal-finding-deep-shortfall">
+              This finding was one of the ones in line for a full write-up.
+              It did not get one this run — see “How many got a full
+              recommendation” above for why — so the recommendation above is
+              the plain version, not a downgrade of a deeper one you are
+              missing.
+            </p>
+          ) : null}
         </div>
       ) : null}
       <div className="ga-finding-meta">

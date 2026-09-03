@@ -326,11 +326,29 @@ _COUNTABLE_NOUN = (
     r"ideas?|projects?|priorities?|actions?)"
 )
 
+#: A BOUNDED run of adjective-like words between a named count and its
+#: countable noun — "the ten MOST IMPORTANT things", "the three BIGGEST
+#: initiatives" — never unlimited distance. Without this, `_NAMED_COUNT_WORD`/
+#: `_NAMED_COUNT_DIGIT` required the noun immediately after the number, so any
+#: modifier broke the match and the report then claimed "no count or target
+#: was named" over a goal that plainly named one — worse than a missed cap,
+#: because it is a false claim about what the user asked. Capped at three
+#: words (plain letters only, so it cannot cross a comma or reach into an
+#: unrelated clause — `\s+` cannot match through a comma that sits directly
+#: after the previous word) so a sentence like "two accounts churned in three
+#: months" still does not read as a count: "months" is not in
+#: `_COUNTABLE_NOUN` regardless of window size, and this cap is what keeps a
+#: FUTURE reader from "fixing" a miss by widening the gap without limit, which
+#: is the one change that would start reading corpus facts as counts.
+_COUNT_ADJECTIVE_GAP = r"(?:[a-zA-Z]+\s+){0,3}"
+
 _NAMED_COUNT_DIGIT = re.compile(
-    r"\b(\d{1,3})\s+" + _COUNTABLE_NOUN + r"\b", re.IGNORECASE,
+    r"\b(\d{1,3})\s+" + _COUNT_ADJECTIVE_GAP + _COUNTABLE_NOUN + r"\b",
+    re.IGNORECASE,
 )
 _NAMED_COUNT_WORD = re.compile(
-    r"\b(" + "|".join(_COUNT_WORDS) + r")\s+" + _COUNTABLE_NOUN + r"\b",
+    r"\b(" + "|".join(_COUNT_WORDS) + r")\s+" + _COUNT_ADJECTIVE_GAP
+    + _COUNTABLE_NOUN + r"\b",
     re.IGNORECASE,
 )
 
@@ -644,6 +662,14 @@ class DeepRecommendation:
 class DeepRecommendationResult:
     by_id: dict[str, DeepRecommendation]
     count: RecommendationCount
+    #: The finding ids that were CANDIDATES for a full write-up this run —
+    #: `top`, before the citation gate (or a failed/malformed call) removed
+    #: any of them. Lets a renderer connect a candidate's plain
+    #: `recommendation` to the shortfall disclosed in `count.basis`, rather
+    #: than leaving it as an unexplained absence next to findings that were
+    #: never candidates at all (simply ranked past N). Empty exactly when
+    #: nothing was attempted — no findings, or the offline short-circuit.
+    attempted_ids: frozenset[str] = frozenset()
 
 
 DEEP_RECOMMENDATION_SCHEMA: dict = {
@@ -989,6 +1015,15 @@ def build_deep_recommendations(
     if not top or _offline():
         return DeepRecommendationResult(by_id={}, count=count_info)
 
+    # ATTEMPTED, regardless of what happens below — `top` IS the candidate
+    # set the moment it is sliced, whether the call that follows succeeds,
+    # returns something unusable, or is dropped item-by-item at the citation
+    # gate. A renderer uses this to connect a dropped candidate's plain
+    # recommendation to the shortfall note below, rather than leaving it as
+    # an unexplained absence next to findings that were never candidates at
+    # all (ranked past `n`).
+    attempted_ids = frozenset(f.id for f in top)
+
     claims_by_id = {c.id: c for c in claims}
     shown_ids_by_finding: dict[str, set[str]] = {}
     strength_of: dict[str, str] = {}
@@ -1000,6 +1035,15 @@ def build_deep_recommendations(
         strength_of[f.id] = min(strengths, key=_STRENGTH_ORDER.index) if strengths else "reported"
 
     started = time.monotonic()
+    kept: dict[str, DeepRecommendation] = {}
+    # WHY A SHARED REASON RATHER THAN A PER-ITEM ONE. A call that raises, or
+    # returns a shape this module cannot use, fails every item in `top`
+    # identically — there is no per-item verdict to report, unlike the
+    # citation gate below, which judges each recommendation on its own
+    # evidence. Kept separate from "the citation bar" language for exactly
+    # that reason: saying a technical failure "did not meet the citation bar"
+    # would be a false claim about why nothing survived.
+    fail_reason: Optional[str] = None
     try:
         from app.graph.gateway import llm_call
 
@@ -1016,56 +1060,73 @@ def build_deep_recommendations(
         out = result.output
     except Exception:  # noqa: BLE001 — the suggestion layer never kills a run
         logger.exception("crucible: deep recommendation call failed")
-        return DeepRecommendationResult(by_id={}, count=count_info)
+        out = None
+        fail_reason = "the suggestion pass did not return a result for this run"
 
-    if not isinstance(out, dict):
-        return DeepRecommendationResult(by_id={}, count=count_info)
-    if time.monotonic() - started > DEADLINE_SECONDS:
-        logger.warning("crucible: deep recommendations exceeded their deadline")
+    if fail_reason is None and not isinstance(out, dict):
+        fail_reason = "the suggestion pass did not return a result for this run"
 
-    by_finding_id = {f.id: f for f in top}
-    kept: dict[str, DeepRecommendation] = {}
-    for rec in out.get("deep_recommendations") or []:
-        if not isinstance(rec, dict):
-            continue
-        f = by_finding_id.get((rec.get("finding_id") or "").strip())
-        if f is None:
-            continue
-        ok = _deep_acceptable(
-            rec, f, strength_of.get(f.id, "reported"),
-            shown_ids_by_finding.get(f.id, set()), claims_by_id,
-        )
-        if ok is not None:
-            kept[f.id] = ok
+    if fail_reason is None:
+        if time.monotonic() - started > DEADLINE_SECONDS:
+            logger.warning("crucible: deep recommendations exceeded their deadline")
 
-    # THE COMPARISON. Only between the two HIGHEST-RANKED findings that
-    # actually kept a deep recommendation — a comparison against a finding
-    # whose own deep pass was entirely dropped would be comparing against
-    # nothing the reader can see. Attached to the higher-ranked of the pair,
-    # which is the one Apurva described comparing ("once we pick the top
-    # two, we could just compare them").
-    ranked_kept = [f for f in top if f.id in kept]
-    if len(ranked_kept) >= 2:
-        first, second = ranked_kept[0], ranked_kept[1]
-        i1, i2 = findings.index(first), findings.index(second)
-        comparison = _compare(
-            first, second, impacts[i1], impacts[i2],
-            confidences[i1], confidences[i2],
-        )
-        kept[first.id] = replace(kept[first.id], comparison=comparison)
+        by_finding_id = {f.id: f for f in top}
+        for rec in out.get("deep_recommendations") or []:
+            if not isinstance(rec, dict):
+                continue
+            f = by_finding_id.get((rec.get("finding_id") or "").strip())
+            if f is None:
+                continue
+            ok = _deep_acceptable(
+                rec, f, strength_of.get(f.id, "reported"),
+                shown_ids_by_finding.get(f.id, set()), claims_by_id,
+            )
+            if ok is not None:
+                kept[f.id] = ok
 
-    # THE BASIS SENTENCE MUST SAY WHAT SURVIVED, NOT ONLY WHAT WAS PROMISED.
-    # `count_info.basis` was written by `resolve_recommendation_count` BEFORE
-    # this call, from the goal's own ask alone — it has no way to know that
-    # `_deep_acceptable`'s citation gate (a documented, deliberate check, not a
-    # bug) is about to drop some of `top`. Left as-is, a report can promise
+        # THE COMPARISON. Only between the two HIGHEST-RANKED findings that
+        # actually kept a deep recommendation — a comparison against a
+        # finding whose own deep pass was entirely dropped would be
+        # comparing against nothing the reader can see. Attached to the
+        # higher-ranked of the pair, which is the one Apurva described
+        # comparing ("once we pick the top two, we could just compare
+        # them").
+        ranked_kept = [f for f in top if f.id in kept]
+        if len(ranked_kept) >= 2:
+            first, second = ranked_kept[0], ranked_kept[1]
+            i1, i2 = findings.index(first), findings.index(second)
+            comparison = _compare(
+                first, second, impacts[i1], impacts[i2],
+                confidences[i1], confidences[i2],
+            )
+            kept[first.id] = replace(kept[first.id], comparison=comparison)
+
+    # THE BASIS SENTENCE MUST SAY WHAT SURVIVED, NOT ONLY WHAT WAS PROMISED —
+    # AND THIS RUNS FOR EVERY REASON THE COUNT CAN FALL SHORT, NOT ONLY THE
+    # CITATION GATE. `count_info.basis` was written by
+    # `resolve_recommendation_count` BEFORE this call, from the goal's own
+    # ask alone — it has no way to know that `_deep_acceptable`'s citation
+    # gate (a documented, deliberate check, not a bug) is about to drop some
+    # of `top`, OR that the call itself is about to fail outright. Earlier,
+    # only the citation-gate path reached this far — a raised exception or a
+    # malformed response returned straight from inside the `try` above,
+    # `by_id={}`, with `count_info.basis` NEVER corrected, so a total
+    # failure (0 of N) was the ONE case with LESS disclosure than a partial
+    # citation-gate shortfall, not more. Left as-is, a report can promise
     # "the top 2 get a full recommendation" over one write-up or zero, which
-    # reads as an error when it is really two true, unconnected sentences: how
-    # many the goal asked for, and how many the evidence supported. Corrected
-    # HERE, once, so both this module's own `resolve_recommendation_count` and
-    # the report renderer never disagree about which count they printed.
+    # reads as an error when it is really two true, unconnected sentences:
+    # how many the goal asked for, and how many the evidence supported.
+    # Corrected HERE, once, so this module's own `resolve_recommendation_
+    # count`, the citation gate, and a total failure never disagree about
+    # which count they printed.
     if len(kept) < n:
-        if not kept:
+        if fail_reason is not None:
+            gate_note = (
+                f" {fail_reason[0].upper()}{fail_reason[1:]}, so none of "
+                f"the {n} are shown below — the flat recommendation above "
+                f"still stands for each."
+            )
+        elif not kept:
             gate_note = (
                 f" None of the {n} met the citation bar for a full "
                 f"recommendation, so none are shown below — the flat "
@@ -1083,4 +1144,6 @@ def build_deep_recommendations(
             )
         count_info = replace(count_info, basis=count_info.basis + gate_note)
 
-    return DeepRecommendationResult(by_id=kept, count=count_info)
+    return DeepRecommendationResult(
+        by_id=kept, count=count_info, attempted_ids=attempted_ids,
+    )

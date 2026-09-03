@@ -124,6 +124,71 @@ def test_a_conflict_is_called_a_conflict():
     assert "sources disagree" in html
 
 
+# ─── The shortfall, connected to the finding it actually dropped ────────────
+#
+# "Asked for N, got fewer" is a real, deliberate citation gate — never
+# weakened. The disclosure already lives in `recommendation_basis` ("How
+# many got a full recommendation"), but a reader who skips straight to a
+# finding's card and sees only a PLAIN recommendation where a full write-up
+# would have been has no way to tell "never a candidate" from "a candidate
+# whose evidence did not clear the bar" apart. `deep_attempted` closes that.
+
+def test_a_dropped_deep_candidate_connects_its_flat_recommendation_to_the_shortfall():
+    run = _run(prioritisation={
+        "plan": _plan(),
+        "recommendation_basis": (
+            "you asked for 2, so the top 2 get a full recommendation. Only "
+            "1 of the 2 met the citation bar for a full recommendation and "
+            "is shown below."
+        ),
+    })
+    html = render_report_html(run, [
+        _finding(
+            recommendation={"action": "Fix the export path",
+                             "because": "three accounts named it"},
+            deep_attempted=True,
+        ),
+    ])
+    assert "How many got a full recommendation" in html
+    assert "in line for a full write-up" in html
+    # The connecting note reads AFTER the plain recommendation it explains,
+    # not before — a reader hits the recommendation first, then the context.
+    assert html.index("Fix the export path") < html.index("in line for a full write-up")
+
+
+def test_a_finding_never_in_line_for_a_deep_pass_gets_no_shortfall_note():
+    """A finding simply ranked past N was never a candidate for a full
+    write-up — connecting the shortfall to it would be a false claim about
+    why it has none."""
+    html = render_report_html(_run(), [
+        _finding(
+            recommendation={"action": "Fix the export path",
+                             "because": "three accounts named it"},
+        ),
+    ])
+    assert "in line for a full write-up" not in html
+
+
+def test_a_finding_that_kept_its_deep_recommendation_gets_no_shortfall_note():
+    """`deep_attempted` can be true on a finding that ALSO kept its deep
+    recommendation (both are read from the same candidate set) — but the
+    note belongs to the plain-recommendation branch only, since a card
+    already showing the full write-up has nothing to explain."""
+    html = render_report_html(_run(), [
+        _finding(
+            deep_recommendation={
+                "action": "Raise the export row cap",
+                "because": "three accounts named it",
+                "changes": [], "open_questions": [],
+                "what_would_falsify": "", "comparison": "",
+            },
+            deep_attempted=True,
+        ),
+    ])
+    assert "the full write-up" in html
+    assert "in line for a full write-up" not in html
+
+
 def test_a_grounded_commercial_figure_is_named_as_evidence_not_a_projection():
     """A real, transcript-stated dollar figure — carried on
     `impact.native_units` (see `pipeline._grounded_commercial_native_units`)

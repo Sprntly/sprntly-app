@@ -1512,6 +1512,7 @@ def _run_enrichment(
     # this route invents. TOTAL, same reasoning as the flat pass above.
     _progress(run_id, company_id, enrichment_step="deep_recommending")
     deep = {}
+    deep_attempted_ids: frozenset[str] = frozenset()
     recommendation_basis = ""
     try:
         from app.crucible.recommend import build_deep_recommendations
@@ -1527,9 +1528,23 @@ def _run_enrichment(
             asked_text=asked_text,
         )
         deep = deep_result.by_id
+        deep_attempted_ids = deep_result.attempted_ids
         recommendation_basis = deep_result.count.basis
     except Exception:  # noqa: BLE001
         logger.exception("crucible: deep recommendations skipped for run %s", run_id)
+
+    # THE FUNNEL'S OWN "written up in full" NUMBER, CORRECTED. `execute_run`
+    # published `deep=result.deep_count` before this function ever ran —
+    # Stage 10a's screening-tier cap (a constant, e.g. 5), which is the best
+    # guess available while a run is still live. The actual deep-RECOMMENDATION
+    # count is not knowable until the citation gate above has run, and it is
+    # routinely smaller (a named count under the cap, or a citation-bar
+    # shortfall). The narration widget and its "How this was narrowed" recap
+    # both read this same stored field and call it "written up in full", so
+    # left uncorrected it states a stale tier cap forever — exactly the
+    # "615 findings — top 5 written up in full" bug reported over a run that
+    # actually wrote 3. Overwritten here, once, with the true count.
+    _progress(run_id, company_id, deep=len(deep))
 
     # CARRIED IN THE RUN'S OWN JSON, not in new columns on `crucible_findings`.
     # Adding columns means a migration against the shared Supabase, which is a
@@ -1555,6 +1570,20 @@ def _run_enrichment(
             **({"recommendation": {
                 "action": recs[f.id].action, "because": recs[f.id].because,
             }} if f.id in recs else {}),
+            # WAS THIS A CANDIDATE FOR A FULL WRITE-UP, EVEN IF IT DID NOT GET
+            # ONE. `f.id in deep_attempted_ids and f.id not in deep` is exactly
+            # the citation-gate-dropped case (or a deep pass that failed
+            # outright) — the finding was in the top N `resolve_recommendation_
+            # count` named, but its evidence did not clear the bar. The
+            # renderer uses this to connect that finding's plain
+            # `recommendation` to the shortfall already disclosed in
+            # `recommendation_basis`, instead of leaving it looking like an
+            # unexplained absence next to findings that were never candidates
+            # at all. Silent (key omitted, since the merge below drops falsy
+            # values) for a finding that kept its deep recommendation — it
+            # already renders one — and for one that was never attempted.
+            **({"deep_attempted": True}
+               if f.id in deep_attempted_ids and f.id not in deep else {}),
             # THE DEEP PASS TAKES PRECEDENCE where both exist — a finding in
             # the deep set is one the flat pass ALSO ran on (`relevant` feeds
             # both), and the renderer shows the deeper one rather than both,
@@ -1701,6 +1730,7 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
     """
     meta = dict(_meta_of(run_id, company_id))
     outcome = "gave_up_after_sweep"
+    enrichment_meta: dict = {}
     try:
         finding_rows, _ledger_rows = runs_db.load_findings(run_id, company_id)
         if finding_rows:
@@ -1728,7 +1758,6 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
                 # still there to read back.
                 asked_text=meta.get("asked_text"),
             )
-            meta.update(enrichment_meta)
             outcome = "completed_by_sweep"
         else:
             # No stored findings at all (should not normally happen — findings
@@ -1745,12 +1774,45 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
             "enrichment_pending without recommendations", run_id,
         )
 
+    # RE-READ, NOT THE SNAPSHOT TAKEN BEFORE `_run_enrichment` RAN. That call
+    # narrates its OWN stages via `_progress` (`judging_relevance`,
+    # `recommending`, `deep_recommending`, and the corrected `deep` count at
+    # its tail) — each one a fresh read-modify-write of this same row's
+    # `prioritisation` blob. Writing back the `meta` snapshot taken at the top
+    # of THIS function, before any of those ran, would silently overwrite
+    # every one of them with what the row looked like before re-enrichment
+    # started: a sweep-completed run would show no `enrichment_step` at all
+    # (or a stale one), while a normally-completed run keeps its last one —
+    # exactly the drift reported live. `execute_run`'s own tail already reads
+    # fresh here for the same reason, after its own call to `_run_enrichment`.
+    meta = dict(_meta_of(run_id, company_id))
+    meta.update(enrichment_meta)
     meta["enrichment_pending"] = False
     meta["enrichment_outcome"] = outcome
     runs_db.update(run_id, company_id, prioritisation=meta)
 
 
-def sweep_stalled_enrichment() -> int:
+#: A single stalled-enrichment recovery measured 22:50:57 -> 22:52:42 on
+#: staging — 105s of synchronous model calls, inline inside the SAME 5-minute
+#: job that also fails abandoned Ask jobs (`scheduler._run_orphan_ask_job_
+#: sweep`, "Fail abandoned Ask jobs (every 5m)"). APScheduler's default
+#: `max_instances=1` means several stranded runs recovered in one tick would
+#: overrun the 5-minute interval and cause SKIPPED executions of that sweep —
+#: a different subsystem's reliability degraded by this one's recovery. The
+#: nesting itself is fine (an existing, deliberate pattern); the unbounded
+#: work per tick is the risk. 2 * 105s ~= 3.5 minutes, leaving real margin
+#: against the interval even after every sweep ahead of this one in
+#: `_run_orphan_ask_job_sweep` has also run. Whatever does not fit in one
+#: tick is simply still a candidate on the next one — `find_stalled_
+#: enrichment` re-lists it (its `heartbeat_at` was never touched), and
+#: `claim_stalled_enrichment`'s compare-and-set means no run is ever silently
+#: skipped forever, only deferred by a few minutes.
+MAX_STALLED_ENRICHMENT_RECOVERIES_PER_TICK = 2
+
+
+def sweep_stalled_enrichment(
+    *, max_recoveries: int = MAX_STALLED_ENRICHMENT_RECOVERIES_PER_TICK,
+) -> int:
     """A deploy that restarts the process mid-enrichment strands a run
     forever: it is already `ready` (findings published), it
     still says `enrichment_pending`, and `sweep_orphans`'s own predicate
@@ -1765,8 +1827,16 @@ def sweep_stalled_enrichment() -> int:
     `scheduler.py`), not startup-only, for the reason `sweep_orphans`'s own
     docstring states: a process that dies at 03:00 must not wait for the next
     deploy to be noticed.
+
+    CAPPED PER TICK (`max_recoveries`) — see `MAX_STALLED_ENRICHMENT_
+    RECOVERIES_PER_TICK`'s own comment for the measured cost this bounds.
+    Candidates beyond the cap are left untouched this tick, not merely
+    counted: `find_stalled_enrichment` orders most-recent-stall-first, so
+    whichever ones this tick does not reach are exactly the ones with the
+    most slack before `STALLED_ENRICHMENT_AGE_MINUTES` next `.range()` page
+    would need to widen — recovered on the next tick instead, never dropped.
     """
-    candidates = runs_db.find_stalled_enrichment()
+    candidates = runs_db.find_stalled_enrichment()[:max_recoveries]
     swept = 0
     for row in candidates:
         run_id, company_id = row["id"], row["company_id"]

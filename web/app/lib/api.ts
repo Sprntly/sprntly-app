@@ -716,6 +716,15 @@ export type GoalFinding = {
     what_would_falsify: string
     comparison: string
   }
+  /** True only when this finding was a candidate for a full write-up (in the
+   *  top N a count named or defaulted to) but did not get one — the citation
+   *  gate dropped it, or the deep pass failed outright. Lets the renderer
+   *  connect the plain `recommendation` below to the shortfall already
+   *  disclosed in `GoalRunDetail["prioritisation"]["recommendation_basis"]`,
+   *  instead of leaving it looking like an unexplained absence. Never true on
+   *  a finding that was simply ranked past N, which never had a full
+   *  write-up coming. */
+  deep_attempted?: boolean
   claim_ids: string[]
   adjudication: string | null
   /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
@@ -926,6 +935,7 @@ export type GoalRunDetail = GoalRun & {
       example?: string
       recommendation?: { action: string; because: string }
       deep_recommendation?: GoalFinding["deep_recommendation"]
+      deep_attempted?: boolean
     }[]
     /** THE HANDSHAKE for the top-of-ranking suggestions. Goes up BEFORE
      *  `status` reaches `ready` and comes down in the same write that

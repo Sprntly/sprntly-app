@@ -988,6 +988,60 @@ describe("AC-2: how many got a full recommendation", () => {
   })
 })
 
+describe("the shortfall, connected to the finding it actually dropped", () => {
+  // "Asked for N, got fewer" is a real, deliberate citation gate — never
+  // weakened. The basis sentence above discloses it once, but a reader who
+  // skips straight to a card and sees only a PLAIN recommendation where a
+  // full write-up would have been cannot tell "never a candidate" from "a
+  // candidate the evidence did not clear the bar for" apart. Mirrors
+  // `report.py`'s `_finding_block`.
+  const withRec = (extra: unknown[], findings = [SIZED]) => ({
+    ...RUN, findings,
+    prioritisation: { ...(RUN.prioritisation ?? {}), findings_extra_by_rank: extra },
+  })
+
+  it("connects a dropped candidate's flat recommendation to the shortfall", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: {
+        action: "Fix the export path",
+        because: "three accounts named it",
+      },
+      deep_attempted: true,
+    }]) as never} />)
+    const card = screen.getByTestId("goal-finding-deep-shortfall")
+    expect(card.textContent).toContain("in line for a full write-up")
+    const cardText = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
+    // Reads AFTER the recommendation it explains, not before.
+    expect(cardText.indexOf("Fix the export path"))
+      .toBeLessThan(cardText.indexOf("in line for a full write-up"))
+  })
+
+  it("says nothing on a finding that was never a candidate for a full write-up", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      recommendation: {
+        action: "Fix the export path",
+        because: "three accounts named it",
+      },
+    }]) as never} />)
+    expect(screen.queryByTestId("goal-finding-deep-shortfall")).toBeNull()
+  })
+
+  it("says nothing on a finding that kept its deep recommendation", () => {
+    render(<GoalAnalysisReport run={withRec([{
+      deep_recommendation: {
+        action: "Raise the export row cap",
+        because: "three accounts named it",
+        changes: [], open_questions: [], what_would_falsify: "",
+        comparison: "",
+      },
+      deep_attempted: true,
+    }]) as never} />)
+    expect(screen.getAllByTestId("goal-finding")[0].textContent)
+      .toContain("the full write-up")
+    expect(screen.queryByTestId("goal-finding-deep-shortfall")).toBeNull()
+  })
+})
+
 describe("the goal-relevance gate, in the panel", () => {
   // Apurva ruled for a gate after a run for "grow revenue by 5%" led with three
   // descriptions of the company's OWN product — the order is how many accounts
