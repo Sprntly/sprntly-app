@@ -583,3 +583,57 @@ describe("ChatScreen — a panel that becomes ready while the reader is elsewher
       expect(screen.getByTestId("panel-probe").textContent).toBe("tickets"))
   })
 })
+
+
+// The REPORT half of the same rule. Reported after the PRD half was fixed and
+// this one was not: "for report… I started a new chat and asked for a report,
+// and the panel is not yet in, I move to another tab, it shows the reports on
+// the other tab even when I've not asked any question."
+//
+// The report panel opens EARLY — before the answer, because a report streams
+// into the panel and the spinner has to exist before the first delta — but not
+// early enough to beat a reader: it lands after the planner round-trip, which
+// is seconds.
+describe("ChatScreen — a report panel opened while the reader is elsewhere", () => {
+  it("waits for the tab that asked instead of opening over the new one", async () => {
+    let release!: () => void
+    resolveIntent.mockImplementationOnce(
+      () => new Promise((resolve) => {
+        release = () => resolve({
+          intent: "answer", confidence: 0.9, task: null, instruction: null,
+          reason: "a calls question", source: "planner",
+          prd_id: null, prd_title: null, report: true,
+        })
+      }),
+    )
+    // The report really lands, so the panel legitimately belongs open at the
+    // end — otherwise the "no report produced" close would clear it and this
+    // test would pass for the wrong reason.
+    runAskGeneration.mockResolvedValueOnce({
+      answer: "## Voice of customer", sources: [], follow_ups: [], key_points: [],
+      citations: [], confidence: 1, unanswered: "", _report: true,
+    })
+    renderChat()
+
+    await typeAndSend("give me a voice of customer report for last week")
+
+    // The reader opens a new tab while the planner is still thinking.
+    const newTabBtn = document.querySelector(".chat-tab")!
+      .parentElement!.querySelector('button[aria-label="New chat"]') as HTMLButtonElement
+    await act(async () => { fireEvent.click(newTabBtn) })
+
+    await act(async () => { release() })
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+
+    // The fresh tab asked for nothing.
+    expect(screen.getByTestId("panel-probe").textContent).toBe("closed")
+
+    // The tab that DID ask has it waiting.
+    const askingTab = Array.from(document.querySelectorAll(".chat-tab"))
+      .find((t) => !t.hasAttribute("data-tab-pinned") && !t.textContent?.includes("New chat"))
+    expect(askingTab).toBeTruthy()
+    await act(async () => { fireEvent.click(askingTab!) })
+    await waitFor(() =>
+      expect(screen.getByTestId("panel-probe").textContent).toBe("reports"))
+  })
+})

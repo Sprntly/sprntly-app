@@ -774,7 +774,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 }
                 if (activeTab?.prd) {
                   setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                  openContentPanel("tickets")
+                  openPanelForTab(activeTab.id, "tickets")
                   settlePendingSend()
                   return
                 }
@@ -820,7 +820,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                       reportFocusStandalone: false,
                       reportsRefreshKey: Date.now(),
                     })
-                    openContentPanel("reports")
+                    openPanelForTab(tabId, "reports")
                     return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                   }
                   const res = await customArtifactsApi.chatEdit(target.id, instruction)
@@ -828,7 +828,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                     return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
                   }
                   setContent({ documentId: target.id, documentGenerating: false })
-                  openContentPanel("document")
+                  openPanelForTab(tabId, "document")
                   return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                 })
                 settlePendingSend()
@@ -1027,7 +1027,15 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
           reportFocusId: null,
           reportFocusStandalone: false,
         })
-        openContentPanel("reports")
+        // FOR THE TAB THAT ASKED, not for wherever the reader is by now. This
+        // open is several seconds after the send — the planner round-trip, then
+        // attachment extraction — and it used to call `openContentPanel`
+        // directly, so starting a report and stepping to another tab put a
+        // "Generating report…" panel over a thread that had asked for nothing.
+        // Reported after the PRD path was fixed and this one was not: "for
+        // report… I move to another tab, it shows the reports on the other tab
+        // even when I've not asked any question."
+        openPanelForTab(targetTabId, "reports")
       }
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments, reportRun })
     },
