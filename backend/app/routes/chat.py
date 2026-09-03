@@ -74,9 +74,9 @@ class ChatIntentIn(BaseModel):
     # chat renders match its project-scoped prose. No source (every main-chat
     # client) ⇒ workspace-wide listing, unchanged.
     context_source: dict | None = None
-    # What the tab has OPEN in its side panel besides a PRD: the report or the
-    # document the user is looking at, as `{"kind": "report"|"document",
-    # "id": int, "title": str}`. The planner is TOLD about it
+    # What the tab has OPEN in its side panel besides a PRD: the report, the
+    # team document or the evidence page the user is looking at, as
+    # `{"kind": "report"|"document"|"evidence", "id": int, "title": str}`. The planner is TOLD about it
     # (`ask_planner._open_artifact_block`), which is what gives "convert that
     # section into a table" a referent instead of an answer that prints the
     # rewritten section into the chat. Ownership-resolved below, never trusted:
@@ -88,7 +88,9 @@ def _resolve_open_artifact(raw: dict | None, company) -> dict | None:
     """The report/document the tab has open, re-read under this company's scope.
 
     Returns `{"kind", "id", "title"}` or None — None for anything absent,
-    malformed, of an unknown kind, or belonging to another company. Never
+    malformed, of an unknown kind, or belonging to another company. The kinds
+    are the ones an edit can act on: a report, a team document, and an
+    evidence page. Never
     raises: a panel pointer that no longer resolves is a message with no open
     artifact, not a failed send, and the classify endpoint's whole contract is
     that it fails open to `answer`.
@@ -116,6 +118,18 @@ def _resolve_open_artifact(raw: dict | None, company) -> dict | None:
             from app.db.custom_artifacts import get_artifact
 
             row = get_artifact(company.company_id, artifact_id)
+            title = (row or {}).get("title") or ""
+        elif kind == "evidence":
+            # Resolved through the SAME ownership chain the evidence routes
+            # use (evidence → brief → dataset → company), which raises rather
+            # than returning None — caught below with every other lookup
+            # failure, because a pointer that does not resolve is a message
+            # with no open artifact, never a failed send.
+            from app.deps.ownership import require_owned_evidence
+
+            row = require_owned_evidence(
+                artifact_id, company.company_id, company.workspace_id
+            )
             title = (row or {}).get("title") or ""
         else:
             return None
