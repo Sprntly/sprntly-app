@@ -134,6 +134,11 @@ export interface MainConversationAdapter {
   postSummary: (key: string, kind: "prd" | "evidence" | "prototype" | "ticket_set", artifactId: number) => void
   setContent: (patch: Partial<AppContentState>) => void
   openContentPanel: (tab: ContentPanelTab) => void
+  /** Open a panel FOR A NAMED TAB — now if it is on screen, else held on that
+   *  tab until the reader returns. Forwarded straight to the generation flows;
+   *  see `ChatScreen.openPanelForTab` for why an async panel must not follow
+   *  the reader. */
+  openPanelForTab: (tabId: string, tab: ContentPanelTab) => void
   /** Take the panel down. Used by the report path when a run that opened it
    *  turns out not to have produced a document. */
   closeContentPanel: () => void
@@ -302,6 +307,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postSummary,
     setContent,
     openContentPanel,
+    openPanelForTab,
     closeContentPanel,
     content,
     composer,
@@ -500,6 +506,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     finalizeConversationTurn,
     setContent,
     openContentPanel,
+    openPanelForTab,
     content,
     showToast,
     openArtifactInPanel,
