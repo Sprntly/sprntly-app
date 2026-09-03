@@ -223,12 +223,48 @@ def test_build_brief_folds_source_content_into_brief_prompt(isolated_settings, m
         tool_input={"assignee": "Fortune", "task_summary": "Prioritize the feedback"},
         source_content="THEMES_FROM_THE_THREAD: users want dark mode; onboarding is too slow.",
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(calls) == 1
     assert "THEMES_FROM_THE_THREAD" in calls[0]["user"], (
         "the brief prompt must carry the requester's actual content, not "
         "only the task_summary label and general project memory"
     )
+
+
+def test_delegation_confirmation_names_assignee_echoes_task_and_promises_followup(
+    isolated_settings, monkeypatch
+):
+    """A3: the assigner's confirmation (the grounded handler return — emitted
+    ONLY with a persisted delegation row) names the assignee, echoes the actual
+    task, and keeps the 'marked it done' completion promise; it is no longer the
+    terse 'Sent the brief to X's chat.'"""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    result = _delegate(
+        project, ctx.user_id, task="Review the integration test coverage"
+    )
+    assert "Fortune Adeyemi" in result  # names the assignee
+    assert "Review the integration test coverage" in result  # echoes the task
+    assert "marked it done" in result  # keeps the (now-backed) completion promise
+    assert "Sent the brief" not in result  # the old terse copy is gone
+
+
+def test_delegation_confirmation_truncates_a_long_task(isolated_settings, monkeypatch):
+    """A huge task_summary is capped (~120 chars + ellipsis) so it can't blow up
+    the one-line confirmation."""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    long_task = "Audit every module " * 40  # ~800 chars
+    result = _delegate(project, ctx.user_id, task=long_task)
+    assert "…" in result, "an over-long task must be truncated with an ellipsis"
+    # the echoed task segment (between the quotes) is capped at 120 chars
+    echoed = result.split('"')[1]
+    assert len(echoed) <= 120
+    assert "marked it done" in result
 
 
 def test_build_brief_without_source_content_is_backward_compatible(isolated_settings, monkeypatch):
@@ -241,7 +277,7 @@ def test_build_brief_without_source_content_is_backward_compatible(isolated_sett
     calls = _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(calls) == 1
     assert "actually about" not in calls[0]["user"].lower()
 
@@ -307,7 +343,7 @@ def test_delivery_only_into_assignee_own_individual_thread(isolated_settings, mo
     _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -399,7 +435,7 @@ def test_non_member_assignee_no_write(isolated_settings, monkeypatch):
     # now occurs, proving the gate (not something else) was blocking it.
     monkeypatch.setattr(project_delegation, "is_project_member", lambda *a, **kw: True)
     result2 = _delegate(project, ctx.user_id, assignee="Outsider")
-    assert "Sent the brief" in result2
+    assert "Assigned to" in result2
     assert len(require_client().table("project_delegations").select("id").execute().data) == 1
     assert (
         len(
@@ -566,7 +602,7 @@ def test_delegation_emits_single_assigned_genesis(isolated_settings, monkeypatch
     _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -606,7 +642,7 @@ def test_genesis_failure_does_not_rollback_delegation(isolated_settings, monkeyp
     monkeypatch.setattr(project_delegation, "record_event", _boom)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+    assert "Assigned to" in result, "the delegation must still succeed and report normally"
 
     from app.db.client import require_client
 
@@ -663,7 +699,7 @@ def test_handle_delegate_task_seeds_followup_row(isolated_settings, monkeypatch)
     before = datetime.now(timezone.utc)
     result = _delegate(project, ctx.user_id)
     after = datetime.now(timezone.utc)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -708,7 +744,7 @@ def test_handle_delegate_task_seed_failure_is_best_effort(isolated_settings, mon
 
     with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
         result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+    assert "Assigned to" in result, "the delegation must still succeed and report normally"
 
     from app.db.client import require_client
 
@@ -779,7 +815,7 @@ def test_delegation_create_publishes_event_to_both_parties(isolated_settings, mo
     )
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     events = [p for p in published if p[1] == "delegation.event"]
     assert len(events) == 2, published
@@ -812,7 +848,7 @@ def test_self_delegation_declines_no_row_no_publish(isolated_settings, monkeypat
     # The assigner (full_name "Alex Assigner") is a member of their own project,
     # so a hand-off to "Alex" resolves to self — and is declined.
     result = _delegate(project, ctx.user_id, assignee="Alex")
-    assert "Sent the brief" not in result
+    assert "Assigned to" not in result
     assert "only hand tasks off to" in result.lower()
 
     # The ledger is never polluted with a self-row, and nothing is broadcast.
@@ -836,7 +872,7 @@ def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, 
     monkeypatch.setattr(project_delegation, "status_dto", _boom)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "a create-publish hiccup must never break the hand-off"
+    assert "Assigned to" in result, "a create-publish hiccup must never break the hand-off"
 
     from app.db.client import require_client
 
@@ -869,7 +905,7 @@ def test_delegate_task_sends_assignment_email_to_assignee(isolated_settings, mon
     )
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(calls) == 1
     assert calls[0]["to_email"] == f"{assignee_id}@co.com"
     assert calls[0]["assigner_name"] == "Alex Assigner"
@@ -893,7 +929,7 @@ def test_delegate_task_assignment_email_skipped_without_recipient_email(
     )
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "a missing email must never block the delegation"
+    assert "Assigned to" in result, "a missing email must never block the delegation"
     assert calls == []
 
 
@@ -913,7 +949,7 @@ def test_delegate_task_assignment_email_failure_is_best_effort(
 
     with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
         result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
     delegations = (
@@ -1049,7 +1085,7 @@ def test_delegation_emits_one_brief_cost_line(isolated_settings, monkeypatch, ca
 
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     brief_lines = [
         r.getMessage() for r in caplog.records if "projects.delegation.brief" in r.getMessage()
