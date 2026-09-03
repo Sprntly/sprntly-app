@@ -627,7 +627,7 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     # the `backlog_action` action, neither of which any earlier version could
     # name. The version is pinned here rather than merely compared to itself
     # because pooling rows across versions would pool two different menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v17"
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v20"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
