@@ -199,19 +199,41 @@ def test_dispatch_swallows_a_raising_side_effect_without_surfacing_it(monkeypatc
     monkeypatch.setattr(projects_routes, "_run_member_add_side_effects", _boom)
     monkeypatch.setattr(projects_routes.sys, "modules", _no_pytest_sys_modules())
 
+    # Capture the future at SUBMIT time rather than reading it back out of
+    # `_inflight_member_add_futures` afterwards. `_boom` raises the instant the
+    # pool picks it up, so on a loaded runner the future can already be DONE by
+    # the time the dispatcher reaches `add_done_callback` — and a callback
+    # added to an already-finished future runs synchronously, right there,
+    # discarding the future from the set before this test ever looks at it.
+    # Asserting `len(set) == 1` after dispatch therefore raced the pool thread:
+    # it lost under CI load (`assert 0 == 1`) while passing locally. Production
+    # is correct either way — the strong ref is held from `.add()` until the
+    # callback discards it — only the test's "still in flight" assumption was.
+    captured: list = []
+    real_submit = projects_routes._MEMBER_ADD_POOL.submit
+
+    def _capturing_submit(fn, *args, **kwargs):
+        future = real_submit(fn, *args, **kwargs)
+        captured.append(future)
+        return future
+
+    monkeypatch.setattr(projects_routes._MEMBER_ADD_POOL, "submit", _capturing_submit)
+
     # Must not raise here — the future's exception is only observable via
     # future.exception()/the done-callback, never by calling the dispatcher.
     projects_routes._dispatch_member_add_side_effects(
         project_id=1, user_id="u1", project_name="P", dataset="ds",
         company_id="co", email="e@x.co", recipient_name="E",
     )
-    futures = list(projects_routes._inflight_member_add_futures)
-    assert len(futures) == 1
-    # The pool discards + logs it via the done-callback; wait for that.
+    assert len(captured) == 1
+    future = captured[0]
+    # The pool discards + logs it via the done-callback; wait for that. It may
+    # already have happened before this line runs — see above.
     import time
 
     for _ in range(50):
-        if futures[0] not in projects_routes._inflight_member_add_futures:
+        if future not in projects_routes._inflight_member_add_futures:
             break
         time.sleep(0.05)
-    assert isinstance(futures[0].exception(timeout=5), RuntimeError)
+    assert future not in projects_routes._inflight_member_add_futures
+    assert isinstance(future.exception(timeout=5), RuntimeError)
