@@ -389,6 +389,21 @@ class ImpactInputs:
     `affected_population` and `movable_gap` are `Optional` because a corpus that
     never measured them yields `None`, which must survive to the output as
     "not measured" rather than collapsing to a confident zero (I3).
+
+    `size_band` IS A CROSS-FINDING COMPARISON, AND IT IS STILL NOT
+    CORROBORATION. Every other field here describes this finding alone; the
+    band describes where its size falls among the other findings in the same
+    run. That is a legitimate thing for size to depend on and an illegitimate
+    thing for size to be computed from at scoring time, so the comparison
+    happens in Stage 8 — BEFORE any scoring — and arrives here as an ordinary
+    input. `score_impact` still reads this object and nothing else.
+
+    The distinction that keeps I1 intact: the band ranks findings by how much
+    money or how many accounts they carry, never by how many claims say so.
+    An amount restated ten times and an amount stated once band identically,
+    because the sum they band on is deduplicated before it is taken (see
+    `pipeline._grounded_commercial_native_units`). Corroboration cannot reach
+    this field, which is why the dedup had to land first.
     """
     currency: GoalCurrency
     affected_population: Optional[float]
@@ -396,6 +411,11 @@ class ImpactInputs:
     value_per_unit: Optional[float]
     assumed_params: tuple[AssumedParam, ...] = ()
     native_units: Mapping[str, float] = field(default_factory=dict)
+    #: Ordinal quartile of this finding's size against its OWN currency's
+    #: peers in the same run — dollar findings against dollar findings,
+    #: reach findings against reach findings. 4 is largest. `None` means
+    #: there was nothing to band: no grounded figure and no measured reach.
+    size_band: Optional[int] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -405,7 +425,7 @@ class ImpactInputs:
     def __hash__(self) -> int:
         return hash((self.currency, self.affected_population, self.movable_gap,
                      self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units)))
+                     _hashable(self.native_units), self.size_band))
 
 
 @dataclass(frozen=True)
@@ -444,6 +464,13 @@ class Impact:
     value_per_unit: Optional[float]
     assumed_params: tuple[AssumedParam, ...] = ()
     native_units: Mapping[str, float] = field(default_factory=dict)
+    #: Carried through from `ImpactInputs` unchanged, so ordering can read it
+    #: off the FROZEN score without ever recomputing a comparison (I10). A
+    #: finding can be unsizeable in the goal's currency (`value is None`) and
+    #: still carry a band, which is the case a quoted figure with no named
+    #: account produces: we did not measure its reach, and saying so is not
+    #: the same as saying it is worth nothing.
+    size_band: Optional[int] = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -453,7 +480,7 @@ class Impact:
     def __hash__(self) -> int:
         return hash((self.value, self.currency, self.affected_population,
                      self.movable_gap, self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units)))
+                     _hashable(self.native_units), self.size_band))
 
 
 @dataclass(frozen=True)

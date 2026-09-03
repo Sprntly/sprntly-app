@@ -75,6 +75,53 @@ def test_it_still_holds_for_a_reach_only_impact():
     assert_impact_ignores_corroboration(score_impact, a_finding(impact=reach_only))
 
 
+def test_it_still_holds_for_a_banded_impact():
+    """The band is the ONE input here computed by comparing findings against
+    each other, so it is the one place corroboration could re-enter size
+    without touching a field named like corroboration. The harness sweeps
+    every `ConfidenceInputs` and `Finding` field against a banded probe to
+    prove the scorer reads the band and nothing that travels with it."""
+    banded = ImpactInputs(
+        currency="accounts", affected_population=12.0,
+        movable_gap=1.0, value_per_unit=None, size_band=4,
+    )
+    assert_impact_ignores_corroboration(score_impact, a_finding(impact=banded))
+
+
+def test_the_band_passes_through_untouched_and_never_reaches_value():
+    """`value` is denominated in ACCOUNTS on a corpus-only run. If a band —
+    or the money behind it — ever leaked into `value`, a finding that named
+    any figure would beat every reach-based finding by orders of magnitude,
+    which is the loudest-problem failure wearing a currency symbol."""
+    inputs = ImpactInputs(currency="accounts", affected_population=12.0,
+                          movable_gap=1.0, value_per_unit=None)
+    unbanded = score_impact(a_finding(impact=inputs))
+    banded = score_impact(a_finding(
+        impact=dataclasses.replace(inputs, size_band=4)))
+
+    assert unbanded.size_band is None
+    assert banded.size_band == 4
+    assert banded.value == unbanded.value == 12.0
+    assert banded.affected_population == unbanded.affected_population
+    assert banded.movable_gap == unbanded.movable_gap
+    assert banded.value_per_unit == unbanded.value_per_unit
+
+
+def test_a_figure_only_finding_carries_a_band_while_staying_unsizeable():
+    """The case the band exists for. No named account means no measured
+    reach, so `value` is honestly `None` — and the band still lets it be
+    ordered against its own currency's peers instead of sinking below every
+    finding we could size."""
+    inputs = ImpactInputs(currency="accounts", affected_population=None,
+                          movable_gap=None, value_per_unit=None,
+                          native_units={"commercial_grounded_usd": 340000.0},
+                          size_band=4)
+    impact = score_impact(a_finding(impact=inputs))
+    assert impact.value is None
+    assert impact.size_band == 4
+    assert impact.native_units["commercial_grounded_usd"] == 340000.0
+
+
 def test_adding_a_corroboration_bonus_to_impact_would_be_caught():
     """Mutation proof against the real function: the exact change spec F2
     predicts under deadline."""

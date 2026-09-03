@@ -20,8 +20,9 @@ from __future__ import annotations
 
 import logging
 import re
+from bisect import bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
@@ -107,6 +108,13 @@ UNGROUPED_STAGE = "ungrouped"
 AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 
 
+#: The `native_units` key carrying a finding's deduplicated, transcript-stated
+#: dollar sum. Named once so the code that WRITES the sum and the code that
+#: BANDS on it can never read different keys — a silent typo there would mean
+#: no dollar finding ever bands, and nothing would fail.
+GROUNDED_USD_UNIT = "commercial_grounded_usd"
+
+
 def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float]:
     """Real, transcript-stated dollar figures among THIS finding's claims —
     additive evidence carried alongside Impact on `native_units`, never
@@ -184,10 +192,146 @@ def _grounded_commercial_native_units(group: Sequence[Claim]) -> dict[str, float
     # it: it counts agreement, and agreement is confidence's business.
     units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
     if usd_amounts:
-        units["commercial_grounded_usd"] = float(sum(usd_amounts))
+        units[GROUNDED_USD_UNIT] = float(sum(usd_amounts))
     if accounts_named:
         units["commercial_grounded_accounts"] = float(len(accounts_named))
     return units
+
+
+#: How many ordinal bands a run sorts sizes into. Quartiles: enough to
+#: separate a big finding from a small one, few enough that the output never
+#: implies a precision the underlying evidence cannot support. A percentile
+#: would read as measurement; a quartile reads as what it is, a rough
+#: position among peers.
+SIZE_BANDS = 4
+
+
+def _quartile_bands(values: Sequence[float]) -> dict[float, int]:
+    """value -> its quartile (1..4, 4 largest) within `values`.
+
+    Ties always share a band — the rank used is the count of the population
+    AT OR BELOW each value, so two findings of identical size can never be
+    separated by an accident of iteration order. That matters more than it
+    sounds: ordering has to be reproducible run over run, which is the whole
+    claim this engine makes against asking a general model the same question.
+
+    The largest member of any population is in its own top quartile, which is
+    also true of a population of one. That is deliberate rather than a
+    degenerate case: a lone quoted figure IS the largest quoted figure in the
+    run, and the band says only that, never that it is large in absolute
+    terms.
+    """
+    if not values:
+        return {}
+    ordered = sorted(values)
+    n = len(ordered)
+    bands: dict[float, int] = {}
+    for value in set(ordered):
+        rank = bisect_right(ordered, value)
+        # Ceiling division, so the top of the population lands in band 4 and
+        # nothing lands in band 0.
+        bands[value] = max(1, min(SIZE_BANDS, -(-SIZE_BANDS * rank // n)))
+    return bands
+
+
+def _size_bands(
+    findings: Sequence[Finding], provisional: Sequence[Impact],
+) -> list[Optional[int]]:
+    """The one cross-finding comparison in this pipeline, and the reason it
+    lives HERE rather than inside `score_impact`.
+
+    THE PROBLEM. A finding carrying a real quoted dollar figure but no named
+    account scores `value=None` — we know what a customer said and nothing
+    about how many accounts it touches — so it sorted below every finding we
+    could size, however trivially. Findings holding actual money ranked last,
+    which is the opposite of what a stated figure is worth. And the obvious
+    repair, adding the dollars to `value`, is worse than the disease: `value`
+    is denominated in accounts here, so dollars would win by six orders of
+    magnitude and naming any figure at all would beat every reach-based
+    finding in the corpus.
+
+    THE ANSWER IS ORDINAL, AND EACH FINDING COMPETES IN ITS OWN CURRENCY.
+    Dollar findings are banded against the other dollar findings; reach
+    findings against the other reach findings. A figure in the top quartile of
+    quoted figures and a reach in the top quartile of reaches are both "the
+    biggest of their kind", which IS comparable, where their raw numbers are
+    not. A finding that has both takes the higher of its two bands, so
+    carrying more evidence can lift a finding and can never demote one.
+
+    WHAT THIS DELIBERATELY DOES NOT DO. It does not guarantee a dollar
+    finding reaches the top of the list. If the only quoted figures in a
+    corpus are small, the smallest of them sits in a low band and stays
+    there. Guaranteeing the dollar line renders would mean a $5,000 one-off
+    outranking a forty-account finding, which is the loudest-problem failure
+    rebuilt with a currency symbol on it. The band earns its place or it does
+    not.
+
+    I10 IS SATISFIED, and the direction matters. I10 forbids Stage 10 writing
+    BACKWARD into frozen scores; this reads forward, before the freeze:
+    inputs are compared, the answer is written into `ImpactInputs`, and only
+    then is anything scored. Ordering afterwards reads the frozen `Impact` and
+    mutates nothing, exactly as before.
+    """
+    dollar_values: list[float] = []
+    reach_values: list[float] = []
+    per_finding: list[tuple[Optional[float], Optional[float]]] = []
+    for finding, impact in zip(findings, provisional):
+        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        usd = float(usd) if isinstance(usd, (int, float)) else None
+        reach = impact.value
+        if usd is not None:
+            dollar_values.append(usd)
+        if reach is not None:
+            reach_values.append(reach)
+        per_finding.append((usd, reach))
+
+    dollar_bands = _quartile_bands(dollar_values)
+    reach_bands = _quartile_bands(reach_values)
+
+    bands: list[Optional[int]] = []
+    for usd, reach in per_finding:
+        candidates = [
+            band for band in (
+                dollar_bands.get(usd) if usd is not None else None,
+                reach_bands.get(reach) if reach is not None else None,
+            )
+            if band is not None
+        ]
+        bands.append(max(candidates) if candidates else None)
+    return bands
+
+
+def _log_size_bands(findings: Sequence[Finding], bands: Sequence[Optional[int]]) -> None:
+    """The figures behind each dollar band, so a reader can check whether the
+    banding is doing something sensible on a real corpus.
+
+    Without this the band is an unfalsifiable integer. The specific thing it
+    exists to expose: in a corpus whose largest quoted figure happens to be
+    small, that figure still lands in band 4 and outranks reach findings.
+    That is correct by the ordinal design and may still be wrong for a
+    reader, and the only way to find out is to see the amounts next to the
+    bands. Magnitudes and counts only — never a paraphrase, an account name
+    or anything a customer said.
+    """
+    dollars_by_band: defaultdict[int, list[float]] = defaultdict(list)
+    reach_by_band: defaultdict[int, int] = defaultdict(int)
+    for finding, band in zip(findings, bands):
+        if band is None:
+            continue
+        usd = finding.impact_inputs.native_units.get(GROUNDED_USD_UNIT)
+        if isinstance(usd, (int, float)):
+            dollars_by_band[band].append(float(usd))
+        else:
+            reach_by_band[band] += 1
+    if not dollars_by_band and not reach_by_band:
+        return
+    logger.info(
+        "crucible_size_bands dollar_figures_by_band=%s reach_findings_by_band=%s "
+        "unbanded=%s",
+        {b: sorted(v, reverse=True) for b, v in sorted(dollars_by_band.items())},
+        dict(sorted(reach_by_band.items())),
+        sum(1 for b in bands if b is None),
+    )
 
 
 @dataclass(frozen=True)
@@ -516,8 +660,30 @@ def build_findings(
             adjudication=_adjudicate(group),
         )
         findings.append(finding)
-        impacts.append(score_impact(finding))
-        confidences.append(score_confidence(finding, now=now))
+
+    # ── The ordinal size band: the ONE cross-finding comparison ─────────────
+    #
+    # SCORED TWICE, ON PURPOSE, and only the second result ever escapes. The
+    # reach half of the band is `score_impact`'s own arithmetic, so the
+    # alternative was to re-derive `affected_population * movable_gap *
+    # value_per_unit` here — a second copy of the sizing formula, free to
+    # drift from the real one and wrong in a way no test would catch, because
+    # both copies would agree until someone changed one. Calling the real
+    # scorer for a throwaway pass costs nothing (it is pure arithmetic over a
+    # frozen dataclass) and there is then exactly one definition of size.
+    #
+    # The provisional impacts are discarded here and never reach a caller.
+    provisional = [score_impact(f) for f in findings]
+    bands = _size_bands(findings, provisional)
+    _log_size_bands(findings, bands)
+    findings = [
+        f if band is None else replace(
+            f, impact_inputs=replace(f.impact_inputs, size_band=band)
+        )
+        for f, band in zip(findings, bands)
+    ]
+    impacts = [score_impact(f) for f in findings]
+    confidences = [score_confidence(f, now=now) for f in findings]
 
     if len(rejected) > MAX_LISTED_REJECTIONS:
         rejected.sort(key=lambda r: (-len(r.claim_ids), r.label))
@@ -584,16 +750,34 @@ def _rank(
 ) -> list[int]:
     """Order by size, then by how sure — reading FROZEN scores (I10).
 
-    An unsizeable finding sorts last but is never dropped and never treated as
-    zero: "we could not size this" and "this is worth nothing" lead to opposite
-    decisions. An authoritative conflict outranks everything, because two
-    sources that may both speak disagreeing is worth more than either claim.
+    Size is read as the ORDINAL BAND first and the raw `value` second, and
+    that order is the point. `value` is denominated differently for different
+    findings on the same run — accounts for a reach-based finding, nothing at
+    all for one whose only evidence is a quoted dollar figure — so sorting the
+    whole list on one raw number was comparing incommensurable things and
+    putting every unsizeable finding last by construction. The band makes them
+    comparable: it says "biggest of its kind", which is true in either
+    currency. `value` then orders WITHIN a band, where everything left is the
+    same kind of number.
+
+    This preserves reach-only ordering exactly. The band is monotone in reach,
+    so sorting reach findings by band and then by value is the same order as
+    sorting them by value alone — a finding with no figure is where it always
+    was, relative to the others with no figure.
+
+    An unbanded finding — no grounded figure and no measured reach — sorts
+    last but is never dropped and never treated as zero: "we could not size
+    this" and "this is worth nothing" lead to opposite decisions. An
+    authoritative conflict outranks everything, because two sources that may
+    both speak disagreeing is worth more than either claim.
     """
     def key(i: int):
         conflict = findings[i].adjudication == "conflict"
+        band = impacts[i].size_band
         value = impacts[i].value
         return (
             0 if conflict else 1,
+            -(band if band is not None else 0),
             -(value if value is not None else -1),
             -confidences[i].score,
         )
