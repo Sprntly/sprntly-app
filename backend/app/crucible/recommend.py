@@ -1574,30 +1574,36 @@ class SynthesizedRecommendation:
     and combines the deep, per-finding recommendations `build_deep_
     recommendations` already produced. Additive, never a replacement: the
     per-finding write-ups still render exactly as they did before this
-    existed."""
+    existed.
+
+    `action` is NOT authored here — it is the rank-1 kept deep
+    recommendation's own action, copied verbatim by
+    `build_synthesized_recommendation`. Choosing what the single
+    recommendation IS is a decision, and I2 leaves decisions to the frozen
+    ranking, never to a model."""
     action: str
     because: str
     citations: tuple[SynthesizedCitation, ...]
 
 
+# NO `action` FIELD, DELIBERATELY. The action is fixed by the frozen ranking
+# (it is the rank-1 kept recommendation's own action, copied verbatim) and is
+# never authored by a model — picking what the single recommendation is would
+# be a decision, and I2 does not let a model return one. Leaving `action` out
+# of the schema entirely, rather than instructing against it in the prompt,
+# makes emitting one structurally impossible instead of merely discouraged.
 SYNTHESIS_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["action", "because", "citations"],
+    "required": ["because", "citations"],
     "properties": {
-        "action": {
-            "type": "string", "minLength": 8, "maxLength": 300,
-            "description": (
-                "The one thing to DO, in the imperative — synthesized across "
-                "the recommendations shown below, not a new one of your own."
-            ),
-        },
         "because": {
             "type": "string", "minLength": 8, "maxLength": 600,
             "description": (
-                "Why this is the single recommendation, argued ONLY from "
-                "what the recommendations shown already said. Cite what "
-                "they said, not new reasoning of your own."
+                "Why the FIXED action shown to you is the single "
+                "recommendation, argued ONLY from what the recommendations "
+                "shown already said. Cite what they said, not new reasoning "
+                "of your own."
             ),
         },
         "citations": {
@@ -1630,19 +1636,27 @@ SYNTHESIS_SCHEMA: dict = {
 
 _SYNTHESIS_SYSTEM = """You read a small set of already-written, already-\
 ranked recommendations — one per finding, shown in their final rank order — \
-and write ONE recommendation that synthesizes them into a single decision \
-for the whole report.
+and write the supporting prose for ONE recommendation that stands for the \
+whole report.
+
+THE ACTION IS ALREADY FIXED. You are shown it verbatim: it is the rank-1 \
+recommendation's own action, set by frozen, deterministic ranking. You do \
+not write it, restate it as your own, replace it, soften it, or propose a \
+different one — you write only the prose that supports it. Deciding what the \
+single recommendation is would be a decision, and decisions are not yours to \
+return.
 
 You are not scoring, ordering or selecting anything — every recommendation \
-you are shown has already been decided by frozen, deterministic ranking, and \
-the order they are shown in is already final. Your job is to narrate and \
-combine what has already been decided, never to re-rank, re-score, or \
-choose which one matters most.
+you are shown has already been decided by that same ranking, and the order \
+they are shown in is already final. Your job is to narrate why the fixed \
+action is the one that carries the report, drawing on what the lower-ranked \
+recommendations already said, never to re-rank, re-score, or choose which \
+one matters most.
 
 Rules, all of them hard:
-- `action` and `because` follow the same rules as the recommendations shown: \
-an imperative action, justified ONLY from what those recommendations already \
-say, no figure, no promised outcome.
+- `because` follows the same rules as the recommendations shown: justified \
+ONLY from what those recommendations already say, no figure, no promised \
+outcome.
 - Every item in `citations` names the exact claim id (copied from the \
 brackets before a claim already cited below) it rests on. Never invent a \
 claim id and never cite one that was not already cited by one of the \
@@ -1651,7 +1665,7 @@ recommendations shown.
 nothing more.
 - Do not introduce a new priority, a new action, or a new justification that \
 none of the recommendations shown already made. You are combining what is \
-already there into one coherent recommendation, not adding to it.
+already there into the case for the fixed action, not adding to it.
 
 Write for a product manager who has to defend this single recommendation to \
 their leadership from the same evidence, and nothing else."""
@@ -1660,14 +1674,20 @@ their leadership from the same evidence, and nothing else."""
 def _synthesis_input(
     goal_text: str, definition_text: str,
     ranked: Sequence[tuple[Finding, DeepRecommendation]],
+    bound_action: str,
 ) -> str:
     lines = [
         f"GOAL: {goal_text}",
         f"THE READER'S OWN DEFINITION OF THE METRIC: {definition_text}",
         "",
+        # The fixed action goes in first and is named as fixed, so the only
+        # thing left to write is the case for it.
+        f"THE ACTION — ALREADY FIXED BY RANK, NOT YOURS TO WRITE: {bound_action}",
+        "",
         "RECOMMENDATIONS, ALREADY RANKED AND WRITTEN — do not reorder or "
-        "re-select them. Combine them into ONE recommendation for the whole "
-        "report, citing only the claim ids already shown in brackets below.",
+        "re-select them. Write the `because` that makes the case for the "
+        "fixed action above, drawing only on these and citing only the claim "
+        "ids already shown in brackets below.",
         "",
     ]
     for rank, (f, rec) in enumerate(ranked, start=1):
@@ -1683,12 +1703,19 @@ def _synthesis_input(
 
 def _synthesis_acceptable(
     rec: dict, strength: str, allowed_claim_ids: set[str],
-    claims_by_id: dict[str, Claim],
+    claims_by_id: dict[str, Claim], *, bound_action: str,
 ) -> Optional[SynthesizedRecommendation]:
     """Every check `_deep_acceptable` runs on `action`/`because`, plus the
     same citation gate, restricted to the claim ids the per-finding
     recommendations being synthesized ALREADY cited — never the finding's
     full claim set, and never a claim id this call invents.
+
+    `bound_action` is the action, full stop: the rank-1 kept recommendation's
+    own wording, passed in by the caller. Anything the model may have put in
+    `rec["action"]` is ignored outright rather than merged or preferred —
+    the schema does not ask for one, and if one arrives anyway it must not be
+    able to reach a reader, because that would be the model deciding what the
+    recommendation is (I2).
 
     A synthesis whose citations all fail — no valid claim id, or cited but
     not grounded in what that claim says — is dropped entirely, the same
@@ -1697,7 +1724,7 @@ def _synthesis_acceptable(
     not more useful than no synthesis at all, and the per-finding
     recommendations (computed separately) still render regardless.
     """
-    action = (rec.get("action") or "").strip()
+    action = bound_action.strip()
     because = (rec.get("because") or "").strip()
     if not action or not because:
         return None
@@ -1776,7 +1803,13 @@ def build_synthesized_recommendation(
 
     `findings` MUST be in the run's own rank order (I10) — the same contract
     `build_deep_recommendations` takes; this reads only the subset whose id
-    is a key in `deep_by_id`, in that order, and never re-sorts.
+    is a key in `deep_by_id`, in that order, and never re-sorts. That order
+    is load-bearing twice over now: it fixes which recommendation is rank 1,
+    and rank 1's action IS the action returned here, copied verbatim. The
+    model writes the prose and the citations only; it is never asked what the
+    recommendation should be, because that is a decision and I2 keeps
+    decisions in the deterministic ranking (see `SYNTHESIS_SCHEMA`, which has
+    no `action` field at all).
 
     ONLY WHEN THERE IS MORE THAN ONE KEPT DEEP RECOMMENDATION. With exactly
     one, that recommendation already IS "the" recommendation for the report —
@@ -1792,6 +1825,16 @@ def build_synthesized_recommendation(
     """
     ranked = [(f, deep_by_id[f.id]) for f in findings if f.id in deep_by_id]
     if len(ranked) <= 1 or _offline():
+        return None
+
+    # THE ACTION, DECIDED BEFORE THE CALL. `findings` arrives in the run's
+    # own frozen rank order (I10), so `ranked[0]` is rank 1 — its action,
+    # verbatim, IS this recommendation's action. The model is asked only for
+    # the prose around it. Letting it author the action would make it the
+    # thing choosing what the single recommendation is, and I2 does not let a
+    # model return a score, a rank, or a decision.
+    bound_action = ranked[0][1].action.strip()
+    if not bound_action:
         return None
 
     claims_by_id = {c.id: c for c in claims}
@@ -1822,7 +1865,9 @@ def build_synthesized_recommendation(
             purpose="recommend_synthesis",
             prompt_version="crucible-recommend-synthesis-v1",
             system=_SYNTHESIS_SYSTEM,
-            input=_synthesis_input(goal_text, definition_text, ranked),
+            input=_synthesis_input(
+                goal_text, definition_text, ranked, bound_action,
+            ),
             json_schema=SYNTHESIS_SCHEMA,
             max_tokens=2000,
         )
@@ -1836,4 +1881,7 @@ def build_synthesized_recommendation(
     if time.monotonic() - started > DEADLINE_SECONDS:
         logger.warning("crucible: synthesized recommendation exceeded its deadline")
 
-    return _synthesis_acceptable(out, strength, allowed_claim_ids, claims_by_id)
+    return _synthesis_acceptable(
+        out, strength, allowed_claim_ids, claims_by_id,
+        bound_action=bound_action,
+    )

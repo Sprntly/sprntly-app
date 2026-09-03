@@ -929,6 +929,21 @@ def _headline_section(findings: list[dict]) -> str:
 #: unlimited space for it.
 MAX_STATEMENT_CHARS = 400
 
+#: THE CAVEAT THAT TRAVELS WITH EVERY KILL SIGNAL. A kill signal here is
+#: derived from a corpus of what people said — there is no metric series
+#: behind it and nothing watches it — so the line is a belief a reader can go
+#: and disprove, never a measured trigger. It renders inline, in the same
+#: paragraph as the signal itself, so it cannot be skimmed past the way a
+#: footnote can. The live panel
+#: (`web/app/components/shared/GoalAnalysisReport.tsx`) carries the same
+#: sentence; the two renderers share no code, so they are kept in step by
+#: hand.
+KILL_SIGNAL_CAVEAT = (
+    "This is a falsifiable belief, not a measured threshold — this analysis "
+    "reads what people said, not a metric series, so nothing is watching for "
+    "this on your behalf. Someone has to go and look."
+)
+
 
 def _clip(text: str, limit: int) -> str:
     """`text`, bounded, cut on a word boundary."""
@@ -1098,9 +1113,16 @@ def _finding_block(
             ))
         falsify = (deep.get("what_would_falsify") or "").strip()
         if falsify:
+            # THE KILL SIGNAL, NAMED AS ONE — and carrying its own honesty
+            # caveat in the same breath. This corpus is what people said; it
+            # has no metric series in it, so this can only ever be a belief
+            # someone can go and falsify, never a threshold that trips on its
+            # own. The caveat is inline rather than a footnote precisely so a
+            # reader cannot take the line for a measured trigger.
             out.append(_p(
-                f"<em>Would change this if.</em> "
-                f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)}"
+                f"<strong>Kill signal.</strong> "
+                f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)} "
+                f"<em>{KILL_SIGNAL_CAVEAT}</em>"
             ))
         comparison = (deep.get("comparison") or "").strip()
         if comparison:

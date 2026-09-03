@@ -51,6 +51,19 @@ import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
  *  closing section under them. */
 const RULED_OUT_OPEN_MAX = 12
 
+/** THE CAVEAT THAT TRAVELS WITH EVERY KILL SIGNAL. A kill signal here comes
+ *  out of a corpus of what people said — there is no metric series behind it
+ *  and nothing watches it — so the line is a belief a reader can go and
+ *  disprove, never a measured trigger. It renders INLINE, in the same
+ *  paragraph as the signal, so it cannot be skimmed past the way a footnote
+ *  can. The exported document (`backend/app/crucible/report.py`,
+ *  `KILL_SIGNAL_CAVEAT`) carries the same sentence; the two renderers share
+ *  no code, so they are kept in step by hand. */
+const KILL_SIGNAL_CAVEAT =
+  "This is a falsifiable belief, not a measured threshold — this analysis "
+  + "reads what people said, not a metric series, so nothing is watching for "
+  + "this on your behalf. Someone has to go and look."
+
 /** An excluded source is only a KEY by the time the report runs — its label
  *  went with the entry the run dropped. Rather than keep a second copy of the
  *  backend's source prose here, where it would drift, the key is softened into
@@ -164,8 +177,9 @@ function ReportFinding({
             </>
           ) : null}
           {f.deep_recommendation!.what_would_falsify ? (
-            <p className="ga-weakest">
-              <b>Would change this if.</b> {f.deep_recommendation!.what_would_falsify}
+            <p className="ga-weakest" data-testid="goal-finding-kill-signal">
+              <b>Kill signal.</b> {f.deep_recommendation!.what_would_falsify}{" "}
+              <em>{KILL_SIGNAL_CAVEAT}</em>
             </p>
           ) : null}
           {f.deep_recommendation!.comparison ? (
