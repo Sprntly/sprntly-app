@@ -23,6 +23,7 @@ vi.hoisted(() => {
 
 import { GoalAnalysisReport } from "../GoalAnalysisReport"
 import type { GoalFinding } from "../../../lib/api"
+import { MAX_RICE_ROWS } from "../../../lib/goalRice"
 
 const PLAN = {
   goal_text: "raise net revenue retention",
@@ -1386,5 +1387,65 @@ describe("the memo's cover strip and appendix table, in the panel", () => {
     const t = screen.getByTestId("goal-set-aside").textContent ?? ""
     expect(t).toContain("Unsized")
     expect(t).not.toContain("0 accounts")
+  })
+})
+
+describe("capping the full write-up section", () => {
+  // A real run rendered every one of 529 findings in full below the "What the
+  // evidence says" heading — heading, confidence badge, claim count, quote,
+  // source documents, per finding, with no cap at all. Mirrors
+  // `report.py`'s `_findings_section`, which caps full write-ups at
+  // `MAX_DETAILED_FINDINGS` (== `MAX_RICE_ROWS`) and lists the remainder as a
+  // compact, counted overflow list rather than dropping it.
+  const manyFindings: typeof SIZED[] = Array.from({ length: MAX_RICE_ROWS + 5 }, (_, i) => ({
+    ...SIZED,
+    id: i + 1,
+    statement: `Finding number ${i + 1} concerns export latency.`,
+    label: `Finding ${i + 1}`,
+    claim_ids: [`c${i + 1}`],
+    surfaced_by: [`Source doc ${i + 1}`],
+  }))
+
+  it("renders exactly MAX_RICE_ROWS findings in full detail, not all of them", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
+    expect(screen.getAllByTestId("goal-finding")).toHaveLength(MAX_RICE_ROWS)
+  })
+
+  it("keeps the heading's total honest even though the body is capped", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
+    const heading = screen.getByTestId("goal-report").textContent ?? ""
+    expect(heading).toContain(`What the evidence says (${manyFindings.length})`)
+  })
+
+  it("lists the remainder in a compact overflow list, with the count stated — nothing silently dropped", () => {
+    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
+    const overflow = screen.getByTestId("goal-findings-overflow")
+    const rows = screen.getAllByTestId("goal-finding-overflow-row")
+    const remainder = manyFindings.length - MAX_RICE_ROWS
+
+    // The remainder is not silently dropped: every one of it is a row.
+    expect(rows).toHaveLength(remainder)
+    // The count is STATED, in prose, not left for the reader to count rows.
+    expect(overflow.textContent).toContain(`The next ${remainder} findings`)
+    expect(overflow.textContent).toContain(String(MAX_RICE_ROWS))
+    // Every overflow row still names the finding it stands for.
+    expect(rows[0].textContent).toContain(`Finding ${MAX_RICE_ROWS + 1}`)
+    expect(rows[rows.length - 1].textContent).toContain(
+      `Finding ${manyFindings.length}`,
+    )
+
+    // TOTAL ACCOUNTED FOR: full blocks + overflow rows == every finding on
+    // the run. This is the property the whole cap exists to preserve.
+    const fullBlocks = screen.getAllByTestId("goal-finding").length
+    expect(fullBlocks + rows.length).toBe(manyFindings.length)
+  })
+
+  it("does not cap the RICE table or the overflow list below MAX_RICE_ROWS worth of findings", () => {
+    // The control: a run at or under the cap must render every finding in
+    // full, with no overflow section at all.
+    const exactly = manyFindings.slice(0, MAX_RICE_ROWS)
+    render(<GoalAnalysisReport run={{ ...RUN, findings: exactly }} />)
+    expect(screen.getAllByTestId("goal-finding")).toHaveLength(MAX_RICE_ROWS)
+    expect(screen.queryByTestId("goal-findings-overflow")).toBeNull()
   })
 })
