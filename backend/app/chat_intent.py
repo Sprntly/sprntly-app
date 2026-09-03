@@ -704,8 +704,28 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
 #: a client that has never had — and does not need — a case for it.
 
 
-def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
+def _is_report_pipeline(
+    pipeline_id: Optional[str],
+    question: str = "",
+    wants_report: Optional[bool] = None,
+) -> bool:
     """Does this plan's pipeline WRITE A REPORT DOCUMENT?
+
+    THE PLANNER ANSWERS THIS NOW, and `wants_report` is its answer: a document
+    is written when the user ASKED for one, in so many words. Pass it and the
+    two rules below are not consulted at all — they are what this decision was
+    before the planner had a field for it, and they are kept for the callers
+    that have no plan (this module's own pre-planner path, and every test that
+    predates the field).
+
+    Why it moved: the old verdict read the question's surface words, so every
+    phrasing that meant "answer me in the chat" had to be discovered and added
+    one at a time. Two were added on 2026-09-03 alone — a summary ask, then a
+    table ask — and the failure each time was the same, a reader who asked a
+    question watching a Reports panel fill with a document they never wanted.
+    The model reading the whole sentence can tell "look at all customer
+    conversations and show me what features they want" from "give me a
+    voice-of-customer report" without a rule per phrasing.
 
     `qa_agent._REPORT_PIPELINE_IDS` is the set the answer path itself dispatches
     on, so it is the one read here — a second list would drift and the drift
@@ -760,6 +780,11 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
 
         if pipeline_id not in _REPORT_PIPELINE_IDS:
             return False
+        # The planner's own verdict, when there is one. `apply_gates` has
+        # already clamped it to a report pipeline, so this needs no second
+        # membership test — the check above is for the no-plan callers.
+        if wants_report is not None:
+            return bool(wants_report)
         from app.call_digest import VOC_PIPELINE_IDS, is_voc_query
 
         if pipeline_id in VOC_PIPELINE_IDS and is_voc_query(question):
@@ -906,7 +931,13 @@ def _plan_to_envelope(
         # Read from the SAME set `qa_agent` dispatches on, never a second list:
         # a name that fell out of one and not the other would open a panel for
         # an answer, or print a report into the chat.
-        "report": _is_report_pipeline(plan.pipeline_id, question),
+        "report": _is_report_pipeline(
+            plan.pipeline_id, question,
+            # Present on every planned turn; `getattr` only so a Plan-shaped
+            # stub from an older test still resolves to the pre-field rules
+            # rather than raising on the send path.
+            wants_report=getattr(plan, "wants_report", None),
+        ),
         # `edit_artifact` only: WHICH document the edit targets — the report or
         # team document the tab has open, re-read server-side. The client
         # already knows what its own panel is showing; this is echoed so the

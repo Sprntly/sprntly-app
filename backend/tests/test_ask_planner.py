@@ -680,15 +680,18 @@ def test_the_schema_property_order_is_load_bearing():
         # skill/pipeline choices like every other action argument.
         "list_kind", "list_mode",
         "company_skill_id", "company_confidence",
-        "pipeline_id", "confidence",
+        # `wants_report` straight after the pipeline it qualifies: WHAT gets
+        # read, then WHERE the answer goes. Deciding the destination before a
+        # pipeline exists would be deciding it about nothing.
+        "pipeline_id", "confidence", "wants_report",
         # The team roster sits with the other own-records flag it behaves
         # like: both are exhaustive reads of Sprntly's own tables, and both
         # are decided after the skill/pipeline choice they cannot influence.
         "sources", "include_knowledge_graph", "include_library", "include_team",
         # The backlog is the fourth own-records flag and sits with the other
         # three, after the skill/pipeline choice it cannot influence.
-        # …and the fifth: what Sprntly has LEARNED, as opposed to what it can
-        # retrieve about a topic. Same family, same place in the order.
+        # …and the fifth: what Sprntly has LEARNED, as opposed to what it
+        # can retrieve about a topic. Same family, same place in the order.
         "include_projects", "include_knowledge_base", "include_backlog",
         "web_search", "documents",
         "constraints", "in_scope",
@@ -722,7 +725,11 @@ def test_the_schema_property_order_is_load_bearing():
     assert "include_backlog" in ap._PLANNER_SCHEMA["required"]
     assert "include_knowledge_base" in ap._PLANNER_SCHEMA["required"]
     assert "action_confidence" in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 16
+    # `wants_report` is required on the same rule as the include_* booleans: an
+    # omitted boolean is indistinguishable from a considered `false`, and this
+    # one decides whether a document gets written.
+    assert "wants_report" in ap._PLANNER_SCHEMA["required"]
+    assert len(ap._PLANNER_SCHEMA["required"]) == 17
 
 
 # ── the action fork (v3) ─────────────────────────────────────────────────────
