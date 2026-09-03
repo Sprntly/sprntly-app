@@ -2951,3 +2951,66 @@ def test_a_summary_ask_never_opens_the_reports_drawer():
     assert ci._is_report_pipeline(
         "call-digest", "give me a voice of customer report for last month"
     ) is True
+
+
+# ── …and neither is asking for a table (same rule, same day) ─────────────────
+# Reported second, against a question that named its own columns and still came
+# back as a document. It is the sharpest case for the rule: the asker said
+# exactly what shape they wanted, and a report was not it.
+
+_TABLE_ASK = (
+    "Be a list of the product features that clients have asked for in the last "
+    "one month show me the name of the company the feature they asked for and "
+    "the problem that they are trying to solve and also how much revenue will "
+    "be unlocked if this was done and give me the final output in a form of a "
+    "table"
+)
+
+
+def test_the_reported_table_ask_answers_in_the_thread():
+    """The reported sentence. It names no artifact, no summary word, and none
+    of the pointed query shapes fit it — so before this rule it fell through to
+    the report path, which is how a request for four columns became a
+    multi-minute VoC document."""
+    from app.call_digest import is_voc_query
+
+    assert is_voc_query(_TABLE_ASK)
+
+
+def test_the_reported_table_ask_never_opens_the_reports_drawer():
+    import app.chat_intent as ci
+
+    assert ci._is_report_pipeline("call-digest", _TABLE_ASK) is False
+
+
+def test_every_output_shape_answers_in_the_thread():
+    from app.call_digest import is_voc_query
+
+    for q in (
+        "give me a list of feature requests from last month",
+        "show me customer asks as a table",
+        "break down what customers asked for into a spreadsheet",
+        "what features did clients ask for, in a table with company and problem",
+        "put the top complaints in a table",
+        "output the requests as csv",
+    ):
+        assert is_voc_query(q), f"output-shape ask still routed to the report: {q!r}"
+
+
+def test_naming_the_document_still_wins_over_a_shape():
+    """Order matters and is load-bearing: a report asked for AS a table is
+    still the report. The artifact check runs first precisely so that adding
+    shape words could not take the artifact away."""
+    from app.call_digest import is_voc_query
+
+    assert not is_voc_query("produce the VoC digest as a table")
+    assert not is_voc_query("give me a voice of customer report, in a table")
+
+
+def test_a_customer_talking_about_a_table_is_not_a_formatting_instruction():
+    """The bound on the rule. Products have tables in them, and a complaint
+    about one must not be read as "put your answer in a table" — which is why
+    this matches an output DIRECTIVE rather than the bare noun."""
+    from app.call_digest import is_voc_query
+
+    assert not is_voc_query("customers complained the table view is slow")

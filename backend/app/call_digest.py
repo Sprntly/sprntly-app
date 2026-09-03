@@ -1212,6 +1212,39 @@ _VOC_SUMMARY_SHAPED = re.compile(
     re.I,
 )
 
+# ASKING FOR A TABLE IS NOT ASKING FOR A REPORT EITHER (same rule, reported
+# 2026-09-03 against: "be a list of the product features that clients have
+# asked for in the last one month, show me the name of the company, the feature
+# they asked for and the problem they are trying to solve … and give me the
+# final output in a form of a table").
+#
+# That sentence names no artifact and no summary word, and none of the pointed
+# `_VOC_QUERY_SHAPES` fit it either — it is not "how many", not comparative,
+# not "which customers", not "what did X say" — so `is_voc_query` said no and
+# the whole thing became a multi-minute VoC document. But it is the most
+# specific kind of question there is: it names its columns.
+#
+# A request for a SHAPE the answer should take — a table, a list, a breakdown,
+# a spreadsheet — is a request for an ANSWER in that shape. It is never a
+# request for a report, because a report has its own shape and the asker just
+# said what they wanted instead.
+#
+# Bounded to an OUTPUT DIRECTIVE ("give me … as a table", "a list of …") rather
+# than the bare nouns, so a customer complaining about a slow table view does
+# not read as a formatting instruction. Over-matching here is mild in any case:
+# it biases toward answering in the thread, which is what the rule wants.
+_VOC_TABULAR_SHAPED = re.compile(
+    # "as a table", "in a table", "in a form of a table", "into a list"
+    r"\b(?:as|in|into)\s+(?:a|an|the)?\s*(?:form|format|shape)?\s*(?:of\s+)?"
+    r"(?:a|an|the)?\s*(?:table|list|spreadsheet|csv|matrix|grid)\b"
+    # "a list of …", "the breakdown of …"
+    r"|\b(?:a|an|the)\s+(?:list|table|breakdown|rundown\s+table)\s+of\b"
+    # "give me / show me / make it a table|list|columns|rows"
+    r"|\b(?:give|show|send|make|put|format|output|return|produce)\b"
+    r"[^.?!]{0,60}\b(?:table|list|spreadsheet|csv|columns?|rows?|breakdown)\b",
+    re.I,
+)
+
 #: Kept as the union of the two, because the eligibility rule below reads
 #: "report-shaped" as "not a pointed query" — and a summary is not one of those
 #: either. What changed is only which MODE a summary-shaped ask lands in,
@@ -1265,11 +1298,16 @@ def is_voc_query(question: str) -> bool:
          summarized in the chat, not a multi-minute document and a panel. This
          is the owner's rule (2026-09-03), and it reverses the previous
          behaviour, where "summarize" was read as naming the report.
-      3. Otherwise the pointed-query shapes decide, unchanged.
+      3. NEITHER DOES ASKING FOR A TABLE. "give me a list of the features
+         clients asked for … as a table" names the columns it wants; a report
+         is not one of the shapes on offer.
+      4. Otherwise the pointed-query shapes decide, unchanged.
     """
     if _VOC_ARTIFACT_NAMED.search(question):
         return False
     if _VOC_SUMMARY_SHAPED.search(question):
+        return True
+    if _VOC_TABULAR_SHAPED.search(question):
         return True
     return any(p.search(question) for p in _VOC_QUERY_SHAPES)
 
