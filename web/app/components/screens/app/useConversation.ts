@@ -78,6 +78,9 @@ export interface MainConversationAdapter {
   activeTabId: string | null
   /** Live active-tab id, for the handle's `isActive`. */
   activeTabIdRef: RefObject<string | null>
+  /** Raised while a command is dispatched onto a tab the user has since left —
+   *  the generation runs there, but nothing steals the screen. See ChatScreen. */
+  commandInBackgroundRef: RefObject<boolean>
   setTabs: Dispatch<SetStateAction<ChatTab[]>>
   /** Per-tab busy set (composer-blocking, keyed by tab id). */
   setBusyTabs: Dispatch<SetStateAction<ReadonlySet<string>>>
@@ -272,6 +275,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     tabsRef,
     activeTabId,
     activeTabIdRef,
+    commandInBackgroundRef,
     setTabs,
     setBusyTabs,
     askingTabsRef,
@@ -603,11 +607,13 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       // `rollbackOptimistic`; the attachment-failure branch clears it too.
       setBusyTabs((prev) => addToSet(prev, targetTabId))
       // Undo the optimistic turn/tab so a COMMAND branch (which renders its own
-      // turn) is not doubled. Restores the pre-send active-tab identity — incl.
-      // `activeTabIdRef`, which the command executors read to resolve their
-      // target — so command routing is byte-identical to dispatching before any
-      // optimistic render happened.
-      const rollbackOptimistic = () => {
+      // turn) is not doubled, and restore the pre-send active tab — so command
+      // routing is byte-identical to dispatching before any optimistic render
+      // happened. `activeTabIdRef`, which the command executors read to resolve
+      // their target, is pinned by the dispatch site itself (below): it has to
+      // survive the reader wandering off during the classify await, which this
+      // rollback knows nothing about. `keepFocus` is false exactly then.
+      const rollbackOptimistic = (keepFocus: boolean) => {
         // Clear the busy flag set on the optimistic commit so the command branch
         // leaves no stranded "thinking"/composer-disabled state on the tab (the
         // command renders its own turn and manages its own busy state, exactly as
@@ -620,12 +626,13 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
         // not committed yet at that point, so without this the command grounds on
         // the very optimistic turn we are removing — folding the user's own
         // command text in as a "Conversation (this chat)" source doc. Mirrors the
-        // synchronous `activeTabIdRef.current` restore already done just below.
+        // synchronous `activeTabIdRef.current` pin the dispatch site does.
         if (spawnedNewTab) {
           if (tabsRef.current) tabsRef.current = tabsRef.current.filter((t) => t.id !== targetTabId)
           setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
-          setActiveTabId(prevActiveTabId)
-          activeTabIdRef.current = prevActiveTabId
+          // …but not when the reader has moved on: they are somewhere else on
+          // purpose, and the tab being removed is not the one they are looking at.
+          if (keepFocus) setActiveTabId(prevActiveTabId)
         } else {
           const rollTab = (t: ChatTab): ChatTab => t.id === targetTabId
             ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
@@ -898,8 +905,34 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             ) as ChatIntentExecutors,
           ).handled
           if (wouldHandle) {
-            rollbackOptimistic()
-            dispatchChatIntent(envelope, dispatchCtx, executors)
+            // The classify round-trip above is SECONDS long (a real one has been
+            // measured at 13s with a PDF folded into the planner prompt), and the
+            // command executors resolve their target tab from `activeTabIdRef` —
+            // live, read now. A tab switch inside that window therefore handed the
+            // generation to wherever the reader had gone: a PRD asked for in one
+            // chat was built in, and took over, a blank tab opened while waiting
+            // (conversation and all), while the thread that asked for it stayed
+            // empty. So pin the ref to the tab this send was RESOLVED to for the
+            // duration of the dispatch — `targetTabId`, or the pre-send tab when
+            // the rollback has just removed a spawned one — and hand it straight
+            // back afterwards, so the async continuations (which guard their panel
+            // writes on "am I still the active tab?") read the truth again.
+            const liveTabId = activeTabIdRef.current
+            const pinnedTabId = spawnedNewTab ? prevActiveTabId : targetTabId
+            // Where the reader actually is. `commandInBackgroundRef` is what keeps
+            // the pinned dispatch from yanking them out of it: the generation lands
+            // (and shows its generating state) on the tab that asked, and switching
+            // back there reopens its panel by the ordinary refocus route.
+            const movedAway = liveTabId !== pinnedTabId
+            commandInBackgroundRef.current = movedAway
+            rollbackOptimistic(!movedAway)
+            activeTabIdRef.current = pinnedTabId
+            try {
+              dispatchChatIntent(envelope, dispatchCtx, executors)
+            } finally {
+              activeTabIdRef.current = liveTabId
+              commandInBackgroundRef.current = false
+            }
             return
           }
           // An `answer` that will write a REPORT. Not a dispatch — the ask path
