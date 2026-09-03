@@ -2032,6 +2032,27 @@ _PROJECT_TOOL_COMPLETE_VERB = re.compile(
 )
 
 
+#: COMPLETION-ONLY question veto: a leading auxiliary/interrogative verb
+#: ("is the review complete?", "are we done with the deck?", "has David
+#: finished the review?", "did I finish that?"). `_PROJECT_TOOL_COMPLETE_VERB`
+#: matches third-person status claims ("<the deck> is done") that are
+#: lexically indistinguishable from a yes/no QUESTION with the same words in
+#: interrogative order — this leading-auxiliary anchor rejects the question
+#: form. Deliberately NOT folded into the shared `_PROJECT_TOOL_MENTION_VETO`:
+#: that veto also gates `is_project_tool_request`, where a leading auxiliary is
+#: a legitimate delegation lead ("can you ask Femi to take this", "have Fortune
+#: handle the deploy") — widening the shared veto would wrongly decline those.
+#: So this is completion-scoped. Over-vetoing is safe: any genuine completion
+#: this drops (e.g. a subject-less "have finished the deck") is still caught by
+#: the background `done_explicit` classifier path, which posts the assignee
+#: confirmation. A false negative degrades gracefully; a false positive
+#: (force-completing on a question) does not.
+_PROJECT_TOOL_COMPLETE_QUESTION_VETO = re.compile(
+    r"^\s*(?:is|are|was|were|has|have|had|did|do|does|can|could|will|would)\b",
+    re.I,
+)
+
+
 def is_project_completion_request(question: str, history: list[dict] | None = None) -> bool:
     """True when the speaker is reporting that a task assigned to THEM is
     finished. Called by `qa_agent._try_scoped_tool_answer`'s admission ladder
@@ -2040,17 +2061,21 @@ def is_project_completion_request(question: str, history: list[dict] | None = No
     retired).
 
     Sibling of `is_project_tool_request`: cheap regex, veto-set discipline.
-    The mention/interrogative veto is reused so "is the review done?" (a
-    status QUESTION) never trips it — only a first-person completion CLAIM
-    admits. A message this declines still falls through to the composer, and
-    the accept-with-nudge system prompt covers the residual gap; a false
-    positive is absorbed by `handle_complete_task`, which no-ops gracefully
-    when the speaker has no open task to close.
+    TWO vetoes fire before the completion verb is consulted: the shared
+    `_PROJECT_TOOL_MENTION_VETO` (wh-led / "status of …" reads) AND the
+    completion-only `_PROJECT_TOOL_COMPLETE_QUESTION_VETO` (a leading
+    auxiliary — "is the review done?", "has David finished?") — so a status
+    QUESTION never trips it; only a first-person or declarative completion
+    CLAIM admits. A message this declines still falls through to the composer,
+    and a false positive is absorbed by `handle_complete_task`, which no-ops
+    gracefully when the speaker has no open task to close.
 
     `history` is accepted for signature parity with its sibling gates but is
     not consulted in this v1 (the claim is judged on the message's own words)."""
     q = question or ""
     if _PROJECT_TOOL_MENTION_VETO.search(q):
+        return False
+    if _PROJECT_TOOL_COMPLETE_QUESTION_VETO.search(q):
         return False
     return bool(_PROJECT_TOOL_COMPLETE_VERB.search(q))
 
