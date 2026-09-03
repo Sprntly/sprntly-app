@@ -539,6 +539,15 @@ const PRD_TRANSCRIPT_DOC_NAME = "Conversation (this chat)"
 // requirements if fed back in. Matched on TEXT, not turn ids, so the filter still
 // holds for a thread rehydrated from Supabase (which rebuilds turns with fresh
 // ids and reconstructs replies as plain answers).
+const PANEL_NOUN: Record<string, string> = {
+  prd: "PRD",
+  evidence: "Evidence",
+  tickets: "Tickets",
+  reports: "report",
+  document: "document",
+  goal: "analysis",
+}
+
 const PRD_ACK_ANSWER_RE = /View PRD button/
 const PRD_CLARIFY_ANSWER_RE = /^Before I write this PRD/
 // Artifact summaries end with a per-kind pointer line ("…View Evidence button…",
@@ -2416,11 +2425,16 @@ export function ChatScreen() {
    *  would trade one wrong panel for a missing one, and the reader would come
    *  back to the thread that did the work and find nothing there. */
   const openPanelForTab = useCallback((tabId: string, panel: ContentPanelTab) => {
-    if (activeTabIdRef.current === tabId) {
-      openContentPanel(panel)
-      return
-    }
+    // RECORDED ON THE TAB EITHER WAY, not only when deferring. The request is
+    // what the tab asked for, and that stays true whether or not the reader
+    // happened to be looking when it became ready: a panel that opened here
+    // and was then left behind has to come back on the next visit, and until
+    // the run lands there is no artifact for the ordinary reopen paths to
+    // restore from. Recording only the deferred case fixed "leave before it
+    // opens" and left "leave after it opens" broken — the same bug from the
+    // other side.
     setTabs((prev) => prev.map((t) => t.id === tabId ? { ...t, panelWanted: panel } : t))
+    if (activeTabIdRef.current === tabId) openContentPanel(panel)
   }, [openContentPanel])
 
   const openReportByTitle = useCallback((title: string) => {
@@ -4421,14 +4435,26 @@ export function ChatScreen() {
     // Brief tab or the tab-less landing → no PRD to show; drop any lingering panel.
     if (isBriefTab || !activeTabId) { if (contentPanelTab) closeContentPanel(); return }
     const tab = tabsRef.current.find((t) => t.id === activeTabId)
-    // A PANEL THIS TAB ASKED FOR WHILE THE READER WAS ELSEWHERE, spent here and
-    // ahead of every default below — those decide what a tab shows at REST, and
-    // this is an explicit request from the tab's own work. Cleared as it opens,
-    // so it is spent exactly once and a manual close afterwards sticks.
+    // A PANEL THIS TAB ASKED FOR, restored ahead of every default below —
+    // those decide what a tab shows at REST, and this is an explicit request
+    // from the tab's own work.
+    //
+    // IT IS NOT SPENT BY BEING SHOWN, and the first cut of this getting that
+    // wrong is what was reported: leave and come back once, the panel is
+    // there; leave and come back AGAIN, and it is gone while the thread is
+    // still visibly generating. Clearing on the first restore left nothing to
+    // restore from on the second, and a run still in flight has no artifact
+    // yet for the ordinary paths below to reopen from — a PRD tab reopens its
+    // document, the reports auto-open needs a landed report, and mid-run there
+    // is neither.
+    //
+    // Keeping it matches what every other artifact here already does: the
+    // per-visit `*AutoOpenedRef` claims are retired on the way OUT precisely so
+    // that returning to a thread shows its artifact again. The request is
+    // cleared by the run that owns it, when that run ends without one (see
+    // `onReportStream`'s `produced === false`).
     if (tab?.panelWanted) {
-      const wanted = tab.panelWanted
-      setTabs((prev) => prev.map((t) => t.id === activeTabId ? { ...t, panelWanted: undefined } : t))
-      openContentPanel(wanted)
+      openContentPanel(tab.panelWanted)
       return
     }
     // A PRD that landed IN THIS TAB, as opposed to one that merely exists in the
@@ -6056,11 +6082,30 @@ export function ChatScreen() {
       return { label: "View Tickets", onClick: () => handleTicketSetAction(tabId) }
     }
     if (chatEvidenceExists) return { label: "View Evidence", onClick: handleOpenEvidence }
+    // NOTHING HAS LANDED YET, BUT SOMETHING IS BEING WRITTEN FOR THIS TAB.
+    // Every branch above needs an artifact that already exists — a PRD, a
+    // report row, a ticket set — so a thread mid-run had no way back to its own
+    // panel at all: close it (or arrive with it closed) and the strip offered
+    // nothing while the thread visibly said it was generating. Reported
+    // alongside the restore bug: "there's no panel, and the icon at the top
+    // right isn't showing that there's something generating".
+    //
+    // `panelWanted` is the per-tab record of exactly that — the panel this
+    // tab's own work asked for — so it is the honest last resort here, and the
+    // only one of these branches that can speak for a run still in flight.
+    if (activeTab?.panelWanted) {
+      const wanted = activeTab.panelWanted
+      return {
+        label: `View ${PANEL_NOUN[wanted] ?? "panel"}`,
+        onClick: () => openContentPanel(wanted),
+      }
+    }
     return null
   }, [
     isBriefTab, contentPanelTab, activeTabId, chatPrdExists, chatEvidenceExists,
     activeTab?.prdGenerating, activeTab?.prdLoading, activeTab?.prd?.generatedAt,
-    activeTab?.id, activeTab?.ticketSetId, activeTab?.ticketSetStatus, handleTicketSetAction,
+    activeTab?.id, activeTab?.ticketSetId, activeTab?.ticketSetStatus,
+    activeTab?.panelWanted, handleTicketSetAction,
     handleOpenPrd, handleOpenEvidence, threadReports, setContent, openContentPanel,
   ])
 
