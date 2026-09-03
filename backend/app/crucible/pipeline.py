@@ -205,11 +205,21 @@ def _figure_is_committed(
        never seen — but it was measured firing on only one of ~13 distinct
        list prices in the sample, so it cannot be asked to do the job alone.
     2. PHRASES, where the text says outright which it is.
-    3. KIND AS THE ROUTER. The extraction pass already judged whether the
-       signal is a `pricing` fact or a `commercial_term`, and unlike the
-       other two it has an opinion about every row. It is the default rather
-       than the decider: measured at 93% precision on `pricing` and 55% on
-       `commercial_term`, which is why the phrase refusals upstream exist.
+    3. KIND, WHICH MAY ONLY EXCLUDE. The extraction pass already judged
+       whether the signal is a `pricing` fact or a `commercial_term`, and it
+       is the only one of the three with an opinion about every row — but a
+       `commercial_term` label is a weak signal, and it is attached to the
+       lower-precision of the two populations.
+
+    A POSITIVE SIGNAL IS REQUIRED, and this function used to end
+    `return claim.artifact_type != _LIST_PRICE_KIND`, which did the exact
+    opposite of the paragraph below it: a `commercial_term` row matching
+    NEITHER phrase is a tie, and that line resolved the tie by admitting it.
+    It routed the whole weaker population into the summed total on the
+    strength of a label. A live spot-check found 2 of 11 rows in the
+    committed head were real deals, and both of the real ones had matched a
+    phrase anyway — so requiring the phrase removed nine wrong rows and cost
+    nothing.
 
     Ties go to NOT committed. Every failure in this feature's history has
     been over-claiming, and a figure wrongly left out of the sum understates
@@ -217,12 +227,12 @@ def _figure_is_committed(
     """
     if amount in list_price_amounts:
         return False
+    if claim.artifact_type == _LIST_PRICE_KIND:
+        return False
     text = claim.assertion or ""
     if _LIST_PRICE_PHRASE.search(text):
         return False
-    if _COMMITTED_PHRASE.search(text):
-        return True
-    return claim.artifact_type != _LIST_PRICE_KIND
+    return bool(_COMMITTED_PHRASE.search(text))
 
 #: The `certainty` marker a figure recovered from a written summary carries
 #: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
