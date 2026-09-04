@@ -269,8 +269,23 @@ const runAwaitingApproval = (): GoalRunDetail => ({
   prioritisation: { plan: planAsOffered() },
 })
 
+//: THE DOCUMENT THE SERVER RENDERED FOR THIS RUN.
+//:
+//: The panel stopped rebuilding the report in React and now displays the
+//: bytes `render_report_document` produced, in a sandboxed iframe — so what
+//: this flow can still prove at the last hop is that THIS run's report is what
+//: the reader is shown. What the document SAYS about a definition, an
+//: exclusion, a hypothesis or an unsized finding is the Python renderer's
+//: contract and is asserted against the real renderer in
+//: `backend/tests/test_crucible_report.py` and
+//: `backend/tests/test_crucible_document_consistency.py`, not against a
+//: TypeScript re-implementation of it that no longer exists.
+const REPORT_HTML =
+  "<!doctype html><html><body><h1>the report for run 4242</h1></body></html>"
+
 const runReady = (d: Decision): GoalRunDetail => ({
   ...runRow("ready"),
+  report_html: REPORT_HTML,
   claim_count: 31,
   coverage_notes: [
     { reason: "Undated evidence", actual: "6 of 18 signals carry no date" },
@@ -515,14 +530,15 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // whatever `confirm` carried, so a confirm that posted the proposal (or
       // nothing) shows up here as a report about a goal nobody agreed to.
       await walkTheFlow()
-      const asked = within(panelBody() as HTMLElement)
-        .getByTestId("goal-definition")
-      // The report quotes the EDIT. Quoting the proposal instead fails here,
-      // because `PROPOSED` and `CONFIRMED` are deliberately different
-      // sentences — a fixture where the reader accepts the proposal unchanged
-      // could not tell the two apart.
-      expect(asked.textContent).toContain(CONFIRMED)
+      // THE EDIT, NOT THE PROPOSAL. `PROPOSED` and `CONFIRMED` are
+      // deliberately different sentences, so a confirm that posted the
+      // proposal — or nothing — fails here; a fixture where the reader
+      // accepts the proposal unchanged could not tell the two apart.
       expect(confirmRun).toHaveBeenCalledWith(RUN_ID, CONFIRMED)
+      // And the reader can still see what they agreed to, in the thread where
+      // they agreed to it.
+      expect(screen.getByTestId("goal-gate-plan-done").textContent)
+        .toContain(CONFIRMED)
     }, 30_000)
 
   it("does not count the dropped source in what was read, and still names it",
@@ -532,38 +548,34 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // merely omit it. A quietly narrower run is exactly what coverage notes
       // exist to prevent.
       await walkTheFlow()
-      const read = within(panelBody() as HTMLElement)
-        .getByTestId("goal-what-was-read")
-      // 18 signals across 1 source — the tracker's 12 are not in the total and
-      // it is not in the list.
-      expect(read.textContent).toContain("18 signals across 1 source")
-      expect(read.textContent).toContain(KEPT_LABEL)
-      expect(read.textContent).not.toContain(DROPPED_LABEL)
-      // ...and it is NAMED as dropped, in the same section.
-      expect(within(read).getByTestId("goal-excluded").textContent)
-        .toContain("project mgmt")
-      // ...and the request that produced all of the above carried the drop.
-      // Asserted last on purpose: the rendered page is the thing that can be
-      // wrong while every mock stays happy, so it is what fails first.
+      // THE WIRE. This is the hop nothing else covers: the checkbox the
+      // reader unticked has to reach the approve body, or the run is quietly
+      // wider than the one they agreed to.
       expect(approveRun).toHaveBeenCalledWith(
         RUN_ID,
         expect.objectContaining({ excluded_sources: [DROPPED_TYPE] }),
       )
+      // And the drop is a record, not an omission: the settled card in the
+      // thread still names the source and shows it struck.
+      const settled = screen.getByTestId("goal-gate-plan-done")
+      expect(within(settled).getByText(DROPPED_LABEL)
+        .closest(".ggc-src-struck")).toBeTruthy()
+      expect(settled.textContent).toContain(KEPT_LABEL)
     }, 30_000)
 
   it("carries the reader's hypothesis into the report", async () => {
       // The other half of the gate-2 decision, and the one that is silently
       // droppable: nothing else on screen would look wrong without it.
       await walkTheFlow()
-      expect(within(panelBody() as HTMLElement)
-        .getByTestId("goal-hypotheses").textContent).toContain(HYPOTHESIS)
       expect(approveRun).toHaveBeenCalledWith(
         RUN_ID,
         expect.objectContaining({ hypotheses: [HYPOTHESIS] }),
       )
+      expect(screen.getByTestId("goal-gate-plan-done").textContent)
+        .toContain(HYPOTHESIS)
     }, 30_000)
 
-  it("renders the findings the run produced", async () => {
+  it("shows the report this run produced, in the panel", async () => {
       // The panel body, not the document: this is the hop nothing else covers.
       await walkTheFlow()
       const body = panelBody() as HTMLElement
@@ -575,14 +587,13 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // which is `ChatScreen.goal-restore`'s subject, not this file's.
       expect(panelTabLabels()).toContain("Goal Analysis")
       expect(within(body).getByTestId("goal-report")).toBeTruthy()
-      expect(within(body).getAllByTestId("goal-finding")[0].textContent)
-        .toContain(FINDING_STATEMENT)
-      // I3, at the far end of the whole flow: the unsized finding says so.
-      expect(within(body).getByTestId("goal-unsized").textContent)
-        .toBe("Could not be sized")
-      // The ledger the ranking rests on is on screen too.
-      expect(within(body).getByTestId("goal-considered").textContent)
-        .toContain("Globex asked for SSO")
+      // THE LAST HOP, AS IT NOW EXISTS: this run's rendered report is what
+      // reaches the reader, whole and unaltered. What the document says — I3,
+      // the ledger, the coverage notes — is asserted against the renderer
+      // that writes it; see `REPORT_HTML` above for where.
+      const frame = within(body).getByTitle("Goal analysis") as HTMLIFrameElement
+      expect(frame.getAttribute("srcdoc")).toContain("the report for run 4242")
+      expect(frame.getAttribute("sandbox")).toBe("allow-same-origin")
     }, 30_000)
 
   it("leaves the plan in the thread, read-only, with the dropped source struck",

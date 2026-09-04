@@ -1,19 +1,57 @@
 // @vitest-environment jsdom
 //
-// The Goal Analysis REPORT. Every test here guards a way the document could
-// read as more than it knows:
+// The Goal Analysis REPORT — the chrome around a document, not a renderer of
+// one.
 //
-//   1. An unsized finding rendered as 0 — "we could not size this" and "this
-//      is worth nothing" lead to OPPOSITE decisions (I3). Guarded in both
-//      places a size appears, because the headline repeats the leading one.
-//   2. A finding with no visible provenance. If the source documents behind a
-//      claim are dropped, the reader has to take it on faith, which is the one
-//      thing this engine is supposed to remove.
-//   3. "What this cannot tell you" going missing. That section is the product's
-//      actual claim; a report that silently omits it looks complete.
-//   4. What was read going unstated — including what the USER dropped, which a
-//      report that lists it among its sources would be lying about.
-import { cleanup, render, screen } from "@testing-library/react"
+// WHAT THIS FILE USED TO BE, AND WHY IT IS NOT THAT ANY MORE. `GoalAnalysis-
+// Report` used to rebuild the entire document in React from `run.findings`,
+// in parallel with the Python that renders the exported copy. Two renderers of
+// one report, sharing no code, each holding its own copy of every rule about
+// how a finding is written out — and this file was the 1,500 lines of tests
+// that kept the second one honest. The component's own header records what
+// that cost: a decision box that existed only in the exported document, a
+// grounded-money line the panel's payload could not even carry, caps declared
+// twice, and half a dozen rules with a comment on each saying "keep this in
+// step by hand".
+//
+// The second renderer is gone. What the panel shows is the bytes
+// `backend/app/crucible/report.render_report_document` produced, displayed in
+// a sandboxed iframe by `HtmlReportView`.
+//
+// SO THE ASSERTIONS WENT WHERE THE CODE WENT. Every guarantee this file used
+// to make about what the document SAYS is now made against the renderer that
+// actually writes it, over the real pipeline rather than a fixture:
+//
+//   an unsized finding is never 0 (I3)
+//     -> test_crucible_report.py::test_an_unsized_finding_says_so_and_is_
+//        never_a_number, and end to end over five corpus shapes in
+//        test_crucible_document_consistency.py::_assert_null_is_never_zero_
+//        or_small, which checks EVERY place a size appears rather than the
+//        two this file could reach;
+//   a finding carries the documents it rests on
+//     -> test_crucible_report.py::test_a_finding_carries_the_documents_it_
+//        rests_on;
+//   "What this cannot tell you" is never dropped
+//     -> test_crucible_report.py::test_the_limits_section_is_built_from_the_
+//        plan_s_own_gaps;
+//   what was read, including what the reader dropped
+//     -> test_crucible_document_consistency.py::_assert_what_was_read_is_
+//        what_the_plan_kept, which also checks the bullets sum to the total;
+//   coverage notes qualifying what they qualify
+//     -> test_crucible_report.py::test_coverage_notes_sit_inside_what_was_
+//        read_not_in_a_footer;
+//   the ruled-out ledger, with each reason
+//     -> test_crucible_report.py::test_the_ruled_out_ledger_keeps_its_reasons;
+//   the recommendation, the deep write-up, list pricing, the RICE table, the
+//   relevance-gate disclosure, the shortfall note
+//     -> their namesakes in test_crucible_report.py.
+//
+// WHAT IS LEFT HERE IS WHAT THIS COMPONENT STILL DECIDES, and all of it is
+// something only the client can get wrong: whether the report reaches the
+// reader intact, whether it can execute anything, whether a run without one
+// says so, and whether the two document actions are offered — and warned
+// about — before they are irreversible.
+import { cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -22,1472 +60,134 @@ vi.hoisted(() => {
 })
 
 import { GoalAnalysisReport } from "../GoalAnalysisReport"
-import type { GoalFinding } from "../../../lib/api"
-import { MAX_RICE_ROWS } from "../../../lib/goalRice"
+import type { GoalRunDetail } from "../../../lib/api"
 
-const PLAN = {
-  goal_text: "raise net revenue retention",
-  definition_text: "expansion minus churn across renewing accounts",
-  currency: "accounts",
-  total_signals: 412,
-  sources: [
-    {
-      source_type: "customer_voice",
-      signal_count: 260,
-      label: "calls and customer tickets",
-      witnesses: "what customers asked for and reported",
-    },
-    {
-      source_type: "project_mgmt",
-      signal_count: 152,
-      label: "the tracker",
-      witnesses: "what was built, broken, blocked or attempted",
-    },
-  ],
-  cannot_answer: [
-    {
-      question: "How many points will this move the metric?",
-      because: "nothing connected here carries numbers",
-      remedy: "connect Amplitude, or upload a cohort export",
-    },
-  ],
-  will_produce: ["Themes ranked by how much of your book they touch"],
-  excluded_sources: [] as string[],
-  hypotheses: [] as string[],
-}
-
-const SIZED = {
-  id: 1,
-  statement: "9 claims across 4 accounts concern export latency.",
-  claim_ids: ["c1", "c2"],
-  adjudication: "corroborated",
-  impact_value: 4,
-  currency: "accounts",
-  confidence_band: "medium",
-  assumed_params: [
-    { name: "value_per_account", basis: "no revenue data connected" },
-  ],
-  surfaced_by: ["Renewal call — Vandelay Industries", "NW-2140"],
-  impact: { value: 4, affected_population: 4 },
-  confidence: {
-    band: "medium",
-    weakest_leg: "problem",
-    weakest_leg_reason: "one account carries 6 of the 9 claims",
-    cap_reason: null,
-  },
-}
-
-const UNSIZED = {
-  ...SIZED,
-  id: 2,
-  statement: "Onboarding hand-off is raised repeatedly and never quantified.",
-  impact_value: null,
-  claim_ids: ["c7"],
-  surfaced_by: ["Kickoff notes — Initech"],
-  impact: { value: null, affected_population: null },
-}
+/** A stand-in for what `render_report_document` emits. It only has to be
+ *  recognisable: the panel's job is to pass it through unchanged, and what a
+ *  real one SAYS is asserted against the real renderer (see the header). */
+const REPORT =
+  '<!doctype html><html lang="en"><head><title>Goal analysis</title>' +
+  "<style></style></head><body>" +
+  '<div class="frame"><div class="page">' +
+  "<h1>raise net revenue retention</h1>" +
+  "<p>Could not be sized</p>" +
+  "<p>9 accounts &amp; counting — “quoted”</p>" +
+  "</div></div></body></html>"
 
 const RUN = {
   id: 7,
-  status: "ready" as const,
+  status: "ready",
   goal_text: "raise net revenue retention",
   error_code: null,
-  coverage_notes: [] as { reason: string; actual: string }[],
-  claim_count: 412,
+  coverage_notes: [],
+  claim_count: 12,
   conversation_id: null,
-  // No document has been rendered from this run. The read-only report is what
-  // every test in this file is about; the editable half is
-  // GoalAnalysisTab.document.dom.test.tsx.
   artifact_id: null,
   created_at: null,
   finished_at: null,
-  findings: [SIZED],
+  findings: [],
   considered: [],
-  prioritisation: { plan: PLAN },
-}
+  report_html: REPORT,
+} as unknown as GoalRunDetail
+
+const frame = () => screen.getByTitle("Goal analysis") as HTMLIFrameElement
 
 afterEach(cleanup)
 
-describe("sizing", () => {
-  it("renders an unsized finding as unsized, never as zero", async () => {
-    // THE ONE THAT MATTERS. A dash and a 0 look similar and mean opposites.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [UNSIZED] }} />)
-    expect(screen.getByTestId("goal-unsized").textContent).toBe(
-      "Could not be sized",
-    )
-    const report = screen.getByTestId("goal-report")
-    expect(report.textContent).not.toMatch(/\b0 accounts\b/)
-    expect(screen.queryByTestId("goal-sized")).toBeNull()
-  })
-
-  it("does not size the HEADLINE as zero either", async () => {
-    // The headline repeats the leading finding, so it is a second place the
-    // same lie can be told — and the more prominent of the two.
-    //
-    // It used to say this by printing "Could not be sized" straight after "It
-    // is the largest thing this reading found:", which is the two halves of
-    // one sentence contradicting each other. The absence is now stated as a
-    // sentence instead of spliced into a superlative — so what this test
-    // guards is the MEANING (no number, and it says the size is unknown), not
-    // the particular words that used to carry it.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [UNSIZED] }} />)
-    const headline = screen.getByTestId("goal-headline")
-    // One finding, and it has no size — so the honest sentence is that
-    // nothing in this reading could be sized. What must never appear is a
-    // number, or a superlative resting on one.
-    expect(headline.textContent).toMatch(
-      /nothing in this reading could be sized/i,
-    )
-    expect(headline.textContent).not.toMatch(/\b0\b/)
-    expect(headline.textContent).not.toMatch(/largest/i)
-    expect(screen.queryByTestId("goal-headline-sized")).toBeNull()
-  })
-
-  it("renders a sized finding in the goal's own currency", async () => {
+describe("the document reaches the reader", () => {
+  it("shows the report the run produced, character for character", () => {
+    // NOT "CONTAINS THE HEADLINE". A panel that summarised, truncated,
+    // re-ordered or re-escaped the document would still contain the headline;
+    // the only assertion that catches all four is the whole document. The one
+    // permitted difference is the panel's own gutter override, which
+    // `HtmlReportView` splices into <head> and which adds nothing a reader
+    // reads — so it is subtracted rather than waved at.
     render(<GoalAnalysisReport run={RUN} />)
-    expect(screen.getByTestId("goal-sized").textContent).toBe("4 accounts")
+    const shown = (frame().getAttribute("srcdoc") || "")
+      .replace(/<style>body:has\(\.page\)[\s\S]*?<\/style>/, "")
+    expect(shown).toBe(REPORT)
   })
 
-  it("says the ranking is by reach, not by effect on the metric", async () => {
-    // The whole ranking rests on a proxy. Presenting it without saying so is
-    // how "4 accounts" gets read as "worth more points".
+  it("does not re-escape the text the document already escaped", () => {
+    // The report is server-generated but it quotes tenant text, which arrives
+    // escaped. Escaping it a second time is how "&" becomes "&amp;" on screen.
     render(<GoalAnalysisReport run={RUN} />)
-    expect(screen.getByTestId("goal-report").textContent).toMatch(/reach/i)
+    expect(frame().getAttribute("srcdoc")).toContain("9 accounts &amp; counting")
+  })
+
+  it("cannot execute anything the document carries", () => {
+    // This is the boundary tenant text crosses into the reader's session.
+    // `allow-same-origin` WITHOUT `allow-scripts`: the stylesheet applies,
+    // nothing in the document runs, and inline handlers never fire.
+    render(<GoalAnalysisReport run={RUN} />)
+    const sandbox = frame().getAttribute("sandbox")
+    expect(sandbox).toBe("allow-same-origin")
+    expect(sandbox).not.toContain("allow-scripts")
+  })
+
+  it("names the goal above the document, so the panel says what it is", () => {
+    render(<GoalAnalysisReport run={RUN} />)
+    expect(screen.getByTestId("goal-report").textContent)
+      .toContain("raise net revenue retention")
   })
 })
 
-describe("what the ordering is allowed to claim", () => {
-  // THIS PANEL IS THE SECOND RENDERER OF THE SAME REPORT, and it is the one a
-  // reader looks at — `backend/app/crucible/report.py` renders the exported
-  // document. Every rule below exists identically in both, because a fix
-  // applied to one of them leaves the other telling the reader the same
-  // falsehood in a more prominent place.
-  const BIG = { ...SIZED, id: 3, impact_value: 900, claim_ids: ["c9"] }
+describe("a run with no report yet", () => {
+  const pending = { ...RUN, report_html: undefined } as GoalRunDetail
 
-  it("does not call the top the largest while anything went unsized", () => {
-    // "The largest thing this reading found" quantifies over EVERYTHING, and
-    // an unsized finding is not a small one — its size is unknown, and an
-    // unknown can be bigger.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
-    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
-    expect(note).not.toMatch(/largest thing this reading found/i)
-    expect(note).toMatch(/largest of the ones that could be sized/i)
-    expect(note).toMatch(/One of these could not be sized/i)
+  it("says so rather than going blank", () => {
+    // STATED, NOT BLANK. A run still generating — or one read by a client
+    // older than the field — must not render as an empty panel, which reads
+    // as "the analysis found nothing".
+    render(<GoalAnalysisReport run={pending} />)
+    expect(screen.getByTestId("goal-report-pending").textContent)
+      .toContain("no rendered report yet")
+    expect(screen.queryByTitle("Goal analysis")).toBeNull()
   })
 
-  it("keeps the superlative when every finding was sized", () => {
-    // The weaker sentence must not swallow the strong one: hedging a claim
-    // the run DID establish is its own kind of inaccuracy.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [BIG, SIZED] }} />)
-    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
-    expect(note).toMatch(/largest thing this reading found/i)
-    expect(note).not.toMatch(/could be sized/i)
-  })
-
-  it("does not call a conflict-led run's top row the largest", () => {
-    // `_rank`'s dominant term places an authoritative disagreement above
-    // everything that is not one, so the top row here is a 4-account finding
-    // sitting above a 900-account one.
-    const CONFLICT = { ...SIZED, id: 4, adjudication: "conflict" }
+  it("treats whitespace as no report at all", () => {
     render(
-      <GoalAnalysisReport run={{ ...RUN, findings: [CONFLICT, BIG] }} />,
+      <GoalAnalysisReport run={{ ...RUN, report_html: "   \n " } as GoalRunDetail} />,
     )
-    const note = screen.getByTestId("goal-headline-note").textContent ?? ""
-    expect(note).not.toMatch(/largest/i)
-    expect(note).toMatch(/placed above every finding that is not one/i)
-  })
-
-  it("does not claim a reach ranking when nothing could be sized", () => {
-    // `_rank`'s key is (conflict, claim-type bucket, reach, confidence). When
-    // nothing could be sized the reach term drops out — but the two terms
-    // ABOVE it still sort the list, and the lede used to credit what was left
-    // to confidence. That was false: a blocker sorts above a preference
-    // whatever either one's confidence. So the lede has to name the terms
-    // that actually did the sorting, and must not restate the old claim.
-    const BLOCKER = {
-      ...UNSIZED, id: 1, claim_ids: ["c1"], claim_types: ["constraint"],
-    }
-    const WANTED = {
-      ...UNSIZED, id: 2, claim_ids: ["c2"], claim_types: ["preference"],
-    }
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [BLOCKER, WANTED] }} />)
-    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-    expect(lede).toMatch(/not ranked by reach/i)
-    expect(lede).toMatch(/blocks an account is placed above/i)
-    expect(lede).toMatch(/authoritative disagreement is placed above/i)
-    expect(lede).not.toMatch(/ordered by confidence\b/i)
-  })
-
-  it("says when the order rests on something the reader cannot see", () => {
-    // `_rank`'s last term is a confidence SCORE, never rendered — the reader
-    // sees bands. With no outcome evidence every band comes out the same, so a
-    // list that LOOKS ranked is read as ranked. Position is the most
-    // persuasive thing on a page.
-    //
-    // SCOPED TO ONE BUCKET, which is why both findings here are preferences:
-    // the caveat is owed between NEIGHBOURS the claim-type term could not
-    // separate, not over the whole list — blockers genuinely do sort above
-    // preferences, so disowning the list end to end would be its own
-    // inaccuracy, printed inches under a recommendation bound to position 1.
-    const flat = {
-      ...UNSIZED, confidence_band: "medium", claim_types: ["preference"],
-    }
-    render(
-      <GoalAnalysisReport
-        run={{ ...RUN, findings: [
-          { ...flat, id: 1, claim_ids: ["c1"] },
-          { ...flat, id: 2, claim_ids: ["c2"] },
-        ] }}
-      />,
-    )
-    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-    expect(lede).toMatch(/same confidence band/i)
-    // The load-bearing pair: what the reader cannot check (the score), and
-    // how far the disclaimer reaches (two neighbours in the same group).
-    expect(lede).toMatch(/confidence score this report does not print/i)
-    expect(lede).toMatch(/neighbours in the same group/i)
-    expect(lede).toMatch(/verdict on which matters more/i)
-  })
-
-  it("does not disclaim an order the bands actually justify", () => {
-    // The control: when the bands differ the order IS checkable from the page,
-    // and telling the reader to discount it would be its own inaccuracy.
-    render(
-      <GoalAnalysisReport
-        run={{ ...RUN, findings: [
-          { ...UNSIZED, id: 1, confidence_band: "high", claim_ids: ["c1"] },
-          { ...UNSIZED, id: 2, confidence_band: "low", claim_ids: ["c2"] },
-        ] }}
-      />,
-    )
-    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-    expect(lede).toMatch(/not ranked by reach/i)
-    expect(lede).not.toMatch(/same confidence band/i)
-  })
-
-  it("says how many it could not size, once, when the ranking is partial", () => {
-    // THE DISCLOSURE MOVED, IT DID NOT GO. The headline and this lede both
-    // carried the count and the caveat, three lines apart, and a real report
-    // read "…257 of these could not be sized at all, and a missing size is not
-    // a small one" immediately above "…and 257 of them could not be sized at
-    // all. An unsized theme sorts last without being small". With a SIZED top
-    // row the headline says both, so the lede says neither.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
-    const head = screen.getByTestId("goal-headline").textContent ?? ""
-    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-
-    expect(head).toMatch(/one of these could not be sized at all/i)
-    expect(head).toMatch(/is not a small one/i)
-    expect(lede).not.toMatch(/could not be sized at all/i)
-    expect(lede).not.toMatch(/its size is unknown, not zero/i)
-  })
-
-  it("still names the count when the headline states only the caveat", () => {
-    // THE CASE A BOOLEAN GOT WRONG. With an UNSIZED top row the headline says
-    // "a missing size is not a small one" and never names how many — so
-    // suppressing the whole lede clause drops the count out of the page.
-    render(<GoalAnalysisReport
-      run={{ ...RUN, findings: [UNSIZED, { ...UNSIZED, id: 99 }, SIZED] }} />)
-    const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
-    expect(lede).toMatch(/2 of them could not be sized at all/i)
-    // And does not repeat the caveat the headline just made.
-    expect(lede).not.toMatch(/its size is unknown, not zero/i)
+    expect(screen.getByTestId("goal-report-pending")).toBeTruthy()
   })
 })
 
-describe("one fact about the corpus is not many about the findings", () => {
-  // A corpus with no outcome evidence anywhere gives EVERY finding the same
-  // weakest link. Printed on all 32 rows it reads as 32 separate judgements
-  // about 32 different themes, and a reader who meets an identical sentence
-  // three times stops reading the section — which is how a genuine
-  // per-finding difference would later go unnoticed.
-  // TYPED, not `unknown`. An `unknown` here is not assignable to
-  // `GoalFinding` and added 11 tsc errors — a fixture that does not typecheck
-  // is the same silent-drift problem as the untyped `Record<string, unknown>`
-  // fixtures that let unknown keys vanish elsewhere in this suite.
-  type Conf = GoalFinding["confidence"]
-  const conf = (over: Partial<Conf>): Conf => ({
-    band: "medium", weakest_leg: null, weakest_leg_reason: null,
-    cap_reason: null, ...over,
+describe("the document actions", () => {
+  it("offers none unless the caller asked for them", () => {
+    // DEFAULT FALSE, so every existing caller renders what it rendered before.
+    render(<GoalAnalysisReport run={RUN} />)
+    expect(screen.queryByTestId("goal-report-actions")).toBeNull()
   })
-  const withConf = (id: number, confidence: Conf): GoalFinding => ({
-    ...SIZED, id, confidence, claim_ids: [`c${id}`],
-  } as GoalFinding)
-  const SAME = conf({ weakest_leg_reason: "no outcome evidence exists" })
 
-  it("states a weakest link shared by every finding exactly once", () => {
+  it("warns that editing is one-way BEFORE the click, not after it", () => {
+    // Editing detaches the report from the run for good. A reader who did not
+    // know that would be told only once it had happened.
+    render(<GoalAnalysisReport run={RUN} editable />)
+    const actions = screen.getByTestId("goal-report-actions")
+    expect(actions.textContent).toContain("It stops updating from the run")
+  })
+
+  it("hands each action to its own handler", () => {
+    const onEdit = vi.fn()
+    const onSaveCopy = vi.fn()
     render(
-      <GoalAnalysisReport
-        run={{ ...RUN, findings: [withConf(1, SAME), withConf(2, SAME), withConf(3, SAME)] }}
-      />,
+      <GoalAnalysisReport run={RUN} editable onEdit={onEdit} onSaveCopy={onSaveCopy} />,
     )
-    expect(screen.getByTestId("goal-shared-weakest").textContent ?? "")
-      .toMatch(/every finding below has the same weakest link/i)
-    const report = screen.getByTestId("goal-report").textContent ?? ""
-    expect(report.split("no outcome evidence exists").length - 1).toBe(1)
-    expect(report).not.toMatch(/Weakest link\./)
+    fireEvent.click(screen.getByTestId("goal-report-edit"))
+    fireEvent.click(screen.getByTestId("goal-report-save-copy"))
+    expect(onEdit).toHaveBeenCalledTimes(1)
+    expect(onSaveCopy).toHaveBeenCalledTimes(1)
   })
 
-  it("joins the cap onto the weakest link as a clause, not a new sentence", () => {
-    // `cap_reason` arrives uncapitalised ("capped at medium: …"), so joining
-    // it after a full stop rendered "…the diagnosis are not. capped at
-    // medium". Shipped once and only caught by reading the rendered panel —
-    // hence this test, since nothing else in the suite reads the join.
-    const withCap = conf({
-      weakest_leg_reason: "no outcome evidence exists",
-      cap_reason: "capped at medium: no outcome evidence in the corpus",
-    })
-    render(
-      <GoalAnalysisReport
-        run={{ ...RUN, findings: [withConf(1, withCap), withConf(2, withCap)] }}
-      />,
-    )
-    const said = screen.getByTestId("goal-shared-weakest").textContent ?? ""
-    expect(said).toContain("exists; capped at medium")
-    expect(said).not.toMatch(/\.\s+capped at medium/)
-  })
-
-  it("puts two different weakest links back on their own rows", () => {
-    // The control. Detected, not assumed: the moment they differ, the sentence
-    // is about the finding again and belongs beside it.
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          findings: [
-            withConf(1, SAME),
-            withConf(2, conf({ band: "low", weakest_leg_reason: "one account carries it" })),
-          ],
-        }}
-      />,
-    )
-    expect(screen.queryByTestId("goal-shared-weakest")).toBeNull()
-    const report = screen.getByTestId("goal-report").textContent ?? ""
-    expect(report).toContain("no outcome evidence exists")
-    expect(report).toContain("one account carries it")
-  })
-
-  it("leaves a lone finding's weakest link where it is", () => {
-    // One finding is not a corpus-wide pattern; "every finding below" would be
-    // a claim about a set of one.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [withConf(1, SAME)] }} />)
-    expect(screen.queryByTestId("goal-shared-weakest")).toBeNull()
-    expect(screen.getByTestId("goal-report").textContent ?? "")
-      .toMatch(/Weakest link\./)
-  })
-
-  it("says once that every rejection died for the same reason", () => {
-    // One group is the degenerate case of grouping: the reason belongs to the
-    // group heading, not to each of the four rows beneath it.
-    const considered = [0, 1, 2, 3].map((i) => ({
-      id: i, label: `candidate ${i}`,
-      reason: "no source that may speak to this claim type reported it",
-      stopped_at_stage: "verification", claim_ids: [],
-    }))
-    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
-    const said = screen.getByTestId("goal-considered").textContent ?? ""
-    expect(said).toMatch(/every one of them died for the same one/i)
+  it("disables BOTH while one is in flight", () => {
+    // They write to the same run. Letting the second fire while the first is
+    // still going is how you get a copy of a report that is mid-creation.
+    render(<GoalAnalysisReport run={RUN} editable busy />)
+    expect((screen.getByTestId("goal-report-edit") as HTMLButtonElement).disabled)
+      .toBe(true)
     expect(
-      said.split("no source that may speak to this claim type reported it").length - 1,
-    ).toBe(1)
-    expect(screen.getAllByTestId("goal-ruled-out-group")).toHaveLength(1)
-    for (const i of [0, 1, 2, 3]) expect(said).toContain(`candidate ${i}`)
-  })
-
-  it("groups rejections by reason, biggest cause first", () => {
-    // THE SHAPE OF THE ANSWER. A real run rejected 102 candidates for five
-    // reasons — 49 one way, 47 another — and the flat list repeated each
-    // reason beside each label, so a reader could not see that half the ledger
-    // died one way and half another without counting by hand.
-    const considered = [
-      ...[0, 1, 2].map((i) => ({
-        id: i, label: `a${i}`, reason: "no authoritative source",
-        stopped_at_stage: "verification", claim_ids: [],
-      })),
-      ...[0, 1, 2, 3, 4].map((i) => ({
-        id: 90 + i, label: `b${i}`, reason: "only 1 supporting claim",
-        stopped_at_stage: "clustering", claim_ids: [],
-      })),
-    ]
-    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
-    const said = screen.getByTestId("goal-considered").textContent ?? ""
-    expect(screen.getAllByTestId("goal-ruled-out-group")).toHaveLength(2)
-    // Each reason once, as a heading over its own group.
-    expect(said.split("no authoritative source").length - 1).toBe(1)
-    expect(said.split("only 1 supporting claim").length - 1).toBe(1)
-    // Biggest cause first.
-    expect(said.indexOf("only 1 supporting claim"))
-      .toBeLessThan(said.indexOf("no authoritative source"))
-    for (const l of ["a0", "a2", "b0", "b4"]) expect(said).toContain(l)
-  })
-
-  it("keeps differing rejection reasons on their own rows", () => {
-    const considered = [
-      { id: 1, label: "alpha", reason: "one account only",
-        stopped_at_stage: "verification", claim_ids: [] },
-      { id: 2, label: "beta", reason: "one conversation echoing",
-        stopped_at_stage: "verification", claim_ids: [] },
-    ]
-    render(<GoalAnalysisReport run={{ ...RUN, considered }} />)
-    const said = screen.getByTestId("goal-considered").textContent ?? ""
-    expect(said).not.toMatch(/died for the same reason/i)
-    expect(said).toContain("one account only")
-    expect(said).toContain("one conversation echoing")
-  })
-})
-
-describe("what the report admits it did not do", () => {
-  it("says the findings were not selected for the goal", () => {
-    // Claim selection never sees the definition: `build_findings` takes a
-    // `goal_accounts` filter that production does not pass. Unstated, the
-    // panel LOOKS like it answered the question it was asked.
-    render(<GoalAnalysisReport run={RUN} />)
-    const said = screen.getByTestId("goal-not-selected").textContent ?? ""
-    expect(said).toMatch(/not selected for your goal/i)
-    expect(said).toMatch(/filtered or ranked by relevance/i)
-  })
-
-  it("does not also claim the definition chose them", () => {
-    // The two sentences are five sections apart and used to contradict each
-    // other, with the false one in the more prominent position.
-    render(<GoalAnalysisReport run={RUN} />)
-    const report = screen.getByTestId("goal-report").textContent ?? ""
-    expect(report).not.toMatch(/measured against that sentence/i)
-    expect(
-      screen.getByTestId("goal-definition-note").textContent ?? "",
-    ).toMatch(/did not decide which findings appear below/i)
-  })
-
-  it("says it FILTERED, not that it did not, once the relevance gate ran", () => {
-    // `relevance_gate_ran` is true only when `judge_relevance` completed
-    // without raising — the OLD sentence is false the moment that happened,
-    // whether or not anything ended up set aside.
-    const run = {
-      ...RUN,
-      prioritisation: { ...RUN.prioritisation, relevance_gate_ran: true },
-    }
-    render(<GoalAnalysisReport run={run} />)
-    const notSelected = screen.getByTestId("goal-not-selected").textContent ?? ""
-    expect(notSelected).not.toMatch(/not selected for your goal/i)
-    expect(notSelected).toMatch(/filtered for relevance to your goal/i)
-    const note = screen.getByTestId("goal-definition-note").textContent ?? ""
-    expect(note).not.toMatch(/did not decide which findings appear below/i)
-    expect(note).toMatch(/shaped which findings appear below/i)
-  })
-})
-
-describe("the relevance gate's own truncation is disclosed", () => {
-  it("says how many were evaluated when the gate stopped short", () => {
-    const run = {
-      ...RUN,
-      prioritisation: {
-        ...RUN.prioritisation,
-        relevance_gate_ran: true,
-        relevance_judged: { judged: 60, considered: 240 },
-      },
-    }
-    render(<GoalAnalysisReport run={run} />)
-    const said = screen.getByTestId("goal-relevance-coverage").textContent ?? ""
-    expect(said).toMatch(/evaluated 60/)
-    expect(said).toMatch(/180/)
-    expect(said).toMatch(/kept in the list above/i)
-  })
-
-  it("says nothing when the gate judged everything it found", () => {
-    const run = {
-      ...RUN,
-      prioritisation: {
-        ...RUN.prioritisation,
-        relevance_gate_ran: true,
-        relevance_judged: { judged: 4, considered: 4 },
-      },
-    }
-    render(<GoalAnalysisReport run={run} />)
-    expect(screen.queryByTestId("goal-relevance-coverage")).toBeNull()
-  })
-})
-
-describe("provenance", () => {
-  it("renders the source documents for EVERY finding that has them", async () => {
-    // Not "for the first one". A report that traces its headline and leaves
-    // the rest bare is the same unfalsifiable list in nicer type.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED, UNSIZED] }} />)
-    const findings = screen.getAllByTestId("goal-finding")
-    const withSources = findings.filter((el) =>
-      el.querySelector('[data-testid="goal-sources"]'),
-    )
-    expect(findings.length).toBe(2)
-    expect(withSources.length).toBe(2)
-    expect(screen.getAllByTestId("goal-sources").map((el) => el.textContent))
-      .toEqual([
-        expect.stringContaining("Renewal call — Vandelay Industries"),
-        expect.stringContaining("Kickoff notes — Initech"),
-      ])
-  })
-
-  it("shows no provenance line for a finding that carries none", async () => {
-    // The control for the test above: a source line that appears whether or
-    // not there are sources proves nothing about the ones that have them.
-    render(
-      <GoalAnalysisReport
-        run={{ ...RUN, findings: [{ ...SIZED, surfaced_by: [] }] }}
-      />,
-    )
-    expect(screen.queryByTestId("goal-sources")).toBeNull()
-  })
-
-  it("discloses every assumed parameter beside the number it produced", async () => {
-    // I8. A methodology page nobody opens is not a disclosure.
-    render(<GoalAnalysisReport run={RUN} />)
-    expect(screen.getByTestId("goal-report").textContent).toContain(
-      "no revenue data connected",
-    )
-  })
-})
-
-describe("what this cannot tell you", () => {
-  it("renders the closing section whenever the plan has gaps", async () => {
-    render(<GoalAnalysisReport run={RUN} />)
-    const limits = screen.getByTestId("goal-limits")
-    expect(screen.getAllByTestId("goal-gap").length).toBe(1)
-    expect(limits.textContent).toContain(
-      "How many points will this move the metric?",
-    )
-    // The gap without the fix is a shrug. Both halves render.
-    expect(limits.textContent).toContain("nothing connected here carries numbers")
-    expect(limits.textContent).toContain("connect Amplitude")
-  })
-
-  it("renders every gap, not just the first", async () => {
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          prioritisation: {
-            plan: {
-              ...PLAN,
-              cannot_answer: [
-                ...PLAN.cannot_answer,
-                {
-                  question: "Did a change like this work last time?",
-                  because: "no measured outcomes are connected",
-                  remedy: "connect your experiment tool",
-                },
-              ],
-            },
-          },
-        }}
-      />,
-    )
-    expect(screen.getAllByTestId("goal-gap").length).toBe(2)
-    expect(screen.getByTestId("goal-limits").textContent).toContain(
-      "Did a change like this work last time?",
-    )
-  })
-
-  it("still states the standing limits when the run kept no plan", async () => {
-    // An old run has no gap list. Rendering nothing would read as "no limits",
-    // which is the opposite of true.
-    render(<GoalAnalysisReport run={{ ...RUN, prioritisation: {} }} />)
-    const limits = screen.getByTestId("goal-limits")
-    expect(limits.textContent).toMatch(/point estimate/i)
-    expect(screen.queryAllByTestId("goal-gap").length).toBe(0)
-  })
-})
-
-describe("what was read", () => {
-  it("names each source with its count", async () => {
-    render(<GoalAnalysisReport run={RUN} />)
-    const read = screen.getByTestId("goal-what-was-read")
-    expect(screen.getAllByTestId("goal-read-source").length).toBe(2)
-    expect(read.textContent).toContain("calls and customer tickets")
-    expect(read.textContent).toContain("260")
-    expect(read.textContent).toContain("152")
-  })
-
-  it("says what the USER excluded, rather than quietly omitting it", async () => {
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          prioritisation: {
-            plan: {
-              ...PLAN,
-              sources: [PLAN.sources[0]],
-              total_signals: 260,
-              excluded_sources: ["project_mgmt"],
-            },
-          },
-        }}
-      />,
-    )
-    // Readable, not a column name: the label went with the entry the run
-    // dropped, so the key is softened rather than printed raw.
-    expect(screen.getByTestId("goal-excluded").textContent).toContain(
-      "project mgmt",
-    )
-    expect(screen.getByTestId("goal-excluded").textContent).not.toContain(
-      "project_mgmt",
-    )
-  })
-
-  it("admits when a run kept no record of what it read", async () => {
-    render(<GoalAnalysisReport run={{ ...RUN, prioritisation: {} }} />)
-    expect(screen.getByTestId("goal-no-plan")).toBeTruthy()
-  })
-
-  it("puts the coverage notes ABOVE the findings they qualify", async () => {
-    // A note that a third of the evidence was undated changes how every line
-    // beneath it reads, so it cannot sit under them.
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          coverage_notes: [
-            { reason: "undated evidence", actual: "40 of 300 signals carried no date" },
-          ],
-        }}
-      />,
-    )
-    const report = screen.getByTestId("goal-report")
-    expect(screen.getByTestId("goal-coverage").textContent).toContain(
-      "40 of 300 signals carried no date",
-    )
-    expect(report.textContent!.indexOf("undated evidence")).toBeLessThan(
-      report.textContent!.indexOf(SIZED.statement),
-    )
-  })
-})
-
-describe("the goal and its definition", () => {
-  it("quotes the confirmed definition verbatim", async () => {
-    render(<GoalAnalysisReport run={RUN} />)
-    expect(screen.getByTestId("goal-definition").textContent).toContain(
-      "expansion minus churn across renewing accounts",
-    )
-  })
-
-  it("says so when no definition was recorded, instead of showing none", async () => {
-    render(<GoalAnalysisReport run={{ ...RUN, prioritisation: {} }} />)
-    expect(screen.getByTestId("goal-no-definition")).toBeTruthy()
-  })
-})
-
-describe("the user's own hypotheses", () => {
-  it("renders them, and refuses to imply a verdict on them", async () => {
-    // The engine does not test a stated hypothesis against the claims. Showing
-    // these beside the findings without saying so would let their absence be
-    // read as "not supported" — a conclusion nothing produced.
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          prioritisation: {
-            plan: { ...PLAN, hypotheses: ["pricing is the blocker"] },
-          },
-        }}
-      />,
-    )
-    const section = screen.getByTestId("goal-hypotheses")
-    expect(section.textContent).toContain("pricing is the blocker")
-    expect(section.textContent).toMatch(/did not test/i)
-  })
-
-  it("omits the section entirely when none were given", async () => {
-    render(<GoalAnalysisReport run={RUN} />)
-    expect(screen.queryByTestId("goal-hypotheses")).toBeNull()
-  })
-})
-
-describe("the ruled-out ledger", () => {
-  const rejection = (i: number) => ({
-    id: i,
-    label: `candidate ${i}`,
-    reason: `only ${i} supporting claims`,
-    stopped_at_stage: "verification",
-    claim_ids: [],
-  })
-
-  it("keeps the closing section reachable when the ledger is long", async () => {
-    // A run can drop a hundred candidates. Rendering all hundred expanded
-    // buries "what this cannot tell you" under them — and that section is the
-    // one a reader has to reach.
-    const many = Array.from({ length: 40 }, (_, i) => rejection(i + 1))
-    render(<GoalAnalysisReport run={{ ...RUN, considered: many }} />)
-    const ledger = screen.getByTestId("goal-considered")
-    // The COUNT is visible whether or not the list is expanded, so a thinner
-    // ledger can never hide behind the fold.
-    expect(ledger.querySelector("summary")!.textContent).toContain("40")
-    expect(ledger.querySelector("details")!.open).toBe(false)
-    // Every reason is still in the document, one click away — not dropped.
-    expect(ledger.textContent).toContain("only 40 supporting claims")
-    expect(screen.getByTestId("goal-limits")).toBeTruthy()
-  })
-
-  it("stays open when there are few enough to read at once", async () => {
-    render(<GoalAnalysisReport run={{ ...RUN, considered: [rejection(1), rejection(2)] }} />)
-    expect(
-      screen.getByTestId("goal-considered").querySelector("details")!.open,
+      (screen.getByTestId("goal-report-save-copy") as HTMLButtonElement).disabled,
     ).toBe(true)
-  })
-})
-
-describe("a run where nothing survived", () => {
-  it("says so, and points at the list of why", async () => {
-    render(
-      <GoalAnalysisReport
-        run={{
-          ...RUN,
-          findings: [],
-          considered: [
-            {
-              id: 1,
-              label: "onboarding friction",
-              reason: "all 4 supporting claims land within 6 days",
-              stopped_at_stage: "verification",
-              claim_ids: ["c9"],
-            },
-          ],
-        }}
-      />,
-    )
-    expect(screen.getByTestId("goal-headline").textContent).toContain(
-      "Nothing survived verification",
-    )
-    expect(screen.getByTestId("goal-considered").textContent).toContain(
-      "all 4 supporting claims land within 6 days",
-    )
-    // And no headline size is invented for a finding that does not exist.
-    expect(screen.queryByTestId("goal-headline-sized")).toBeNull()
-    expect(screen.queryByTestId("goal-headline-unsized")).toBeNull()
-  })
-})
-
-describe("an assumption every finding makes is stated once", () => {
-  // "lots of irrelevant information". On a corpus with no revenue connected
-  // every finding carries the identical "value_per_account: no revenue data
-  // connected; accounts weighted equally" — a real report printed it on all
-  // 279. That is not disclosure, it is what the reader has to look past to
-  // find the assumptions that ARE per-finding.
-  it("hoists it out of the findings and states it once", () => {
-    render(<GoalAnalysisReport
-      run={{ ...RUN, findings: [SIZED, { ...SIZED, id: 2, statement: "b" }] }} />)
-    const page = document.body.textContent ?? ""
-    expect(screen.getByTestId("goal-shared-assumptions")).toBeTruthy()
-    // Stated — not lost.
-    expect(page).toContain("value_per_account")
-    // Once.
-    expect(page.split("value_per_account").length - 1).toBe(1)
-  })
-
-  it("leaves assumptions that differ on their own findings", () => {
-    // The moment two findings assume different things the hoist is wrong: it
-    // would attribute one finding's assumption to every other.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [
-      SIZED,
-      { ...SIZED, id: 2, statement: "b",
-        assumed_params: [{ name: "value_per_account", basis: "cohort median" }] },
-    ] }} />)
-    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
-    const page = document.body.textContent ?? ""
-    expect(page).toContain("no revenue data connected")
-    expect(page).toContain("cohort median")
-  })
-
-  it("leaves a lone finding's assumption on itself", () => {
-    // Hoisting out of one finding moves the disclosure away from the number it
-    // qualifies, for no saving at all.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
-    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
-    expect(document.body.textContent).toContain("no revenue data connected")
-  })
-
-  it("fires when only the sized findings carry an assumption", () => {
-    // THE SHAPE REAL DATA HAS. A live run had 326 findings — 30 sized and
-    // carrying value_per_account, 296 unsized and carrying nothing. Asking
-    // whether EVERY finding matched never fired, so the line stayed repeated
-    // 30 times on the page written to de-duplicate it.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [
-      SIZED,
-      { ...SIZED, id: 2, statement: "s2" },
-      { ...UNSIZED, id: 3, statement: "u1", assumed_params: [] },
-      { ...UNSIZED, id: 4, statement: "u2", assumed_params: [] },
-    ] }} />)
-    const page = document.body.textContent ?? ""
-    expect(page.split("value_per_account").length - 1).toBe(1)
-    // And says how many it speaks for, rather than claiming all of them.
-    expect(page).toContain("2 of the findings below rest on the same assumption")
-    expect(page).not.toContain("Every finding below rests on the same assumption")
-  })
-
-  it("does not hoist a single carrier", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [
-      SIZED,
-      { ...UNSIZED, id: 3, statement: "u1", assumed_params: [] },
-    ] }} />)
-    expect(screen.queryByTestId("goal-shared-assumptions")).toBeNull()
-    expect(document.body.textContent).toContain("no revenue data connected")
-  })
-})
-
-describe("the finding is a card, not a sentence", () => {
-  // Apurva: make the document "display data in a more beautiful manner, so
-  // that the user is able to understand the wins". The heading used to be the
-  // whole sentence, so the one word a reader scans for sat mid-clause, in
-  // quotes, behind two numbers the chips repeat verbatim.
-  const CARD = {
-    ...SIZED,
-    statement: '25 claims across 2 accounts concern “AI tabletop generation” — for example, “x”.',
-    label: "AI tabletop generation",
-    example: "Northwind tailors scenarios by role and complexity",
-  }
-
-  it("leads with the theme and sets the quote as a quote", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [CARD] }} />)
-    const head = screen.getAllByTestId("goal-finding")[0]
-      .querySelector(".ga-finding-statement")!.textContent
-    expect(head).toBe("AI tabletop generation")
-    expect(head).not.toMatch(/claims across/)
-    expect(screen.getByTestId("goal-finding-example").textContent)
-      .toContain("Northwind tailors scenarios by role and complexity")
-  })
-
-  it("falls back to the sentence for a run stored before the theme existed", () => {
-    // An empty heading would be a worse regression than the run-on it replaced.
-    const old = { ...SIZED, statement: "9 claims concern export latency.", label: undefined }
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [old] }} />)
-    expect(screen.getAllByTestId("goal-finding")[0]
-      .querySelector(".ga-finding-statement")!.textContent)
-      .toContain("export latency")
-    expect(screen.queryByTestId("goal-finding-example")).toBeNull()
-  })
-
-  it("does not print the quote twice when the sentence is the heading", () => {
-    const old = {
-      ...SIZED, label: undefined,
-      statement: '4 claims concern “x” — for example, “the export times out”.',
-      example: "the export times out",
-    }
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [old] }} />)
-    const section = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
-    expect(section.split("the export times out").length - 1).toBe(1)
-  })
-})
-
-describe("the card leads with what to do", () => {
-  // Apurva: "we should start with a recommendation on how to solve this, this
-  // is only the issues, no suggestion on how to solve or what's the exact
-  // recommendation from it".
-  const withRec = (extra: unknown[], findings = [SIZED]) => ({
-    ...RUN, findings,
-    prioritisation: { ...(RUN.prioritisation ?? {}), findings_extra_by_rank: extra },
-  })
-
-  it("shows the recommendation above the counts, with its justification", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      recommendation: {
-        action: "Route export tickets to the rendering on-call team",
-        because: "three accounts named export in a renewal call",
-      },
-    }]) as never} />)
-    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
-    expect(card).toContain("Route export tickets to the rendering on-call team")
-    expect(card).toContain("three accounts named export in a renewal call")
-    // It LEADS: above the counts, not a footnote under them.
-    expect(card.indexOf("Recommended.")).toBeLessThan(card.indexOf("medium confidence"))
-  })
-
-  it("renders nothing when a finding has no recommendation", () => {
-    // Only the top findings get one, and anything that failed a check was
-    // dropped rather than repaired. Absent is the normal case.
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
-    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
-    expect(document.body.textContent).toContain("medium confidence")
-  })
-
-  it("does not render half a recommendation", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      recommendation: { action: "Do the thing", because: "" },
-    }]) as never} />)
-    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
-    expect(document.body.textContent).not.toContain("Do the thing")
-  })
-
-  it("ignores extras that do not line up with the findings", () => {
-    // The merge is positional. Attaching one finding's recommendation to
-    // another is far worse than showing none.
-    render(<GoalAnalysisReport run={withRec(
-      [{ recommendation: { action: "A", because: "b" } }],
-      [SIZED, { ...SIZED, id: 2, statement: "second" }],
-    ) as never} />)
-    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
-  })
-
-  it("renders the deep recommendation instead of the flat one when both exist", () => {
-    // The same findings feed both LLM calls — showing both would put two
-    // suggestions on one finding.
-    render(<GoalAnalysisReport run={withRec([{
-      recommendation: { action: "Flat action", because: "flat because" },
-      deep_recommendation: {
-        action: "Ship the deeper fix",
-        because: "three accounts named export in a renewal call",
-        changes: [
-          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
-        ],
-        open_questions: ["Is this already partly built?"],
-        what_would_falsify: "No account raises this again",
-        comparison: "",
-      },
-    }]) as never} />)
-    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
-    expect(card).toContain("Ship the deeper fix")
-    expect(card).not.toContain("Flat action")
-    expect(card).toContain("Raise the export row cap")
-    expect(card).toContain("export runs time out past 10k rows")
-    expect(card).toContain("Is this already partly built?")
-    expect(card).toContain("No account raises this again")
-  })
-
-  it("labels a deep recommendation as the full write-up, not just 'Recommended.'", () => {
-    // The deep and flat passes used to share the identical "Recommended."
-    // header — the only visible discriminator was whether a "What to change"
-    // list happened to follow it.
-    render(<GoalAnalysisReport run={withRec([{
-      deep_recommendation: {
-        action: "Ship the deeper fix",
-        because: "three accounts named export in a renewal call",
-        changes: [
-          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
-        ],
-        open_questions: [], what_would_falsify: "", comparison: "",
-      },
-    }]) as never} />)
-    const card = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
-    expect(card).toContain("Recommended — the full write-up.")
-  })
-
-  it("renders the comparison only when it is present", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      deep_recommendation: {
-        action: "Ship the deeper fix",
-        because: "three accounts named export in a renewal call",
-        changes: [
-          { text: "Raise the export row cap", claim_id: "c1", cited_claim: "export runs time out past 10k rows" },
-        ],
-        open_questions: [],
-        what_would_falsify: "",
-        comparison: "Ranked above “onboarding delay” because it touches more accounts: 3 against 2.",
-      },
-    }]) as never} />)
-    expect(screen.getByTestId("goal-finding-comparison").textContent)
-      .toContain("Ranked above")
-    expect(screen.getByTestId("goal-finding-comparison").textContent)
-      .toContain("3 against 2")
-  })
-
-  it("does not render a deep block when the deep recommendation is half-empty", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      deep_recommendation: {
-        action: "", because: "", changes: [], open_questions: [],
-        what_would_falsify: "", comparison: "",
-      },
-    }]) as never} />)
-    expect(screen.queryByTestId("goal-finding-recommendation")).toBeNull()
-  })
-})
-
-describe("how many findings got a full recommendation", () => {
-  it("renders the basis sentence when the run recorded one", () => {
-    render(<GoalAnalysisReport run={{
-      ...RUN, findings: [SIZED],
-      prioritisation: {
-        ...(RUN.prioritisation ?? {}),
-        recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
-      },
-    } as never} />)
-    // The basis is STORED as a lowercase clause because it also renders
-    // mid-sentence elsewhere. Here it follows a bold full stop, so it is the
-    // start of a sentence and the panel capitalises it — asserted both ways
-    // round, because the bug this replaced was "…full recommendation. you
-    // asked for 2".
-    const basis = screen.getByTestId("goal-recommendation-basis").textContent ?? ""
-    expect(basis).toContain("You asked for 2")
-    expect(basis).not.toMatch(/recommendation\.\s+you asked/)
-  })
-
-  it("renders nothing when no basis was recorded — a run stored before the deep pass shipped", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
-    expect(screen.queryByTestId("goal-recommendation-basis")).toBeNull()
-  })
-})
-
-describe("list pricing, in the live panel", () => {
-  it("renders the list-pricing paragraph when the run recorded one", () => {
-    render(<GoalAnalysisReport run={{
-      ...RUN, findings: [SIZED],
-      prioritisation: {
-        ...(RUN.prioritisation ?? {}),
-        list_pricing_basis:
-          "List pricing was quoted in 2 of the findings below. "
-          + "$5,000–$47,500. This is what was quoted, not what was agreed "
-          + "— the same price offered to several accounts is one rate "
-          + "card, so these are never added together or added to any "
-          + "figure above.",
-      },
-    } as never} />)
-    expect(screen.getByTestId("goal-list-pricing-basis").textContent)
-      .toContain("$5,000–$47,500")
-  })
-
-  it("renders nothing when no list pricing was recorded", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
-    expect(screen.queryByTestId("goal-list-pricing-basis")).toBeNull()
-  })
-
-  it("never shares a block with the committed-money basis line, so the two cannot be read as addable", () => {
-    render(<GoalAnalysisReport run={{
-      ...RUN, findings: [SIZED],
-      prioritisation: {
-        ...(RUN.prioritisation ?? {}),
-        recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
-        list_pricing_basis:
-          "List pricing was quoted in one finding below. $30,000. This is "
-          + "what was quoted, not what was agreed — the same price offered "
-          + "to several accounts is one rate card, so these are never "
-          + "added together or added to any figure above.",
-      },
-    } as never} />)
-    const recommendationEl = screen.getByTestId("goal-recommendation-basis")
-    const listPricingEl = screen.getByTestId("goal-list-pricing-basis")
-    expect(recommendationEl).not.toBe(listPricingEl)
-    expect(recommendationEl.contains(listPricingEl)).toBe(false)
-    expect(listPricingEl.contains(recommendationEl)).toBe(false)
-  })
-})
-
-describe("the shortfall, connected to the finding it actually dropped", () => {
-  // "Asked for N, got fewer" is a real, deliberate citation gate — never
-  // weakened. The basis sentence above discloses it once, but a reader who
-  // skips straight to a card and sees only a PLAIN recommendation where a
-  // full write-up would have been cannot tell "never a candidate" from "a
-  // candidate the evidence did not clear the bar for" apart. Mirrors
-  // `report.py`'s `_finding_block`.
-  const withRec = (extra: unknown[], findings = [SIZED]) => ({
-    ...RUN, findings,
-    prioritisation: { ...(RUN.prioritisation ?? {}), findings_extra_by_rank: extra },
-  })
-
-  it("connects a dropped candidate's flat recommendation to the shortfall", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      recommendation: {
-        action: "Fix the export path",
-        because: "three accounts named it",
-      },
-      deep_attempted: true,
-    }]) as never} />)
-    const card = screen.getByTestId("goal-finding-deep-shortfall")
-    expect(card.textContent).toContain("in line for a full write-up")
-    const cardText = screen.getAllByTestId("goal-finding")[0].textContent ?? ""
-    // Reads AFTER the recommendation it explains, not before.
-    expect(cardText.indexOf("Fix the export path"))
-      .toBeLessThan(cardText.indexOf("in line for a full write-up"))
-  })
-
-  it("says nothing on a finding that was never a candidate for a full write-up", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      recommendation: {
-        action: "Fix the export path",
-        because: "three accounts named it",
-      },
-    }]) as never} />)
-    expect(screen.queryByTestId("goal-finding-deep-shortfall")).toBeNull()
-  })
-
-  it("says nothing on a finding that kept its deep recommendation", () => {
-    render(<GoalAnalysisReport run={withRec([{
-      deep_recommendation: {
-        action: "Raise the export row cap",
-        because: "three accounts named it",
-        changes: [], open_questions: [], what_would_falsify: "",
-        comparison: "",
-      },
-      deep_attempted: true,
-    }]) as never} />)
-    expect(screen.getAllByTestId("goal-finding")[0].textContent)
-      .toContain("the full write-up")
-    expect(screen.queryByTestId("goal-finding-deep-shortfall")).toBeNull()
-  })
-})
-
-describe("the goal-relevance gate, in the panel", () => {
-  // Apurva ruled for a gate after a run for "grow revenue by 5%" led with three
-  // descriptions of the company's OWN product — the order is how many accounts
-  // mentioned a theme, and what gets mentioned most on a sales call is the
-  // vendor's own demo.
-  const withAside = (reasons: (string | null)[], findings: unknown[]) => ({
-    ...RUN, findings,
-    prioritisation: { ...(RUN.prioritisation ?? {}), set_aside_by_rank: reasons },
-  })
-
-  const A = { ...SIZED, id: 1, statement: "renewals stall", label: "renewals" }
-  const B = { ...SIZED, id: 2, statement: "our platform does X", label: "our platform" }
-
-  it("moves a set-aside finding to the appendix, with its reason", () => {
-    render(<GoalAnalysisReport run={withAside(
-      [null, "describes our own product, not a customer problem"], [A, B]) as never} />)
-
-    const main = screen.getAllByTestId("goal-finding").map(n => n.textContent).join(" ")
-    expect(main).toContain("renewals")
-    expect(main).not.toContain("our platform")
-    // Moved, not deleted — and it took its reason with it.
-    const aside = screen.getByTestId("goal-set-aside").textContent ?? ""
-    expect(aside).toContain("our platform")
-    expect(aside).toContain("describes our own product, not a customer problem")
-  })
-
-  it("states the funnel before the findings", () => {
-    // A filtered list that does not say it was filtered is the more
-    // confident-looking of the two, and the less honest.
-    render(<GoalAnalysisReport run={withAside([null, "off-topic"], [A, B]) as never} />)
-    const funnel = screen.getByTestId("goal-funnel").textContent ?? ""
-    expect(funnel).toContain("2 themes were found")
-    expect(funnel).toContain("1 bear on this goal")
-  })
-
-  it("says nothing when nothing was set aside", () => {
-    render(<GoalAnalysisReport run={withAside([null, null], [A, B]) as never} />)
-    expect(screen.queryByTestId("goal-funnel")).toBeNull()
-    expect(screen.queryByTestId("goal-set-aside")).toBeNull()
-    expect(screen.getAllByTestId("goal-finding")).toHaveLength(2)
-  })
-
-  it("sets nothing aside when the lists do not line up", () => {
-    // The split is positional. Setting aside the WRONG finding is far worse
-    // than setting none aside.
-    render(<GoalAnalysisReport run={withAside(["off-topic"], [A, B]) as never} />)
-    expect(screen.queryByTestId("goal-set-aside")).toBeNull()
-    expect(screen.getAllByTestId("goal-finding")).toHaveLength(2)
-  })
-})
-
-describe("the RICE table in the panel", () => {
-  // TWO RENDERERS OF ONE RANKING. The document grew a scoring table and the
-  // panel did not, which would have shipped a feature the reader never sees —
-  // the panel is what is open while the document is a thing you save.
-  const withRice = (findings: unknown[]) => ({
-    ...RUN, findings,
-    // MERGED, not replaced: the panel's "what was read" section reads
-    // `plan.total_signals`, so a fixture that swaps the whole plan out crashes
-    // the render before the table is reached.
-    prioritisation: {
-      ...(RUN.prioritisation ?? {}),
-      plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), framework: "RICE" },
-    },
-  })
-  const F = (id: number, label: string, reach: number | null, types: string[]) => ({
-    ...SIZED, id, label, statement: `${label} stmt`,
-    impact_value: reach, claim_types: types,
-  })
-
-  it("shows every term and names the one it cannot fill", () => {
-    render(<GoalAnalysisReport run={withRice([F(1, "blocked", 5, ["constraint"])]) as never} />)
-    const t = screen.getByTestId("goal-rice").textContent ?? ""
-    for (const h of ["Reach", "Impact", "Confidence", "Effort", "Score", "Inputs"]) {
-      expect(t).toContain(h)
-    }
-    expect(t).toContain("person-month")
-    // NAMED IN THE CELL, not merely in the key above it. Asserting the word
-    // appears anywhere passed against a mutation that filled the cell with "1"
-    // — a table quietly supplying the one number nothing supports.
-    const effortCells = [...screen.getByTestId("goal-rice")
-      .querySelectorAll("tbody tr")].map(r => r.querySelectorAll("td")[4]?.textContent)
-    expect(effortCells).toEqual(["Unquantified"])
-  })
-
-  it("scores a blocker above a bigger theme that only describes", () => {
-    // THE POINT OF SCORING AT ALL. Reach alone put commentary above blocked
-    // revenue.
-    render(<GoalAnalysisReport run={withRice([
-      F(1, "chatter", 11, ["mechanism"]),
-      F(2, "blocked", 5, ["constraint"]),
-    ]) as never} />)
-    const cells = [...screen.getByTestId("goal-rice").querySelectorAll("tbody tr")]
-      .map(r => [...r.querySelectorAll("td")].map(c => c.textContent))
-    const chatter = Number(cells[0][5])
-    const blocked = Number(cells[1][5])
-    expect(blocked).toBeGreaterThan(chatter)
-  })
-
-  it("renders an unsized finding as no score, never zero", () => {
-    render(<GoalAnalysisReport run={withRice([F(1, "unsized", null, ["preference"])]) as never} />)
-    const cells = [...screen.getByTestId("goal-rice").querySelectorAll("tbody td")]
-      .map(c => c.textContent)
-    expect(cells).toContain("—")
-    expect(cells).not.toContain("0.0")
-  })
-
-  it("does not reorder the findings", () => {
-    // `_rank` froze the order; a table that re-sorted would be the
-    // prioritisation step mutating the ranking (I10).
-    render(<GoalAnalysisReport run={withRice([
-      F(1, "first", 1, ["mechanism"]),
-      F(2, "second", 50, ["constraint"]),
-    ]) as never} />)
-    const rows = [...screen.getByTestId("goal-rice").querySelectorAll("tbody tr")]
-      .map(r => r.querySelector("td")?.textContent)
-    expect(rows).toEqual(["first", "second"])
-  })
-
-  it("says nothing when no framework is set", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [SIZED] }} />)
-    expect(screen.queryByTestId("goal-rice")).toBeNull()
-  })
-
-  it("says RICE in the heading even when the stored value is lowercase", () => {
-    // A real run's `plan["framework"]` is always the lowercase comparison
-    // value ("rice") — only these fixtures use the pre-cased "RICE".
-    const run = {
-      ...RUN, findings: [F(1, "blocked", 5, ["constraint"])],
-      prioritisation: {
-        ...(RUN.prioritisation ?? {}),
-        plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), framework: "rice" },
-      },
-    }
-    render(<GoalAnalysisReport run={run as never} />)
-    const heading = screen.getByTestId("goal-rice").querySelector("h2")?.textContent ?? ""
-    expect(heading).toContain("RICE")
-  })
-})
-
-describe("the MoSCoW table in the panel", () => {
-  const withMoscow = (findings: unknown[], reason = "") => ({
-    ...RUN, findings,
-    prioritisation: {
-      ...(RUN.prioritisation ?? {}),
-      plan: {
-        ...((RUN.prioritisation ?? {}).plan ?? {}),
-        framework: "moscow", framework_reason: reason,
-      },
-    },
-  })
-  const M = (id: number, label: string, reach: number | null, types: string[],
-             surfacedBy: string[]) => ({
-    ...SIZED, id, label, statement: `${label} stmt`,
-    impact_value: reach, claim_types: types, surfaced_by: surfacedBy,
-  })
-
-  it("renders MUST/SHOULD buckets, and never a RICE table, for a MoSCoW run", () => {
-    render(<GoalAnalysisReport run={withMoscow([
-      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
-    ]) as never} />)
-    expect(screen.getByTestId("goal-moscow").textContent).toContain("MUST")
-    expect(screen.queryByTestId("goal-rice")).toBeNull()
-  })
-
-  it("says the reader's word for the framework in the heading, not the stored lowercase value", () => {
-    // `framework` on the stored plan is the storage/comparison value
-    // ("moscow"); the heading must show "MoSCoW", never the raw value.
-    render(<GoalAnalysisReport run={withMoscow([
-      M(1, "blocked", 5, ["constraint"], ["doc-a (2)", "doc-b (1)"]),
-    ]) as never} />)
-    const heading = screen.getByTestId("goal-moscow").querySelector("h2")?.textContent ?? ""
-    expect(heading).toContain("MoSCoW")
-    expect(heading).not.toContain("moscow")
-  })
-
-  it("flags a single-document blocker as thin rather than a full MUST", () => {
-    render(<GoalAnalysisReport run={withMoscow([
-      M(1, "thin", 1, ["constraint"], ["doc-a (1)"]),
-      M(2, "solid", 3, ["constraint"], ["doc-a (2)", "doc-b (1)", "doc-c (1)"]),
-    ]) as never} />)
-    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
-      .map((r) => r.querySelectorAll("td")[1]?.textContent)
-    expect(cells).toEqual(["MUST?", "MUST"])
-  })
-
-  it("expands the overflow summary entry back into its real document count", () => {
-    // `surfaced_by` is pre-formatted for display: up to 4 named "doc (n)"
-    // entries plus one "+K more documents" summary. Counting entries
-    // directly would undercount the best-attested findings.
-    render(<GoalAnalysisReport run={withMoscow([
-      M(1, "well attested", 2, ["constraint"],
-        ["doc-a (5)", "doc-b (3)", "doc-c (2)", "doc-d (1)", "+3 more documents"]),
-    ]) as never} />)
-    const cells = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody td")]
-      .map((c) => c.textContent)
-    expect(cells).toContain("7")
-  })
-
-  it("states why MoSCoW was chosen, in the panel", () => {
-    render(<GoalAnalysisReport run={withMoscow(
-      [M(1, "x", 1, ["preference"], ["doc-a (1)"])],
-      "nothing connected here carries a number",
-    ) as never} />)
-    expect(screen.getByTestId("goal-moscow").textContent)
-      .toContain("nothing connected here carries a number")
-  })
-
-  it("does not reorder findings in the MoSCoW table either", () => {
-    render(<GoalAnalysisReport run={withMoscow([
-      M(1, "first", 1, ["preference"], ["doc-a (1)"]),
-      M(2, "second", 50, ["constraint"], ["doc-a (1)"]),
-    ]) as never} />)
-    const rows = [...screen.getByTestId("goal-moscow").querySelectorAll("tbody tr")]
-      .map((r) => r.querySelector("td")?.textContent)
-    expect(rows).toEqual(["first", "second"])
-  })
-})
-
-describe("the memo's cover strip and appendix table, in the panel", () => {
-  const withPlan = (extra: Record<string, unknown>, findings: unknown[], aside: (string|null)[]) => ({
-    ...RUN, findings,
-    prioritisation: {
-      ...(RUN.prioritisation ?? {}),
-      plan: { ...((RUN.prioritisation ?? {}).plan ?? {}), total_signals: 1200, ...extra },
-      set_aside_by_rank: aside,
-    },
-  })
-  const A = { ...SIZED, id: 1, label: "kept", statement: "kept stmt", impact_value: 4 }
-  const B = { ...SIZED, id: 2, label: "ours", statement: "ours stmt",
-              example: "the platform supports X", impact_value: 2 }
-
-  it("shows the headline numbers on one line", () => {
-    render(<GoalAnalysisReport run={withPlan({}, [A, B], [null, "our own product"]) as never} />)
-    const t = screen.getByTestId("goal-strip").textContent ?? ""
-    expect(t).toContain("Signals read")
-    expect(t).toContain("Themes found")
-    expect(t).toContain("Bear on this goal")
-    // Counted AFTER the gate: two themes found, one bears on the goal.
-    expect(t).toMatch(/2\s*Themes found/)
-    expect(t).toMatch(/1\s*Bear on this goal/)
-  })
-
-  it("has no data-window cell, because those dates are the ingest clock", () => {
-    render(<GoalAnalysisReport run={withPlan({}, [A], [null]) as never} />)
-    expect((screen.getByTestId("goal-strip").textContent ?? "").toLowerCase())
-      .not.toContain("data window")
-  })
-
-  it("shows money only as the reader's own estimate", () => {
-    render(<GoalAnalysisReport run={withPlan({ account_value: 12000 }, [A], [null]) as never} />)
-    const t = screen.getByTestId("goal-strip").textContent ?? ""
-    expect(t).toContain("Reach × your estimate")
-    expect(t).toContain("48,000")
-  })
-
-  it("shows no money cell when the reader gave no figure", () => {
-    render(<GoalAnalysisReport run={withPlan({}, [A], [null]) as never} />)
-    expect(screen.getByTestId("goal-strip").textContent).not.toContain("your estimate")
-  })
-
-  it("labels the recommendation stat 'any suggestion', counting flat OR deep", () => {
-    // This cell used to read "With a recommendation" and count ONLY
-    // `f.recommendation` — undercounting a finding whose only suggestion was
-    // the deep one, and reading as the same count the basis sentence names
-    // for the DEEP pass alone.
-    const withFlat = { ...A, recommendation: { action: "a", because: "b" } }
-    const withDeepOnly = {
-      ...B,
-      deep_recommendation: {
-        action: "c", because: "d", changes: [], open_questions: [],
-        what_would_falsify: "", comparison: "",
-      },
-    }
-    render(<GoalAnalysisReport run={
-      withPlan({}, [withFlat, withDeepOnly], [null, null]) as never
-    } />)
-    const t = screen.getByTestId("goal-strip").textContent ?? ""
-    expect(t).not.toContain("With a recommendation")
-    expect(t).toContain("Flagged with any suggestion")
-    expect(t).toMatch(/2\s*Flagged with any suggestion/)
-  })
-
-  it("renders the appendix as the memo's four columns", () => {
-    render(<GoalAnalysisReport run={withPlan({}, [A, B], [null, "describes our own product"]) as never} />)
-    const t = screen.getByTestId("goal-set-aside").textContent ?? ""
-    for (const col of ["Theme", "What it is", "Worth this cycle", "Why it was set aside"]) {
-      expect(t).toContain(col)
-    }
-    expect(t).toContain("the platform supports X")
-    expect(t).toContain("2 accounts")
-    expect(t).toContain("describes our own product")
-  })
-
-  it("reads an unsized set-aside theme as Unsized, never zero", () => {
-    const U = { ...B, impact_value: null }
-    render(<GoalAnalysisReport run={withPlan({}, [A, U], [null, "off-topic"]) as never} />)
-    const t = screen.getByTestId("goal-set-aside").textContent ?? ""
-    expect(t).toContain("Unsized")
-    expect(t).not.toContain("0 accounts")
-  })
-})
-
-describe("capping the full write-up section", () => {
-  // A real run rendered every one of 529 findings in full below the "What the
-  // evidence says" heading — heading, confidence badge, claim count, quote,
-  // source documents, per finding, with no cap at all. Mirrors
-  // `report.py`'s `_findings_section`, which caps full write-ups at
-  // `MAX_DETAILED_FINDINGS` (== `MAX_RICE_ROWS`) and lists the remainder as a
-  // compact, counted overflow list rather than dropping it.
-  const manyFindings: typeof SIZED[] = Array.from({ length: MAX_RICE_ROWS + 5 }, (_, i) => ({
-    ...SIZED,
-    id: i + 1,
-    statement: `Finding number ${i + 1} concerns export latency.`,
-    label: `Finding ${i + 1}`,
-    claim_ids: [`c${i + 1}`],
-    surfaced_by: [`Source doc ${i + 1}`],
-  }))
-
-  it("renders exactly MAX_RICE_ROWS findings in full detail, not all of them", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
-    expect(screen.getAllByTestId("goal-finding")).toHaveLength(MAX_RICE_ROWS)
-  })
-
-  it("keeps the heading's total honest even though the body is capped", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
-    // THE HEADING IS A CLAIM, NOT A LABEL — it is derived from the top-ranked
-    // finding's own statement, so it is located by that statement rather than
-    // by a fixed title, and what is asserted is the only part of it this test
-    // is about: the total it names is the run's REAL finding count, not the
-    // number of write-ups the cap left in the body below it.
-    const heading = screen
-      .getAllByRole("heading")
-      .find((h) => (h.textContent ?? "").startsWith(manyFindings[0].statement))
-    expect(heading).toBeDefined()
-    const text = heading?.textContent ?? ""
-    expect(text).toMatch(new RegExp(`\\b${manyFindings.length}\\b`))
-    expect(text).not.toMatch(new RegExp(`\\b${MAX_RICE_ROWS}\\b`))
-  })
-
-  it("lists the remainder in a compact overflow list, with the count stated — nothing silently dropped", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
-    const overflow = screen.getByTestId("goal-findings-overflow")
-    const rows = screen.getAllByTestId("goal-finding-overflow-row")
-    const remainder = manyFindings.length - MAX_RICE_ROWS
-
-    // The remainder is not silently dropped: every one of it is a row.
-    expect(rows).toHaveLength(remainder)
-    // The count is STATED, in prose, not left for the reader to count rows.
-    expect(overflow.textContent).toContain(`The next ${remainder} findings`)
-    expect(overflow.textContent).toContain(String(MAX_RICE_ROWS))
-    // Every overflow row still names the finding it stands for.
-    expect(rows[0].textContent).toContain(`Finding ${MAX_RICE_ROWS + 1}`)
-    expect(rows[rows.length - 1].textContent).toContain(
-      `Finding ${manyFindings.length}`,
-    )
-
-    // TOTAL ACCOUNTED FOR: full blocks + overflow rows == every finding on
-    // the run. This is the property the whole cap exists to preserve.
-    const fullBlocks = screen.getAllByTestId("goal-finding").length
-    expect(fullBlocks + rows.length).toBe(manyFindings.length)
-  })
-
-  it("does not cap the RICE table or the overflow list below MAX_RICE_ROWS worth of findings", () => {
-    // The control: a run at or under the cap must render every finding in
-    // full, with no overflow section at all.
-    const exactly = manyFindings.slice(0, MAX_RICE_ROWS)
-    render(<GoalAnalysisReport run={{ ...RUN, findings: exactly }} />)
-    expect(screen.getAllByTestId("goal-finding")).toHaveLength(MAX_RICE_ROWS)
-    expect(screen.queryByTestId("goal-findings-overflow")).toBeNull()
   })
 })

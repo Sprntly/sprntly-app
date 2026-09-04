@@ -68,8 +68,12 @@ def test_a_scoring_table_with_its_definitions():
     """Memo §04: RICE, with a definitions table and a scores table, so the
     ranking is reviewable rather than asserted."""
     doc = _doc()
-    assert "How this was ranked (RICE)" in doc
-    assert "<table>" in doc
+    # SPLIT ON PURPOSE: the scores table reads with the answer, the
+    # definitions read with the method. Both still render, and the memo owes
+    # both.
+    assert "The ranking (RICE)" in doc
+    assert "How the ranking works (RICE)" in doc
+    assert re.search(r"<table[^>]*>", doc)
     for term in ("Reach", "Impact", "Confidence", "Effort"):
         assert term in doc
 
@@ -149,9 +153,17 @@ def test_section_headings_are_claims_not_labels():
     # (1)" — a label that happens to be long. The property is that the findings
     # heading SAYS something about this corpus, so the test is that it is no
     # longer the constant label.
-    heads = [re.sub(r"<[^>]+>", "", h) for h in re.findall(r"<h2>(.*?)</h2>", _doc())]
+    # EVERY HEADING, NOT JUST THE `<h2>`s. The findings section's own `<h2>`
+    # is a plain label again ("Each one, in full") and that is deliberate: the
+    # memo now leads with the answer, so the section heading's job is to say
+    # where you are, and the CLAIM is the heading of each write-up under it.
+    # The property is unchanged — a heading in this document says something
+    # about this corpus — so the search is over the headings a reader
+    # actually meets.
+    heads = [re.sub(r"<[^>]+>", "", h)
+             for h in re.findall(r"<h[23][^>]*>(.*?)</h[23]>", _doc())]
     assert not any(h.startswith("What the evidence says") for h in heads), (
-        "the findings heading is still a label; the memo's is a claim"
+        "the findings heading is still the old label; the memo's is a claim"
     )
     # NOT JUST "DIFFERENT" — DERIVED. Any different string would satisfy the
     # assertion above (an empty heading, a typo'd label, anything). The claim
@@ -159,9 +171,9 @@ def test_section_headings_are_claims_not_labels():
     # fragment of the top finding's own statement inside a rendered heading.
     assert any(h.strip() for h in heads), "no non-empty h2 headings rendered"
     assert any("export defect" in h for h in heads), (
-        "the findings heading should carry a fragment of the top finding's "
-        "own statement ('...concern export defect'), proving the claim is "
-        "derived from the corpus rather than any different string"
+        "a heading should carry a fragment of the top finding's own statement "
+        "('...concern export defect'), proving the claim is derived from the "
+        "corpus rather than any different string"
     )
 
 
@@ -175,7 +187,7 @@ def test_the_appendix_is_a_table_with_a_value_column():
     doc = _doc()
     i = doc.find("Considered and set aside")
     tail = doc[i:]
-    assert "<table>" in tail
+    assert re.search(r"<table[^>]*>", tail)
     for col in ("Theme", "What it is", "Worth this cycle", "Why it was set aside"):
         assert col in tail
     # The value column carries the theme's actual worth. THIS fixture's
@@ -225,10 +237,17 @@ def test_one_recommendation_for_the_whole_document():
              "cited_claim": "exports return empty files"},
         ],
     }
-    t = _text(render_report_html(run, _findings(), _DOC_LEDGER))
+    html = render_report_html(run, _findings(), _DOC_LEDGER)
+    t = _text(html)
+    # EXACTLY ONE SECTION IS THE ASK, and it is the first screen. The
+    # synthesis used to be headed "The recommendation" two screens above
+    # options headed "recommended", so a reader met the word three times and
+    # could not tell which of them was the ask; it is now the argument FOR the
+    # answer and is headed as one.
+    assert len(re.findall(r"<h2[^>]*>What we recommend</h2>", html)) == 1
     # Exactly one synthesized section — not zero (it must render) and not
     # duplicated across the document.
-    assert t.count("The recommendation") == 1
+    assert t.count("Why we would start here") == 1
     # It carries the synthesized content, distinct from the per-finding
     # recommendation's own action text ("Repair the wide-table export path")
     # that still renders separately below it.
@@ -298,7 +317,7 @@ def test_a_decision_box_when_the_gate_was_answered():
     run["prioritisation"]["plan"].update(
         {"decision_owner": "VP Product", "needed_by": "1 September"})
     t = _text(render_report_html(run, _findings(), []))
-    assert "The decision" in t
+    assert "Who decides, and by when" in t
     assert "VP Product" in t
     assert "1 September" in t
 
@@ -306,7 +325,8 @@ def test_a_decision_box_when_the_gate_was_answered():
 def test_no_decision_box_when_nobody_answered():
     """A box of blanks is worse than no box: it implies the decision has a home
     when it does not."""
-    assert "The decision" not in _text(_doc())
+    assert "Who decides, and by when" not in _text(_doc())
+    assert "Needed by" not in _text(_doc())
 
 
 def test_the_stake_is_counted_not_forecast():
@@ -315,7 +335,7 @@ def test_the_stake_is_counted_not_forecast():
     run = _run_dict()
     run["prioritisation"]["plan"].update({"decision_owner": "VP Product"})
     t = _text(render_report_html(run, _findings(), []))
-    assert "what the evidence counts, not a forecast" in t
+    assert "what we counted, not a forecast" in t
 
 
 def test_money_appears_only_when_the_reader_supplied_a_value_and_is_labelled():

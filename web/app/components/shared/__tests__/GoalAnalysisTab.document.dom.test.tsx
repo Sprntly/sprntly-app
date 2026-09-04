@@ -73,6 +73,13 @@ const READY = {
   conversation_id: null, artifact_id: null,
   created_at: null, finished_at: null,
   findings: [FINDING], considered: [],
+  // WHAT THE PANEL ACTUALLY SHOWS. The run's report is rendered server-side
+  // and displayed in a sandboxed iframe — the panel is no longer a second
+  // implementation of the document (see `GoalAnalysisReport.tsx`) — so a
+  // fixture without this renders the "no report yet" note instead.
+  report_html:
+    "<!doctype html><html><body><h1>raise net revenue retention</h1>" +
+    "<p>4 accounts</p></body></html>",
 }
 
 const DOC = {
@@ -113,7 +120,9 @@ describe("a report that has been edited", () => {
     render(<GoalAnalysisTab runId={7} />)
     fireEvent.click(await screen.findByTestId("goal-report-back"))
     expect(await screen.findByTestId("goal-report")).toBeTruthy()
-    expect(screen.getByTestId("goal-sized").textContent).toBe("4 accounts")
+    // And it is the RUN's own report that comes back, not the edited copy.
+    const frame = screen.getByTitle("Goal analysis") as HTMLIFrameElement
+    expect(frame.getAttribute("srcdoc")).toContain("4 accounts")
   })
 
   it("says so on the read-only view, so the edited version is not orphaned", async () => {
@@ -185,7 +194,7 @@ describe("edit", () => {
   })
 
   it("shows the server's reason for a 413 instead of a generic failure", async () => {
-    // The bug this PR fixes rendered a fixed string, so the server's
+    // The bug this closes rendered a fixed string, so the server's
     // explanation — the report is too large, and the RUN IS FINE — never
     // reached anyone. "Your analysis is broken" is the wrong thing to imply.
     get.mockResolvedValue(READY)

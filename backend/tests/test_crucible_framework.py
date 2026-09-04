@@ -15,7 +15,7 @@ def _src(source_type: str, n: int = 10) -> SourceInventory:
 
 
 def test_no_numeric_source_and_no_declared_preference_chooses_moscow():
-    """The corpus this ticket exists for: no analytics, no revenue, no
+    """The corpus this exists for: no analytics, no revenue, no
     measured outcome. RICE cannot derive Reach or Impact from it (see the
     reasoning spike's real-pipeline run — 26/26 findings scored None)."""
     choice = select_framework([_src("customer_voice"), _src("communication")])
