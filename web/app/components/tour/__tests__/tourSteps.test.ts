@@ -1,10 +1,15 @@
 // What the first-run tour is allowed to say, and to whom.
 //
-// The whole risk of a scripted tour is that it confidently points at something
-// this viewer does not have — a module their company switched off, a settings
-// pane their role cannot open, a trial counter that is not on screen. These
-// assert the filtering that prevents that, plus the copy invariants that keep
-// a step honest.
+// The tour is THREE STEPS (owner's call, 2026-09-04) — what Sprntly is for,
+// the question shape that shows it working, and Projects. It was twelve, a
+// walk down the rail; most of what went was furniture the rail already
+// teaches. So most of what this file used to assert went with it: the
+// role-gated connector step, the trial-credits step, the workspace switcher
+// and the Top Insights step no longer exist to be filtered.
+//
+// What remains is the risk that survives any scripted tour: pointing at
+// something this viewer does not have. That is now one gate — chat — plus the
+// copy invariants that keep a step honest.
 import { readFileSync, readdirSync } from "node:fs"
 import { dirname, join } from "node:path"
 import { fileURLToPath } from "node:url"
@@ -27,17 +32,37 @@ function audience(over: Partial<TourAudience> = {}): TourAudience {
 
 const idsFor = (a: TourAudience) => stepsFor(a).map((s) => s.id)
 
+describe("the tour is three steps", () => {
+  it("says what Sprntly is for, what to ask it, and where teams work", () => {
+    // The order is the argument: the product, then the one thing you do with
+    // it, then the container your team works in. A reader who quits after the
+    // first card has still been told what this is.
+    expect(idsFor(audience())).toEqual(["welcome", "ask", "projects"])
+  })
+
+  it("opens with an anchorless step, and every other step points at something", () => {
+    // The opener is about the product, not a control — spotlighting the rail
+    // before saying what the product is teaches the furniture first.
+    expect(TOUR_STEPS[0].anchor).toBeUndefined()
+    for (const s of TOUR_STEPS.slice(1)) {
+      expect(s.anchor, `step "${s.id}" has nothing to point at`).toBeTruthy()
+    }
+  })
+
+  it("has unique ids", () => {
+    const ids = TOUR_STEPS.map((s) => s.id)
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+})
+
 describe("stepsFor — module entitlements", () => {
   // entitlements.py resolves FAIL-OPEN so a company predating a flag is not
   // silently downgraded. The tour has to match, or an established tenant loses
-  // steps for features they demonstrably have.
-  it("keeps a step when its flag is missing entirely (fail open, like the backend)", () => {
+  // a step for a feature they demonstrably have.
+  it("keeps the chat step when the flag is missing entirely (fail open, like the backend)", () => {
     const flags = { ...DEFAULT_FEATURE_FLAGS }
     delete (flags as Partial<typeof flags>).agents
-    delete (flags as Partial<typeof flags>).top_insights
-    const ids = idsFor(audience({ flags }))
-    expect(ids).toContain("ask")
-    expect(ids).toContain("brief")
+    expect(idsFor(audience({ flags }))).toContain("ask")
   })
 
   it("withholds the chat step when the agents module is off", () => {
@@ -47,76 +72,37 @@ describe("stepsFor — module entitlements", () => {
     expect(ids).not.toContain("ask")
   })
 
-  it("withholds Top Insights when that module is off", () => {
-    const ids = idsFor(
-      audience({ flags: { ...DEFAULT_FEATURE_FLAGS, top_insights: false } }),
-    )
-    expect(ids).not.toContain("brief")
-  })
-
-  it("still shows the surfaces no module gates", () => {
+  it("still runs a real tour for a company with chat switched off", () => {
+    // Two steps, both carrying content. `ProductTour`'s floor is 2 for exactly
+    // this case: one step is a popup, two is still a tour. If that floor is
+    // ever raised again, this company silently loses the tour entirely.
     const ids = idsFor(
       audience({
-        flags: { ...DEFAULT_FEATURE_FLAGS, agents: false, top_insights: false },
-      }),
-    )
-    for (const always of ["artifacts", "projects", "backlog", "search"]) {
-      expect(ids).toContain(always)
-    }
-  })
-})
-
-describe("stepsFor — role", () => {
-  it("only offers 'connect your tools' to an owner or admin", () => {
-    expect(idsFor(audience({ orgRole: "owner" }))).toContain("connect")
-    expect(idsFor(audience({ orgRole: "admin" }))).toContain("connect")
-    // A plain member cannot manage connectors; pointing them at it points at
-    // a door they cannot open.
-    expect(idsFor(audience({ orgRole: "member" }))).not.toContain("connect")
-    expect(idsFor(audience({ orgRole: null }))).not.toContain("connect")
-  })
-})
-
-describe("stepsFor — trial", () => {
-  it("only explains trial credits while actually trialling", () => {
-    // The anchor itself only renders while trialling (Sidebar's `trialDays !=
-    // null` guard), so off-trial this step would spotlight nothing AND talk
-    // about a balance that is not on screen.
-    expect(idsFor(audience({ onTrial: true }))).toContain("credits")
-    expect(idsFor(audience({ onTrial: false }))).not.toContain("credits")
-  })
-})
-
-describe("the step list itself", () => {
-  it("has unique ids", () => {
-    const ids = TOUR_STEPS.map((s) => s.id)
-    expect(new Set(ids).size).toBe(ids.length)
-  })
-
-  it("opens and closes with an anchorless step", () => {
-    // The bookends are about the product, not a control — and an anchored
-    // first step would spotlight the rail before saying what the product is.
-    expect(TOUR_STEPS[0].anchor).toBeUndefined()
-    expect(TOUR_STEPS[TOUR_STEPS.length - 1].anchor).toBeUndefined()
-  })
-
-  it("survives the worst case with the bookends and something in between", () => {
-    // A company with every optional module off and a plain member viewing it.
-    // If this ever filtered down to welcome-then-goodbye, ProductTour's
-    // `resolved.length < 3` guard would suppress the tour entirely — this
-    // asserts there is still a real tour to show.
-    const ids = idsFor(
-      audience({
-        flags: { ...DEFAULT_FEATURE_FLAGS, agents: false, top_insights: false },
+        flags: { ...DEFAULT_FEATURE_FLAGS, agents: false },
         orgRole: "member",
         onTrial: false,
       }),
     )
-    expect(ids.length).toBeGreaterThanOrEqual(3)
-    expect(ids[0]).toBe("welcome")
-    expect(ids[ids.length - 1]).toBe("done")
+    expect(ids).toEqual(["welcome", "projects"])
   })
 
+  it("gates nothing else — the remaining steps are true for every viewer", () => {
+    // A member, off trial, one workspace, every optional module off. The
+    // opener describes the product and Projects is not module-gated, so both
+    // stand. This is the assertion that fails if someone adds a `when` to a
+    // step that does not need one.
+    const bare = audience({
+      flags: { agents: false, top_insights: false } as TourAudience["flags"],
+      orgRole: "member",
+      onTrial: false,
+      workspaceCount: 1,
+    })
+    expect(idsFor(bare)).toContain("welcome")
+    expect(idsFor(bare)).toContain("projects")
+  })
+})
+
+describe("what a step is allowed to say", () => {
   it("carries plain text only — a step can never inject markup", () => {
     // The body renders into a <p> as a text node, and it must stay that way:
     // this copy is ours, but the invariant is what keeps it safe if it ever
@@ -128,16 +114,23 @@ describe("the step list itself", () => {
     }
   })
 
+  it("stays short enough to read in a card", () => {
+    // A tour card is a paragraph, not a page — and the card is positioned by
+    // measuring its own height, so a body that runs long is also the shape
+    // that pushed Next off-screen once (see ProductTour's clamp test).
+    for (const s of TOUR_STEPS) {
+      expect(s.body.length, `${s.id} is too long for a tour card`).toBeLessThan(260)
+    }
+  })
+
   it("names an anchor that the app actually writes", () => {
     // DERIVED from the source, not a hand-kept list — a hardcoded set passes
     // happily while the attribute it names has been renamed or deleted, which
     // is the failure it was supposed to catch.
     //
-    // WHAT THIS STILL CANNOT SEE: whether the element RENDERS. `rail-search`
-    // lives inside `{SHOW_SIDEBAR_SEARCH && …}`, false on main, so the
-    // attribute is in the file and never reaches the DOM. That is survivable
-    // by design — a missing anchor centres the step rather than breaking it —
-    // but it is the reason this asserts "written", not "rendered".
+    // WHAT THIS STILL CANNOT SEE: whether the element RENDERS. A missing
+    // anchor centres the step rather than breaking it, which is why this
+    // asserts "written", not "rendered".
     const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..")
     const written = new Set<string>()
     const walk = (dir: string) => {
@@ -194,23 +187,16 @@ describe("the tour is actually mounted", () => {
       /<ProductTour\s*\/>/,
     )
   })
-})
 
-describe("stepsFor — the workspace switcher", () => {
-  it("only explains it when the switcher actually opens", () => {
-    // With ONE workspace and no right to create another, Sidebar renders the
-    // trigger static and unclickable. Spotlighting a control that does nothing
-    // when clicked teaches the wrong thing about the product.
-    expect(idsFor(audience({ workspaceCount: 1, orgRole: "member" }))).not.toContain(
-      "workspaces",
+  it("does not suppress a two-step tour", () => {
+    // The floor lives in ProductTour and the tour's shape lives here; a change
+    // to either can silently switch the tour off for a company with chat
+    // disabled. Asserted against the source, since the guard runs inside an
+    // effect that needs a workspace, a profile and a role to reach.
+    const tour = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), "..", "ProductTour.tsx"),
+      "utf8",
     )
-    // Two workspaces: it opens for anyone who can reach both.
-    expect(idsFor(audience({ workspaceCount: 2, orgRole: "member" }))).toContain(
-      "workspaces",
-    )
-    // One workspace but an admin: the menu still opens, to create another.
-    expect(idsFor(audience({ workspaceCount: 1, orgRole: "admin" }))).toContain(
-      "workspaces",
-    )
+    expect(tour).toMatch(/resolved\.length\s*<\s*2/)
   })
 })
