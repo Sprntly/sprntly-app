@@ -33,8 +33,9 @@ vi.mock("../../../../../lib/api", async () => {
   }
 })
 
+const { pushSpy } = vi.hoisted(() => ({ pushSpy: vi.fn() }))
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: vi.fn(), replace: vi.fn(), prefetch: vi.fn() }),
+  useRouter: () => ({ push: pushSpy, replace: vi.fn(), prefetch: vi.fn() }),
   useSearchParams: () => new URLSearchParams(),
 }))
 
@@ -75,9 +76,15 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function renderDrawer() {
+function renderDrawer(extra?: { onOpenInPlace?: (a: ArtifactItem) => void }) {
   return render(
-    <ProjectArtifactsDrawer projectId={7} open onClose={vi.fn()} onArtifactsChanged={vi.fn()} />,
+    <ProjectArtifactsDrawer
+      projectId={7}
+      open
+      onClose={vi.fn()}
+      onArtifactsChanged={vi.fn()}
+      onOpenInPlace={extra?.onOpenInPlace}
+    />,
   )
 }
 
@@ -203,5 +210,21 @@ describe("ProjectArtifactsDrawer — V2 upload UI", () => {
     // The add-view host (the reused AddArtifactPanel's shell) is now rendered.
     await screen.findByTestId("artifacts-drawer-add-host")
     expect(uploadDocumentMock).not.toHaveBeenCalled()
+  })
+
+  it("opens an uploaded document IN-PLACE (onOpenInPlace), not via full-page navigation", async () => {
+    artifactsMock.mockResolvedValueOnce([docItem(42, "Uploaded teardown")])
+    const onOpenInPlace = vi.fn()
+    renderDrawer({ onOpenInPlace })
+
+    const row = await screen.findByTestId("artifacts-drawer-row-custom_artifact-42")
+    fireEvent.click(row)
+
+    // Routed through the in-place seam (the same one PRD/report/ticket_set use),
+    // NOT the full-page documentPath router.push.
+    expect(onOpenInPlace).toHaveBeenCalledTimes(1)
+    expect(onOpenInPlace.mock.calls[0][0].id).toBe(42)
+    expect(onOpenInPlace.mock.calls[0][0].type).toBe("custom_artifact")
+    expect(pushSpy).not.toHaveBeenCalled()
   })
 })

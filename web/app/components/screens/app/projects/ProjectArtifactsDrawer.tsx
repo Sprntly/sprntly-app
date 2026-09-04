@@ -1033,19 +1033,22 @@ export function ProjectArtifactsDrawer({
 
   const handleOpenRow = useCallback(
     (a: ArtifactItem) => {
-      // PRD, evidence, report and ticket_set are IN-PANEL artifacts: they open
-      // in the SAME shared side-panel main uses, beside the project chat, via the
-      // project surface's in-place seam — which also closes this drawer (it clears
-      // the project's rail-modal state). This is a HARD invariant: these rows must
-      // NEVER reach the `/?prd=`/`/?evidence=` deep-link, because those land on the
-      // MAIN workspace chat (`/`) and yank the user out of the project (the
-      // reported defect). So we short-circuit unconditionally — if the in-place
-      // seam is somehow absent we no-op rather than fall back to a main deep-link.
+      // PRD, evidence, report, ticket_set AND an uploaded/team document
+      // (custom_artifact) are IN-PANEL artifacts: they open in the SAME shared
+      // side-panel main uses, beside the project chat, via the project surface's
+      // in-place seam — which also closes this drawer (it clears the project's
+      // rail-modal state). This is a HARD invariant: these rows must NEVER reach
+      // the `/?prd=`/`/?evidence=` deep-link or the full-page document route,
+      // because those land on a DIFFERENT page and yank the user out of the
+      // project (the reported defect — an uploaded document opened the full-page
+      // `DocumentRoute`). So we short-circuit unconditionally — if the in-place
+      // seam is somehow absent we no-op rather than fall back to a navigation.
       if (
         a.type === "prd" ||
         a.type === "evidence" ||
         a.type === "report" ||
-        a.type === "ticket_set"
+        a.type === "ticket_set" ||
+        a.type === "custom_artifact"
       ) {
         onOpenInPlace?.(a)
         return
@@ -1060,8 +1063,8 @@ export function ProjectArtifactsDrawer({
         window.open(prototypePath(a.open.prd_id), "_blank", "noopener")
         return
       }
-      // A custom document opens onto its OWN page (it is written, not read beside
-      // a chat) — main's `openChatArtifactItem` routes it the same way.
+      // Defensive fallback for any future artifact type with only a deep-link
+      // entry point — no current type reaches here.
       const href = artifactHref(a)
       if (!href) return
       router.push(href)
