@@ -43,6 +43,7 @@ from app.crucible.types import (
     Confidence,
     EffortEstimate,
     Finding,
+    GraphRelation,
     GoalDefinition,
     GoalNotLockedError,
     Impact,
@@ -147,6 +148,22 @@ _FINDING_MUTATIONS: tuple[tuple[str, object], ...] = (
     # An out-of-band index keyed on the statement text is another way to read
     # corroboration without touching a corroboration field.
     ("statement", "__probe_statement__"),
+    # THE GRAPH'S OWN VERBS, and the newest way in. `graph_relations` carries a
+    # per-relation CLAIM COUNT, which is a corroboration quantity wearing a
+    # different name: "6 claims support this" is precisely what I1 forbids
+    # impact from reading, and it is one plausible-looking line
+    # ("blocked findings are bigger") away from being read. This list is
+    # HAND-WRITTEN — unlike the `ConfidenceInputs` sweep, which derives itself
+    # from the dataclass — so a field added to `Finding` is invisible to the
+    # flagship check until it is named here. Adding the field without adding
+    # these rows would have left exactly that hole.
+    ("graph_relations", None),
+    ("graph_relations", (GraphRelation("BLOCKED_BY", 41, tuple(
+        f"acct-{i}" for i in range(19))),)),
+    ("graph_relations", (
+        GraphRelation("REQUESTS", 1, ("acct-1",)),
+        GraphRelation("SUPPORTS", 97, ()),
+    )),
 )
 
 
