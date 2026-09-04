@@ -891,13 +891,26 @@ def test_assumed_parameters_are_disclosed_not_reproduced_whole():
 
 
 def test_clipping_never_emits_a_half_escaped_entity():
-    """Cutting escaped text can land inside `&quot;` and emit `&am`."""
+    """Cutting escaped text can land inside `&quot;` and emit `&am`.
+
+    THE BOUND IS ON THE RAW STRING, NOT THE ESCAPED ONE. `_esc_clipped` clips
+    first and escapes second, on purpose — the second, escaped-length cut it
+    replaced had none of `_clip`'s care, landed mid-word and threw away the
+    ellipsis, so a clipped paragraph ran into the next heading with no mark
+    that anything had been removed. Escaping expands, so the escaped result
+    may exceed `limit`; what may never happen is a cut inside an entity.
+    """
+    import html as _html
+
     from app.crucible import report as r
 
     for n in range(1, 40):
         out = r._esc_clipped('"' * 50, n)
-        assert len(out) <= n
+        # No entity was cut in half.
         assert "&" not in out or out.count("&") == out.count(";")
+        # And the bound that IS promised holds: `n` raw characters, plus the
+        # ellipsis `_clip` adds to mark the cut.
+        assert len(_html.unescape(out).rstrip("\u2026")) <= n
 
 
 # ── The report must not claim more than the run established ──────────────────
@@ -917,11 +930,17 @@ def test_an_unsized_top_finding_is_not_called_the_largest():
         _finding(impact_value=None, claim_ids=["c2", "c3", "c4"]),
     ])
     assert "largest thing this reading found" not in html
-    # And it says what IS true of the order. NOT "arbitrary": with every value
-    # None the sort key is (1, 1, -confidence), so the order is strictly
-    # confidence-descending — a real ordering, just not the one the heading
-    # used to imply.
-    assert "ordered by confidence rather than by size" in html
+    # And it says what IS true of the order. NOT "arbitrary", and NOT
+    # "ordered by confidence" either, which is what this used to assert:
+    # `_rank`'s key is (conflict, claim-type bucket, reach, confidence), so
+    # with reach constant what orders the list is the BUCKET — what KIND of
+    # claim each finding is — and confidence only breaks ties inside one.
+    # Crediting the order to confidence told the reader it said how SURE each
+    # finding was, the opposite emphasis, on the sentence introducing the
+    # whole list.
+    assert "ordered by confidence rather than by size" not in html
+    assert "what orders these is the kind of claim behind each one" in html
+    assert "breaking ties inside a kind" in html
     assert "Nothing in this reading could be sized" in html
 
 
@@ -1048,17 +1067,28 @@ def test_an_order_the_reader_cannot_check_says_so():
     reader sees bands. On a corpus with no outcome evidence every band comes
     out the same, so "ordered by confidence" describes an ordering they cannot
     check against anything on the page, and a list that LOOKS ranked is read as
-    ranked. Position is the most persuasive thing in a document."""
+    ranked. Position is the most persuasive thing in a document.
+
+    SCOPED TO ONE BUCKET, which is why both findings here are preferences.
+    The caveat is owed between NEIGHBOURS the claim-type term could not
+    separate, not over the list end to end: blockers genuinely do sort above
+    preferences, so disowning the whole order would be its own inaccuracy —
+    printed a few inches under a recommendation bound to position 1."""
     same = {"band": "medium"}
     html = render_report_html(_run(), [
         _finding(impact_value=None, confidence_band="medium", confidence=same,
-                 claim_ids=["c1"]),
+                 claim_ids=["c1"], claim_types=["preference"]),
         _finding(impact_value=None, confidence_band="medium", confidence=same,
-                 claim_ids=["c2"]),
+                 claim_ids=["c2"], claim_types=["preference"]),
     ])
     assert "Not ranked by reach" in html
     assert "same confidence band" in html
-    assert "not as a verdict on which matters more" in html
+    # The load-bearing pair: what the reader cannot check (an unprinted
+    # score), and how far the disclaimer reaches (two neighbours in one
+    # group) — not the whole list, which the earlier wording disowned.
+    assert "confidence score this report does not print" in html
+    assert "gap between two neighbours in the same group" in html
+    assert "as a verdict on which matters more" in html
 
 
 def test_a_real_confidence_spread_is_not_disclaimed():
@@ -1568,11 +1598,19 @@ def test_the_recommendation_leads_the_card_and_carries_its_justification():
     html = render_report_html(run, [_finding()])
     body = _findings_html(html)
 
-    assert "Recommended." in body
+    # "Suggested.", NOT "Recommended." — this fixture carries the one-line
+    # `recommendation`, which is the pass over a finding that did NOT get a
+    # full write-up. Both passes used to say "Recommended.", so a page with
+    # two write-ups and five short cards said it seven times and a reader
+    # could not tell which one was the ask. "Recommended." is now the deep
+    # card's word alone (`test_a_deep_recommendation_says_it_is_the_full_
+    # write_up` below holds that half).
+    assert "Suggested." in body
+    assert "Recommended." not in body
     assert "Route export tickets to the rendering on-call team" in body
     assert "three accounts named export in a renewal call" in body
     # It leads: the suggestion is above the counts, not a footnote under them.
-    assert body.index("Recommended.") < body.index("medium confidence")
+    assert body.index("Suggested.") < body.index("medium confidence")
 
 
 def test_a_deep_recommendation_says_it_is_the_full_write_up():

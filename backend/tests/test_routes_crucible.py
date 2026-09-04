@@ -1268,7 +1268,7 @@ def test_excluding_a_numeric_source_flips_the_gap_the_run_states(ctx):
     )
 
 
-# ─── AC-2: the framework is chosen from the inventory, not hardcoded ────────
+# ─── The framework is chosen from the inventory, not hardcoded ─────────────
 
 
 def test_the_plan_chooses_moscow_when_nothing_carries_a_number(ctx):

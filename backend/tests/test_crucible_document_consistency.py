@@ -236,6 +236,18 @@ def _from(html: str, start: int) -> str:
     return rest if nxt == -1 else rest[:nxt]
 
 
+#: The findings section, located STRUCTURALLY. Its `<h2>` is a CLAIM, not a
+#: label — `_findings_heading` prints the top-ranked finding's own statement —
+#: so there is no fixed title to search for, and matching one would break the
+#: moment the copy moved. What is stable is the pairing: the findings heading
+#: is the only `<h2>` immediately followed by the ranking lede.
+_FINDINGS_H2 = re.compile(r"<h2>[^<]*</h2><p>(?:Not r|R)anked by reach")
+#: How many findings that heading says are on the run. Absent by design on a
+#: run with exactly one — the claim already describes the whole section, and
+#: "the strongest of 1 findings below" would be nonsense.
+_FINDINGS_TOTAL = re.compile(r"the strongest of ([\d,]+) findings below</h2>")
+
+
 def _findings_text(html: str) -> str:
     """The findings section alone.
 
@@ -244,7 +256,7 @@ def _findings_text(html: str) -> str:
     "3. " would otherwise be counted as a finding, and a count that can be
     inflated by tenant text is not a count.
     """
-    m = re.search(r"<h2>What the evidence says \(\d+\)</h2>", html)
+    m = _FINDINGS_H2.search(html)
     return _from(html, m.start()) if m else ""
 
 
@@ -254,14 +266,23 @@ def _assert_the_counts_match_the_data(doc: Doc) -> None:
     """Every number the prose states is the number of the things it counts."""
     html, rows = doc.html, doc.rows
 
-    heading = re.search(r"<h2>What the evidence says \((\d+)\)</h2>", html)
+    heading = _FINDINGS_H2.search(html)
+    total = _FINDINGS_TOTAL.search(html)
     if not rows:
         assert heading is None
+        assert total is None
         assert "Nothing survived verification" in html
+    elif len(rows) == 1:
+        # One finding: the heading IS the claim, and names no total, because
+        # there is nothing sitting under it to count.
+        assert heading, "the findings section lost its heading"
+        assert total is None
     else:
-        assert heading, "the findings section lost its count"
-        assert int(heading.group(1)) == len(rows), (
-            f"heading says {heading.group(1)} findings, the run has {len(rows)}"
+        assert heading, "the findings section lost its heading"
+        assert total, "the findings heading lost its total"
+        said = int(total.group(1).replace(",", ""))
+        assert said == len(rows), (
+            f"heading says {said} findings, the run has {len(rows)}"
         )
 
     listed = _findings_text(html)
@@ -434,9 +455,9 @@ def _assert_every_size_claim_is_earned(doc: Doc) -> None:
     # The overflow line's ranking basis is the lede's.
     if "The next" in html and "findings are listed below" in html:
         if sized:
-            assert "they rank lower by reach" in html
+            assert "rank lower by reach" in html
         else:
-            assert "they rank lower by reach" not in html
+            assert "rank lower by reach" not in html
             assert "not by size, which nothing here had" in html
 
 
@@ -726,7 +747,7 @@ def test_the_overflow_line_never_claims_a_ranking_the_lede_denied():
 
     # The control: a run that CAN size its findings keeps the sentence.
     sized = _document(_many_sized_themes())
-    assert "they rank lower by reach" in sized.html
+    assert "rank lower by reach" in sized.html
     _assert_every_size_claim_is_earned(sized)
 
 

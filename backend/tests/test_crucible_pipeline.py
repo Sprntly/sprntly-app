@@ -1627,9 +1627,16 @@ def test_sync_batches_of_one_provider_collapse_into_one_source():
         claim("c3", artifact_id="fireflies-sync-batch-0"),
         claim("c4", artifact_id="fireflies-sync-batch-14"),
     ])
-    assert out == ("Fireflies call transcripts (4)",)
+    assert len(out) == 1, out
+    assert out[0].startswith("Fireflies call transcripts")
     # The counts are SUMMED, not the largest chunk kept: four claims came from
     # that source and the line has to say four.
+    assert "4 claims" in out[0]
+    # And the call count is a FLOOR, stated as one: three distinct raw
+    # `artifact_id`s are behind those four claims, and per-call extraction is
+    # recent enough that an older corpus genuinely batched several calls under
+    # one name — so the entry may understate corroboration, never overstate it.
+    assert "≥ 3 calls" in out[0]
     assert "batch" not in " ".join(out)
 
 
@@ -1655,7 +1662,12 @@ def test_two_providers_do_not_collapse_into_each_other():
         claim("c1", artifact_id="fireflies-sync-batch-1"),
         claim("c2", artifact_id="zoom-sync-batch-4"),
     ])
-    assert set(out) == {"Fireflies call transcripts (1)", "Zoom call transcripts (1)"}
+    # The provider prefix is the assertion; what follows it is the call/claim
+    # count, covered by the collapse test above.
+    assert len(out) == 2, out
+    assert {s.split(" (")[0] for s in out} == {
+        "Fireflies call transcripts", "Zoom call transcripts",
+    }
 
 
 def test_an_unknown_provider_still_reads_as_a_name():
