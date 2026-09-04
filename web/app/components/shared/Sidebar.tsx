@@ -25,7 +25,7 @@ import {
   resumeConversation,
   useChatsList,
 } from "../../lib/recentChats"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck, IconArrowUpRight } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
@@ -582,12 +582,15 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
           type="button"
           className="sb-chats-all"
           data-testid="sidebar-view-all-chats"
-          // TEXT, NOT AN ICON (owner's call). An arrow in this corner is a
-          // guess the reader has to make — expand? collapse? new? — and the
-          // two words cost less than the guess.
+          // THE WORDS CARRY THE MEANING, the arrow carries the affordance
+          // (owner's call, both halves). An arrow alone in this corner is a
+          // guess — expand? collapse? new? — so the label says where it goes;
+          // the outward arrow is what makes a line of small grey text read as
+          // something you can click. Same convention as the docs topbar.
           onClick={() => goTo("chats")}
         >
-          Chat history
+          <span className="sb-chats-all-label">Chat history</span>
+          <IconArrowUpRight size={13} stroke={2} aria-hidden />
         </button>
       </div>
       <div className="sb-chats-list">

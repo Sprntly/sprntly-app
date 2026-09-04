@@ -542,14 +542,20 @@ describe("Sidebar — the threads themselves are in the nav", () => {
       .toHaveLength(1)
   })
 
-  it("labels it in words rather than an icon", async () => {
-    // An arrow in this corner is a guess the reader has to make — expand?
-    // collapse? new? — and two words cost less than the guess.
+  it("says where it goes in words, and shows it is a way out", async () => {
+    // BOTH HALVES, and they do different jobs. An arrow alone in this corner
+    // is a guess the reader has to make — expand? collapse? new? — so the
+    // label says where it goes. A line of small grey text is not obviously
+    // clickable, so the outward arrow is what makes it read as a control.
     conversations = seed(3)
     await openExpanded()
     const link = screen.getByTestId("sidebar-view-all-chats")
     expect(link.textContent?.trim()).toBe("Chat history")
-    expect(link.querySelector("svg")).toBeNull()
+    // Decorative: the words are the accessible name, so the arrow must not
+    // add a second one for a screen reader to read out.
+    const arrow = link.querySelector("svg")
+    expect(arrow).toBeTruthy()
+    expect(arrow!.getAttribute("aria-hidden")).toBe("true")
   })
 
   it("says nothing at all when there are no threads", async () => {

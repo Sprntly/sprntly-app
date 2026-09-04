@@ -2297,6 +2297,11 @@
      hover fill, and no row height. */
   .sb-chats-all {
     flex: none;
+    /* Label and arrow on one line, the arrow nudged to sit on the text's
+       optical centre rather than its baseline. */
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
     padding: 0;
     border: none;
     background: none;
@@ -2313,7 +2318,30 @@
   .sb-chats-all:hover {
     opacity: 1;
     color: var(--nav-text-hover);
+  }
+
+  /* The underline belongs to the WORDS. Running it under the arrow too draws
+     a line through the arrowhead's tail and reads as a strikethrough. */
+  .sb-chats-all:hover .sb-chats-all-label {
     text-decoration: underline;
+  }
+
+  /* It leans out of the corner on hover, in the direction it points — the
+     same motion the docs topbar's external link uses. */
+  .sb-chats-all svg {
+    transition: transform 0.12s ease;
+  }
+
+  .sb-chats-all:hover svg {
+    transform: translate(1px, -1px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sb-chats-all svg,
+    .sb-chats-all:hover svg {
+      transition: none;
+      transform: none;
+    }
   }
 
   /* Keyboard reach: with the hover fill gone, focus needs its own mark. */
