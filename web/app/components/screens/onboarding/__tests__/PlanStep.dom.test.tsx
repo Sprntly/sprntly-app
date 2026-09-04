@@ -85,7 +85,7 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
-describe("payments hidden", () => {
+describe.skipIf(BILLING_ENABLED)("payments hidden", () => {
   it("moves straight on instead of asking anyone to pick a plan", () => {
     // The guards never route here any more, so this only covers a typed URL or
     // a stale bookmark. It must not be a dead end: a picker whose only exit is
@@ -172,7 +172,7 @@ describe.skipIf(!BILLING_ENABLED)("a company that already pays", () => {
   it("is forwarded straight through rather than asked to buy again", async () => {
     onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
     render(<PlanStep />)
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/connectors"))
   })
 
   it("includes a trialling one — the card is already on file", async () => {
@@ -195,7 +195,7 @@ describe.skipIf(!BILLING_ENABLED)("the two contexts disagreeing", () => {
     // step's poll refreshed only the workspace copy, so the step saw paid and
     // pushed to the next slug while the guard still saw unpaid and replaced
     // back to /onboarding/plan — for as long as the tab stayed open. Observed
-    // live: `GET /onboarding/plan` and `GET /onboarding/import-context`
+    // live: `GET /onboarding/plan` and `GET /onboarding/connectors`
     // alternating a few dozen times a second.
     //
     // Nothing stopped it because the guard's provider wraps the whole
@@ -217,7 +217,7 @@ describe.skipIf(!BILLING_ENABLED)("the two contexts disagreeing", () => {
     onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
 
     render(<PlanStep />)
-    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/connectors"))
   })
 })
 
@@ -239,7 +239,7 @@ describe.skipIf(!BILLING_ENABLED)("coming back from a successful Checkout", () =
     expect(push).not.toHaveBeenCalled()
 
     await waitFor(
-      () => expect(push).toHaveBeenCalledWith("/onboarding/import-context"),
+      () => expect(push).toHaveBeenCalledWith("/onboarding/connectors"),
       { timeout: 10_000 },
     )
     expect(summary.mock.calls.length).toBeGreaterThan(1)

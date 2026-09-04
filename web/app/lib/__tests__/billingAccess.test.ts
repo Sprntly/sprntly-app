@@ -61,14 +61,29 @@ describe("subscriptionGrantsAccess", () => {
   })
 })
 
-// PAYMENTS ARE HIDDEN — `BILLING_ENABLED` is false. The RULE above is
-// untouched and still has to match backend/app/billing/plans.py; what changes
-// is the two ANSWERS the app's gates route on, which now wave everyone
-// through. The pre-hiding expectations are kept beside each, so flipping the
-// flag back is an obvious diff rather than an archaeology exercise.
-describe("companyHasPaid — payments hidden", () => {
+// THE SWITCH, BOTH WAYS. `BILLING_ENABLED` decides which half of each pair
+// runs, so the suite always asserts the behaviour that is actually shipping
+// and neither state can rot while the other is live. The RULE
+// (`subscriptionGrantsAccess`) is above and is flag-independent — it still has
+// to mirror backend/app/billing/plans.py exactly, in either state.
+
+describe.skipIf(!BILLING_ENABLED)("companyHasPaid — payments live", () => {
+  it("answers on the subscription, not on optimism", () => {
+    expect(companyHasPaid(null)).toBe(false)
+    expect(companyHasPaid({})).toBe(false)
+    expect(companyHasPaid({ plan: "starter", subscription_status: "trialing" })).toBe(true)
+    expect(companyHasPaid({ plan: "starter", subscription_status: "canceled" })).toBe(false)
+    expect(companyHasPaid({ plan: "starter", subscription_status: "unpaid" })).toBe(false)
+  })
+
+  it("is the flag doing it, not the rule going hard", () => {
+    expect(BILLING_ENABLED).toBe(true)
+    expect(subscriptionGrantsAccess("starter", "canceled")).toBe(false)
+  })
+})
+
+describe.skipIf(BILLING_ENABLED)("companyHasPaid — payments hidden", () => {
   it("waves everyone through, whatever the row says", () => {
-    // Was: null → false, {} → false, trialing → true, canceled → false.
     // Nobody is asked for a card, so nobody can be behind on one.
     expect(companyHasPaid(null)).toBe(true)
     expect(companyHasPaid({})).toBe(true)
@@ -85,7 +100,30 @@ describe("companyHasPaid — payments hidden", () => {
   })
 })
 
-describe("lockModeFor — payments hidden", () => {
+describe.skipIf(!BILLING_ENABLED)("lockModeFor — payments live", () => {
+  it("applies the configured mode to a company that has not paid", () => {
+    // Only read_only and hard are lock modes; anything else is "off".
+    for (const [configured, expected] of [
+      ["hard", "hard"],
+      ["read_only", "read_only"],
+      ["off", "off"],
+      [null, "off"],
+    ] as const) {
+      expect(
+        lockModeFor({ plan: "starter", subscription_status: "canceled" }, configured),
+        String(configured),
+      ).toBe(expected)
+    }
+  })
+
+  it("locks nobody who has paid, however the server is configured", () => {
+    expect(
+      lockModeFor({ plan: "starter", subscription_status: "active" }, "hard"),
+    ).toBe("off")
+  })
+})
+
+describe.skipIf(BILLING_ENABLED)("lockModeFor — payments hidden", () => {
   it("never locks anyone out, whatever the server has configured", () => {
     // Was: "hard" for a canceled company, which routed them to the billing
     // screen and held them there. With no way to pay, that is a trap.

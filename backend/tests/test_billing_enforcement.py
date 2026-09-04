@@ -44,10 +44,14 @@ def enforced(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# The default: off
+# The payments-hidden default — dormant while payments are live
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.skipif(
+    plans.BILLING_ENABLED,
+    reason="payments are live — this pins the HIDDEN state and returns with it",
+)
 def test_payments_hidden_refuses_nothing_even_with_the_env_flag_on(broke, monkeypatch):
     """The payments-hidden switch outranks the environment, deliberately.
 

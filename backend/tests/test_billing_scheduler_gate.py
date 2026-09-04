@@ -26,6 +26,10 @@ def gate(monkeypatch, isolated_settings):
     return scheduler
 
 
+@pytest.mark.skipif(
+    plans.BILLING_ENABLED,
+    reason="payments are live — this pins the HIDDEN state and returns with it",
+)
 def test_payments_hidden_works_every_tenant(monkeypatch, isolated_settings):
     """With payments hidden nobody is lapsed, so nobody is skipped.
 
