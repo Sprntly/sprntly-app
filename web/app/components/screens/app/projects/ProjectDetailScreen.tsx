@@ -928,9 +928,10 @@ export function ProjectDetailScreen({
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
   // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
-  // evidence, report and ticket_set all open like main's STANDALONE branch (no
-  // chat-resume: the drawer is a library view, not a thread turn); prototype and
-  // custom_artifact are routed by the drawer itself (own full-page surfaces).
+  // evidence, report, ticket_set AND custom_artifact (a team/uploaded document,
+  // on the Document tab) all open like main's STANDALONE branch (no chat-resume:
+  // the drawer is a library view, not a thread turn); only prototype is routed by
+  // the drawer itself (its own full-page canvas surface).
   const onOpenArtifactInPlace = useCallback((artifact: ArtifactItem) => {
     setRailModal(null)
     if (artifact.type === "prd") {
@@ -967,6 +968,18 @@ export function ProjectDetailScreen({
       setContent({ ticketSetStandalone: true })
       openContentPanel("tickets")
       void loadTicketSet(artifact.open.ticket_set_id, setContent)
+    } else if (artifact.type === "custom_artifact") {
+      // An uploaded / team document opens on the shared panel's DOCUMENT tab,
+      // beside the project chat — the SAME in-place posture PRD/report/ticket_set
+      // take here, and the same tab `ArtifactsScreen`/main open a custom_artifact
+      // on (`content.documentId` → `DocumentTab`, which self-loads the body by
+      // id). This replaces the full-page `DocumentRoute` navigation the drawer
+      // used to do (the reported defect). No conversation resume: unlike main
+      // chat's thread-scoped open, the panel here opens over the already-live
+      // project chat, exactly as the branches above do. `documentGenerating`
+      // false — an existing document is ready, never mid-generation.
+      setContent({ documentId: artifact.open.custom_artifact_id, documentGenerating: false })
+      openContentPanel("document")
     }
   }, [setContent, openContentPanel, openPrdInPanelById])
 

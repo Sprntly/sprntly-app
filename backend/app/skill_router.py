@@ -2096,6 +2096,10 @@ _PROJECT_CONTENT_INTENT = re.compile(
 #: match on intent alone and pull generic chit-chat into the tool loop.
 _PROJECT_CONTENT_NOUN = re.compile(
     r"\bprds?\b|\breports?\b|\bevidence\b|\bprototypes?\b|\bartifacts?\b|"
+    # Uploaded documents — a member can ask about them by their plain names
+    # ("read the document", "what does the doc say", "the spec"). These land as
+    # `custom_artifact`s the project tool loop's `get_artifact_content` reads.
+    r"\bdocuments?\b|\bdocs?\b|\bspec\b|"
     r"\bmemory\b|\btasks?\b|\bledger\b|\bdelegations?\b|\bmembers?\b|"
     r"\broster\b|\bteam\b|\bcontext\b|"
     r"\bwho(?:'?s|\s+is)\s+(?:on|working)\b|"
@@ -2168,6 +2172,38 @@ def is_project_content_request(question: str, history: list[dict] | None = None)
     if not q.strip():
         return False
     return bool(_PROJECT_CONTENT_INTENT.search(q) and _PROJECT_CONTENT_NOUN.search(q))
+
+
+def is_substantive_project_question(question: str, history: list[dict] | None = None) -> bool:
+    """True for a SUBSTANTIVE content question that `is_project_content_request`
+    declines only because it names no project NOUN — a bare factual ask ("what
+    were the Q3 revenue numbers?", "who is the target persona?") that could be
+    answered from an uploaded document in the project.
+
+    This is `is_project_content_request` with its noun anchor DROPPED: the
+    read/recall/summary INTENT (`_PROJECT_CONTENT_INTENT`, reused verbatim — an
+    interrogative lead or a summary/read verb) is still required, so a greeting
+    or pleasantry ("hey", "thanks") never matches (it has no such lead), and a
+    plain command ("delegate the deck to David") — no interrogative, no
+    read-verb — is left to the delegate/execute gates. A small SUBSTANCE floor
+    (≥3 word tokens) drops a bare "what?" backchannel that the noun anchor would
+    otherwise have caught.
+
+    Deliberately WIDER than the noun-anchored gate, so `qa_agent.answer` ORs it
+    into the sixth-branch admission ONLY for a project surface that actually HAS
+    uploaded documents (`scope.has_project_documents`) — an ordinary project
+    sends no extra turns through the connector-blind tool loop. Still governed
+    by the same `_skip_project_connectors` / report-defer / ticket-defer
+    AND-clauses below the admission, and the loop degrades to the composer on an
+    empty read, so a false-positive admission costs one tool turn that then
+    composes normally. `history` is accepted for signature parity with the
+    sibling gates but not consulted in v1."""
+    q = question or ""
+    if not q.strip():
+        return False
+    if not _PROJECT_CONTENT_INTENT.search(q):
+        return False
+    return len(re.findall(r"\w+", q)) >= 3
 
 
 def is_context_dependent_followup(question: str, history: list[dict] | None = None) -> bool:

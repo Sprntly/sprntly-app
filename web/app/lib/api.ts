@@ -6965,6 +6965,31 @@ export const projectsApi = {
       `/v1/projects/${encodeURIComponent(String(id))}/artifacts`,
       { artifact_type: artifactType, artifact_id: artifactId },
     ),
+  /** Upload a document file to the project — it becomes a `custom_artifact`
+   *  (kind "document") attached here, and the agent can READ its text
+   *  (`POST /v1/projects/{id}/documents`, multipart). TEXT-ONLY MVP: the server
+   *  converts the file to text and stores that; the raw file is not retained.
+   *  Returns the SAME unified `ArtifactItem` the artifacts list renders (a
+   *  `custom_artifact` row — exactly what `db/artifacts.custom_artifact_item`
+   *  emits), so the drawer inserts it directly with the existing row renderer.
+   *  Membership-gated. Throws `ApiError` with `.status`: 400 (empty), 413 (over
+   *  25 MB, or over the stored-body cap), 422 (unreadable — scanned/image-only
+   *  PDF or unsupported/legacy type), 403 (not a member) — callers map these to
+   *  a user message. Multipart via the shared helper's FormData branch (the
+   *  runtime sets the boundary; no manual Content-Type), same shape as
+   *  `designAgentApi.uploadScreenshot`. */
+  uploadDocument: (id: number | string, file: File | Blob) => {
+    const form = new FormData()
+    form.append(
+      "file",
+      file,
+      typeof File !== "undefined" && file instanceof File ? file.name : "upload",
+    )
+    return api.post<ArtifactItem>(
+      `/v1/projects/${encodeURIComponent(String(id))}/documents`,
+      form,
+    )
+  },
   /** Apply a free-form chat edit instruction to the project's PRD
    *  (`POST /v1/projects/{id}/prd/chat-edit`) — the private project chat's
    *  in-place, versioned edit path, reusing the same scoped editor + ★

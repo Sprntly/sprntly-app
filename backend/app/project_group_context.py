@@ -54,6 +54,7 @@ _TYPE_LABELS = {
     "evidence": "Evidence",
     "report": "Reports",
     "ticket_set": "Ticket sets",
+    "custom_artifact": "Documents",
 }
 
 
@@ -117,6 +118,28 @@ def _artifact_manifest(project_id: int, dataset: str, company_id: str) -> str:
         more = "" if len(group) <= _MANIFEST_TITLES_PER_TYPE else ", …"
         parts.append(f"{label} ({len(group)}): {', '.join(titles)}{more}")
     return "; ".join(parts)
+
+
+def has_project_documents(project_id: int, dataset: str, company_id: str) -> bool:
+    """True when this project has ≥1 uploaded document (a `custom_artifact`).
+
+    Reuses the SAME tenant-scoped fan-out (`list_artifacts_for_project`) the
+    manifest and the read tools already read — not a bespoke count query — and
+    keys off the `custom_artifact` type the fan-out emits for documents. This
+    is the signal `SurfaceScope.has_project_documents` carries into
+    `qa_agent`'s routing gates; it re-reads the fan-out (rather than threading
+    a flag out of the string-returning `assemble_private_project_context`,
+    whose exact-output contract several tests pin) exactly as every other
+    per-consumer fan-out read in this module does. Best-effort (AD-P7): a read
+    failure degrades to False — the pre-existing routing (no admission, no
+    connector skip) — never raising into scope assembly."""
+    try:
+        items = list_artifacts_for_project(
+            project_id=project_id, dataset=dataset, company_id=company_id
+        )
+    except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+        return False
+    return any(it.get("type") == "custom_artifact" for it in items)
 
 
 def _roster_block(project_id: int) -> str:
@@ -232,9 +255,11 @@ LIST_PROJECT_ARTIFACTS_TOOL = {
     "name": "list_project_artifacts",
     "description": (
         "List every artifact attached to this project (PRDs, prototypes, "
-        "evidence, reports, ticket sets) with their type, id, and title. Call "
-        "this to answer how many/which artifacts exist, or to find an artifact's "
-        "id before reading its content."
+        "evidence, reports, ticket sets, documents) with their type, id, and "
+        "title. Uploaded documents are type \"custom_artifact\" (shown as "
+        "\"Documents\"); PRDs, evidence and reports are their own separate "
+        "types. Call this to answer how many/which artifacts exist, or to find "
+        "an artifact's id before reading its content."
     ),
     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
 }
@@ -243,16 +268,21 @@ GET_ARTIFACT_CONTENT_TOOL = {
     "name": "get_artifact_content",
     "description": (
         "Read the full content of ONE artifact on this project — e.g. a PRD's "
-        "body, an evidence brief, or a report. Pass the artifact_type and "
-        "artifact_id exactly as returned by list_project_artifacts. Call this "
-        "when asked what a specific document says or to summarize it."
+        "body, an evidence brief, a report, or an uploaded document. Pass the "
+        "artifact_type and artifact_id exactly as returned by "
+        "list_project_artifacts. An uploaded document is "
+        "artifact_type=\"custom_artifact\" (shown as \"Documents\"); PRDs, "
+        "evidence and reports are separate types. When the user says \"the "
+        "document\" or \"the uploaded doc\" and several artifacts exist, prefer "
+        "the \"custom_artifact\". Call this when asked what a specific document "
+        "says or to summarize it."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "artifact_type": {
                 "type": "string",
-                "enum": ["prd", "prototype", "evidence", "report", "ticket_set"],
+                "enum": ["prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"],
                 "description": "the artifact's type, from list_project_artifacts",
             },
             "artifact_id": {
@@ -368,6 +398,19 @@ def _artifact_content_for(atype: str, artifact_id: int, company_id: str) -> str 
         if not row:
             return None
         return (row.get("html") or "").strip() or "(empty report)"
+    if atype == "custom_artifact":
+        # An uploaded document (or a generated one) — its readable text lives in
+        # `body_html`, the same sanitized field the report branch returns. The
+        # caller (`_handle_get_artifact_content`) clamps to
+        # `_ARTIFACT_CONTENT_CHARS`, matching every other branch here. WITHOUT
+        # this branch the agent lists the doc on the manifest but answers "I
+        # couldn't read that artifact's content."
+        from app.db.custom_artifacts import get_artifact
+
+        row = get_artifact(company_id, artifact_id)
+        if not row:
+            return None
+        return (row.get("body_html") or "").strip() or "(empty document)"
     if atype == "prototype":
         # Prototype code lives in checkpoints and is large/non-textual; the
         # manifest already carries its title/status, so surface a pointer

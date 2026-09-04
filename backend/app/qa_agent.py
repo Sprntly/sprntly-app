@@ -90,6 +90,7 @@ from app.skill_router import (
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
+    is_substantive_project_question,
     is_ticket_update,
     is_voc_report_request,
 )
@@ -2078,15 +2079,26 @@ def _skip_project_connectors(
         named_document = document_lookup_candidates(routing_text)
         connector_in_message = bool(is_connector_lookup(routing_text))
         connector_with_history = bool(is_connector_lookup(routing_text, history))
+        # In a project that HAS uploaded documents, a bare document-phrased ask
+        # ("read the uploaded document") must STAY in the project tool loop —
+        # its `get_artifact_content` reads THIS project's own documents — rather
+        # than bailing to the workspace connector document-search. So a named
+        # DOCUMENT alone no longer counts as "names an external source" here. An
+        # explicitly named tracker or connector still does: an intentional
+        # Confluence/Jira ask wins even inside a document project (preserving
+        # the named-connector-wins intent). Projects with no uploaded documents
+        # keep the pre-existing behavior byte-for-byte (`document_names` ==
+        # `named_document`).
+        document_names = named_document and not scope.has_project_documents
         names_source = bool(
-            named_tracker or connector_with_history or named_document
+            named_tracker or connector_with_history or document_names
         )
         stale_connector_only = connector_with_history and not connector_in_message
         if (
             names_source
             and stale_connector_only
             and not named_tracker
-            and not named_document
+            and not document_names
             and is_project_content_request(routing_text)
         ):
             names_source = False
@@ -2805,6 +2817,20 @@ def answer(
         and (
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
+            # A SUBSTANTIVE factual question in a project that HAS uploaded
+            # documents — admitted so the model can `get_artifact_content` a
+            # document before the composer deflects (Babajide decision,
+            # accepting the extra-turn latency for doc-projects only). STRICTLY
+            # gated on `scope.has_project_documents`, so an ordinary project
+            # sends nothing extra through the loop. Still subject to every
+            # AND-clause below (connector-skip, report-defer, ticket-defer): a
+            # named-connector, report-phrased, or ticket/delegation turn still
+            # yields to its own path. The loop degrades to the composer on an
+            # empty read, so a false-positive admission self-heals.
+            or (
+                scope.has_project_documents
+                and is_substantive_project_question(routing_text, history)
+            )
             # A bare "send/assign/hand/route to <roster member>" — no
             # pronoun object — is a delegation signal `is_project_tool_
             # request` alone declines (its `_PROJECT_TOOL_DELEGATE_VERB`

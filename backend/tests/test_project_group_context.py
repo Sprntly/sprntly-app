@@ -59,7 +59,7 @@ def test_read_tools_are_the_four_project_scoped_tools():
     props = gac["input_schema"]["properties"]
     assert set(gac["input_schema"]["required"]) == {"artifact_type", "artifact_id"}
     assert props["artifact_type"]["enum"] == [
-        "prd", "prototype", "evidence", "report", "ticket_set"
+        "prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"
     ]
 
 

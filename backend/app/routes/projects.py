@@ -14,6 +14,7 @@ fan-out (AD-P1/AD-P12, build spec §5.2) — see the handlers below.
 """
 from __future__ import annotations
 
+import asyncio
 import contextvars
 import logging
 import sys
@@ -21,7 +22,7 @@ import uuid
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
 from pydantic import BaseModel, Field
 
 from app import qa_agent
@@ -34,11 +35,17 @@ from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import project_delegations as project_delegations_db
 from app.db import project_memory_entries as memory_db
+from app.db import custom_artifacts as custom_artifacts_db
+from app.db.custom_artifacts import BodyTooLarge
 from app.db import projects as projects_db
 from app.db import team as team_db
 from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
 from app.db import workspaces as workspaces_db
-from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
+from app.db.artifacts import (
+    custom_artifact_item,
+    list_artifacts_for_company,
+    list_artifacts_for_project,
+)
 from app.db.companies import get_seat_limit
 from app.db.prds import save_prd_version, update_prd_content
 from app.team_email import dispatch_invite_email
@@ -58,6 +65,8 @@ from app.delegation_status_ingest import maybe_ingest_status, notify_requester_t
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
+from app.ingest import convert, is_unparsed_stub
+from app.report_markdown import to_html
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
 from app.surface_scope import PROJECT_TOOL_NUDGE, Surface, SurfaceScope
@@ -824,6 +833,104 @@ def add_project_artifact(
         project_id, payload.artifact_type, payload.artifact_id,
     )
     return ref
+
+
+# Same ceiling as the chat-attachment extractor (`routes/ask.py::extract_file`)
+# and PRD import — a spec or deck is comfortably under this. Mirrored, not
+# imported, to avoid reaching into that module's private constant; the value is
+# the shared "a real document fits, a pathological upload does not" bound.
+_MAX_DOCUMENT_BYTES = 25 * 1024 * 1024  # 25 MB
+
+# Message reused VERBATIM from `routes/ask.py::extract_file` so the two upload
+# surfaces refuse an unreadable file with the same words.
+_UNREADABLE_FILE_MESSAGE = (
+    "Could not extract any text from the file. Scanned/image-only PDFs "
+    "and legacy .ppt are not supported — export to PDF or .pptx."
+)
+
+
+@router.post("/{project_id}/documents")
+async def upload_project_document(
+    project_id: int,
+    file: UploadFile = File(...),
+    ctx: WorkspaceContext = Depends(require_workspace),
+):
+    """Upload a document file; it becomes a `custom_artifact` (kind
+    "document") attached to this project, and the agent can READ its text.
+
+    TEXT-ONLY MVP: the file is converted to markdown server-side (the same
+    `app.ingest.convert` the chat-attachment extractor uses — no LLM, no OCR),
+    rendered to sanitized HTML, and STORED as the document's `body_html`. The
+    raw bytes are NOT retained (a download-the-original follow-up would wire
+    `attachments_storage.stage_attachment`; out of scope here).
+
+    Membership-gated (`_require_project_member`, AD-P11) like every other
+    members-only surface on this router — a same-tenant non-member gets 403, a
+    cross-tenant caller 404. `company_id`/`user` come from the authed
+    `WorkspaceContext`; nothing client-supplied names a tenant.
+
+    Validation mirrors `routes/ask.py::extract_file` VERBATIM: empty → 400,
+    > 25 MB → 413, an unreadable file (scanned/image-only PDF, or an
+    unsupported/legacy type whose only extraction is the unparsed stub) → 422
+    with the same message. An over-`MAX_BODY_CHARS` body is a clean 4xx (413),
+    never a 500."""
+    _require_project_member(project_id, ctx)  # 403/404 gate
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(400, "Uploaded file is empty.")
+    if len(data) > _MAX_DOCUMENT_BYTES:
+        raise HTTPException(413, "File too large (max 25 MB).")
+
+    filename = file.filename or "upload"
+    # `convert` is blocking (BeautifulSoup/pdf/docx parsing) — off the loop, the
+    # same way `extract_file` runs it.
+    markdown = await asyncio.to_thread(convert, filename, data)
+    # `extract_file` refuses on empty text; a binary/legacy type extracts to a
+    # NON-empty "unparsed stub" (see `ingest.is_unparsed_stub`), which a plain
+    # empty-check would let through as a bogus document — so both cases are the
+    # one "we could not read this" 422 here.
+    if is_unparsed_stub(markdown) or not markdown.strip():
+        raise HTTPException(422, _UNREADABLE_FILE_MESSAGE)
+
+    # Markdown → sanitized HTML via the SHARED report/document primitive
+    # (`report_markdown.to_html` → `md.markdown(...)` + `sanitize_artifact_html`);
+    # no hand-rolled markdown parsing. `create_artifact` sanitizes again at the
+    # storage chokepoint (idempotent) and enforces `MAX_BODY_CHARS`.
+    body_html = to_html(markdown)
+
+    # Title = the filename stem. `create_artifact` strips + bounds it to 300
+    # (its own `title` store rule), and an empty stem (a dotfile) stores "" —
+    # which the fan-out DTO renders as the web's own "Untitled document" — so
+    # no local truncation or fallback string is reinvented here.
+    from pathlib import PurePosixPath
+
+    try:
+        row = await asyncio.to_thread(
+            custom_artifacts_db.create_artifact,
+            ctx.company_id,
+            kind="document",
+            title=PurePosixPath(filename).stem,
+            body_html=body_html,
+            status="ready",
+            workspace_id=ctx.workspace_id,
+            created_by=ctx.user_id,
+        )
+    except BodyTooLarge:
+        raise HTTPException(413, "Document is too large")
+
+    # Attach through the idempotent choke-point — this is also what fires the
+    # realtime `artifact.added` nudge (AD-P21/AD-P22).
+    projects_db.add_artifact(project_id, "custom_artifact", row["id"])
+    logger.info(
+        "project_document_uploaded project_id=%s artifact_id=%s bytes=%s",
+        project_id, row["id"], len(data),
+    )
+    # The SAME DTO the drawer fan-out publishes for a custom_artifact (one
+    # source of truth — `db/artifacts.py::custom_artifact_item`), so the FE can
+    # optimistically insert this upload without a refetch. A just-uploaded
+    # document has no originating conversation → conversation_title None.
+    return custom_artifact_item(row)
 
 
 # The exact `conversation_turns` read-DTO key set published on a fresh

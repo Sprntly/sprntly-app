@@ -235,6 +235,25 @@ class ProjectContextAssembler:
             )
             block = ""
 
+        # ── Uploaded-document presence (routing signal) ──────────────────────
+        # Whether this project has ≥1 uploaded document (custom_artifact),
+        # carried on the scope so `qa_agent`'s routing gates keep a document-
+        # phrased / bare factual question in the project tool loop instead of
+        # bailing to the workspace connector document-search. Reuses the SAME
+        # tenant-scoped fan-out the manifest reads (`has_project_documents` →
+        # `list_artifacts_for_project`) — no bespoke count query. Best-effort:
+        # a read failure degrades to False (pre-existing routing), never blocks
+        # the answer.
+        has_docs = False
+        try:
+            from app.project_group_context import has_project_documents
+
+            has_docs = has_project_documents(
+                project_id, req.dataset, req.company_id
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            has_docs = False
+
         # ── Project instructions block ───────────────────────────────────────
         # Single-sourced format both surfaces use (`_instructions_block`); folded
         # into `system_addendum` below (never `context_payload`). Best-effort.
@@ -412,4 +431,5 @@ class ProjectContextAssembler:
                 "source_conversation_id": req.conversation_id,
             },
             post_turn=post_turn,
+            has_project_documents=has_docs,
         )

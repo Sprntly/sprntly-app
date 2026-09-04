@@ -237,6 +237,41 @@ function isOpenable(a: ArtifactItem): boolean {
 
 // ── Icons ──
 
+/** The upload picker's accepted extensions — the converter's supported
+ *  document types (`backend/app/ingest.py::_SUFFIX_TO_CONVERTER`), minus the
+ *  data/markup types the drawer's "document" affordance doesn't advertise. A
+ *  hint only: the server re-validates and 422s an unreadable file regardless. */
+const UPLOAD_ACCEPT = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md"
+
+/** DOC badge for a transient upload row — the SAME palette entry a finished
+ *  custom_artifact row uses (`ARTIFACT_BADGE.custom_artifact`), so a processing
+ *  row and its resolved doc row read identically. */
+const DOC_BADGE = ARTIFACT_BADGE.custom_artifact
+
+/** One human-readable size, matching the mockup's "3.4 MB" / "812 KB". */
+function fileSizeLabel(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`
+}
+
+/** ApiError.status → a specific, user-facing upload failure line. Mirrors the
+ *  backend's own 400/413/422/403 contract (`routes/projects.py::upload_project_
+ *  document`). */
+function uploadErrorMessage(status: number | null): string {
+  switch (status) {
+    case 400:
+      return "That file is empty."
+    case 413:
+      return "That file is too large (max 25 MB)."
+    case 422:
+      return "Couldn't read any text — scanned/image-only PDFs and unsupported types aren't supported."
+    case 403:
+      return "You're not a member of this project, so you can't upload here."
+    default:
+      return "Upload failed. Please try again."
+  }
+}
+
 function IconPlusSmall() {
   return (
     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" aria-hidden="true">
@@ -265,6 +300,37 @@ function IconChevron() {
   return (
     <svg className={styles.chev} width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
       <path d="m9 6 6 6-6 6" />
+    </svg>
+  )
+}
+
+function IconCaret() {
+  return (
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="m6 9 6 6 6-6" />
+    </svg>
+  )
+}
+
+/** Upload glyph (an arrow rising out of a tray) — shared by the "+ Add" menu's
+ *  Upload row and the always-present upload strip. */
+function IconUpload({ size = 16 }: { size?: number }) {
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <path d="M12 3v13" />
+      <path d="M7 8l5-5 5 5" />
+    </svg>
+  )
+}
+
+/** The "add existing" library glyph (a stacked-layers artifact), matching the
+ *  mockup's second menu row. */
+function IconLibrary() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinejoin="round" aria-hidden="true">
+      <path d="M12 3l8.5 4.7L12 12.4 3.5 7.7 12 3z" />
+      <path d="M3.5 12L12 16.7 20.5 12" />
     </svg>
   )
 }
@@ -307,6 +373,16 @@ function SkeletonRows() {
   )
 }
 
+/** A transient upload-in-flight row (spinner → resolves into the real DOC row,
+ *  or flips to an inline error). Owned by the container's `uploads` state. */
+export type UploadRow = {
+  id: string
+  name: string
+  sizeLabel: string
+  /** null while uploading; a user-facing message once it has failed. */
+  error: string | null
+}
+
 export type ProjectArtifactsDrawerViewProps = {
   status: Status
   artifacts: ArtifactItem[]
@@ -322,6 +398,13 @@ export type ProjectArtifactsDrawerViewProps = {
   /** Pointer-down on the left-edge drag handle → begins a resize gesture (the
    *  container owns the width state + persistence). */
   onResizeStart: (e: React.PointerEvent<HTMLDivElement>) => void
+  /** Transient upload rows (processing / errored), rendered at the top of the
+   *  list. Container-owned. */
+  uploads: UploadRow[]
+  /** Chosen/dropped files → start uploads (container POSTs each). */
+  onUploadFiles: (files: File[]) => void
+  /** Dismiss / cancel a transient upload row by id. */
+  onCancelUpload: (id: string) => void
 }
 
 export function ProjectArtifactsDrawerView({
@@ -337,7 +420,58 @@ export function ProjectArtifactsDrawerView({
   onBackToList,
   addPanel,
   onResizeStart,
+  uploads,
+  onUploadFiles,
+  onCancelUpload,
 }: ProjectArtifactsDrawerViewProps) {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const [dragging, setDragging] = useState(false)
+  const addwrapRef = useRef<HTMLDivElement | null>(null)
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // Close the "+ Add" menu on an outside click or Escape (a lightweight
+  // document listener — the same posture the drawer's own Escape-to-close uses,
+  // scoped to while the menu is open).
+  useEffect(() => {
+    if (!menuOpen) return
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (!addwrapRef.current?.contains(e.target as Node)) setMenuOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false)
+    }
+    document.addEventListener("mousedown", onDocMouseDown)
+    document.addEventListener("keydown", onKey)
+    return () => {
+      document.removeEventListener("mousedown", onDocMouseDown)
+      document.removeEventListener("keydown", onKey)
+    }
+  }, [menuOpen])
+
+  const openFilePicker = useCallback(() => {
+    fileInputRef.current?.click()
+  }, [])
+
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const files = e.target.files ? Array.from(e.target.files) : []
+      if (files.length) onUploadFiles(files)
+      // Reset so choosing the SAME file again re-fires `change`.
+      e.target.value = ""
+    },
+    [onUploadFiles],
+  )
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault()
+      setDragging(false)
+      const files = e.dataTransfer?.files ? Array.from(e.dataTransfer.files) : []
+      if (files.length) onUploadFiles(files)
+    },
+    [onUploadFiles],
+  )
+
   const counts: Partial<Record<ArtifactFilter, number>> = { all: artifacts.length }
   for (const a of artifacts) {
     if (!isProjectArtifactType(a.type)) continue
@@ -364,6 +498,144 @@ export function ProjectArtifactsDrawerView({
       ))}
     </div>
   )
+
+  // ── "+ Add ▾" split menu (V2) — replaces the single "Add artifact" pill.
+  //    "Upload document" opens the hidden file input; "Add existing artifact"
+  //    reuses the EXISTING add-existing behavior (`onShowAdd` → the reused
+  //    `AddArtifactPanel`). The hidden input is shared by the menu and the
+  //    always-present upload strip below. ──
+  const hiddenFileInput = (
+    <input
+      ref={fileInputRef}
+      type="file"
+      accept={UPLOAD_ACCEPT}
+      multiple
+      hidden
+      onChange={handleInputChange}
+      data-testid="artifacts-drawer-file-input"
+    />
+  )
+
+  const addMenu = (
+    <div className={styles.addwrap} ref={addwrapRef}>
+      <button
+        type="button"
+        className={styles.add}
+        aria-haspopup="menu"
+        aria-expanded={menuOpen}
+        onClick={() => setMenuOpen((o) => !o)}
+        data-testid="artifacts-drawer-add"
+      >
+        <IconPlusSmall />
+        Add
+        <IconCaret />
+      </button>
+      {menuOpen ? (
+        <div className={styles.addmenu} role="menu" data-testid="artifacts-drawer-add-menu">
+          <button
+            type="button"
+            role="menuitem"
+            className={styles.amRow}
+            onClick={() => {
+              setMenuOpen(false)
+              openFilePicker()
+            }}
+            data-testid="artifacts-drawer-menu-upload"
+          >
+            <span className={styles.amIc}>
+              <IconUpload />
+            </span>
+            <span>
+              <span className={styles.amT}>Upload document</span>
+              <span className={styles.amS}>PDF, DOCX, MD, TXT — read into context</span>
+            </span>
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            className={styles.amRow}
+            onClick={() => {
+              setMenuOpen(false)
+              onShowAdd()
+            }}
+            data-testid="artifacts-drawer-menu-existing"
+          >
+            <span className={styles.amIc}>
+              <IconLibrary />
+            </span>
+            <span>
+              <span className={styles.amT}>Add existing artifact</span>
+              <span className={styles.amS}>Link a PRD, report or prototype</span>
+            </span>
+          </button>
+        </div>
+      ) : null}
+    </div>
+  )
+
+  // The slim always-present upload strip (below the filter band, top of body).
+  const uploadStrip = (
+    <button
+      type="button"
+      className={`${styles.upstrip} ${dragging ? styles.upstripDrag : ""}`}
+      onClick={openFilePicker}
+      data-testid="artifacts-drawer-upload-strip"
+    >
+      <span className={styles.upIc}>
+        <IconUpload size={15} />
+      </span>
+      <span className={styles.upMain}>
+        <span className={styles.upT}>
+          Drop documents here, or <b>browse</b>
+        </span>
+        <span className={styles.upS}>PDF · DOCX · MD · TXT — read into Sprntly&rsquo;s context</span>
+      </span>
+    </button>
+  )
+
+  // Transient upload rows (processing spinner or inline error), above the list.
+  const uploadRows = uploads.map((u) => (
+    <div
+      key={u.id}
+      className={`${styles.arow} ${styles.proc}`}
+      data-testid={`artifacts-drawer-upload-${u.id}`}
+      data-upload-state={u.error ? "error" : "uploading"}
+    >
+      {u.error ? (
+        <span className={`${styles.glyph} ${styles.glyphError}`} aria-hidden="true">
+          <ErrorStateIcon />
+        </span>
+      ) : (
+        <span className={`${styles.glyph} ${styles.ring}`} aria-hidden="true" />
+      )}
+      <span className={styles.rowMain}>
+        <span className={styles.rowTitle}>{u.name}</span>
+        <span className={styles.rowMeta}>
+          <span className={styles.badge} style={{ background: DOC_BADGE.bg, color: DOC_BADGE.color }}>
+            {DOC_BADGE.label}
+          </span>
+          <span className={styles.rowSrc}>
+            {u.error ? u.error : `Indexing for Sprntly · ${u.sizeLabel}`}
+          </span>
+        </span>
+        {u.error ? null : (
+          <div className={styles.prog} aria-hidden="true">
+            <i />
+          </div>
+        )}
+      </span>
+      <button
+        type="button"
+        className={styles.cancelBtn}
+        onClick={() => onCancelUpload(u.id)}
+        aria-label={u.error ? "Dismiss" : "Cancel upload"}
+        title={u.error ? "Dismiss" : "Cancel upload"}
+        data-testid={`artifacts-drawer-upload-cancel-${u.id}`}
+      >
+        <IconClose />
+      </button>
+    </div>
+  ))
 
   // ── ADD (secondary) view ──
   if (view === "add") {
@@ -421,10 +693,8 @@ export function ProjectArtifactsDrawerView({
           </div>
           <div className={styles.hsub}>Everything this project has produced — click a row to open it.</div>
         </div>
-        <button type="button" className={styles.add} onClick={onShowAdd} data-testid="artifacts-drawer-add">
-          <IconPlusSmall />
-          Add artifact
-        </button>
+        {hiddenFileInput}
+        {addMenu}
         <button type="button" className={styles.close} onClick={onClose} aria-label="Close artifacts" data-testid="artifacts-drawer-close">
           <IconClose />
         </button>
@@ -432,7 +702,24 @@ export function ProjectArtifactsDrawerView({
 
       {status === "ready" && artifacts.length > 0 ? chips : null}
 
-      <div className={styles.body} data-testid="artifacts-drawer-body">
+      <div
+        className={styles.body}
+        data-testid="artifacts-drawer-body"
+        {...(status === "ready"
+          ? {
+              onDragOver: (e: React.DragEvent) => {
+                e.preventDefault()
+                if (!dragging) setDragging(true)
+              },
+              onDragLeave: (e: React.DragEvent) => {
+                // Only clear when the pointer actually left the body, not on a
+                // child-boundary crossing.
+                if (!e.currentTarget.contains(e.relatedTarget as Node)) setDragging(false)
+              },
+              onDrop: handleDrop,
+            }
+          : {})}
+      >
         {status === "loading" ? (
           <div aria-busy="true" data-testid="artifacts-drawer-loading">
             <SkeletonRows />
@@ -464,30 +751,39 @@ export function ProjectArtifactsDrawerView({
               Try again
             </button>
           </div>
-        ) : artifacts.length === 0 ? (
-          <div className={styles.state} data-testid="artifacts-drawer-empty">
-            <div className={styles.stateIc}>
-              <FolderStateIcon />
+        ) : artifacts.length === 0 && uploads.length === 0 ? (
+          <>
+            {uploadStrip}
+            <div className={styles.state} data-testid="artifacts-drawer-empty">
+              <div className={styles.stateIc}>
+                <FolderStateIcon />
+              </div>
+              <div className={styles.stateHl}>No artifacts yet</div>
+              <div className={styles.stateMsg}>
+                Drop a document above, or attach something from your library — everything this project produces shows up here.
+              </div>
+              <button type="button" className={styles.cta} onClick={onShowAdd} data-testid="artifacts-drawer-empty-add">
+                Add artifact
+              </button>
             </div>
-            <div className={styles.stateHl}>No artifacts yet</div>
-            <div className={styles.stateMsg}>
-              Items this project produces — PRDs, evidence, prototypes, reports — show up here. Or attach something from your library.
+          </>
+        ) : filtered.length === 0 && uploads.length === 0 ? (
+          <>
+            {uploadStrip}
+            <div className={styles.state} data-testid="artifacts-drawer-empty-filter">
+              <div className={styles.stateIc}>
+                <FolderStateIcon />
+              </div>
+              <div className={styles.stateHl}>No {filter} artifacts</div>
+              <div className={styles.stateMsg}>Try a different type filter.</div>
             </div>
-            <button type="button" className={styles.cta} onClick={onShowAdd} data-testid="artifacts-drawer-empty-add">
-              Add artifact
-            </button>
-          </div>
-        ) : filtered.length === 0 ? (
-          <div className={styles.state} data-testid="artifacts-drawer-empty-filter">
-            <div className={styles.stateIc}>
-              <FolderStateIcon />
-            </div>
-            <div className={styles.stateHl}>No {filter} artifacts</div>
-            <div className={styles.stateMsg}>Try a different type filter.</div>
-          </div>
+          </>
         ) : (
-          <div className={styles.list} data-testid="artifacts-drawer-list">
-            {filtered.map((a) => {
+          <>
+            {uploadStrip}
+            <div className={styles.list} data-testid="artifacts-drawer-list">
+              {uploadRows}
+              {filtered.map((a) => {
               const cfg = badgeFor(a.type)
               const openable = isOpenable(a)
               const common = (
@@ -533,7 +829,8 @@ export function ProjectArtifactsDrawerView({
                 </button>
               )
             })}
-          </div>
+            </div>
+          </>
         )}
       </div>
     </aside>
@@ -600,6 +897,8 @@ export function ProjectArtifactsDrawer({
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [filter, setFilter] = useState<ArtifactFilter>(initialFilter ?? "all")
   const [view, setView] = useState<"list" | "add">("list")
+  const [uploads, setUploads] = useState<UploadRow[]>([])
+  const uploadSeq = useRef(0)
   const addHostRef = useRef<HTMLDivElement | null>(null)
 
   // Non-modal region: Escape closes the drawer, focus is NOT trapped (the
@@ -691,6 +990,7 @@ export function ProjectArtifactsDrawer({
     if (!open) return
     setFilter(initialFilter ?? "all")
     setView("list")
+    setUploads([])
     reload()
     // `initialFilter` re-applies only when the drawer (re)opens — a change to
     // the trigger's last-clicked type while already open must not yank the
@@ -733,19 +1033,22 @@ export function ProjectArtifactsDrawer({
 
   const handleOpenRow = useCallback(
     (a: ArtifactItem) => {
-      // PRD, evidence, report and ticket_set are IN-PANEL artifacts: they open
-      // in the SAME shared side-panel main uses, beside the project chat, via the
-      // project surface's in-place seam — which also closes this drawer (it clears
-      // the project's rail-modal state). This is a HARD invariant: these rows must
-      // NEVER reach the `/?prd=`/`/?evidence=` deep-link, because those land on the
-      // MAIN workspace chat (`/`) and yank the user out of the project (the
-      // reported defect). So we short-circuit unconditionally — if the in-place
-      // seam is somehow absent we no-op rather than fall back to a main deep-link.
+      // PRD, evidence, report, ticket_set AND an uploaded/team document
+      // (custom_artifact) are IN-PANEL artifacts: they open in the SAME shared
+      // side-panel main uses, beside the project chat, via the project surface's
+      // in-place seam — which also closes this drawer (it clears the project's
+      // rail-modal state). This is a HARD invariant: these rows must NEVER reach
+      // the `/?prd=`/`/?evidence=` deep-link or the full-page document route,
+      // because those land on a DIFFERENT page and yank the user out of the
+      // project (the reported defect — an uploaded document opened the full-page
+      // `DocumentRoute`). So we short-circuit unconditionally — if the in-place
+      // seam is somehow absent we no-op rather than fall back to a navigation.
       if (
         a.type === "prd" ||
         a.type === "evidence" ||
         a.type === "report" ||
-        a.type === "ticket_set"
+        a.type === "ticket_set" ||
+        a.type === "custom_artifact"
       ) {
         onOpenInPlace?.(a)
         return
@@ -760,8 +1063,8 @@ export function ProjectArtifactsDrawer({
         window.open(prototypePath(a.open.prd_id), "_blank", "noopener")
         return
       }
-      // A custom document opens onto its OWN page (it is written, not read beside
-      // a chat) — main's `openChatArtifactItem` routes it the same way.
+      // Defensive fallback for any future artifact type with only a deep-link
+      // entry point — no current type reaches here.
       const href = artifactHref(a)
       if (!href) return
       router.push(href)
@@ -773,6 +1076,57 @@ export function ProjectArtifactsDrawer({
     reload()
     onArtifactsChanged?.()
   }, [reload, onArtifactsChanged])
+
+  // ── Upload flow ──
+  // A chosen/dropped file → an optimistic processing row (spinner) is inserted
+  // immediately; the POST runs; on success the row is removed and the returned
+  // custom_artifact DTO is merged into the list (the EXISTING row renderer then
+  // draws it) + the parent count refreshes; on failure the row flips to an
+  // inline, status-mapped error (kept until dismissed). No full reload — the
+  // returned DTO is authoritative and the optimistic insert avoids a flash
+  // (`add_artifact`'s realtime `artifact.added` broadcast still reconciles any
+  // other open surface).
+  const cancelUpload = useCallback((id: string) => {
+    setUploads((prev) => prev.filter((u) => u.id !== id))
+  }, [])
+
+  const uploadFiles = useCallback(
+    (files: File[]) => {
+      for (const file of files) {
+        const id = `upload-${++uploadSeq.current}`
+        setUploads((prev) => [
+          ...prev,
+          { id, name: file.name || "document", sizeLabel: fileSizeLabel(file.size), error: null },
+        ])
+        projectsApi
+          .uploadDocument(projectId, file)
+          .then((item) => {
+            setUploads((prev) => prev.filter((u) => u.id !== id))
+            setState((prev) =>
+              prev.status === "ready"
+                ? {
+                    status: "ready",
+                    // Prepend the new doc; dedupe by key in case a concurrent
+                    // reload already surfaced it.
+                    artifacts: [
+                      item,
+                      ...prev.artifacts.filter((a) => `${a.type}-${a.id}` !== `${item.type}-${item.id}`),
+                    ],
+                  }
+                : prev,
+            )
+            onArtifactsChanged?.()
+          })
+          .catch((err: unknown) => {
+            const status = err instanceof ApiError ? err.status : null
+            setUploads((prev) =>
+              prev.map((u) => (u.id === id ? { ...u, error: uploadErrorMessage(status) } : u)),
+            )
+          })
+      }
+    },
+    [projectId, onArtifactsChanged],
+  )
 
   if (!open) return null
 
@@ -790,6 +1144,9 @@ export function ProjectArtifactsDrawer({
         onShowAdd={() => setView("add")}
         onBackToList={() => setView("list")}
         onResizeStart={handleResizeStart}
+        uploads={uploads}
+        onUploadFiles={uploadFiles}
+        onCancelUpload={cancelUpload}
         addPanel={
           <AddArtifactPanel
             projectId={projectId}
