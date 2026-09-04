@@ -28,7 +28,7 @@
 //
 // Matchers: native DOM only (no @testing-library/jest-dom).
 import * as React from "react"
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -309,7 +309,12 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     })
     await waitFor(() => {
       expect(uploadFilesMock).toHaveBeenCalled()
-      expect(screen.getByText(/events\.csv uploaded/)).not.toBeNull()
+      // The file is LISTED, by name. It used to be a sentence ("events.csv
+      // uploaded.") that the next click cleared, which left the reader with no
+      // record of what had gone in on the one step whose whole question is
+      // exactly that.
+      expect(screen.getByTestId("conn-uploaded-analytics").textContent)
+        .toContain("events.csv")
     })
     // An uploaded category counts as Connected, not Skipped.
     fireEvent.click(footerContinue(container))
@@ -320,6 +325,136 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
         ) as HTMLElement
       ).getAttribute("data-state"),
     ).toBe("connected")
+  })
+
+  it("puts upload FIRST in the grid, as one of the cards", async () => {
+    // WHERE IT SITS IS THE POINT. As a full-width dashed bar under the logos
+    // it read as a footnote to the connectors — backwards for the PM this step
+    // is hardest on, the one who cannot authorise an OAuth app and whose only
+    // way in IS the file picker.
+    const { container } = mountLoaded()
+    const grid = container.querySelector(".conn-step.open .conn-grid") as HTMLElement
+    const upload = grid.querySelector(".conn-upload") as HTMLElement
+
+    // In the grid, not after it, and first in reading order.
+    expect(upload.parentElement).toBe(grid)
+    expect(grid.firstElementChild).toBe(upload)
+
+    // SAME CARD, so the row does not break at the first cell: it carries
+    // `.conn`, which is where every dimension the connectors use comes from.
+    // Styling it separately is how it would drift to a different height.
+    expect(upload.classList.contains("conn")).toBe(true)
+    expect(upload.querySelector(".conn-logo")).not.toBeNull()
+    expect(upload.querySelector(".conn-name")!.textContent).toBe("Upload files")
+
+    // The accepted extensions moved to the tooltip — at tile width a second
+    // line is either truncated or a wrapped paragraph in a row of one-liners.
+    expect(upload.getAttribute("title")).toMatch(/^Upload files/)
+  })
+
+  it("says it is uploading in the tile itself", async () => {
+    // The tile IS the progress surface — there is no strip below to put a
+    // spinner in any more, and a file picker that looks unchanged after a
+    // click is one people click twice.
+    const { container } = mountLoaded()
+    let release: (v: unknown) => void = () => {}
+    uploadFilesMock.mockReturnValue(new Promise((r) => { release = r }))
+    const input = container.querySelector(
+      ".conn-step.open .conn-upload input[type=file]",
+    ) as HTMLInputElement
+    fireEvent.change(input, {
+      target: { files: [new File(["a"], "events.csv", { type: "text/csv" })] },
+    })
+    const upload = container.querySelector(".conn-step.open .conn-upload") as HTMLElement
+    await waitFor(() => expect(upload.getAttribute("aria-busy")).toBe("true"))
+    expect(upload.querySelector(".conn-name")!.textContent).toBe("Uploading…")
+    await act(async () => {
+      release({ ingested: [{ filename: "events.csv" }], errors: [] })
+    })
+  })
+
+  it("lists every file it took, and does not list one twice", async () => {
+    const { container } = mountLoaded()
+    const input = () => container.querySelector(
+      ".conn-step.open .conn-upload input[type=file]",
+    ) as HTMLInputElement
+
+    uploadFilesMock.mockResolvedValue({
+      ingested: [{ filename: "events.csv" }, { filename: "cohorts.xlsx" }],
+      errors: [],
+    })
+    fireEvent.change(input(), {
+      target: {
+        files: [
+          new File(["a"], "events.csv", { type: "text/csv" }),
+          new File(["b"], "cohorts.xlsx"),
+        ],
+      },
+    })
+    await waitFor(() =>
+      expect(
+        container.querySelectorAll('[data-testid="conn-uploaded-analytics"] li').length,
+      ).toBe(2),
+    )
+    const listed = () =>
+      Array.from(
+        container.querySelectorAll('[data-testid="conn-uploaded-analytics"] li'),
+      ).map((li) => li.textContent)
+    expect(listed()).toEqual(["events.csv", "cohorts.xlsx"])
+
+    // Picking one of them AGAIN replaces the source server-side rather than
+    // adding a second, so the row must not appear twice.
+    uploadFilesMock.mockResolvedValue({
+      ingested: [{ filename: "events.csv" }],
+      errors: [],
+    })
+    fireEvent.change(input(), {
+      target: { files: [new File(["a"], "events.csv", { type: "text/csv" })] },
+    })
+    await waitFor(() => expect(uploadFilesMock).toHaveBeenCalledTimes(2))
+    expect(listed()).toEqual(["events.csv", "cohorts.xlsx"])
+  })
+
+  it("lists a file under the category it was dropped on, and no other", async () => {
+    const { container } = mountLoaded()
+    uploadFilesMock.mockResolvedValue({
+      ingested: [{ filename: "events.csv" }],
+      errors: [],
+    })
+    fireEvent.change(
+      container.querySelector(
+        ".conn-step.open .conn-upload input[type=file]",
+      ) as HTMLInputElement,
+      { target: { files: [new File(["a"], "events.csv", { type: "text/csv" })] } },
+    )
+    await waitFor(() =>
+      expect(screen.getByTestId("conn-uploaded-analytics")).not.toBeNull(),
+    )
+
+    // Move to the next category: its own list is empty, and the previous
+    // category's file is not confirmed under it.
+    fireEvent.click(footerContinue(container))
+    const open = container.querySelector(".conn-step.open") as HTMLElement
+    expect(open.getAttribute("data-conn")).not.toBe("analytics")
+    expect(open.querySelector(".conn-uploaded")).toBeNull()
+  })
+
+  it("still reports a failure in words — a list cannot show what did not land", async () => {
+    const { container } = mountLoaded()
+    uploadFilesMock.mockResolvedValue({
+      ingested: [],
+      errors: [{ filename: "notes.pages", error: "unsupported file type" }],
+    })
+    fireEvent.change(
+      container.querySelector(
+        ".conn-step.open .conn-upload input[type=file]",
+      ) as HTMLInputElement,
+      { target: { files: [new File(["a"], "notes.pages")] } },
+    )
+    await waitFor(() =>
+      expect(screen.getByText(/notes\.pages: unsupported file type/)).not.toBeNull(),
+    )
+    expect(container.querySelector(".conn-uploaded")).toBeNull()
   })
 
   it("hides the upload fallback on categories that opt out in the catalog", () => {
@@ -365,8 +500,17 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     const research = container.querySelector('.conn-step[data-conn="research"]')
     expect(research).not.toBeNull()
     expect(screen.queryByText("Marvin")).toBeNull()
-    expect(research!.querySelectorAll(".conn").length).toBe(0)
+    // `:not(.conn-upload)` because the upload tile is now one of the cards in
+    // the grid rather than a strip beneath it — it carries `.conn` so its
+    // geometry cannot drift from the connectors', which means a bare `.conn`
+    // count here would report the shelf as non-empty. What this line means,
+    // and still means, is "no CONNECTOR is offered".
+    expect(research!.querySelectorAll(".conn:not(.conn-upload)").length).toBe(0)
     expect(research!.querySelector(".conn-upload")).not.toBeNull()
+    // …and the upload is the FIRST thing in the grid, which is the point of
+    // keeping this shelf alive at all.
+    expect(research!.querySelector(".conn-grid")!.firstElementChild)
+      .toBe(research!.querySelector(".conn-upload"))
     // Advance to CRM: HubSpot (oauth) shows, the coming-soons don't.
     fireEvent.click(footerContinue(container))
     expect(screen.getByText("HubSpot")).not.toBeNull()

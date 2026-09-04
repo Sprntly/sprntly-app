@@ -202,7 +202,7 @@ function CategoryIcon({ catKey }: { catKey: string }) {
   return <Icon />
 }
 
-/** Upload glyph on the per-category manual-upload fallback strip. */
+/** Upload glyph on the per-category upload tile — the first card in the row. */
 function UploadIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...iconProps({ width: 13, height: 13, ...props })}>
@@ -225,6 +225,12 @@ export function Connectors() {
   const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  // What was uploaded, per category, this session. The names are kept — not
+  // just a count — because "3 files uploaded." leaves the reader to remember
+  // WHICH three, on the one step where the whole question is what data got in.
+  // Keyed by category so a file dropped on Analytics is not listed under
+  // Voice; ordered as picked, newest last, the way a picker returns them.
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, string[]>>({})
   // Category keys that had a file uploaded this session — they count as
   // "Connected" in the summary row even with no provider selected.
   const [uploadedCats, setUploadedCats] = useState<Set<string>>(new Set())
@@ -324,11 +330,19 @@ export function Connectors() {
       const r = await companiesApi.uploadFiles(workspace.slug, list)
       if (r.ingested.length > 0) {
         setUploadedCats((prev) => new Set(prev).add(categoryKey))
-        setUploadNotice(
-          r.ingested.length === 1
-            ? `${r.ingested[0].filename} uploaded.`
-            : `${r.ingested.length} files uploaded.`,
-        )
+        // THE LIST IS THE CONFIRMATION, so there is no sentence to write. A
+        // notice saying "3 files uploaded." beside a list of the three is the
+        // same fact twice, and the one that disappears on the next action is
+        // the one that was carrying it.
+        setUploadedFiles((prev) => {
+          const seen = new Set(prev[categoryKey] ?? [])
+          const added = r.ingested
+            .map((f) => f.filename)
+            // Re-picking the same file replaces it server-side rather than
+            // adding a second source, so it must not appear twice here.
+            .filter((n) => !seen.has(n))
+          return { ...prev, [categoryKey]: [...(prev[categoryKey] ?? []), ...added] }
+        })
       }
       if (r.errors.length > 0) {
         setUploadNotice(
@@ -502,6 +516,52 @@ export function Connectors() {
               {isOpen && (
                 <div className="conn-step-body">
                   <div className="conn-grid">
+                    {/* UPLOAD IS THE FIRST TILE IN THE ROW, not a strip under
+                        it. As a full-width dashed bar below the logos it read
+                        as a footnote to the connectors — which is backwards
+                        for the PM this step is hardest on, the one who cannot
+                        authorise an OAuth app and whose only way to bring data
+                        in IS the file picker. First position and the same tile
+                        geometry make it one of the options rather than the
+                        consolation under them.
+
+                        Hidden for the categories that opt out in the catalog
+                        (pm, code, docs): ticket and repo data cannot stay
+                        current from a one-off export, and Company
+                        documentation takes uploads through the named-source
+                        picker in Settings instead. */}
+                    {cat.allowsManualUpload !== false && (
+                      <label
+                        className="conn conn-upload"
+                        aria-busy={uploadingCat === cat.key}
+                        // The accepted extensions used to render as a second
+                        // line. At tile width that is either truncated or a
+                        // wrapped paragraph in a row of one-line cards, so it
+                        // moves to the tooltip and the label carries the verb.
+                        title={
+                          cat.uploadAccept
+                            ? `Upload files — ${cat.uploadAccept}`
+                            : "Upload files"
+                        }
+                        data-testid={`conn-upload-${cat.key}`}
+                      >
+                        <UploadIcon className="conn-logo" aria-hidden />
+                        <span className="conn-name">
+                          {uploadingCat === cat.key ? "Uploading…" : "Upload files"}
+                        </span>
+                        <input
+                          type="file"
+                          multiple
+                          accept={(cat.uploadExtensions ?? []).join(",")}
+                          disabled={uploadingCat !== null}
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            void onUploadFiles(cat.key, e.target.files)
+                            e.target.value = ""
+                          }}
+                        />
+                      </label>
+                    )}
                     {cat.items.map((item) => {
                       const live = connected.has(item.id)
                       const sel = selected.has(item.id)
@@ -524,36 +584,37 @@ export function Connectors() {
                       )
                     })}
                   </div>
-                  {/* Manual fallback for PMs without OAuth access. Hidden for
-                      categories that opt out in the catalog (pm, code, docs) —
-                      ticket and repo data can't stay current from a one-off
-                      export, and Company documentation takes uploads through
-                      the named-source picker in Settings instead. */}
-                  {cat.allowsManualUpload !== false && (
-                    <label
-                      className="conn-upload"
-                      aria-busy={uploadingCat === cat.key}
+                  {/* WHAT LANDED, listed. Scoped to this category — the
+                      state is keyed by it — so a file dropped on Analytics is
+                      not confirmed under Voice. `role="status"` so a screen
+                      reader hears the file arrive rather than only seeing it.
+                      Empty until something is uploaded, which is why there is
+                      no "nothing yet" line: an empty list under an upload tile
+                      says the same thing without a sentence. */}
+                  {(uploadedFiles[cat.key]?.length ?? 0) > 0 && (
+                    <ul
+                      className="conn-uploaded"
+                      role="status"
+                      data-testid={`conn-uploaded-${cat.key}`}
                     >
-                      <UploadIcon aria-hidden />
-                      <span className="t">
-                        {uploadingCat === cat.key
-                          ? "Uploading…"
-                          : "Or upload files manually"}
-                      </span>
-                      <span className="s">{cat.uploadAccept ?? ""}</span>
-                      <input
-                        type="file"
-                        multiple
-                        accept={(cat.uploadExtensions ?? []).join(",")}
-                        disabled={uploadingCat !== null}
-                        style={{ display: "none" }}
-                        onChange={(e) => {
-                          void onUploadFiles(cat.key, e.target.files)
-                          e.target.value = ""
-                        }}
-                      />
-                    </label>
+                      {uploadedFiles[cat.key]!.map((name) => (
+                        <li key={name} className="conn-uploaded-row">
+                          <Check
+                            className="conn-uploaded-tick"
+                            style={{ width: 11, height: 11 }}
+                            aria-hidden
+                          />
+                          {/* The full name in `title`, for the one that is
+                              longer than the row it sits in. */}
+                          <span className="conn-uploaded-name" title={name}>
+                            {name}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
                   )}
+                  {/* Failures only. Success is the list above; a message that
+                      has to survive is not a message that fades. */}
                   {uploadNotice && (
                     <p className="onb-field-hint" role="status">
                       {uploadNotice}

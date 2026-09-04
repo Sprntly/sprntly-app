@@ -20913,36 +20913,79 @@
   }
 
   /* Manual-upload fallback strip inside an open category. */
+  /* THE UPLOAD TILE. It carries `.conn` as well, so every dimension — padding,
+     radius, gap, the grid cell it sits in — comes from the connector card and
+     cannot drift from it. Only the colour and the border style are its own.
+
+     LIGHT GREEN, and it is the one filled tile in the row on purpose: this is
+     the way in for a PM who cannot authorise an OAuth app, and as a dashed
+     grey bar under the logos it read as a footnote to the options rather than
+     one of them. The fill is the existing accent tint (`--accent-soft`), not a
+     new colour — every other green in the product resolves from the same
+     token, so a brand change moves this with it. */
   .onb-card .conn-upload {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 12px;
-    padding: 11px 13px;
-    border: 1px dashed var(--line);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    color: var(--ink-2);
-    transition: border-color 0.15s, background 0.15s;
+    background: var(--accent-soft);
+    border: 1px dashed var(--accent-2);
+    color: var(--accent-ink);
   }
 
   .onb-card .conn-upload:hover {
-    border-color: var(--accent-2);
-    background: var(--accent-alpha-05);
+    border-color: var(--accent);
+    background: var(--accent-muted);
   }
 
   .onb-card .conn-upload[aria-busy="true"] {
     cursor: progress;
   }
 
-  .onb-card .conn-upload .t {
-    font-size: 12.5px;
-    font-weight: 500;
+  /* The glyph sits in the logo's slot, so it lines up with the logos beside
+     it rather than floating at its own size. */
+  .onb-card .conn-upload .conn-logo {
+    width: 18px;
+    height: 18px;
+    color: var(--accent-ink);
   }
 
-  .onb-card .conn-upload .s {
-    font-size: 11.5px;
-    color: var(--ink-3);
+  .onb-card .conn-upload .conn-name {
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  /* WHAT LANDED. One row per file, under the grid, in the upload tile's own
+     green so the two read as one thing: the tile is where files go in and this
+     is what went. A list rather than a sentence because the reader's question
+     after a multi-file pick is "which ones", and a count cannot answer it. */
+  .onb-card .conn-uploaded {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 10px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .onb-card .conn-uploaded-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 10px;
+    border: 1px solid var(--accent-2);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 12px;
+  }
+
+  .onb-card .conn-uploaded-tick {
+    flex: none;
+  }
+
+  /* A long filename truncates rather than wrapping the row to two lines —
+     the full name is in the row's `title`. */
+  .onb-card .conn-uploaded-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .onb-card .conn-step-body {
