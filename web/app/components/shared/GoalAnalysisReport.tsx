@@ -51,7 +51,9 @@ import {
 } from "../../lib/goalDataGaps"
 import { stop, stripClaimRefs, upperFirst } from "../../lib/goalProse"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
+import type { ReactNode } from "react"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
+import styles from "./GoalAnalysisReport.module.css"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
  *  a run can drop a hundred candidates and an unfolded hundred buries the
@@ -105,14 +107,9 @@ const MAX_SET_ASIDE_ROWS = MAX_OTHER_CONSIDERED_ROWS
  *  exported document sees one chart, not two that disagree.
  *
  *  Colour and numeral face are the canonical report palette
- *  (`backend/skills/prd-author/assets/prd.css`). Inline rather than a class
- *  because this component's stylesheet is `globals.css`, and the same style
- *  has to be expressible in the exported document, where classes are stripped. */
+ *  (`backend/skills/prd-author/assets/prd.css`), carried by the stylesheet
+ *  beside this component. */
 const BAR_CELLS = 20
-const BAR_STYLE = {
-  color: "#1A6B47",
-  fontFamily: "'IBM Plex Mono', monospace",
-}
 
 /** A bar proportional to `largest`, or null when there is nothing honest to
  *  draw. NEVER DRAWN FOR AN UNSIZED VALUE (I3): null renders as "Not
@@ -123,7 +120,7 @@ const BAR_STYLE = {
 function Bar({ value, largest }: { value: number | null; largest: number }) {
   if (value == null || !(value > 0) || !(largest > 0)) return null
   const cells = Math.max(1, Math.min(BAR_CELLS, Math.round(BAR_CELLS * value / largest)))
-  return <span style={BAR_STYLE}>{"\u2588".repeat(cells)}</span>
+  return <span className={styles.bar}>{"\u2588".repeat(cells)}</span>
 }
 
 /** The largest reach among a set of rows — the bar's scale. An unsized
@@ -243,165 +240,167 @@ function ReportFinding({
   const flat = f.recommendation
   const hasFlat = Boolean((flat?.action || "").trim() && (flat?.because || "").trim())
 
-  // ── WHAT TO DO, FIRST — then, underneath it, two columns: the argument on
-  //    the left and the evidence it rests on on the right. The shape is the
-  //    reader's own: "maybe build XYZ. This is because five companies have
-  //    asked for it … this is exactly what they said." Stacked paragraphs
-  //    made a reader scroll to find out whether a recommendation had anything
-  //    behind it. Mirrors `report.py`'s `_finding_block`, which builds the
-  //    same two columns as a two-cell table row because the sanitizer on the
-  //    exported document keeps no grid or flex CSS.
+  // ── WHAT TO DO, THEN WHY, THEN WHAT IT RESTS ON. ──────────────────────
   //
-  //    NO ACCOUNT IS NAMED, AND THAT IS NOT AN OMISSION: a stored finding
-  //    carries how MANY accounts a theme touches and never which. The
-  //    evidence column states the reach and names the SOURCE DOCUMENTS, which
-  //    is what is actually on the record.
-  const why = (
-    <>
-      {hasDeep ? (
+  // The action leads the card — "this is only the issues, no suggestion on
+  // how to solve or what's the exact recommendation from it" — and the
+  // argument for it runs directly underneath at its own measure. What the
+  // argument rests on is a strip below, not a column beside: see `.card` in
+  // the stylesheet for why the two-column version this replaced gave the
+  // prose a 45-character measure and the evidence an empty half.
+  //
+  // ABSENT IS NORMAL, not an error: only the top findings get a suggestion,
+  // and anything that quoted a figure, promised an outcome or failed the
+  // lint was dropped rather than repaired. THE DEEP PASS TAKES PRECEDENCE
+  // over the flat one when both exist — the same findings feed both LLM
+  // calls, and showing both would put two suggestions on one finding.
+  //
+  // NO ACCOUNT IS NAMED, AND THAT IS NOT AN OMISSION: a stored finding
+  // carries how MANY accounts a theme touches and never which. The strip
+  // states the reach and names the SOURCE DOCUMENTS, which is what is
+  // actually on the record.
+  const why = hasDeep ? (
+    <div className={styles.prose}>
+      <p className="ga-finding-rec-why">
+        <em>Why.</em> {stripClaimRefs(deep!.because)}
+      </p>
+      {deep!.changes.length ? (
         <>
-          <p className="ga-finding-rec-why">
-            <em>Why.</em> {stripClaimRefs(deep!.because)}
-          </p>
-          {deep!.changes.length ? (
-            <>
-              <p><strong>What to change.</strong></p>
-              <ul className="ga-assumed" data-testid="goal-finding-changes">
-                {deep!.changes.map((c, i) => (
-                  <li key={i}>
-                    {stripClaimRefs(c.text)} <em>— from: “{c.cited_claim}”</em>
-                  </li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-          {/* SUPPRESSED ON THE CARD THAT CARRIES THE GAPS LIST — these same
-              questions are the middle of it. */}
-          {deep!.open_questions.length && !dataGaps.length ? (
-            <>
-              <p><strong>Still open.</strong></p>
-              <ul className="ga-assumed">
-                {deep!.open_questions.map((q, i) => (
-                  <li key={i}>{q}</li>
-                ))}
-              </ul>
-            </>
-          ) : null}
-          {deep!.what_would_falsify ? (
-            <p className="ga-weakest" data-testid="goal-finding-kill-signal">
-              <b>Kill signal.</b> {stripClaimRefs(deep!.what_would_falsify)}{" "}
-              <em>{KILL_SIGNAL_CAVEAT}</em>
-            </p>
-          ) : null}
-          {deep!.comparison && !deferComparison ? (
-            <p className="ga-weakest" data-testid="goal-finding-comparison">
-              <b>Why this over the next.</b> {deep!.comparison}
-            </p>
-          ) : null}
-          {oneTopicNote && !deferComparison ? (
-            <p className="ga-weakest" data-testid="goal-finding-one-topic">
-              <b>Why these are not two options.</b> {oneTopicNote}
-            </p>
-          ) : null}
-        </>
-      ) : hasFlat ? (
-        <>
-          <p className="ga-finding-rec-why">
-            <em>Why.</em> {stripClaimRefs(flat!.because)}
-          </p>
-          {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED.
-              `deep_attempted` is only set on a finding that was IN the top N
-              but whose evidence did not clear the citation gate — never on
-              one simply ranked past N. The specific reason lives once, under
-              how this was produced, and this points there. */}
-          {f.deep_attempted ? (
-            <p className="ga-weakest" data-testid="goal-finding-deep-shortfall">
-              This was in line for a full write-up and did not get one this
-              run — see “How many got a full recommendation” under how this
-              was produced. The suggestion above is the plain version, not a
-              downgrade of a deeper one you are missing.
-            </p>
-          ) : null}
+          <p className={styles.blockLabel}>What to change</p>
+          <ul className={styles.evList} data-testid="goal-finding-changes">
+            {deep!.changes.map((c, i) => (
+              <li key={i}>
+                {stripClaimRefs(c.text)}
+                {/* PROVENANCE RECEDES: its own line, smaller and lighter, so
+                    it supports the change rather than competing with it. */}
+                <span className={styles.cite}>from: “{c.cited_claim}”</span>
+              </li>
+            ))}
+          </ul>
         </>
       ) : null}
-    </>
-  )
+      {/* SUPPRESSED ON THE CARD THAT CARRIES THE GAPS LIST — these same
+          questions are the middle of it. */}
+      {deep!.open_questions.length && !dataGaps.length ? (
+        <>
+          <p className={styles.blockLabel}>Still open</p>
+          <ul className={styles.evList}>
+            {deep!.open_questions.map((q, i) => (
+              <li key={i}>{q}</li>
+            ))}
+          </ul>
+        </>
+      ) : null}
+      {deep!.what_would_falsify ? (
+        <p className="ga-weakest" data-testid="goal-finding-kill-signal">
+          <b>Kill signal.</b> {stripClaimRefs(deep!.what_would_falsify)}{" "}
+          <em>{KILL_SIGNAL_CAVEAT}</em>
+        </p>
+      ) : null}
+      {deep!.comparison && !deferComparison ? (
+        <p className="ga-weakest" data-testid="goal-finding-comparison">
+          <b>Why this over the next.</b> {deep!.comparison}
+        </p>
+      ) : null}
+      {oneTopicNote && !deferComparison ? (
+        <p className="ga-weakest" data-testid="goal-finding-one-topic">
+          <b>Why these are not two options.</b> {oneTopicNote}
+        </p>
+      ) : null}
+    </div>
+  ) : hasFlat ? (
+    <div className={styles.prose}>
+      <p className="ga-finding-rec-why">
+        <em>Why.</em> {stripClaimRefs(flat!.because)}
+      </p>
+      {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED.
+          `deep_attempted` is only set on a finding that was IN the top N but
+          whose evidence did not clear the citation gate — never on one
+          simply ranked past N. The specific reason lives once, under how
+          this was produced, and this points there. */}
+      {f.deep_attempted ? (
+        <p className="ga-weakest" data-testid="goal-finding-deep-shortfall">
+          This was in line for a full write-up and did not get one this run —
+          see “How many got a full recommendation” under how this was
+          produced. The suggestion above is the plain version, not a downgrade
+          of a deeper one you are missing.
+        </p>
+      ) : null}
+    </div>
+  ) : null
 
-  const evidence = (
+  // Label/value rows: the facts that are pairs rather than prose. A row with
+  // nothing in it is not rendered, so the strip is as short as the evidence.
+  const rows: [string, ReactNode][] = []
+  rows.push([
+    "Scale",
     <>
-      <p><strong>What this rests on.</strong></p>
-      <div className="ga-finding-meta">
-        <Sized f={f} />
-        {f.confidence_band ? (
-          <span className="ga-band">{f.confidence_band} confidence</span>
-        ) : null}
-        {f.adjudication === "conflict" ? (
+      <Sized f={f} />
+      {f.confidence_band ? <> · {f.confidence_band} confidence</> : null}
+      {f.adjudication === "conflict" ? (
+        <>
+          {" "}·{" "}
           <span
             className="ga-conflict"
             title="Two sources that may both speak to this disagree"
           >
             sources disagree
           </span>
-        ) : null}
-        {f.claim_ids?.length ? (
-          <span className="ga-doc-claims">
-            {f.claim_ids.length} claim{f.claim_ids.length === 1 ? "" : "s"}
-          </span>
-        ) : null}
-      </div>
-      {/* ONE CLAIM, IN ITS SOURCE'S OWN WORDS — "this is exactly what they
-          said". Only when the heading is the label: with the sentence as the
-          heading the quote is already inside it. */}
-      {(f.label || "").trim() && (f.example || "").trim() ? (
-        <blockquote className="ga-finding-example" data-testid="goal-finding-example">
-          “{f.example}”
-        </blockquote>
+        </>
       ) : null}
-      {/* The weakest leg is the actionable half of a confidence score: it says
-          what to go and find out, which a band on its own never does. */}
-      {f.confidence?.weakest_leg_reason && !sharedWeakest ? (
-        <p className="ga-weakest">
-          <b>Weakest link.</b> {f.confidence.weakest_leg_reason}
-        </p>
+      {f.claim_ids?.length ? (
+        <> · {f.claim_ids.length} claim{f.claim_ids.length === 1 ? "" : "s"}</>
       ) : null}
-      {f.confidence?.cap_reason && !sharedCap ? (
-        <p className="ga-cap">{f.confidence.cap_reason}</p>
-      ) : null}
-      {/* WHERE IT CAME FROM, beside the claim it supports — the difference
-          between an argument and an assertion. */}
-      {f.surfaced_by?.length ? (
-        <p className="ga-sources" data-testid="goal-sources">
-          <span className="ga-sources-label">Source documents</span>{" "}
-          {f.surfaced_by.join(" · ")}
-        </p>
-      ) : null}
-      {/* THE FLOOR, SAID IN WORDS, AND SAID ONCE. A call provider is extracted
-          one pass per call, so a collapsed entry carries how many CALLS it
-          stands for — but anything ingested before that changed was batched
-          several calls to a document, so the number can only be a lower
-          bound. One fact about ingest, not about this finding: `showCallNote`
-          is set by the section for the first card it applies to. */}
-      {showCallNote && hasCallCount(f.surfaced_by ?? []) ? (
-        <p className="ga-cap" data-testid="goal-call-count-floor">
-          <em>{CALL_COUNT_FLOOR_NOTE}</em>
-        </p>
-      ) : null}
-      {/* I8: every assumed parameter is disclosed where the number is read,
-          not in a methodology page nobody opens. */}
-      {f.assumed_params?.length && !sharedAssumptions ? (
-        <ul className="ga-assumed">
-          {f.assumed_params.map((p) => (
-            <li key={p.name}>
-              <b>{p.name}</b>: {p.basis}
-            </li>
-          ))}
-        </ul>
-      ) : null}
-    </>
-  )
+    </>,
+  ])
+  // NO GROUNDED-MONEY ROW HERE, AND IT IS NOT AN OVERSIGHT. The exported
+  // document renders "customers named $X across N accounts" from
+  // `impact.native_units`; `GoalFinding` does not carry `impact`, so the API
+  // never sends it to this panel. Reconstructing the figure from anything
+  // else would be inventing it, and a money line is the last place to guess.
+  // Closing the gap means widening the payload, not the renderer.
+  if (f.surfaced_by?.length) {
+    rows.push(["Sources", <span data-testid="goal-sources">{f.surfaced_by.join(" · ")}</span>])
+  }
+  // The weakest leg is the actionable half of a confidence score: it says
+  // what to go and find out, which a band on its own never does. Suppressed
+  // when it is the same sentence on every row — one fact about the corpus
+  // printed 32 times reads as 32 separate judgements.
+  if (f.confidence?.weakest_leg_reason && !sharedWeakest) {
+    rows.push(["Weakest link", f.confidence.weakest_leg_reason])
+  }
+  if (f.confidence?.cap_reason && !sharedCap) {
+    rows.push(["Capped", f.confidence.cap_reason])
+  }
+  // I8: every assumed parameter is disclosed where the number is read, not
+  // in a methodology page nobody opens.
+  if (f.assumed_params?.length && !sharedAssumptions) {
+    rows.push([
+      "Assumes",
+      <ul>
+        {f.assumed_params.map((p) => (
+          <li key={p.name}>
+            <b>{p.name}</b>: {p.basis}
+          </li>
+        ))}
+      </ul>,
+    ])
+  }
+  // THE FLOOR, SAID IN WORDS, AND SAID ONCE. A call provider is extracted one
+  // pass per call, so a collapsed entry carries how many CALLS it stands for
+  // — but anything ingested before that changed was batched several calls to
+  // a document, so the number can only be a lower bound. One fact about
+  // ingest, not about this finding: `showCallNote` is set by the section for
+  // the first card it applies to.
+  if (showCallNote && hasCallCount(f.surfaced_by ?? [])) {
+    rows.push([
+      "Note",
+      <span data-testid="goal-call-count-floor">{CALL_COUNT_FLOOR_NOTE}</span>,
+    ])
+  }
 
   return (
-    <li className="ga-doc-finding" data-testid="goal-finding">
+    <li className={`ga-doc-finding ${styles.card}`} data-testid="goal-finding">
       {/* THE THEME IS THE HEADING. It used to be the whole sentence — "30
           claims across 11 accounts concern “Sales Pipeline” — for example, …"
           — so the one word a reader scans for sat mid-clause, in quotes,
@@ -413,12 +412,8 @@ function ReportFinding({
           {(f.label || "").trim() || f.statement}
         </p>
       </div>
-      {/* ABSENT IS NORMAL, not an error: only the top findings get a
-          suggestion, and anything that quoted a figure, promised an outcome
-          or failed the lint was dropped rather than repaired. THE DEEP PASS
-          TAKES PRECEDENCE over the flat one when both exist. */}
       {hasDeep ? (
-        <p data-testid="goal-finding-recommendation">
+        <p className={styles.action} data-testid="goal-finding-recommendation">
           {/* EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION, and which
               header each card gets is `optionHeader`'s decision, so the panel
               and the exported document cannot word it differently. */}
@@ -428,38 +423,43 @@ function ReportFinding({
       ) : hasFlat ? (
         // NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. This is the
         // one-line pass over a finding that did NOT get a full write-up.
-        <p data-testid="goal-finding-recommendation">
+        <p className={styles.action} data-testid="goal-finding-recommendation">
           <strong>Suggested.</strong> {stripClaimRefs(flat!.action)}
         </p>
       ) : null}
-      {hasDeep || hasFlat ? (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <tbody>
-            <tr>
-              <td style={{ verticalAlign: "top", width: "52%", paddingRight: 18 }}>
-                <div className="ga-finding-rec">{why}</div>
-              </td>
-              <td style={{ verticalAlign: "top" }}>{evidence}</td>
-            </tr>
-          </tbody>
-        </table>
-      ) : (
-        // No recommendation on this finding, so there is no left-hand column
-        // and nothing to sit beside. One column, full width.
-        evidence
-      )}
+      {why}
+      <div className={styles.rests}>
+        <p className={styles.blockLabel} style={{ marginTop: 0 }}>
+          What this rests on
+        </p>
+        {rows.map(([key, value], i) => (
+          <div className={styles.restsRow} key={i}>
+            <span className={styles.restsKey}>{key}</span>
+            <span className={styles.restsVal}>{value}</span>
+          </div>
+        ))}
+        {/* ONE CLAIM, IN ITS SOURCE'S OWN WORDS — "this is exactly what they
+            said". Full width under the rows rather than squeezed into a value
+            column: it is the only thing in the card being quoted, and the one
+            place the document changes voice. Only when the heading is the
+            label — with the sentence as the heading the quote is already
+            inside it. */}
+        {(f.label || "").trim() && (f.example || "").trim() ? (
+          <blockquote className={styles.quote} data-testid="goal-finding-example">
+            “{f.example}”
+          </blockquote>
+        ) : null}
+      </div>
       {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────────
           Only on the recommended card, assembled deterministically from
           fields the engine already produced — no model call, nothing scored
-          (I2). GAPS, NOT ACTIONS. Full width, under both columns, because it
-          qualifies the whole card. */}
+          (I2). GAPS, NOT ACTIONS. Lifted out to "Before you spend" when
+          `deferGaps` is set; the card still has to KNOW it carries them,
+          because that is what suppresses its own open-questions list. */}
       {dataGaps.length && !deferGaps ? (
         <div data-testid="goal-finding-data-gaps">
-          <p>
-            <strong>{DATA_GAPS_HEADING}</strong>{" "}
-            Gaps in what is known about this option, not work to schedule.
-          </p>
-          <ul className="ga-assumed">
+          <p className={styles.blockLabel}>{DATA_GAPS_HEADING}</p>
+          <ul className={styles.evList}>
             {dataGaps.map((g, i) => (
               <li key={i}>{g}</li>
             ))}
@@ -892,7 +892,7 @@ export function GoalAnalysisReport({
           in it is omitted rather than drawn at zero. */}
       {funnelStages.length > 1 ? (
         <section className="ga-doc-section" data-testid="goal-funnel-chart">
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <table className={styles.chart}>
             <tbody>
               {plan?.total_signals ? (
                 <tr>
@@ -960,7 +960,7 @@ export function GoalAnalysisReport({
         <section className="ga-doc-section" data-testid="goal-problem">
           <h2 className="ga-doc-h2">The problem</h2>
           {noProblemStated ? (
-            <p className="ga-doc-note">
+            <p className={`ga-doc-note ${styles.measure}`}>
               The evidence does not state a problem here: the strongest theme
               describes the world rather than blocking or asking for anything,
               and it could not be sized. What follows is what was found, not a
@@ -968,10 +968,10 @@ export function GoalAnalysisReport({
             </p>
           ) : (
             <>
-              <p className="ga-doc-headline">
+              <p className={styles.problemClaim}>
                 {(headline.label || "").trim() || headline.statement}
               </p>
-              <p className="ga-doc-note">
+              <p className={`ga-doc-note ${styles.measure}`}>
                 {topBucket === TYPE_BUCKET_BLOCKER ? (
                   <>
                     The evidence has this blocking accounts today, not as
@@ -1009,7 +1009,9 @@ export function GoalAnalysisReport({
                   than restated, so this paragraph and the write-up below it
                   cannot say two different things. */}
               {topBecause ? (
-                <p className="ga-doc-note">{stripClaimRefs(topBecause)}</p>
+                <p className={`ga-doc-note ${styles.measure}`}>
+                  {stripClaimRefs(topBecause)}
+                </p>
               ) : null}
             </>
           )}
@@ -1152,7 +1154,7 @@ export function GoalAnalysisReport({
               never names the count, so treating it as covered would drop
               "257 of them could not be sized" out of the page entirely. */}
           {unsized && headlineCovers !== "full" ? (
-            <p className="ga-doc-lede" data-testid="goal-findings-lede">
+            <p className={`ga-doc-lede ${styles.measure}`} data-testid="goal-findings-lede">
               {unsized === 1 ? "One" : unsized} of these could not be sized
               {headlineCovers === "caveat" ? (
                 "."
@@ -1270,11 +1272,11 @@ export function GoalAnalysisReport({
       {recommendedGaps.length ? (
         <section className="ga-doc-section" data-testid="goal-finding-data-gaps">
           <h2 className="ga-doc-h2">Before you spend</h2>
-          <p className="ga-doc-note">
+          <p className={`ga-doc-note ${styles.measure}`}>
             Gaps in what is known about the recommended option, not work to
             schedule.
           </p>
-          <ul className="ga-assumed">
+          <ul className={styles.evList}>
             {recommendedGaps.map((g, i) => (
               <li key={i}>{g}</li>
             ))}
@@ -1313,8 +1315,9 @@ export function GoalAnalysisReport({
                         {r.reach === null ? "Not measured" : (
                           <>
                             {r.reach} {r.reachUnit}
-                            <br />
-                            <Bar value={r.reach} largest={rankLargest} />
+                            <span className={styles.reachBar}>
+                              <Bar value={r.reach} largest={rankLargest} />
+                            </span>
                           </>
                         )}
                       </td>
@@ -1366,8 +1369,9 @@ export function GoalAnalysisReport({
                         {r.reach === null ? "Not measured" : (
                           <>
                             {r.reach} {r.reachUnit}
-                            <br />
-                            <Bar value={r.reach} largest={rankLargest} />
+                            <span className={styles.reachBar}>
+                              <Bar value={r.reach} largest={rankLargest} />
+                            </span>
                           </>
                         )}
                       </td>
@@ -1453,9 +1457,12 @@ export function GoalAnalysisReport({
           PER-FINDING DISCLOSURES DO NOT MOVE — an unsized value, an
           assumption behind one specific finding, the weakest link on one theme
           stay attached to the finding they qualify. */}
-      <section className="ga-doc-section" data-testid="goal-provenance">
+      <section
+        className={`ga-doc-section ${styles.appendix}`}
+        data-testid="goal-provenance"
+      >
         <h2 className="ga-doc-h2">How this was produced</h2>
-        <p className="ga-doc-note">
+        <p className={`ga-doc-note ${styles.measure}`}>
           What the memo above rests on: what was read, what was missing from it,
           and how the ranking works.
         </p>
