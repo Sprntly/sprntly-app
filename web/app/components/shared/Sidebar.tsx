@@ -25,7 +25,7 @@ import {
   resumeConversation,
   useChatsList,
 } from "../../lib/recentChats"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck, IconArrowUpRight } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
 
@@ -549,7 +549,8 @@ function SidebarResizer() {
  *
  * Twenty is the cap because the list has to end somewhere above the fold on a
  * laptop and below the point where the nav stops being useful. Past that,
- * "View all chats" is the same screen it always was.
+ * "Chat history" — in the header, beside the label — is the same screen it
+ * always was.
  */
 function RecentChats({ activeCompany }: { activeCompany: string | null }) {
   const { goTo } = useNavigation()
@@ -569,7 +570,29 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
 
   return (
     <div className="sb-chats" data-testid="sidebar-recent-chats">
-      <div className="sb-chats-head">Chats</div>
+      {/* The label, and the door to the rest, on one line. The door used to
+          sit UNDER the twenty rows, which put the way to older threads behind
+          a scroll past every recent one — the list is capped at twenty
+          precisely because that is where it stops being scannable, so the
+          control for "the ones that are not here" cannot live at the end of
+          it. In the header it is on screen whatever the list is doing. */}
+      <div className="sb-chats-head">
+        <span className="sb-chats-head-label">Chats</span>
+        <button
+          type="button"
+          className="sb-chats-all"
+          data-testid="sidebar-view-all-chats"
+          // THE WORDS CARRY THE MEANING, the arrow carries the affordance
+          // (owner's call, both halves). An arrow alone in this corner is a
+          // guess — expand? collapse? new? — so the label says where it goes;
+          // the outward arrow is what makes a line of small grey text read as
+          // something you can click. Same convention as the docs topbar.
+          onClick={() => goTo("chats")}
+        >
+          <span className="sb-chats-all-label">Chat history</span>
+          <IconArrowUpRight size={13} stroke={2} aria-hidden />
+        </button>
+      </div>
       <div className="sb-chats-list">
         {rows.map((chat) => (
           <button
@@ -593,14 +616,6 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
           </button>
         ))}
       </div>
-      <button
-        type="button"
-        className="sb-chats-all"
-        data-testid="sidebar-view-all-chats"
-        onClick={() => goTo("chats")}
-      >
-        View all chats
-      </button>
     </div>
   )
 }

@@ -520,11 +520,42 @@ describe("Sidebar — the threads themselves are in the nav", () => {
     }
   })
 
-  it("keeps one row for the rest, and it is the history screen", async () => {
+  it("keeps a way to the rest, and it is the history screen", async () => {
     conversations = seed(25)
     await openExpanded()
     fireEvent.click(screen.getByTestId("sidebar-view-all-chats"))
     expect(goTo).toHaveBeenCalledWith("chats")
+  })
+
+  it("puts that way in the HEADER, not under the list", async () => {
+    // It used to be a row at the bottom, which put the control for "the
+    // threads that are not here" behind a scroll past all twenty that are.
+    // The list is capped at twenty precisely because that is where it stops
+    // being scannable, so the door cannot live at the end of it.
+    conversations = seed(25)
+    const section = await openExpanded()
+    const head = section.querySelector(".sb-chats-head")
+    expect(head).toBeTruthy()
+    expect(head!.querySelector('[data-testid="sidebar-view-all-chats"]')).toBeTruthy()
+    // …and it is not also still under the list.
+    expect(section.querySelectorAll('[data-testid="sidebar-view-all-chats"]'))
+      .toHaveLength(1)
+  })
+
+  it("says where it goes in words, and shows it is a way out", async () => {
+    // BOTH HALVES, and they do different jobs. An arrow alone in this corner
+    // is a guess the reader has to make — expand? collapse? new? — so the
+    // label says where it goes. A line of small grey text is not obviously
+    // clickable, so the outward arrow is what makes it read as a control.
+    conversations = seed(3)
+    await openExpanded()
+    const link = screen.getByTestId("sidebar-view-all-chats")
+    expect(link.textContent?.trim()).toBe("Chat history")
+    // Decorative: the words are the accessible name, so the arrow must not
+    // add a second one for a screen reader to read out.
+    const arrow = link.querySelector("svg")
+    expect(arrow).toBeTruthy()
+    expect(arrow!.getAttribute("aria-hidden")).toBe("true")
   })
 
   it("says nothing at all when there are no threads", async () => {
