@@ -328,3 +328,192 @@ def test_tool_descriptions_mention_documents():
     assert "document" in LIST_PROJECT_ARTIFACTS_TOOL["description"].lower()
     # ...and the read tool advertises them as a readable type.
     assert "document" in GET_ARTIFACT_CONTENT_TOOL["description"].lower()
+
+
+def test_tool_descriptions_map_documents_to_custom_artifact():
+    """#3 disambiguation hint — both descriptions tell the model an uploaded
+    document is artifact_type "custom_artifact" (shown as "Documents"), so it
+    can pick the right type when several artifacts exist."""
+    from app.project_group_context import (
+        GET_ARTIFACT_CONTENT_TOOL,
+        LIST_PROJECT_ARTIFACTS_TOOL,
+    )
+
+    for tool in (GET_ARTIFACT_CONTENT_TOOL, LIST_PROJECT_ARTIFACTS_TOOL):
+        assert "custom_artifact" in tool["description"]
+        # The exact word `_TYPE_LABELS` renders.
+        assert "Documents" in tool["description"]
+
+
+# ── Routing: document-aware admission + connector-skip (slice 2) ─────────────
+
+
+def _project_scope(*, has_docs: bool, with_tools: bool = False):
+    from app.surface_scope import Surface, SurfaceScope
+
+    return SurfaceScope(
+        surface=Surface.project_private,
+        project_id=1,
+        has_project_documents=has_docs,
+        extra_tools=({"name": "get_project_memory"},) if with_tools else (),
+    )
+
+
+# #1a — document nouns admit a content request through the noun-anchored gate.
+@pytest.mark.parametrize(
+    "q",
+    [
+        "read the document",
+        "what does the doc say",
+        "what does the spec say about auth",
+        "summarize the uploaded document",
+    ],
+)
+def test_document_nouns_admit_content_request(q):
+    from app.skill_router import is_project_content_request
+
+    assert is_project_content_request(q) is True
+
+
+# #1b — the substantive-question predicate (noun-anchor dropped, intent kept).
+@pytest.mark.parametrize(
+    "q",
+    [
+        "what were the Q3 revenue numbers?",
+        "who is the target persona for this",
+        "how does the onboarding flow work",
+    ],
+)
+def test_substantive_questions_admitted(q):
+    from app.skill_router import is_substantive_project_question
+
+    assert is_substantive_project_question(q) is True
+
+
+@pytest.mark.parametrize(
+    "q",
+    [
+        "hey thanks!",          # greeting/pleasantry — no intent lead
+        "delegate the deck to David",  # a command — owned by the delegate gate
+        "what?",                # bare backchannel — below the substance floor
+        "",                     # empty
+    ],
+)
+def test_non_substantive_declined(q):
+    from app.skill_router import is_substantive_project_question
+
+    assert is_substantive_project_question(q) is False
+
+
+# #2 — a document-phrased ask stays in the loop ONLY when the project has docs.
+def test_skip_connectors_keeps_document_question_in_loop_for_doc_project():
+    import app.qa_agent as qa
+
+    # "what does the document say" → document_lookup_candidates returns a
+    # named-source candidate; in a DOC project that no longer bails to the
+    # workspace connector search — it stays in the project tool loop.
+    assert qa._skip_project_connectors(
+        _project_scope(has_docs=True), "what does the document say", None
+    ) is True
+
+
+def test_skip_connectors_bails_document_question_when_no_docs():
+    import app.qa_agent as qa
+
+    # Same phrasing, project with NO uploaded docs → byte-identical old
+    # behavior: a named document defers to the connector interceptors.
+    assert qa._skip_project_connectors(
+        _project_scope(has_docs=False), "what does the document say", None
+    ) is False
+
+
+def test_named_connector_still_wins_inside_doc_project():
+    import app.qa_agent as qa
+
+    # An explicitly named Confluence ask routes to the connector even in a doc
+    # project (named-connector-wins is preserved — only bare document phrasing
+    # is redirected).
+    assert qa._skip_project_connectors(
+        _project_scope(has_docs=True), "what does confluence say about pricing", None
+    ) is False
+
+
+# #1b end-to-end — a bare factual question reaches the project tool loop in a
+# doc-project, and does NOT in a no-doc project.
+def test_bare_factual_question_reaches_loop_in_doc_project(monkeypatch):
+    import app.qa_agent as qa
+
+    monkeypatch.setattr(
+        qa, "_try_scoped_tool_answer",
+        lambda **kw: {"answer": "from-the-document", "_skill_source": "project-tools"},
+    )
+    out = qa.answer(
+        enterprise_id="ent",
+        question="who is the target persona for this",
+        dataset="acme",
+        scope=_project_scope(has_docs=True, with_tools=True),
+        history=None,
+    )
+    assert out.get("_skill_source") == "project-tools", out
+
+
+def test_bare_factual_question_does_not_reach_loop_without_docs(monkeypatch):
+    import app.qa_agent as qa
+    from types import SimpleNamespace
+
+    def _must_not_run(**kw):
+        raise AssertionError("no-doc project must not enter the project tool loop")
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _must_not_run)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: SimpleNamespace(output={"skill_id": None, "confidence": 0.0, "action": None}),
+    )
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "composed", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    out = qa.answer(
+        enterprise_id="ent",
+        question="who is the target persona for this",
+        dataset="acme",
+        scope=_project_scope(has_docs=False, with_tools=True),
+        history=None,
+    )
+    # Fell through to the composer (the loop's `_try_scoped_tool_answer` above
+    # would have raised had the gate admitted).
+    assert out.get("answer") == "composed", out
+
+
+def test_has_project_documents_field_defaults_false():
+    """Main/workspace scopes and pre-existing callers carry False — the routing
+    additions are inert unless a project surface sets it."""
+    from app.surface_scope import Surface, SurfaceScope
+
+    assert SurfaceScope(surface=Surface.main).has_project_documents is False
+    assert (
+        SurfaceScope(surface=Surface.project_private, project_id=1).has_project_documents
+        is False
+    )
+
+
+def test_has_project_documents_helper_reflects_uploads(docs_env, monkeypatch):
+    """`has_project_documents` derives the flag from the SAME fan-out the
+    manifest reads — True once a document is attached, False for an empty
+    project."""
+    from app.project_group_context import has_project_documents
+
+    ctx = company_client(monkeypatch)
+    empty = _create_project(ctx, name="No docs")
+    with_doc = _create_project(ctx, name="Has docs")
+
+    dataset = "acme"
+    assert has_project_documents(empty["id"], dataset, ctx.company_id) is False
+    assert has_project_documents(with_doc["id"], dataset, ctx.company_id) is False
+
+    _upload(ctx, with_doc["id"], filename="brief.md", content=b"# Brief\n\nhello")
+    assert has_project_documents(with_doc["id"], dataset, ctx.company_id) is True
+    # The other project is unaffected.
+    assert has_project_documents(empty["id"], dataset, ctx.company_id) is False

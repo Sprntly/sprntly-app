@@ -297,6 +297,46 @@ def list_document_artifacts(*, dataset: str, openable_only: bool = False) -> lis
     return items
 
 
+def custom_artifact_item(row: dict, *, conversation_title: str | None = None) -> dict:
+    """The unified artifact-listing DTO for ONE `custom_artifacts` row — the
+    SINGLE source of truth for how a document appears in the drawer fan-out
+    (`list_artifacts_for_company`/`_for_project`) AND in the upload endpoint's
+    optimistic-insert response, so the two can never drift.
+
+    `conversation_title` is passed by the fan-out from its batched
+    conversation-title lookup (None when the chat was deleted — `on delete set
+    null` — so the row omits the "from <chat>" clause rather than inventing a
+    label for a thread that no longer exists). A freshly-uploaded document has
+    no originating conversation, so its caller passes None.
+    """
+    return {
+        "type": "custom_artifact",
+        "id": row["id"],
+        # Empty until the user names it (or a generation does); the web renders
+        # its own "Untitled document" rather than a fabricated title.
+        "title": row.get("title") or "",
+        "status": row.get("status") or "",
+        # The document's own free-text label ('leadership update'), shown in the
+        # row's source line. Never dispatched on — see the migration's note on
+        # why `kind` is not an enum.
+        "kind": row.get("kind") or "",
+        # A document is EDITED after it is created, so the library sorts by last
+        # touch rather than birth. The shared listing key `created_at` is what
+        # every consumer sorts on, so it carries the last-edit time — and the
+        # BIRTH date is emitted beside it under its own name (`born_at`) rather
+        # than being silently discarded.
+        "created_at": row.get("updated_at") or row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "born_at": row.get("created_at"),
+        "source": {
+            "kind": row.get("kind") or "",
+            "conversation_id": row.get("conversation_id"),
+            "conversation_title": conversation_title,
+        },
+        "open": {"custom_artifact_id": row["id"]},
+    }
+
+
 @retry_on_disconnect
 def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
     """Unified, recency-sorted artifact list for one company.
@@ -560,39 +600,12 @@ def list_artifacts_for_company(*, dataset: str, company_id: str) -> list[dict]:
                 convo_title_by_id[r["id"]] = r.get("title")
         for r in doc_rows:
             cid = r.get("conversation_id")
-            items.append({
-                "type": "custom_artifact",
-                "id": r["id"],
-                # Empty until the user names it (or a generation does); the web
-                # renders its own "Untitled document" rather than a fabricated
-                # title stored on the row.
-                "title": r.get("title") or "",
-                "status": r.get("status") or "",
-                # The document's own free-text label ('leadership update'),
-                # shown in the row's source line. Never dispatched on — see the
-                # migration's note on why `kind` is not an enum.
-                "kind": r.get("kind") or "",
-                # A document is EDITED after it is created, so the library
-                # sorts by last touch rather than birth. The shared listing key
-                # `created_at` is what every consumer sorts on, so it carries
-                # the last-edit time — and the BIRTH date is emitted beside it
-                # under its own name rather than being silently discarded, so a
-                # surface that wants to say "Created 3 Aug" still can. (The two
-                # were previously collapsed into one key, which made a document
-                # edited today read as created today.)
-                "created_at": r.get("updated_at") or r.get("created_at"),
-                "updated_at": r.get("updated_at"),
-                "born_at": r.get("created_at"),
-                "source": {
-                    "kind": r.get("kind") or "",
-                    "conversation_id": cid,
-                    # None when the chat was deleted (`on delete set null`); the
-                    # row omits the "from <chat>" clause rather than inventing
-                    # a label for a thread that no longer exists.
-                    "conversation_title": convo_title_by_id.get(cid) if cid else None,
-                },
-                "open": {"custom_artifact_id": r["id"]},
-            })
+            items.append(
+                custom_artifact_item(
+                    r,
+                    conversation_title=convo_title_by_id.get(cid) if cid else None,
+                )
+            )
 
     # Recency sort (newest first). created_at is an ISO-8601 string; lexical
     # sort matches chronological order for same-format UTC timestamps. None

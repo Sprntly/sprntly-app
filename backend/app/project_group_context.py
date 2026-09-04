@@ -120,6 +120,28 @@ def _artifact_manifest(project_id: int, dataset: str, company_id: str) -> str:
     return "; ".join(parts)
 
 
+def has_project_documents(project_id: int, dataset: str, company_id: str) -> bool:
+    """True when this project has ≥1 uploaded document (a `custom_artifact`).
+
+    Reuses the SAME tenant-scoped fan-out (`list_artifacts_for_project`) the
+    manifest and the read tools already read — not a bespoke count query — and
+    keys off the `custom_artifact` type the fan-out emits for documents. This
+    is the signal `SurfaceScope.has_project_documents` carries into
+    `qa_agent`'s routing gates; it re-reads the fan-out (rather than threading
+    a flag out of the string-returning `assemble_private_project_context`,
+    whose exact-output contract several tests pin) exactly as every other
+    per-consumer fan-out read in this module does. Best-effort (AD-P7): a read
+    failure degrades to False — the pre-existing routing (no admission, no
+    connector skip) — never raising into scope assembly."""
+    try:
+        items = list_artifacts_for_project(
+            project_id=project_id, dataset=dataset, company_id=company_id
+        )
+    except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+        return False
+    return any(it.get("type") == "custom_artifact" for it in items)
+
+
 def _roster_block(project_id: int) -> str:
     """"<name> — <job_role>" lines for every human member of this project.
     Degrades to a placeholder on a read failure (AD-P7)."""
@@ -234,7 +256,9 @@ LIST_PROJECT_ARTIFACTS_TOOL = {
     "description": (
         "List every artifact attached to this project (PRDs, prototypes, "
         "evidence, reports, ticket sets, documents) with their type, id, and "
-        "title. Call this to answer how many/which artifacts exist, or to find "
+        "title. Uploaded documents are type \"custom_artifact\" (shown as "
+        "\"Documents\"); PRDs, evidence and reports are their own separate "
+        "types. Call this to answer how many/which artifacts exist, or to find "
         "an artifact's id before reading its content."
     ),
     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
@@ -246,7 +270,11 @@ GET_ARTIFACT_CONTENT_TOOL = {
         "Read the full content of ONE artifact on this project — e.g. a PRD's "
         "body, an evidence brief, a report, or an uploaded document. Pass the "
         "artifact_type and artifact_id exactly as returned by "
-        "list_project_artifacts. Call this when asked what a specific document "
+        "list_project_artifacts. An uploaded document is "
+        "artifact_type=\"custom_artifact\" (shown as \"Documents\"); PRDs, "
+        "evidence and reports are separate types. When the user says \"the "
+        "document\" or \"the uploaded doc\" and several artifacts exist, prefer "
+        "the \"custom_artifact\". Call this when asked what a specific document "
         "says or to summarize it."
     ),
     "input_schema": {

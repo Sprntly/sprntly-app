@@ -126,6 +126,15 @@ class SurfaceScope:
     #: because `qa_agent.py` unconditionally reads `scope.edit_prd_handler`
     #: guarded on `is not None`; removing the field would break that read.
     edit_prd_handler: Optional[Callable[[dict], "tuple[str, Optional[dict]]"]] = None
+    #: True when THIS project surface has ≥1 uploaded document (a
+    #: `custom_artifact`) attached. Read by `qa_agent`'s routing gates
+    #: (`_skip_project_connectors` and the sixth-branch admission) to keep a
+    #: document-phrased or bare factual question in the project tool loop — where
+    #: `get_artifact_content` can read the project's own documents — instead of
+    #: bailing to the workspace connector document-search. Default False for
+    #: main/workspace scopes and for projects with no uploaded documents, so
+    #: their routing is byte-identical to before this field existed.
+    has_project_documents: bool = False
 
     @property
     def is_noop(self) -> bool:

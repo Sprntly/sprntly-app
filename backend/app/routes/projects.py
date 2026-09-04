@@ -41,7 +41,11 @@ from app.db import projects as projects_db
 from app.db import team as team_db
 from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
 from app.db import workspaces as workspaces_db
-from app.db.artifacts import list_artifacts_for_company, list_artifacts_for_project
+from app.db.artifacts import (
+    custom_artifact_item,
+    list_artifacts_for_company,
+    list_artifacts_for_project,
+)
 from app.db.companies import get_seat_limit
 from app.db.prds import save_prd_version, update_prd_content
 from app.team_email import dispatch_invite_email
@@ -845,46 +849,6 @@ _UNREADABLE_FILE_MESSAGE = (
 )
 
 
-def _document_title_from_filename(filename: str) -> str:
-    """A sensible document title from the upload's filename: drop the
-    extension, trim, bound to the `custom_artifacts.title` length the create
-    helper stores (300). Falls back to 'Untitled document' for a blank/dotfile
-    name so the library row is never empty."""
-    from pathlib import PurePosixPath
-
-    stem = PurePosixPath((filename or "").strip()).stem.strip()
-    return (stem or "Untitled document")[:300]
-
-
-def _uploaded_document_dto(row: dict) -> dict:
-    """Shape a freshly-created `custom_artifacts` row into the SAME item the
-    drawer's fan-out publishes for a `custom_artifact` (see
-    `db/artifacts.py::list_artifacts_for_project`'s doc block), so the FE can
-    optimistically insert the upload without a refetch. A just-uploaded
-    document has no originating conversation, so the `source`/conversation
-    fields are null — exactly what the fan-out emits for a document created
-    outside a chat."""
-    return {
-        "type": "custom_artifact",
-        "id": row["id"],
-        "title": row.get("title") or "",
-        "status": row.get("status") or "",
-        "kind": row.get("kind") or "",
-        # The fan-out sorts by last edit, so its `created_at` key carries the
-        # updated_at time and the birth date rides under `born_at`. Mirror that
-        # exactly rather than inventing a second convention.
-        "created_at": row.get("updated_at") or row.get("created_at"),
-        "updated_at": row.get("updated_at"),
-        "born_at": row.get("created_at"),
-        "source": {
-            "kind": row.get("kind") or "",
-            "conversation_id": row.get("conversation_id"),
-            "conversation_title": None,
-        },
-        "open": {"custom_artifact_id": row["id"]},
-    }
-
-
 @router.post("/{project_id}/documents")
 async def upload_project_document(
     project_id: int,
@@ -935,14 +899,18 @@ async def upload_project_document(
     # storage chokepoint (idempotent) and enforces `MAX_BODY_CHARS`.
     body_html = to_html(markdown)
 
-    title = _document_title_from_filename(filename)
+    # Title = the filename stem. `create_artifact` strips + bounds it to 300
+    # (its own `title` store rule), and an empty stem (a dotfile) stores "" —
+    # which the fan-out DTO renders as the web's own "Untitled document" — so
+    # no local truncation or fallback string is reinvented here.
+    from pathlib import PurePosixPath
 
     try:
         row = await asyncio.to_thread(
             custom_artifacts_db.create_artifact,
             ctx.company_id,
             kind="document",
-            title=title,
+            title=PurePosixPath(filename).stem,
             body_html=body_html,
             status="ready",
             workspace_id=ctx.workspace_id,
@@ -958,7 +926,11 @@ async def upload_project_document(
         "project_document_uploaded project_id=%s artifact_id=%s bytes=%s",
         project_id, row["id"], len(data),
     )
-    return _uploaded_document_dto(row)
+    # The SAME DTO the drawer fan-out publishes for a custom_artifact (one
+    # source of truth — `db/artifacts.py::custom_artifact_item`), so the FE can
+    # optimistically insert this upload without a refetch. A just-uploaded
+    # document has no originating conversation → conversation_title None.
+    return custom_artifact_item(row)
 
 
 # The exact `conversation_turns` read-DTO key set published on a fresh
