@@ -10,13 +10,13 @@ def _src(source_type: str, n: int = 10) -> SourceInventory:
     return SourceInventory(source_type, n, source_type, "witnesses")
 
 
-# ─── AC-2 / AC-3: the chosen framework, and the gap when it could not honour
-#     the company's own onboarding setting ───────────────────────────────────
+# ─── The chosen framework, and the gap when it could not honour the
+#     company's own onboarding setting ─────────────────────────────────────
 
 
 def test_a_declared_framework_mismatch_becomes_a_gap_not_a_silent_swap():
-    """AC-3: the plan calls out what THIS run needs and cannot get — including
-    the company's own stated framework, when the data cannot support it."""
+    """The plan calls out what THIS run needs and cannot get — including the
+    company's own stated framework, when the data cannot support it."""
     choice = FrameworkChoice(
         framework="moscow",
         reason="your team set RICE at onboarding, but nothing connected "

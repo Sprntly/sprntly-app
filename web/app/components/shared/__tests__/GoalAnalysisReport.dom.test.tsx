@@ -198,10 +198,24 @@ describe("what the ordering is allowed to claim", () => {
   })
 
   it("does not claim a reach ranking when nothing could be sized", () => {
-    render(<GoalAnalysisReport run={{ ...RUN, findings: [UNSIZED] }} />)
+    // `_rank`'s key is (conflict, claim-type bucket, reach, confidence). When
+    // nothing could be sized the reach term drops out — but the two terms
+    // ABOVE it still sort the list, and the lede used to credit what was left
+    // to confidence. That was false: a blocker sorts above a preference
+    // whatever either one's confidence. So the lede has to name the terms
+    // that actually did the sorting, and must not restate the old claim.
+    const BLOCKER = {
+      ...UNSIZED, id: 1, claim_ids: ["c1"], claim_types: ["constraint"],
+    }
+    const WANTED = {
+      ...UNSIZED, id: 2, claim_ids: ["c2"], claim_types: ["preference"],
+    }
+    render(<GoalAnalysisReport run={{ ...RUN, findings: [BLOCKER, WANTED] }} />)
     const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
     expect(lede).toMatch(/not ranked by reach/i)
-    expect(lede).toMatch(/ordered by confidence/i)
+    expect(lede).toMatch(/blocks an account is placed above/i)
+    expect(lede).toMatch(/authoritative disagreement is placed above/i)
+    expect(lede).not.toMatch(/ordered by confidence\b/i)
   })
 
   it("says when the order rests on something the reader cannot see", () => {
@@ -209,7 +223,15 @@ describe("what the ordering is allowed to claim", () => {
     // sees bands. With no outcome evidence every band comes out the same, so a
     // list that LOOKS ranked is read as ranked. Position is the most
     // persuasive thing on a page.
-    const flat = { ...UNSIZED, confidence_band: "medium" }
+    //
+    // SCOPED TO ONE BUCKET, which is why both findings here are preferences:
+    // the caveat is owed between NEIGHBOURS the claim-type term could not
+    // separate, not over the whole list — blockers genuinely do sort above
+    // preferences, so disowning the list end to end would be its own
+    // inaccuracy, printed inches under a recommendation bound to position 1.
+    const flat = {
+      ...UNSIZED, confidence_band: "medium", claim_types: ["preference"],
+    }
     render(
       <GoalAnalysisReport
         run={{ ...RUN, findings: [
@@ -220,7 +242,11 @@ describe("what the ordering is allowed to claim", () => {
     )
     const lede = screen.getByTestId("goal-findings-lede").textContent ?? ""
     expect(lede).toMatch(/same confidence band/i)
-    expect(lede).toMatch(/not as a verdict on which matters more/i)
+    // The load-bearing pair: what the reader cannot check (the score), and
+    // how far the disclaimer reaches (two neighbours in the same group).
+    expect(lede).toMatch(/confidence score this report does not print/i)
+    expect(lede).toMatch(/neighbours in the same group/i)
+    expect(lede).toMatch(/verdict on which matters more/i)
   })
 
   it("does not disclaim an order the bands actually justify", () => {
@@ -970,7 +996,7 @@ describe("the card leads with what to do", () => {
   })
 })
 
-describe("AC-2: how many got a full recommendation", () => {
+describe("how many findings got a full recommendation", () => {
   it("renders the basis sentence when the run recorded one", () => {
     render(<GoalAnalysisReport run={{
       ...RUN, findings: [SIZED],
@@ -979,8 +1005,14 @@ describe("AC-2: how many got a full recommendation", () => {
         recommendation_basis: "you asked for 2, so the top 2 get a full recommendation.",
       },
     } as never} />)
-    expect(screen.getByTestId("goal-recommendation-basis").textContent)
-      .toContain("you asked for 2")
+    // The basis is STORED as a lowercase clause because it also renders
+    // mid-sentence elsewhere. Here it follows a bold full stop, so it is the
+    // start of a sentence and the panel capitalises it — asserted both ways
+    // round, because the bug this replaced was "…full recommendation. you
+    // asked for 2".
+    const basis = screen.getByTestId("goal-recommendation-basis").textContent ?? ""
+    expect(basis).toContain("You asked for 2")
+    expect(basis).not.toMatch(/recommendation\.\s+you asked/)
   })
 
   it("renders nothing when no basis was recorded — a run stored before the deep pass shipped", () => {
@@ -1413,8 +1445,18 @@ describe("capping the full write-up section", () => {
 
   it("keeps the heading's total honest even though the body is capped", () => {
     render(<GoalAnalysisReport run={{ ...RUN, findings: manyFindings }} />)
-    const heading = screen.getByTestId("goal-report").textContent ?? ""
-    expect(heading).toContain(`What the evidence says (${manyFindings.length})`)
+    // THE HEADING IS A CLAIM, NOT A LABEL — it is derived from the top-ranked
+    // finding's own statement, so it is located by that statement rather than
+    // by a fixed title, and what is asserted is the only part of it this test
+    // is about: the total it names is the run's REAL finding count, not the
+    // number of write-ups the cap left in the body below it.
+    const heading = screen
+      .getAllByRole("heading")
+      .find((h) => (h.textContent ?? "").startsWith(manyFindings[0].statement))
+    expect(heading).toBeDefined()
+    const text = heading?.textContent ?? ""
+    expect(text).toMatch(new RegExp(`\\b${manyFindings.length}\\b`))
+    expect(text).not.toMatch(new RegExp(`\\b${MAX_RICE_ROWS}\\b`))
   })
 
   it("lists the remainder in a compact overflow list, with the count stated — nothing silently dropped", () => {

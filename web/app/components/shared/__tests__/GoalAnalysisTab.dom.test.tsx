@@ -499,7 +499,7 @@ describe("the funnel survives the run", () => {
   })
 })
 
-describe("AC-5: a visible generating state for the recommendations", () => {
+describe("a visible generating state for the recommendations", () => {
   // David: "this doesn't show something is happening… can this have some
   // way of showing that it's thinking, which is more prominent." Apurva,
   // live: "we need to have this something rendering here that still

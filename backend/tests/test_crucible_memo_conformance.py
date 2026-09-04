@@ -78,7 +78,11 @@ def test_each_item_carries_a_recommendation_and_its_reasoning():
     """Memo §01: the recommendation, then "We recommend Option 1 for three
     reasons"."""
     t = _text(_doc())
-    assert "Recommended." in t
+    # "Suggested." is the one-line pass's word; "Recommended." belongs to the
+    # deep card and to the single synthesized section. Either satisfies §01 —
+    # what the memo owes is a recommendation with its reasoning attached, not
+    # one particular label.
+    assert "Suggested." in t or "Recommended." in t
     assert "Repair the wide-table export path" in t
     assert "three accounts named it in renewal calls" in t
 
