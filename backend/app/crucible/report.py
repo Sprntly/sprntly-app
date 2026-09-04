@@ -2945,7 +2945,7 @@ def _ledger_section(ledger: list[dict]) -> str:
     # a section that reordered itself would undermine that everywhere else).
     ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
-    out = [f"<h2>Considered and ruled out ({len(ledger)})</h2>"]
+    out = [f"<h2>Considered and ruled out ({len(shown)})</h2>"]
     out.append(_p(
         "A ranking whose rejections are invisible is a ranking you have to "
         "take on faith. Each of these was a candidate and each one died for a "
