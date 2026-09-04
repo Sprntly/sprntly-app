@@ -1272,7 +1272,7 @@ def test_excluding_a_numeric_source_flips_the_gap_the_run_states(ctx):
 
 
 def test_the_plan_chooses_moscow_when_nothing_carries_a_number(ctx):
-    """The corpus this ticket exists for. RICE cannot derive Reach or Impact
+    """The corpus MoSCoW exists for. RICE cannot derive Reach or Impact
     from three customer_voice signals — measured on a real 1,275-signal
     corpus, this is exactly the shape that scores 26/26 findings `None`."""
     for i in range(3):
@@ -1310,7 +1310,7 @@ def test_dropping_the_only_numeric_source_at_approval_downgrades_the_framework(c
     """Framework selection is RE-DERIVED from the KEPT inventory at approve
     time, same fix as the gaps re-derivation above and for the same reason: a
     reader who unticks the one source that made RICE derivable must not keep
-    a RICE table where every row scores `None` — this ticket's whole reason
+    a RICE table where every row scores `None` — MoSCoW's whole reason
     for existing, one step later than the bug the gaps fix already covers."""
     from app.db.client import require_client
 
@@ -1939,7 +1939,7 @@ def test_the_balance_identity_is_exercised_with_real_drops(ctx):
     `max(0, groups - 2 * ungroupable)`, which on a real corpus publishes 414
     where the truth is 622. The only shape that pins the coefficient is the one
     where both terms are non-zero, and it existed in no test. Third round of
-    "the fixture does not contain the condition" on this PR."""
+    "the fixture does not contain the condition"."""
     from app.crucible.pipeline import NARRATED_DROPS
     # Themed and embeddable -> real findings.
     for i in range(6):
