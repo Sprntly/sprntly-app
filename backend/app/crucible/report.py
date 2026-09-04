@@ -227,129 +227,244 @@ def _goal_definition(run: dict, plan: dict) -> str:
 
 
 def _ask_section(run: dict, plan: dict) -> str:
-    """What was asked, at the top, in three lines.
+    """What you asked, and what you told us it meant.
 
-    The reference plan opens with exactly this — "Your question: increase
-    revenue by 2%" — and a memo that does not restate its own question makes
-    a reader hold it in their head while reading the answer.
+    IT USED TO OPEN THE DOCUMENT AND NOW IT CLOSES IT. The reader's own
+    verdict on the old shape was that the answer should be the first thing on
+    the page and that everything establishing what the run was given belongs
+    behind it. The goal is still the title, so restating the question at the
+    top was also saying it twice.
 
-    SHORT ON PURPOSE. The goal, the confirmed definition verbatim, and the one
-    line that says what the definition is for. Everything else that section
-    used to say — whether a relevance gate ran, what it did and did not
-    decide — is method, and reads in the appendix.
+    WHAT IS RECORDED HERE IS UNCHANGED, including the branch for a run with no
+    confirmed definition — that one is a disclosure, not throat-clearing, and
+    it moves without being softened.
     """
     goal = (run.get("goal_text") or "").strip()
     definition = _goal_definition(run, plan)
-    out = ["<h2>The ask</h2>"]
+    out = ["<h3>What you asked, and what you said it meant</h3>"]
     if goal:
-        out.append(_p(
-            f"<strong>Your question.</strong> "
-            f"{_esc_clipped(goal, MAX_STATEMENT_CHARS)}"
-        ))
+        out.append(_p(_esc_clipped(goal, MAX_STATEMENT_CHARS)))
     if definition:
-        out.append(_p("You confirmed this means, in your own words:"))
+        out.append(_p("In your own words, this meant:"))
         out.append(f"<blockquote>{_esc(definition)}</blockquote>")
-        out.append(_p(
-            "Recorded here so a decision can be defended against it."
-        ))
     else:
         # STATED, NOT SKIPPED. A report with no recorded definition is a
         # report whose subject is unknown, and omitting the line would make
         # that look like the ordinary case.
         out.append(_p(
-            "No confirmed definition was recorded for this run, so what the "
-            "goal means is not on the record. Read what follows as being "
-            "about the goal as typed, nothing narrower."
+            "You never confirmed what the goal means, so we held the memo to "
+            "the goal exactly as you typed it and nothing narrower."
         ))
     return "".join(out)
 
 
-def _problem_section(findings: list[dict], plan: dict) -> str:
-    """Why this matters — the one paragraph in the memo that is not "what we
-    found".
+#: How a small count reads inside a sentence. The reference memo writes
+#: "Two are high confidence", not "2 are high confidence" — a numeral at the
+#: head of a sentence reads as a data point and a word reads as prose. Only
+#: the handful this document ever needs; anything larger stays a numeral,
+#: which is also what the reference does ("214 named companies").
+_SMALL_NUMBERS = {
+    1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five",
+}
 
-    ASSEMBLED, NEVER AUTHORED. Every clause is a read of something the engine
-    already produced: the top-ranked finding's own label, the KIND of claim
-    behind it (`type_bucket` — a blocker reads differently from a preference,
-    and the difference is the whole of whether there is a problem at all), the
-    reach and claim and source counts, and the finding's own `because` where
-    the deep pass wrote one. No model is called and no narrative is invented
-    (I2).
 
-    AND IT REFUSES TO OVERSTATE. When the strongest theme neither blocks nor
-    is asked for AND could not be sized, there is no defensible problem
-    statement in this corpus — so it says what the corpus does support, in one
-    line, rather than manufacturing urgency. A problem statement that
-    overstates is worse than none, on a product whose entire claim is that it
-    does not overstate.
+def _count_word(n: int, *, capital: bool = True) -> str:
+    word = _SMALL_NUMBERS.get(n)
+    if not word:
+        return f"{n:,}"
+    return word if capital else word.lower()
+
+
+def _claim_sentence(finding: dict) -> str:
+    """The finding as a sentence about the reader's business.
+
+    THE SENTENCE THIS REPLACES WAS ABOUT US. Every finding carries a stored
+    `statement` in the engine's own bookkeeping voice — "64 claims across 14
+    accounts concern a reported theme: Sales Pipeline" — which leads with how
+    much evidence we hold and reaches the thing the reader cares about in the
+    last clause, behind a colon. The reader's verdict on it was that the
+    document read like an audit trail.
+
+    SO THE CLAIM LEADS AND THE COUNT SITS INSIDE IT. Nothing new is asserted:
+    every clause is a read of a field the engine already computed — the
+    theme's own label, how many accounts it reaches (`_reach`, so an unsized
+    theme still says so), the KIND of claim behind it (`type_bucket`), and
+    whether two sources that may both speak contradict each other. What
+    changed is the order of the words.
+
+    "" WHEN THERE IS NO LABEL, and that is deliberate rather than a fallback:
+    a labelless finding's own heading IS its stored statement, so a
+    constructed sentence here would say the same thing twice, three lines
+    apart, which is the duplication the previous pass was asked to remove.
     """
-    if not findings:
+    label = (finding.get("label") or "").strip()
+    if not label:
         return ""
-    top = findings[0]
-    bucket = type_bucket([str(t) for t in _as_list(top.get("claim_types"))])
-    sized = top.get("impact_value") is not None
-    out = ["<h2>The problem</h2>"]
+    topic = _esc_clipped(label, MAX_STATEMENT_CHARS)
+    bucket = type_bucket([str(t) for t in _as_list(finding.get("claim_types"))])
+    sized = finding.get("impact_value") is not None
+    unit = (finding.get("currency") or "accounts").strip()
 
-    if bucket not in (TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE) and not sized:
-        out.append(_p(
-            "The evidence does not state a problem here: the strongest theme "
-            "describes the world rather than blocking or asking for anything, "
-            "and it could not be sized. What follows is what was found, not a "
-            "case for acting on it."
-        ))
-        return "".join(out)
-
-    label = (top.get("label") or "").strip()
-    out.append(_p(
-        f"<strong>"
-        f"{_esc_clipped(label, MAX_STATEMENT_CHARS) if label else _esc_statement(top)}"
-        f"</strong>"
-    ))
     if bucket == TYPE_BUCKET_BLOCKER:
-        kind = (
-            "The evidence has this blocking accounts today, not as something "
-            "they would merely prefer."
-        )
+        verb = f"report being blocked by {topic}"
     elif bucket == TYPE_BUCKET_PREFERENCE:
-        kind = (
-            "Accounts are asking for this. Nothing in the evidence says they "
-            "are blocked by it."
-        )
+        verb = f"have asked for {topic}"
     else:
-        kind = (
-            "The evidence describes this rather than asking for or blocking "
-            "anything, so read it as context rather than as something "
-            "stopping you."
+        verb = f"talk about {topic}"
+
+    # THE SUBJECT IS ONLY EVER A COUNT OF ACCOUNTS. A theme sized in some
+    # other unit cannot be the subject of "… have asked for" without the
+    # sentence claiming the unit is a group of people, so that size is stated
+    # separately instead.
+    if sized and unit == "accounts":
+        parts = [f"{_esc(_reach(finding))} {verb}."]
+    elif sized:
+        parts = [
+            f"Accounts {verb}.",
+            f"This reading sizes it at {_esc(_reach(finding))}.",
+        ]
+    else:
+        # I3, said as a sentence rather than as a label. An unsized theme is
+        # one whose size is unknown, and the sentence has to carry that or the
+        # absence reads as smallness.
+        parts = [
+            f"Accounts {verb}, and nothing we read says how many.",
+            "How far it reaches is unknown here, which is not the same as "
+            "small.",
+        ]
+
+    if bucket not in (TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE):
+        parts.append(
+            "Nothing in it reads as blocked or as a request, so take it as "
+            "context rather than as something stopping you."
         )
-    # THE SCALE ACTUALLY MEASURED, and nothing beyond it. An unsized theme
-    # says so (I3) rather than borrowing a number from the ones that could be
-    # sized.
-    scale = [_esc(_reach(top))]
-    claims = len(_as_list(top.get("claim_ids")))
-    if claims:
-        scale.append(f"{claims} claim{'' if claims == 1 else 's'}")
-    sources = len([x for x in _as_list(top.get("surfaced_by")) if x])
-    if sources:
-        scale.append(
-            f"{sources} source document{'' if sources == 1 else 's'}"
+    if (finding.get("adjudication") or "") == "conflict":
+        parts.append(
+            "Two sources that may both speak on this contradict each other, "
+            "which is why we put it first."
         )
-    tail = (
-        "" if sized else
-        " A missing size is not a small one: how many accounts this touches "
-        "is unknown, not zero."
+    return _p(" ".join(parts))
+
+
+def _grounded_money(finding: dict) -> Optional[tuple[float, float, Optional[int]]]:
+    """`(committed, of which read back from summaries, accounts)` or `None`.
+
+    ONE READ OF `native_units`, SHARED. The figure appears twice now — as a
+    chip on the recommendation screen and as a paragraph inside the write-up
+    — and two reads of the same nested dict is how the two end up disagreeing
+    about whether a number exists.
+    """
+    commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
+    usd = commercial.get("commercial_committed_usd")
+    if not isinstance(usd, (int, float)):
+        return None
+    derived = commercial.get("commercial_committed_usd_derived")
+    derived = float(derived) if isinstance(derived, (int, float)) else 0.0
+    accounts = commercial.get("commercial_grounded_accounts")
+    accounts = (
+        int(accounts) if isinstance(accounts, (int, float)) and accounts
+        else None
     )
-    out.append(_p(f"{kind} Measured at: {' · '.join(scale)}.{tail}"))
-    # THE FINDING'S OWN REASONING, where the deep pass wrote one. Quoted from
-    # the finding rather than restated, so the problem paragraph and the
-    # write-up below it cannot say two different things.
-    because = (
-        _as_dict(top.get("deep_recommendation")).get("because")
-        or _as_dict(top.get("recommendation")).get("because")
-        or ""
-    ).strip()
-    if because:
-        out.append(_p(_esc_clipped(because, MAX_STATEMENT_CHARS)))
-    return "".join(out)
+    return float(usd), derived, accounts
+
+
+def _option_chips(finding: dict, *, full: bool = False) -> str:
+    """The facts under an option, as a strip rather than as a clause.
+
+    THIS IS THE HONESTY-VERSUS-READABILITY TRADE, MADE ONCE. "Measured at: 14
+    accounts · 64 claims · 1 source document" was a sentence about our own
+    method sitting in the middle of a paragraph about the reader's business.
+    None of those numbers is dropped — they move to a strip under the claim,
+    where a reader takes them in at a glance and the prose beside them can be
+    about the finding.
+    """
+    bits = [_esc(_reach(finding))]
+    band = (finding.get("confidence_band") or "").strip()
+    if band:
+        bits.append(f"{_esc(band)} confidence")
+    money = _grounded_money(finding)
+    if money:
+        bits.append(f"${money[0]:,.0f} named by customers")
+    if (finding.get("adjudication") or "") == "conflict":
+        bits.append("<strong>sources disagree</strong>")
+    if full:
+        claims = len(_as_list(finding.get("claim_ids")))
+        if claims:
+            bits.append(f"{claims} claim{'' if claims == 1 else 's'}")
+        sources = len([x for x in _as_list(finding.get("surfaced_by")) if x])
+        if sources:
+            bits.append(
+                f"{sources} source document{'' if sources == 1 else 's'}"
+            )
+    return " · ".join(bits)
+
+
+def _unlocks_block(finding: dict, account_value: Any) -> str:
+    """What acting on this is worth — or, far more often, that we cannot say.
+
+    THE SLOT IS FILLED HONESTLY OR IT SAYS IT IS EMPTY. On this corpus money
+    is attributable on very few findings, and the two failure modes either
+    side of that are both worse than the gap: padding it with a projection
+    invents revenue, and hiding it lets a reader assume the number was
+    considered and came out small. So the empty case is a sentence in the
+    memo's own voice that says which of the two things is unknown.
+
+    THREE SOURCES, IN DESCENDING STRENGTH, and each says which it is:
+    figures customers actually stated, then the reader's own per-account
+    estimate carried through, then nothing.
+    """
+    money = _grounded_money(finding)
+    if money:
+        usd, derived, accounts = money
+        where = (
+            f" across {accounts} named account{'' if accounts == 1 else 's'}"
+            if accounts else ""
+        )
+        # PROVENANCE IS PART OF THE CLAIM, NOT A FOOTNOTE. A figure recovered
+        # from a written summary is not the same evidence as one captured
+        # against a verified verbatim quote: the summary was itself written
+        # under a grounding gate, so the number came from real text, but it
+        # was copied once more than a quoted figure was and could have been
+        # copied wrong. "Customers named $X" is only true of the quoted kind.
+        if derived >= usd:
+            return _p(
+                f"Customers put <strong>${usd:,.0f}</strong>{where} against "
+                f"this. We read those figures back out of written summaries "
+                f"rather than matching them to a verified quote, so each is "
+                f"only as good as the summary it came from. It is a sum of "
+                f"what was stated, not a projection of what you would gain."
+            )
+        if derived:
+            return _p(
+                f"Customers put <strong>${usd:,.0f}</strong>{where} against "
+                f"this — a sum of figures they actually quoted, not a "
+                f"projection of what you would gain. ${derived:,.0f} of it we "
+                f"read back out of written summaries rather than matching to "
+                f"a verified quote."
+            )
+        return _p(
+            f"Customers put <strong>${usd:,.0f}</strong>{where} against this "
+            f"— a sum of figures they actually quoted, not a projection of "
+            f"what you would gain."
+        )
+
+    if finding.get("impact_value") is not None:
+        reach_n = float(finding.get("impact_value") or 0)
+        estimate = _finding_money_estimate(reach_n, account_value)
+        if estimate:
+            return _p(
+                f"Nobody we read named a figure for this one. On your own "
+                f"numbers it is {_stop(estimate)}"
+            )
+        return _p(
+            "Nothing we read puts money on this, so neither do we. What we "
+            "can tell you is how far it reaches, above."
+        )
+    return _p(
+        "Nothing we read puts money on this, and nothing sized it either. "
+        "Both are unknown here rather than zero, and we would rather leave "
+        "the gap than fill it with an estimate."
+    )
 
 
 def _definition_method_note(run: dict) -> str:
@@ -476,7 +591,7 @@ def _stat_strip(
         # which counts only the DEEP pass. This cell counts flat OR deep — the
         # union — so a run can show 8 here and 2 there, both true, about two
         # different senses of the word. The label says which one this is.
-        cells.append(("Flagged with any suggestion", f"{len(recommended):,}"))
+        cells.append(("Carry any suggestion", f"{len(recommended):,}"))
     value = plan.get("account_value")
     if sized and isinstance(value, (int, float)) and value > 0:
         # LABELLED IN THE CELL ITSELF. A number in a strip is read as a fact,
@@ -558,7 +673,7 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
     sized = [f for f in findings if f.get("impact_value") is not None]
     reach = sum(float(f.get("impact_value") or 0) for f in sized)
     value = plan.get("account_value")
-    out = ["<h2>The decision</h2>"]
+    out = ["<h2>Who decides, and by when</h2>"]
     bits = []
     if owner:
         bits.append(f"<strong>Owner</strong> {_esc_clipped(owner, MAX_PARAM_NAME_CHARS)}")
@@ -577,9 +692,9 @@ def _decision_section(plan: dict, findings: list[dict]) -> str:
                 f"gave rather than something measured"
             )
         out.append(_p(
-            f"The findings that bear on this goal touch <strong>{reach:g} "
-            f"accounts</strong>{money}. That is what the evidence counts, not "
-            f"a forecast of what changes if you act."
+            f"What is in front of you touches <strong>{reach:g} "
+            f"accounts</strong>{money}. That is what we counted, not a "
+            f"forecast of what changes if you act on it."
         ))
     return "".join(out)
 
@@ -598,7 +713,7 @@ def _recommendation_basis_section(basis: str) -> str:
     # also renders mid-sentence elsewhere — so left alone it produced
     # "How many got a full recommendation. you named a target of…".
     return _p(
-        f"<strong>How many got a full recommendation.</strong> "
+        f"<strong>How many got a full write-up.</strong> "
         f"{_stop(_upper_first(_esc_clipped(basis, MAX_STATEMENT_CHARS)))}"
     )
 
@@ -610,40 +725,50 @@ def _recommendation_basis_section(basis: str) -> str:
 MAX_SYNTHESIS_CITATIONS_RENDERED = 6
 
 
-def _synthesized_recommendation_section(synth: dict) -> str:
-    """The single, top-line recommendation for the whole report (item 1) —
-    narrated across the per-finding deep recommendations `_findings_section`
-    still renders below, never a replacement for them.
+def _why_this_section(synth: dict, written: list[dict]) -> str:
+    """The argument behind the answer — and NOT a second answer.
 
-    RENDERED BEFORE THE RANKING MECHANICS (`_framework_section`) in
-    `render_report_html`'s own assembly order — the answer leads, and how it
-    was ranked is supporting detail underneath it, not the other way round.
+    ONLY ONE THING IN THIS DOCUMENT IS CALLED THE RECOMMENDATION, and it is
+    the screen at the top. This section used to be headed "The recommendation"
+    and to open with "Recommended. <action>", two screens above a set of
+    numbered options headed "Option 1 — recommended." Those were the same
+    sentence twice: `recommend.build_synthesized_recommendation` copies rank
+    one's action VERBATIM and asks the model only for the prose around it. A
+    reader met the word "recommended" in three places and could not tell which
+    of them was the ask.
+
+    SO THE ACTION IS PRINTED HERE ONLY WHEN IT IS NOT ALREADY ON THE PAGE.
+    Compared against the first write-up's own action rather than assumed
+    identical, because a row stored before that binding existed could carry
+    something else, and silently dropping it would lose a sentence rather than
+    de-duplicate one.
 
     Silent when there is nothing to show: a run with zero or exactly one kept
     deep recommendation (see `recommend.build_synthesized_recommendation`'s
     own "only when there is more than one" rule), or one whose call/citation
-    gate produced nothing usable. The card reads exactly as it did before
-    this existed, which is a document that says nothing it cannot stand
-    behind.
+    gate produced nothing usable.
     """
     action = (synth.get("action") or "").strip()
     because = (synth.get("because") or "").strip()
     if not action or not because:
         return ""
-    out = ["<h2>The recommendation</h2>"]
-    out.append(_p(
-        f"<strong>Recommended.</strong> "
-        f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
-    ))
-    out.append(_p(
-        f"<em>Why.</em> {_esc_clipped(because, MAX_ARGUMENT_CHARS)}"
-    ))
+    out = ["<h2>Why we would start here</h2>"]
+    on_page = {
+        " ".join((_as_dict(f.get("deep_recommendation")).get("action") or "").split())
+        for f in written
+    }
+    if " ".join(action.split()) not in on_page:
+        out.append(_p(
+            f"<strong>What we would do.</strong> "
+            f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
+        ))
+    out.append(_p(_esc_clipped(because, MAX_ARGUMENT_CHARS)))
     citations = [
         c for c in _as_list(synth.get("citations"))
         if isinstance(c, dict) and (c.get("evidence") or "").strip()
     ]
     if citations:
-        out.append("<p><strong>Drawn from.</strong></p>")
+        out.append("<p><strong>What that rests on.</strong></p>")
         out.append(_ul(
             f"{_esc_clipped(c.get('evidence'), MAX_STATEMENT_CHARS)} "
             f'<em class="src">{_SOURCE_LEAD_IN} '
@@ -895,10 +1020,16 @@ def _funnel_section(considered: int, kept: int) -> str:
     return "".join([
         "<h3>What bears on this goal</h3>",
         _p(
-            f"<strong>{considered} themes were found. {kept} bear on this "
-            f"goal.</strong> The other {aside} are listed with the reason "
-            f"each was set aside — not gone, and one set aside for this goal "
-            f"may be the answer to a different one."
+            f"<strong>We found {considered:,} themes. {kept:,} of them bear "
+            f"on this goal.</strong> "
+            + (
+                "The other one is listed with the reason we set it aside"
+                if aside == 1 else
+                f"The other {aside:,} are listed with the reason we set each "
+                f"aside"
+            )
+            + " — set aside is not gone, and one that does not answer this "
+              "goal may be the answer to a different one."
         ),
     ])
 
@@ -965,9 +1096,9 @@ def _set_aside_section(pairs: list) -> str:
     out = [
         f"<h3>Considered and set aside for this goal ({len(pairs)})</h3>",
         _p(
-            "Found and ranked like the findings above. They are here because "
-            "they do not bear on the goal as you defined it, not because the "
-            "evidence was weak."
+            "We found and ranked these exactly like the findings above. They "
+            "are here because they do not bear on the goal as you defined it, "
+            "not because the evidence behind them was weak."
         ),
     ]
     # CAPPED FOR THE SAME REASON THE TAIL ABOVE IS. A 95-row table of what was
@@ -1011,67 +1142,32 @@ def _set_aside_section(pairs: list) -> str:
     return "".join(out)
 
 
-def _headline_unsized_coverage(findings: list[dict]) -> str:
-    """How much of the unsized disclosure the headline has already made.
+def _placement_note_section(findings: list[dict]) -> str:
+    """Why the first finding is first — METHOD, so it reads with the method.
 
-    THE HEADLINE RUNS IMMEDIATELY ABOVE THE FINDINGS LEDE, and both were
-    written to disclose the same two facts — HOW MANY findings have no size,
-    and that a missing size is not a small one. In a real report that read:
+    THIS USED TO BE "THE SHORT VERSION", AT THE TOP. It opened with the top
+    finding's own stored statement set as a deck, then explained what its
+    position does and does not mean. The statement is now the write-up's own
+    heading two sections above, so the deck was the same sentence twice; what
+    remains is the part that was never said anywhere else, which is what the
+    ordering is a claim about.
 
-        …257 of these could not be sized at all, and a missing size is not a
-        small one — so this is the largest known size, not necessarily the
-        largest thing here.
+    EVERY BRANCH SURVIVES THE MOVE, and getting them right is not cosmetic:
+    `_rank` keys on (conflict, claim-type bucket, reach, confidence), so
+    "it is the largest" is true on exactly one of them. See the branch
+    comments below, each of which records a wrong sentence that reached a
+    rendered report.
 
-        Ranked by reach — how many accounts each theme touches, and 257 of them
-        could not be sized at all. An unsized theme sorts last without being
-        small: its size is unknown, not zero.
-
-    Two paragraphs, three lines apart, making the same point twice. Feedback:
-    "poorly formatted (not human readable), lots of irrelevant information".
-
-    THREE STATES, NOT TWO, and the third is the reason this is not a boolean.
-    The headline's branches do not all say the same amount:
-
-      "full"    — a SIZED top row. It names the count AND the caveat, so the
-                  lede has nothing left to add.
-      "caveat"  — an UNSIZED top row with sized rows below it. It says "a
-                  missing size is not a small one" and NEVER NAMES THE COUNT.
-                  A boolean here suppressed the whole lede clause and silently
-                  dropped "257 of them could not be sized" from the document —
-                  de-duplication quietly turning into data loss, which is the
-                  one thing this file exists to prevent.
-      "none"    — nothing anywhere could be sized. The headline says something
-                  else entirely and the lede is the only place the fact lives.
-
-    Both callers read THIS function rather than re-deriving the branch, because
-    the pair that drifted last time drifted precisely by each computing its own
-    version of the same fact.
+    THE UNSIZED COUNT IS NO LONGER NAMED HERE. `_findings_section` states it
+    unconditionally now, two sections above and beside the findings it
+    qualifies; repeating the number in the appendix would be the duplication
+    this pass exists to remove. The CAVEAT that a missing size is not a small
+    one still travels with every branch that needs it.
     """
     if not findings:
-        return "none"
-    if not any(f.get("impact_value") is None for f in findings):
-        return "none"
-    if findings[0].get("impact_value") is not None:
-        return "full"
-    if any(f.get("impact_value") is not None for f in findings):
-        return "caveat"
-    return "none"
-
-
-def _headline_section(findings: list[dict]) -> str:
-    out = ["<h2>The short version</h2>"]
-    if not findings:
-        out.append(_p(
-            "Nothing survived verification. What was considered is listed "
-            "below with the reason it was dropped — that list, not this "
-            "silence, is the result of this run. Where more was considered "
-            "than the list can hold, the remainder is counted with it rather "
-            "than folded in as though it were one more candidate."
-        ))
-        return "".join(out)
-
+        return ""
+    out = ["<h3>Why the first finding is first</h3>"]
     top = findings[0]
-    out.append(f'<p class="deck"><strong>{_esc_statement(top)}</strong></p>')
     band = (top.get("confidence_band") or "").strip()
     claims = len(_as_list(top.get("claim_ids")))
 
@@ -1137,12 +1233,11 @@ def _headline_section(findings: list[dict]) -> str:
         # difference is the whole of I3. An unsized finding is not a small one;
         # it is one whose size is unknown, and an unknown can be bigger.
         tail = (
-            "It is the largest of the ones that could be sized: "
+            "It is the largest of the ones we could size: "
             f"{_esc(_reach(top))}" + lead
-            + ". " + ("One of these" if unsized == 1 else f"{unsized} of these")
-            + " could not be sized at all, and a missing size is not a small "
-              "one — so this is the largest known size, not necessarily the "
-              "largest thing here."
+            + ". Others could not be sized at all, and a missing size is not "
+              "a small one — so this is the largest known size, not "
+              "necessarily the largest thing here."
         )
     elif anything_sized:
         # Unsized itself, but sized findings exist below it — so the order is a
@@ -1387,11 +1482,19 @@ def _esc_clipped(value: Any, limit: int) -> str:
 #: actually is. These constants exist so the wording cannot drift between
 #: the four places it appears.
 #:
-#: How a summarised example is introduced wherever this module renders one.
-#: Mirrors `pipeline.EXAMPLE_LEAD_IN`, which does the same job inside the
-#: stored statement — one phrase, so a reader meets the same signal in the
-#: sentence, the blockquote and the provenance line rather than three.
-_EXAMPLE_LEAD_IN = "Summarising one source:"
+#: How a summarised example is ATTRIBUTED, under the text rather than in
+#: front of it.
+#:
+#: THE HONESTY IS KEPT AND MOVED OUT OF THE WAY. As a lead-in this sat at the
+#: head of the blockquote, so a reader met a clause about our extraction
+#: pipeline before meeting the evidence — one of the specific things that made
+#: the document read as an audit trail. It is not dropped, because what
+#: follows genuinely is a paraphrase and presenting it as a quotation was a
+#: correctness bug. It renders as a quiet attribution line beneath the quote
+#: (`em.src`, the same treatment provenance already gets), and the section
+#: states the same fact once at its head — visual treatment plus one stated
+#: caveat, instead of a clause inside every line.
+_EXAMPLE_LEAD_IN = "Summarised from one source — not a quotation."
 
 #: The same lead-in mid-sentence, where the statement builder puts it.
 #: MUST STAY EQUAL TO `pipeline.EXAMPLE_LEAD_IN` — `_findings_heading` cuts a
@@ -1404,7 +1507,11 @@ _STATEMENT_EXAMPLE_LEAD_IN = "— summarising one source:"
 #: "from" rather than any verb of speech, for the same reason: the text after
 #: it is the claim's stored assertion, which is the extractor's summary of
 #: the source and not the source.
-_SOURCE_LEAD_IN = "— summarised from the source:"
+#:
+#: NO LEADING EM DASH. `em.src` is `display: block` — the line already sits
+#: under what it qualifies, in a smaller, quieter face, so the dash was
+#: punctuation joining it to a sentence it is not part of.
+_SOURCE_LEAD_IN = "Summarised from the source:"
 
 #: The theme lead-in `pipeline._statement_parts` writes, and the quoted shape
 #: it used to write. Both are matched below.
@@ -1769,39 +1876,39 @@ def _finding_block(
     one_topic: bool = False,
     one_topic_note: str = "",
     account_value: Any = None,
-    defer_comparison: bool = False,
+    defer_comparison: bool = True,
     defer_gaps: bool = False,
     show_call_note: bool = True,
 ) -> str:
-    """One finding, written out as a memo item: the action, then its grounding.
+    """One finding, written out so it can be read on its own.
 
-    THE SHAPE COMES FROM THE READER'S OWN DESCRIPTION of the document he
-    wanted: "finding number one could be, hey, maybe build XYZ. This is
-    because five companies — one, two, three — have asked for it … this is
-    exactly what they said." So the action is a full-width line, and
-    underneath it two columns: the argument on the left, the evidence it rests
-    on on the right. Stacked paragraphs made a reader scroll to find out
-    whether a recommendation had anything behind it.
+    THE ORDER IS THE READER'S, NOT THE ENGINE'S. Asked what a write-up should
+    contain he described a sequence — the problem it addresses, who asked,
+    what it unlocks, what they said, what to change, what would kill it — and
+    every one of those already existed in this document, scattered: the
+    problem was a document-level section describing only the top finding, what
+    it unlocks was two paragraphs in an evidence column, what would kill it
+    was the last line of an argument column. This is the same material in that
+    order, under headings that say which question is being answered.
 
-    TWO COLUMNS MEAN A TABLE, and that too is forced rather than chosen: this
-    HTML is stored in `custom_artifacts.body_html`, whose sanitizer keeps no
-    `class`, no `<style>` block and no width/display CSS, so a flex or grid
-    layout arrives at the editor as a stack. A two-cell table row is the one
-    side-by-side construction that survives both that allowlist and
-    print-to-PDF.
+    IT USED TO BE TWO COLUMNS AND IS NOW ONE. The columns split the material
+    into "the argument" and "what it rests on", which cuts straight across the
+    sequence above — the problem and what they said sat on one side, what to
+    change and what would kill it on the other, and a reader following the
+    order had to zig-zag. A sequence cannot be read in parallel.
 
     NO ACCOUNT IS NAMED, AND THAT IS NOT AN OMISSION. He asked for the
     accounts by name; a stored finding carries how MANY accounts a theme
     touches and never which — `pipeline` counts `accounts_named` and keeps the
-    count alone. Naming them would mean inventing them, so the evidence column
+    count alone. Naming them would mean inventing them, so the "who" section
     states the reach and names the SOURCE DOCUMENTS, which is what is actually
-    on the record, and says which of the two it is.
+    on the record. The limit itself is stated once, at the head of the
+    section, rather than on every card.
     """
-    # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
-    # across 11 accounts concern a reported theme: Sales Pipeline —
+    # THE THEME IS THE HEADING. It used to be the whole stored sentence — "30
+    # claims across 11 accounts concern a reported theme: Sales Pipeline —
     # summarising one source: …" — so the one word a reader scans for sat
-    # mid-clause, behind two numbers that the chips on the next line repeat
-    # verbatim.
+    # mid-clause, behind two numbers.
     #
     # FALLS BACK TO THE SENTENCE when there is no label, which is every run
     # stored before this shipped and every fixture that predates it.
@@ -1811,53 +1918,160 @@ def _finding_block(
         else _esc_statement(finding)
     )
     out = [f'<h3 class="finding">{rank}. {head}</h3>']
-    # The argument, and the evidence under it. Built as two lists and joined
-    # into one table row at the end, so a card with no recommendation degrades
-    # to a single column instead of an empty cell beside a full one.
-    why: list[str] = []
-    evidence: list[str] = []
-    tail: list[str] = []
 
-    # ── WHAT TO DO, FIRST. ─────────────────────────────────────────────────
-    #
-    # "This is only the issues, no suggestion on how to solve or what's the
-    # exact recommendation from it." So the suggestion leads and its
-    # justification sits directly under it.
-    #
-    # ABSENT IS NORMAL, not an error: only the top findings get one, and any
-    # suggestion that quoted a figure, promised an outcome or failed the lint
-    # was dropped rather than repaired.
-    #
-    # THE DEEP PASS TAKES PRECEDENCE. A finding in the deep set also has a
-    # flat `recommendation` — the same `relevant` findings feed both LLM calls
-    # — and showing both would put two suggestions on one finding.
     deep = _as_dict(finding.get("deep_recommendation"))
     rec = _as_dict(finding.get("recommendation"))
     deep_action = (deep.get("action") or "").strip()
     deep_because = (deep.get("because") or "").strip()
     action = (rec.get("action") or "").strip()
     because = (rec.get("because") or "").strip()
-    if deep_action and deep_because:
-        # EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION, and which
-        # header each card gets is `data_gaps.option_header`'s decision, so
-        # the panel and this document cannot word it differently. Purely a
-        # label: nothing here groups, scores or chooses, and no model is
-        # consulted (I2).
+    has_deep = bool(deep_action and deep_because)
+
+    # ── WHAT TO BUILD, RESTATED FROM THE SCREEN AT THE TOP. ────────────────
+    #
+    # The header is `data_gaps.option_header`'s decision so the wording cannot
+    # drift, and it no longer contains the word "recommended": exactly one
+    # thing in this document is the recommendation and it is the first screen.
+    if has_deep:
         header = option_header(option, option_total, one_topic)
         out.append(
             f'<p class="action"><strong>{header}</strong> '
             f'{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}</p>'
         )
-        why.append(_p(
-            f"<em>Why.</em> {_esc_clipped(deep_because, MAX_STATEMENT_CHARS)}"
+    elif action and because:
+        out.append(
+            f'<p class="action"><strong>Suggested.</strong> '
+            f'{_esc_clipped(action, MAX_STATEMENT_CHARS)}</p>'
+        )
+
+    # ── 1. THE PROBLEM IT ADDRESSES. ───────────────────────────────────────
+    #
+    # Assembled, never authored (I2): the theme's own label, the kind of claim
+    # behind it, its reach, and the finding's own `because` where one was
+    # written. This is the paragraph that used to be a document-level section
+    # sitting above everything and describing only the top finding.
+    out.append("<h4>The problem</h4>")
+    problem = _claim_sentence(finding)
+    if problem:
+        out.append(problem)
+    reason = deep_because if has_deep else (because if action else "")
+    if reason:
+        out.append(_p(_esc_clipped(reason, MAX_STATEMENT_CHARS)))
+    if not problem and not reason:
+        out.append(_p(
+            "We have no statement of the problem beyond the theme above — "
+            "nothing we read framed it as a difficulty, only as a subject."
         ))
+    if not has_deep and action and because and finding.get("deep_attempted"):
+        # THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED.
+        # `deep_attempted` is only set on a finding that was IN the top N but
+        # whose evidence did not clear the citation gate — never on one that
+        # was simply ranked past N.
+        out.append(_p(
+            "<em>This was in line for a full write-up and did not get one "
+            "this run — see “How many got a full write-up” under how this "
+            "was produced. The suggestion above is the plain version, not a "
+            "downgrade of a deeper one you are missing.</em>"
+        ))
+
+    # ── 2. WHO. ────────────────────────────────────────────────────────────
+    out.append("<h4>Who this comes from</h4>")
+    out.append(f'<p class="chips">{_option_chips(finding, full=True)}</p>')
+    surfaced = [s for s in _as_list(finding.get("surfaced_by")) if s]
+    if surfaced:
+        # WHERE IT CAME FROM, beside the claim it supports — the difference
+        # between an argument and an assertion. BOUNDED HERE, not only at
+        # write time: `pipeline.MAX_NAMED_SOURCES` caps what new runs store,
+        # but a document name is tenant text of any length and rows already on
+        # disk predate every cap.
+        shown = [_esc_clipped(x, MAX_SOURCE_NAME_CHARS)
+                 for x in surfaced[:MAX_RENDERED_SOURCES]]
+        extra = len(surfaced) - len(shown)
+        out.append(_p(
+            "<strong>Source documents</strong> " + " · ".join(shown)
+            + (f" (+{extra} more)" if extra > 0 else "")
+        ))
+        # THE FLOOR, SAID IN WORDS — AND SAID ONCE PER DOCUMENT. A call
+        # provider is extracted one pass per call, so a collapsed entry
+        # carries how many CALLS it stands for, but anything ingested before
+        # that changed was batched several calls to a document, so the number
+        # can only be a lower bound. `show_call_note` is set by
+        # `_findings_section` for the first block it applies to.
+        if show_call_note and has_call_count(surfaced):
+            out.append(_p(f"<em>{_esc(CALL_COUNT_FLOOR_NOTE)}</em>"))
+
+    confidence = _as_dict(finding.get("confidence"))
+    # The weakest leg is the ACTIONABLE half of a confidence score: it says
+    # what to go and find out, which a band on its own never does. SUPPRESSED
+    # WHEN IT IS THE SAME SENTENCE ON EVERY ROW — one fact about the corpus
+    # printed 32 times reads as 32 separate judgements.
+    if confidence.get("weakest_leg_reason") and not shared_weakest:
+        out.append(_p(
+            f"<strong>Weakest link.</strong> "
+            f"{_esc(confidence['weakest_leg_reason'])}"
+        ))
+    if confidence.get("cap_reason") and not shared_cap:
+        out.append(_p(_esc(confidence["cap_reason"])))
+    # THE COMPOSITION OF THE EVIDENCE. Suppressed to a single sentence when
+    # there is nothing to converge — see `_convergence_figure`.
+    out.append(_convergence_figure(finding))
+
+    # ── 3. WHAT IT UNLOCKS. ────────────────────────────────────────────────
+    #
+    # Empty on most findings, and it says so rather than being dropped — see
+    # `_unlocks_block`.
+    out.append("<h4>What it unlocks</h4>")
+    out.append(_unlocks_block(finding, account_value))
+    # I8: every assumed parameter is disclosed WHERE THE NUMBER IS READ, and
+    # the number it qualifies is the one directly above. Bounded because
+    # `name` and `basis` are tenant strings with no cap upstream, and a single
+    # block once reached 41,745 characters here. Hoisted to the top of the
+    # section when every finding says the same thing (`_shared_assumptions`).
+    assumed = (
+        [] if shared_assumptions
+        else [a for a in _as_list(finding.get("assumed_params"))
+              if isinstance(a, dict)]
+    )
+    if assumed:
+        shown_params = assumed[:MAX_ASSUMED_PARAMS]
+        out.append(_ul(
+            f"<strong>{_esc_clipped(a.get('name'), MAX_PARAM_NAME_CHARS)}"
+            f"</strong>: {_esc_clipped(a.get('basis'), MAX_PARAM_BASIS_CHARS)}"
+            for a in shown_params
+        ))
+        if len(assumed) > len(shown_params):
+            out.append(_p(
+                f"and {len(assumed) - len(shown_params)} further assumed "
+                f"parameters"
+            ))
+
+    # ── 4. WHAT THEY SAID. ─────────────────────────────────────────────────
+    #
+    # STILL A BLOCKQUOTE, AND STILL NOT IN QUOTATION MARKS. `graph.extractor`
+    # validates a verbatim quote against the transcript, uses it to gate the
+    # write and then discards it by design, so `example` is an extractor
+    # paraphrase that `example_for` has additionally cut and may have
+    # ellipsised. The indent sets it apart as evidence; the attribution line
+    # under it says what it actually is. That line sits BELOW the text rather
+    # than in front of it — the disclosure is kept and moved out of the way,
+    # and the section states the same thing once at its head.
+    example = (finding.get("example") or "").strip()
+    if label and example:
+        out.append("<h4>What they said</h4>")
+        out.append(
+            f"<blockquote>{_esc_clipped(example, MAX_STATEMENT_CHARS)}"
+            f'<em class="src">{_EXAMPLE_LEAD_IN}</em></blockquote>'
+        )
+
+    # ── 5. WHAT TO CHANGE. ─────────────────────────────────────────────────
+    if has_deep:
         changes = [
             c for c in _as_list(deep.get("changes"))
             if isinstance(c, dict) and (c.get("text") or "").strip()
         ]
         if changes:
-            why.append("<p><strong>What to change.</strong></p>")
-            why.append(_ul(
+            out.append("<h4>What to change</h4>")
+            out.append(_ul(
                 f"{_esc_clipped(c.get('text'), MAX_STATEMENT_CHARS)} "
                 f'<em class="src">{_SOURCE_LEAD_IN} '
                 f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
@@ -1871,268 +2085,69 @@ def _finding_block(
         # SUPPRESSED ON THE FINDING THAT CARRIES THE GAPS LIST, because these
         # same questions are the middle of it (`data_gaps.data_gaps_for`).
         if open_qs and not data_gaps:
-            why.append("<p><strong>Still open.</strong></p>")
-            why.append(_ul(
+            out.append("<h4>Still open</h4>")
+            out.append(_ul(
                 _esc_clipped(q, MAX_STATEMENT_CHARS)
                 for q in open_qs[:MAX_DEEP_OPEN_QUESTIONS]
             ))
+
+        # ── 6. WHAT WOULD KILL IT. ─────────────────────────────────────────
+        out.append("<h4>What would kill it</h4>")
         falsify = (deep.get("what_would_falsify") or "").strip()
         if falsify:
             # THE KILL SIGNAL, NAMED AS ONE — and carrying its own caveat in
             # the same breath. This corpus is what people said; it has no
             # metric series in it, so this can only be a belief someone can go
             # and falsify, never a threshold that trips on its own.
-            why.append(_p(
-                f"<strong>Kill signal.</strong> "
+            out.append(_p(
                 f"{_esc_clipped(falsify, MAX_STATEMENT_CHARS)} "
                 f"<em>{KILL_SIGNAL_CAVEAT}</em>"
             ))
-        # WHY THIS ONE OVER THE NEXT, MOVED OUT FROM UNDER THIS CARD when
-        # there are two write-ups. "But I think you should do number one
-        # because it's the most important one" is a comparison BETWEEN the
-        # two, and it now reads after both of them rather than inside the
-        # first — see `_why_number_one_section`. Still rendered here when
-        # there is no second write-up to read it after.
+        else:
+            out.append(_p(
+                "We did not find anything that would tell you this is wrong. "
+                "Read that as a gap in the evidence, not as a clean bill of "
+                "health."
+            ))
+        # WHY THIS ONE OVER THE NEXT. It reads on the first screen now, above
+        # both write-ups, because holding two options in your head to reach
+        # the comparison two screens later is what made a reader think there
+        # was no comparison at all. Still rendered here when a caller has not
+        # deferred it.
         comparison = (deep.get("comparison") or "").strip()
         if comparison and not defer_comparison:
-            why.append(_p(
+            out.append(_p(
                 f"<strong>Why this over the next.</strong> "
                 f"{_esc_clipped(comparison, MAX_STATEMENT_CHARS)}"
             ))
         if one_topic_note and not defer_comparison:
-            why.append(_p(
+            out.append(_p(
                 f"<strong>Why these are not two options.</strong> "
                 f"{_esc(one_topic_note)}"
             ))
         # ── WHAT WE DO NOT KNOW ABOUT THE THING WE JUST RECOMMENDED. ───────
         #
-        # Only on the recommended finding, assembled deterministically from
-        # fields the engine already produced (`data_gaps.data_gaps_for`) — no
-        # model call, nothing scored (I2). GAPS, NOT ACTIONS.
-        #
-        # `defer_gaps` lifts them out to `_before_you_spend_section`, which is
-        # where they read once the memo is two write-ups rather than ten: they
-        # qualify the recommendation the whole document is making, not one
-        # card among many. The finding still has to KNOW it carries them —
-        # `data_gaps` also suppresses this card's own open-questions list,
-        # which is the middle of the same list.
+        # Assembled deterministically from fields the engine already produced
+        # (`data_gaps.data_gaps_for`) — no model call, nothing scored (I2).
+        # GAPS, NOT ACTIONS. `defer_gaps` lifts them out to
+        # `_before_you_spend_section`, where they qualify the recommendation
+        # the whole document is making rather than one card.
         if data_gaps and not defer_gaps:
-            tail.append(
-                f"<p><strong>{_esc(DATA_GAPS_HEADING)}</strong> "
-                f"Gaps in what is known about this option, not work to "
-                f"schedule.</p>"
+            out.append(
+                f"<h4>{_esc(DATA_GAPS_HEADING)}</h4>"
             )
-            tail.append(_ul(
+            out.append(_p(
+                "Gaps in what is known about this one, not work to schedule."
+            ))
+            out.append(_ul(
                 _esc_clipped(g, MAX_STATEMENT_CHARS) for g in data_gaps
             ))
-    elif action and because:
-        # NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. This is the
-        # one-line pass over a finding that did NOT get a full write-up.
-        out.append(
-            f'<p class="action"><strong>Suggested.</strong> '
-            f'{_esc_clipped(action, MAX_STATEMENT_CHARS)}</p>'
-        )
-        why.append(_p(
-            f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
+    elif not (action and because):
+        out.append(_p(
+            "We wrote no recommendation for this one. What is above is what "
+            "the evidence carries on its own."
         ))
-        # THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED.
-        # `deep_attempted` is only set on a finding that was IN the top N but
-        # whose evidence did not clear the citation gate — never on one that
-        # was simply ranked past N. The specific reason lives once, in
-        # "How many got a full recommendation", and this points there.
-        if finding.get("deep_attempted"):
-            why.append(_p(
-                "<em>This was in line for a full write-up and did not get one "
-                "this run — see “How many got a full recommendation” under "
-                "how this was produced. The suggestion above is the plain "
-                "version, not a downgrade of a deeper one you are "
-                "missing.</em>"
-            ))
-
-    # ── WHAT IT RESTS ON. ──────────────────────────────────────────────────
-    evidence.append("<p><strong>What this rests on.</strong></p>")
-    meta = [_esc(_reach(finding))]
-    band = (finding.get("confidence_band") or "").strip()
-    if band:
-        meta.append(f"{_esc(band)} confidence")
-    if (finding.get("adjudication") or "") == "conflict":
-        # Never softened into a footnote. Two sources that may both speak
-        # disagreeing is the single most decision-relevant thing a run can
-        # find, which is also why `_rank` puts it first regardless of size.
-        meta.append("<strong>sources disagree</strong>")
-    claims = len(_as_list(finding.get("claim_ids")))
-    if claims:
-        meta.append(f"{claims} claim{'' if claims == 1 else 's'}")
-    evidence.append(_p(" · ".join(meta)))
-
-    # NAMED EVIDENCE, NEVER A PROJECTION. A grounded dollar figure — a number
-    # a customer actually stated, in a call OR in any other connected source's
-    # text — is sized differently from `_reach` above: it is a SUM of real,
-    # quoted amounts across the accounts that named one, not the finding's own
-    # scored `Impact.value` (which stays reach-based/unsized exactly as
-    # before). Rendered in its own words so a reader cannot mistake "customers
-    # named $X" for "this is worth $X".
-    #
-    # NEVER NAMES A CHANNEL. `native_units` carries the SUM and the account
-    # count, not which connector the contributing claims came from, and
-    # guessing it here would assert something this function cannot know.
-    commercial = _as_dict(_as_dict(finding.get("impact")).get("native_units"))
-    commercial_usd = commercial.get("commercial_committed_usd")
-    if isinstance(commercial_usd, (int, float)):
-        accounts_n = commercial.get("commercial_grounded_accounts")
-        accounts_txt = (
-            f" across {int(accounts_n)} named account{'' if accounts_n == 1 else 's'}"
-            if isinstance(accounts_n, (int, float)) and accounts_n
-            else ""
-        )
-        # PROVENANCE IS PART OF THE CLAIM, NOT A FOOTNOTE. A figure recovered
-        # from a written summary is not the same evidence as one captured
-        # against a verified verbatim quote: the summary was itself written
-        # under a grounding gate, so the number came from real text, but it
-        # was copied once more than a quoted figure was and could have been
-        # copied wrong. "Customers named $X" is only true of the quoted kind.
-        derived_usd = commercial.get("commercial_committed_usd_derived")
-        derived_usd = (
-            float(derived_usd) if isinstance(derived_usd, (int, float)) else 0.0
-        )
-        if derived_usd >= commercial_usd:
-            evidence.append(_p(
-                f"<strong>Figures stated in the source material.</strong> "
-                f"${commercial_usd:,.0f}{accounts_txt} — a sum of figures "
-                f"stated, not a projection. Read back from written summaries "
-                f"rather than matched to a verified quote, so each is only as "
-                f"accurate as the summary it came from."
-            ))
-        elif derived_usd:
-            evidence.append(_p(
-                f"<strong>Customers named this evidence.</strong> Customers "
-                f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
-                f"figures actually quoted, not a projection. "
-                f"${derived_usd:,.0f} of that was read back from written "
-                f"summaries rather than matched to a verified quote."
-            ))
-        else:
-            evidence.append(_p(
-                f"<strong>Customers named this evidence.</strong> Customers "
-                f"named ${commercial_usd:,.0f}{accounts_txt} — a sum of "
-                f"figures actually quoted, not a projection."
-            ))
-
-    # ONE CLAIM, SUMMARISED, SET APART — "this is the kind of thing behind the
-    # count". Only when the heading is the label: with the sentence as the
-    # heading the example is already inside it, and `example` is empty
-    # whenever the statement fell back to its plain form.
-    #
-    # STILL A BLOCKQUOTE, BUT NO LONGER IN QUOTATION MARKS. The indent is
-    # doing the work it should have been doing alone — setting the evidence
-    # apart so it reads as evidence. The curly quotes were doing work they
-    # had no right to: `graph.extractor` validates a verbatim quote against
-    # the transcript, uses it to gate the write and then discards it by
-    # design, so `example` is an extractor paraphrase that `example_for` has
-    # additionally cut and may have ellipsised. Set in quotes, that told a
-    # reader a named account said words nobody said. The lead-in says what
-    # the text actually is instead.
-    example = (finding.get("example") or "").strip()
-    if label and example:
-        evidence.append(
-            f"<blockquote><em>{_EXAMPLE_LEAD_IN}</em> "
-            f"{_esc_clipped(example, MAX_STATEMENT_CHARS)}</blockquote>"
-        )
-
-    confidence = _as_dict(finding.get("confidence"))
-    # The weakest leg is the ACTIONABLE half of a confidence score: it says
-    # what to go and find out, which a band on its own never does. SUPPRESSED
-    # WHEN IT IS THE SAME SENTENCE ON EVERY ROW — one fact about the corpus
-    # printed 32 times reads as 32 separate judgements.
-    if confidence.get("weakest_leg_reason") and not shared_weakest:
-        evidence.append(_p(
-            f"<strong>Weakest link.</strong> {_esc(confidence['weakest_leg_reason'])}"
-        ))
-    if confidence.get("cap_reason") and not shared_cap:
-        evidence.append(_p(_esc(confidence["cap_reason"])))
-
-    # WHERE IT CAME FROM, beside the claim it supports — the difference
-    # between an argument and an assertion. BOUNDED HERE, not only at write
-    # time: `pipeline.MAX_NAMED_SOURCES` caps what new runs store, but a
-    # document name is tenant text of any length and rows already on disk
-    # predate every cap.
-    surfaced = [s for s in _as_list(finding.get("surfaced_by")) if s]
-    if surfaced:
-        shown = [_esc_clipped(s, MAX_SOURCE_NAME_CHARS)
-                 for s in surfaced[:MAX_RENDERED_SOURCES]]
-        extra = len(surfaced) - len(shown)
-        tail_txt = f" (+{extra} more)" if extra > 0 else ""
-        evidence.append(_p(
-            "<strong>Source documents</strong> " + " · ".join(shown) + tail_txt
-        ))
-        # THE FLOOR, SAID IN WORDS — AND SAID ONCE. A call provider is
-        # extracted one pass per call, so a collapsed entry carries how many
-        # CALLS it stands for, but anything ingested before that changed was
-        # batched several calls to a document, so the number can only be a
-        # lower bound. It is one fact about how the corpus was ingested, not a
-        # judgement about this finding, and it used to print under every
-        # finding block that showed a call count. `show_call_note` is set by
-        # `_findings_section` for the first block it applies to and cleared
-        # for the rest.
-        if show_call_note and has_call_count(surfaced):
-            evidence.append(_p(f"<em>{_esc(CALL_COUNT_FLOOR_NOTE)}</em>"))
-
-    # I8: every assumed parameter is disclosed WHERE THE NUMBER IS READ, not in
-    # a methodology page nobody opens. Bounded for the same reason as
-    # `surfaced_by`: `name` and `basis` are tenant strings with no cap
-    # upstream, and a single block once reached 41,745 characters here.
-    assumed = [a for a in _as_list(finding.get("assumed_params")) if isinstance(a, dict)]
-    # Hoisted to the top of the section when every finding says the same
-    # thing; see `_shared_assumptions`. Suppressed HERE rather than emptied
-    # upstream so the finding row itself is untouched.
-    if shared_assumptions:
-        assumed = []
-    if assumed:
-        shown = assumed[:MAX_ASSUMED_PARAMS]
-        evidence.append(_ul(
-            f"<strong>{_esc_clipped(a.get('name'), MAX_PARAM_NAME_CHARS)}</strong>"
-            f": {_esc_clipped(a.get('basis'), MAX_PARAM_BASIS_CHARS)}"
-            for a in shown
-        ))
-        if len(assumed) > len(shown):
-            evidence.append(_p(
-                f"and {len(assumed) - len(shown)} further assumed parameters"
-            ))
-
-    # SIZED ON THE READER'S OWN ESTIMATE, DISPLAY-ONLY — NEVER SCORING.
-    # `Impact.value`/ranking read the frozen reach exactly as before; this is
-    # commentary alongside an unchanged order. LAST IN THE COLUMN, deliberately
-    # far from the grounded committed-money paragraph above: that number is a
-    # fact, this one is a reach multiplied by a figure the reader typed.
-    #
-    # SKIPPED ENTIRELY FOR AN UNSIZED FINDING (I3): there is no reach to
-    # multiply, and no size should be invented for a theme this run could not
-    # measure.
-    if finding.get("impact_value") is not None:
-        reach_n = float(finding.get("impact_value") or 0)
-        estimate = _finding_money_estimate(reach_n, account_value)
-        if estimate:
-            evidence.append(
-                _p(f"<strong>On your own estimate.</strong> {estimate}.")
-            )
-
-    if why:
-        out.append(
-            '<table class="cols"><tbody><tr>'
-            f"<td>{''.join(why)}</td>"
-            f"<td>{''.join(evidence)}</td>"
-            "</tr></tbody></table>"
-        )
-    else:
-        # No recommendation on this finding, so there is no left-hand column
-        # and nothing to sit beside. One column, full width.
-        out.extend(evidence)
-    # THE COMPOSITION OF THE EVIDENCE, FULL WIDTH UNDER BOTH COLUMNS.
-    # Suppressed to a single sentence when there is nothing to converge — see
-    # `_convergence_figure`.
-    out.append(_convergence_figure(finding))
-    out.extend(tail)
-    return "".join(p for p in out if p)
+    return "".join(x for x in out if x)
 
 
 #: How many findings get a full block in the document.
@@ -2220,7 +2235,12 @@ MAX_RENDERED_SOURCES = 5
 MAX_OVERFLOW_ROWS = 1_000
 
 #: The ledger and the limits section — neither is reachable by the ladder.
-MAX_LEDGER_ROWS = 300
+#: How many rejected candidates are NAMED. Every rejection is still COUNTED —
+#: the per-reason totals below are computed over the whole ledger — but a
+#: reader asked for "10 to 20, not an exhaustive list", and a hundred names
+#: teaches nothing a grouped count does not. Examples are spread across the
+#: reasons so no single cause swallows the allowance.
+MAX_LEDGER_ROWS = 20
 MAX_LEDGER_LABEL_CHARS = 200
 MAX_LEDGER_REASON_CHARS = 400
 MAX_GAPS = 40
@@ -2418,24 +2438,35 @@ def _findings_section(
     # THE SAME NUMBER THE STAT STRIP AND DECISION BOX ALREADY MULTIPLY BY,
     # read once here rather than re-derived per finding.
     account_value = _as_dict(plan).get("account_value")
-    out = ["<h2>What to do</h2>"]
+    out = ["<h2>Each one, in full</h2>"]
 
-    # HOW MUCH OF THE UNSIZED DISCLOSURE THE HEADLINE ALREADY MADE — see
-    # `_headline_unsized_coverage`. Three states, not two: the middle one
-    # states the caveat and never names the count, and treating it as covered
-    # dropped "257 of them could not be sized" out of the document entirely.
+    # ── THE TWO CAVEATS THIS SECTION OWES, STATED ONCE AT ITS HEAD. ───────
+    #
+    # Both used to travel as a clause inside individual lines — "Summarising
+    # one source:" opening every blockquote, and the naming limit buried in
+    # the appendix while the write-ups above it read as though they named
+    # accounts. Neither is dropped. Said once, at the top, they are out of the
+    # way of the prose and still unmissable, which is the whole trade.
+    out.append(_p(
+        "Two things to know before you read these. We can tell you how many "
+        "accounts sit behind a finding, never which ones — this reading "
+        "counts accounts and does not keep their names. And anything set "
+        "apart below is a summary of what one source said rather than a "
+        "quotation: the raw text is checked, used, and never stored."
+    ))
+
+    # THE UNSIZED COUNT, STATED UNCONDITIONALLY. It used to be suppressed
+    # depending on how much of the same disclosure the old opening section had
+    # already made two paragraphs above; that section is now the appendix's
+    # placement note, below this one and no longer naming the count, so the
+    # coordination it required is gone and this is the only place the number
+    # lives.
     unsized = sum(1 for f in findings if f.get("impact_value") is None)
-    covered = _headline_unsized_coverage(findings)
-    if unsized and covered != "full":
-        how_many = "One" if unsized == 1 else str(unsized)
+    if unsized:
+        how_many = "One" if unsized == 1 else f"{unsized:,}"
         out.append(_p(
-            f"{how_many} of these could not be sized"
-            + (
-                "."
-                if covered == "caveat" else
-                " — an unsized theme sorts last without being small: its size "
-                "is unknown, not zero."
-            )
+            f"{how_many} of these we could not size at all. An unsized theme "
+            f"sorts last without being small: its size is unknown, not zero."
         ))
 
     # ONE FACT ABOUT THE CORPUS, OR MANY ABOUT THE FINDINGS? Detected, never
@@ -2455,8 +2486,8 @@ def _findings_section(
 
     if shared_weakest:
         out.append(_p(
-            "<strong>Every finding has the same weakest link</strong>, stated "
-            "once rather than on each: "
+            "<strong>Every finding here has the same weakest link</strong>, "
+            "so we state it once rather than on each: "
             + _esc(shared_weakest)
             # A CLAUSE, NOT A NEW SENTENCE. `cap_reason` arrives uncapitalised
             # ("capped at medium: …"), so a full stop before it rendered
@@ -2465,8 +2496,8 @@ def _findings_section(
         ))
     elif shared_cap:
         out.append(_p(
-            "<strong>Every finding is capped the same way</strong>, stated "
-            "once rather than on each: "
+            "<strong>Every finding here is capped the same way</strong>, so "
+            "we state it once rather than on each: "
             + _stop(_esc(shared_cap))
         ))
 
@@ -2482,8 +2513,8 @@ def _findings_section(
             else f"{shared_count} findings rest on the same assumption"
         )
         out.append(_p(
-            f"<strong>{subject}{'s' if many else ''}</strong>, stated once "
-            "rather than on each:"
+            f"<strong>{subject}{'s' if many else ''}</strong>, which we state "
+            "once rather than on each:"
         ))
         out.append(_ul(
             f"<strong>{_esc_clipped(name, MAX_PARAM_NAME_CHARS)}</strong>"
@@ -2511,9 +2542,9 @@ def _findings_section(
         )
         out.append(_p(
             f"<strong>List pricing was quoted in {where}.</strong> {span}. "
-            f"What was quoted, not what was agreed — the same price offered "
-            f"to several accounts is one rate card, so these are never added "
-            f"together or added to any figure above."
+            f"That is what was quoted, not what was agreed — the same price "
+            f"offered to several accounts is one rate card, so we never add "
+            f"these together or add them to any figure above."
         ))
 
     full = findings[:full_cap]
@@ -2528,9 +2559,12 @@ def _findings_section(
     # labels come off and the comparison explains the absence instead of
     # comparing against a sibling that is not an alternative.
     one_topic = options_are_one_topic(full)
-    # The comparison reads after BOTH write-ups when there are two of them;
-    # with only one there is no "next" to read it after, so it stays inline.
-    defer_comparison = len(full) > 1
+    # THE COMPARISON ALWAYS READS ON THE FIRST SCREEN, above both write-ups
+    # — `_answer_section` renders it, with a fallback built from the ranking's
+    # own terms when the deep pass wrote none. It used to sit two screens
+    # below the first option, which is what made a reader conclude the
+    # comparison was missing.
+    defer_comparison = True
     # ONE CALL-COUNT FLOOR NOTE PER DOCUMENT. It is a fact about how the
     # corpus was ingested, not about any one finding, and it used to print
     # under every block that showed a call count.
@@ -2560,37 +2594,165 @@ def _findings_section(
     return "".join(out)
 
 
-def _why_number_one_section(written: list[dict]) -> str:
-    """"But I think you should do number one because it's the most important
-    one" — the comparison, read AFTER both write-ups rather than inside the
-    first one.
+def _rank_reason(first: dict, second: dict) -> str:
+    """Why the first write-up outranks the second, when the deep pass wrote no
+    comparison of its own.
 
-    The sentence itself is unchanged and still comes off the engine's own
-    `deep_recommendation.comparison`; only where it sits has moved. Silent
-    when there is nothing to compare — one write-up, or a run whose deep pass
-    produced no comparison.
+    READ OFF `_rank`'s OWN KEY — (conflict, claim-type bucket, reach,
+    confidence) — in that order, and it stops at the first term that actually
+    separated the two. Nothing is scored or decided here (I2): the order was
+    frozen upstream and this says which term produced it.
+
+    THE LAST BRANCH IS THE HONEST ONE. When no term visible in this document
+    separates them, the remaining term is a confidence SCORE the report does
+    not print, and the sentence says so rather than inventing a reason that
+    reads better.
     """
-    if len(written) < 2:
-        return ""
-    comparison = ""
-    for f in written:
-        candidate = (
-            _as_dict(f.get("deep_recommendation")).get("comparison") or ""
-        ).strip()
-        if candidate:
-            comparison = candidate
-            break
-    one_topic = options_are_one_topic(written)
-    if not comparison and not one_topic:
-        return ""
-    out = ["<h2>Why number one</h2>"]
-    if comparison:
-        out.append(_p(_esc_clipped(comparison, MAX_STATEMENT_CHARS)))
-    if one_topic:
+    a_conflict = (first.get("adjudication") or "") == "conflict"
+    b_conflict = (second.get("adjudication") or "") == "conflict"
+    if a_conflict and not b_conflict:
+        return (
+            "Two sources that may both speak contradict each other in the "
+            "first one, and a disagreement is placed above everything that is "
+            "not one — it is the thing most worth resolving, not the biggest."
+        )
+    a_bucket = type_bucket([str(t) for t in _as_list(first.get("claim_types"))])
+    b_bucket = type_bucket([str(t) for t in _as_list(second.get("claim_types"))])
+    if a_bucket != b_bucket and a_bucket == TYPE_BUCKET_BLOCKER:
+        return (
+            "The first is something accounts are blocked by; the second is "
+            "something they asked for. We put a blocker above a request, "
+            "whatever their sizes."
+        )
+    if a_bucket != b_bucket and a_bucket == TYPE_BUCKET_PREFERENCE:
+        return (
+            "Accounts asked for the first one. The second describes the world "
+            "without blocking anyone or asking for anything."
+        )
+    a_val, b_val = first.get("impact_value"), second.get("impact_value")
+    if isinstance(a_val, (int, float)) and b_val is None:
+        return (
+            f"We could size the first at {_esc(_reach(first))} and could not "
+            f"size the second at all. That is an unknown rather than a small "
+            f"number, so read this as an ordering we can defend, not as a gap "
+            f"between them."
+        )
+    if (
+        isinstance(a_val, (int, float)) and isinstance(b_val, (int, float))
+        and a_val != b_val
+    ):
+        return (
+            f"It reaches {_esc(_reach(first))} against "
+            f"{_esc(_reach(second))}."
+        )
+    a_band = (first.get("confidence_band") or "").strip()
+    b_band = (second.get("confidence_band") or "").strip()
+    if a_band and b_band and a_band != b_band:
+        return (
+            f"They reach about the same, and the first rests on {_esc(a_band)} "
+            f"confidence against {_esc(b_band)}."
+        )
+    return (
+        "Nothing this document prints separates them. The ranking split them "
+        "on a confidence score it does not show, so treat the gap between "
+        "these two as narrow."
+    )
+
+
+def _answer_section(
+    kept: list[dict], full_cap: int, one_topic: bool,
+) -> str:
+    """The screen that answers the question, above everything else.
+
+    "No one is really going to read all of this, people are going to skim."
+    So the first thing under the title is what to build, numbered, with the
+    facts under each as a strip rather than a paragraph, and the reason for
+    the order immediately beneath. Everything that used to sit here — what was
+    asked, what the definition was, the problem, the short version, the
+    decision box, the synthesis — is below it or inside the write-up it
+    belongs to.
+
+    THE COMPARISON LIVES HERE, and that is the specific fix. It used to render
+    two screens after the first option, so reaching it meant holding both
+    options in your head; the reader's conclusion was that the memo did not
+    compare them at all. It always did.
+
+    AND IT ALWAYS RENDERS. The engine's own `comparison` is a model-authored
+    sentence that a run can simply not have, and a screen whose last line
+    disappears on some runs is a screen whose shape a reader cannot learn. The
+    fallback is `_rank_reason`, built from the ranking's own terms.
+
+    NOTHING NEW IS ASSERTED. Every option is a deep write-up the run already
+    produced, in the run's own frozen rank order (I10); the numbering is
+    `data_gaps.option_numbers`, the same function the write-ups below use, so
+    the screen and the cards cannot disagree about which is first.
+    """
+    out = ["<h2>What we recommend</h2>"]
+
+    if not kept:
         out.append(_p(
-            f"<strong>Why these are not two options.</strong> "
-            f"{_esc(ONE_TOPIC_NOTE)}"
+            "Nothing survived verification, so we have nothing to recommend. "
+            "What was considered is listed below with the reason it was "
+            "dropped — that list, not this silence, is the result of this run."
         ))
+        return "".join(out)
+
+    written = kept[:full_cap]
+    options = option_numbers(written)
+    numbered = [(n, f) for n, f in zip(options, written) if n]
+    if not numbered:
+        out.append(_p(
+            "Nothing in this evidence produced a build we can stand behind, "
+            "so there is nothing to recommend. What we did find is ranked "
+            "below, and it is worth reading before you conclude there is "
+            "nothing here."
+        ))
+        return "".join(out)
+
+    # THE GOAL IS THE TITLE, ONE LINE ABOVE THIS. Naming it again here put the
+    # same words on the screen twice, which is what a deck is least able to
+    # afford.
+    n = len(numbered)
+    if n == 1:
+        out.append(
+            '<p class="deck">One thing here is worth building.</p>'
+        )
+    else:
+        out.append(
+            f'<p class="deck">We think {_count_word(n, capital=False)} things '
+            f'here are worth building, and one of them first.</p>'
+        )
+
+    rows = "".join(
+        "<tr>"
+        f"<td>{num}.</td>"
+        f"<td><strong>"
+        f"{_esc_clipped(_as_dict(f.get('deep_recommendation')).get('action'), MAX_STATEMENT_CHARS)}"
+        f"</strong><br><span>{_option_chips(f)}</span></td>"
+        "</tr>"
+        for num, f in numbered
+    )
+    out.append(f'<table class="opts"><tbody>{rows}</tbody></table>')
+
+    if n > 1:
+        comparison = ""
+        for _, f in numbered:
+            candidate = (
+                _as_dict(f.get("deep_recommendation")).get("comparison") or ""
+            ).strip()
+            if candidate:
+                comparison = candidate
+                break
+        reason = (
+            _esc_clipped(comparison, MAX_STATEMENT_CHARS) if comparison
+            else _rank_reason(numbered[0][1], numbered[1][1])
+        )
+        out.append(_p(f"<strong>Do number one first.</strong> {reason}"))
+        if one_topic:
+            out.append(_p(
+                f"<strong>These are not two options.</strong> "
+                f"{_esc(ONE_TOPIC_NOTE)}"
+            ))
     return "".join(out)
 
 
@@ -2613,13 +2775,49 @@ def _before_you_spend_section(written: list[dict]) -> str:
     if not gaps:
         return ""
     return "".join([
-        "<h2>Before you spend</h2>",
+        "<h2>What we do not know about number one</h2>",
         _p(
-            "Gaps in what is known about the recommended option, not work to "
-            "schedule."
+            "These are gaps in what we know about the one we would start "
+            "with, not work for anyone to schedule. We would want them closed "
+            "before you spend against it."
         ),
         _ul(_esc_clipped(g, MAX_STATEMENT_CHARS) for g in gaps),
     ])
+
+
+def _why_not_chosen(finding: dict) -> str:
+    """Why a theme is in the tail rather than in the two above.
+
+    THE REASON ALREADY EXISTS IN THE DATA — it is `_rank`'s own key, read back
+    out: what kind of claim is behind it, how far it reaches, and how much the
+    evidence earned. Nothing is judged here and no model is asked (I2); the
+    ordering was frozen upstream, and this states the terms it was frozen on.
+
+    IT USED TO BE A BARE LABEL. Twenty names in rank order tell a reader
+    nothing they can argue with — the reader's own description of what this
+    list should do is "we consider these other ten projects, but then we
+    didn't choose them because maybe the revenue is large, but then the
+    confidence is low." That sentence is two facts and a contrast, and both
+    facts were already on the finding.
+    """
+    bits: list[str] = []
+    if finding.get("impact_value") is None:
+        bits.append("we could not size it — unknown, not small")
+    else:
+        bits.append(_esc(_reach(finding)))
+    band = (finding.get("confidence_band") or "").strip()
+    if band:
+        bits.append(f"{_esc(band)} confidence")
+    bucket = type_bucket([str(t) for t in _as_list(finding.get("claim_types"))])
+    if bucket == TYPE_BUCKET_BLOCKER:
+        bits.append("stated as blocking accounts")
+    elif bucket == TYPE_BUCKET_PREFERENCE:
+        bits.append("asked for rather than blocking")
+    else:
+        bits.append("describes rather than blocks or asks")
+    if (finding.get("adjudication") or "") == "conflict":
+        bits.append("<strong>sources disagree</strong>")
+    return _stop("; ".join(bits))
 
 
 def _other_considered_section(
@@ -2630,38 +2828,51 @@ def _other_considered_section(
     """"And then the bottom will be other things that we considered — these
     are 20 other things that you could also build."
 
-    One line each, in the run's own rank order, with everything past the cap
+    A TABLE, BECAUSE A LIST OF NAMES IS NOT AN ANSWER. This was one clipped
+    label per line in rank order, which says what was considered and nothing
+    about why it lost. Each row now carries what the theme actually is, what
+    it is worth in the same vocabulary the set-aside appendix uses (`_worth`,
+    so an unsized theme reads "Unsized" and never "0"), and the terms it
+    ranked below the two above on (`_why_not_chosen`).
+
+    Still in the run's own rank order, and everything past the cap is still
     COUNTED. The count is the whole reason this section can be short: a list
     that stops without saying so reads as the complete set, which is the
     silent degradation this file exists to prevent.
-
-    THE LABEL, NOT THE STATEMENT. A statement is a whole sentence ("30 claims
-    across 11 accounts concern a reported theme: X — summarising one source:
-    …"); twenty of those is a
-    wall. The label is the one phrase a reader scans for, and the statement is
-    the fallback for a run stored before labels existed.
     """
     rest = findings[full_cap:]
     if not rest:
         return ""
     listed = rest[:overflow_cap]
-    out = [
-        f"<h2>Other things considered ({len(rest)})</h2>",
-        _p(
-            "Ranked below the two above. One line each, in rank order — all "
-            "of them are on the run."
-        ),
-    ]
+    out = [f"<h2>The other {len(rest):,} we did not choose</h2>"]
+    out.append(_p(
+        "Every one of these was found, corroborated and ranked exactly like "
+        "the two above. The last column is the one that matters: it is what "
+        "put each of them below, in the ranking's own terms."
+    ))
     rows = "".join(
-        f"<li>{offset}. "
-        f"{_esc_clipped((f.get('label') or '').strip() or _statement_text(f), MAX_STATEMENT_CHARS)}"
-        f"</li>"
+        "<tr>"
+        f"<td>{offset}</td>"
+        f"<td><strong>"
+        f"{_esc_clipped((f.get('label') or '').strip() or _statement_text(f), MAX_PARAM_NAME_CHARS)}"
+        f"</strong></td>"
+        f"<td>{_esc_clipped((f.get('example') or '').strip() or _statement_text(f), MAX_PARAM_BASIS_CHARS)}</td>"
+        f"<td>{_esc(_worth(f))}</td>"
+        f"<td>{_why_not_chosen(f)}</td>"
+        "</tr>"
         for offset, f in enumerate(listed, start=full_cap + 1)
     )
-    out.append(f"<ul>{rows}</ul>")
+    out.append(
+        '<table class="aside"><thead><tr>'
+        "<th>#</th><th>Theme</th><th>What it is</th><th>Worth</th>"
+        "<th>Why it is not one of the two</th>"
+        "</tr></thead><tbody>" + rows + "</tbody></table>"
+    )
     beyond = len(rest) - len(listed)
     if beyond > 0:
-        out.append(_p(f"and {beyond} more, all on the run."))
+        out.append(_p(
+            f"and {beyond:,} more, all of them on the run."
+        ))
     return "".join(out)
 
 
@@ -2695,7 +2906,10 @@ def _ledger_section(ledger: list[dict]) -> str:
     # to be clipped for `statement` — and the shed ladder cannot rescue this
     # section, because it sheds findings only. 102 rows at 4,000-char labels
     # rendered 828,071 characters, over the limit at every rung.
-    shown = ledger[:MAX_LEDGER_ROWS]
+    # COUNTED IN FULL, NAMED IN PART. Grouping over a truncated slice would
+    # turn "49 died with no authoritative source" into "3 died", which is the
+    # one number in this section a reader actually uses.
+    shown = ledger
     # ALWAYS EXPANDED HERE, unlike the panel, which folds a long ledger behind
     # a `<details>`. `<details>` is not on the artifact allowlist and would be
     # unwrapped into a permanently-open list anyway.
@@ -2731,7 +2945,7 @@ def _ledger_section(ledger: list[dict]) -> str:
     # a section that reordered itself would undermine that everywhere else).
     ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
-    out = [f"<h2>Considered and ruled out ({len(shown)})</h2>"]
+    out = [f"<h2>Considered and ruled out ({len(ledger)})</h2>"]
     out.append(_p(
         "A ranking whose rejections are invisible is a ranking you have to "
         "take on faith. Each of these was a candidate and each one died for a "
@@ -2753,6 +2967,12 @@ def _ledger_section(ledger: list[dict]) -> str:
             )
         )
         out.append(_p(head))
+        # AN ALLOWANCE PER REASON, not a global truncation. A flat cut would
+        # spend every name on the biggest group and leave the smaller causes
+        # unnamed, which is the opposite of useful: the rare rejection is the
+        # one a reader wants to see an example of.
+        per_reason = max(1, MAX_LEDGER_ROWS // max(1, len(ordered)))
+        named = rows[:per_reason]
         out.append(_ul(
             f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
             f"</strong>"
@@ -2761,8 +2981,13 @@ def _ledger_section(ledger: list[dict]) -> str:
                 f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
-            for r in rows
+            for r in named
         ))
+        if len(rows) > len(named):
+            out.append(_p(
+                f"<em class=\"src\">and {len(rows) - len(named)} more for the "
+                f"same reason, counted above and not named here.</em>"
+            ))
     # THE BOOKKEEPING, SAID AS BOOKKEEPING. These rows carry numbers the reader
     # needs — how many candidates the list could not hold, how many signals
     # could not be grouped at all — and burying them among the candidates is
@@ -2886,6 +3111,7 @@ def _provenance_section(
     relevance_gate_ran: bool,
     relevance_judged: dict,
     recommendation_basis: str,
+    written: int = 0,
 ) -> str:
     """Everything the memo rests on, AFTER the memo.
 
@@ -2913,15 +3139,20 @@ def _provenance_section(
     out = [
         '<h2 class="appendix">How this was produced</h2>',
         _p(
-            "What the memo above rests on: what was read, what was missing "
-            "from it, and how the ranking works."
+            "What the memo above rests on: what you asked us, what we read, "
+            "what was missing from it, and how the ranking works. None of it "
+            "is needed to act on the recommendation, and all of it is needed "
+            "to argue with it."
         ),
+        _ask_section(run, plan),
         _what_was_read_section(run, plan),
+        _funnel_chart(plan, considered, kept, written),
         _funnel_section(len(considered), len(kept)),
         _relevance_coverage_section(relevance_judged),
         _definition_method_note(run),
         _framework_section(kept, plan, with_table=False),
         _ordering_note(kept),
+        _placement_note_section(kept),
         _recommendation_basis_section(recommendation_basis),
         _set_aside_section(set_aside),
         # SAID ONCE, AND SAID PLAINLY, because the memo above is read as
@@ -2931,9 +3162,9 @@ def _provenance_section(
         # here is the alternative to a write-up that implies a customer list
         # it cannot produce.
         _p(
-            "Accounts are counted, not named: this reading records how many "
-            "accounts a theme touches, never which ones. Where a name appears "
-            "it is a source document."
+            "We count accounts, we never name them: this reading records how "
+            "many accounts a theme touches and not which ones. Where a name "
+            "appears in this document it is a source document."
         ),
     ]
     return "".join(p for p in out if p)
@@ -3013,12 +3244,12 @@ def render_report_html(
     relevance_gate_ran = bool(prioritisation.get("relevance_gate_ran"))
     relevance_judged_info = _as_dict(prioritisation.get("relevance_judged"))
 
-    # THE ONE RECOMMENDATION FOR THE WHOLE REPORT (item 1). Read straight off
-    # the run's own JSON — computed once, upstream, by
-    # `recommend.build_synthesized_recommendation` — and rendered by
-    # `_assemble` below BEFORE the ranking mechanics (`_framework_section`):
-    # the answer leads, and how it was ranked is supporting detail
-    # underneath it, not competing with it for attention.
+    # THE ARGUMENT BEHIND THE ANSWER. Read straight off the run's own JSON —
+    # computed once, upstream, by `recommend.build_synthesized_recommendation`
+    # — and rendered by `_assemble` below immediately UNDER the screen that
+    # states the answer, never as a second answer of its own: that call binds
+    # its `action` to rank one's action verbatim, so printing it again is the
+    # same sentence twice. See `_why_this_section`.
     synthesized_recommendation = _as_dict(
         prioritisation.get("synthesized_recommendation")
     )
@@ -3032,25 +3263,33 @@ def render_report_html(
         #    prioritization, with the table. And then the bottom will be other
         #    things that we considered."
         #
-        # Title, the numbers, the answer, the two write-ups, why the first
-        # one, the table, the tail. Everything that describes HOW the run
-        # worked is below all of that, in `_provenance_section`.
+        # THE ANSWER IS THE FIRST SCREEN, and everything else is arranged
+        # around it: the argument for it, who has to decide, the numbers, the
+        # write-ups in full, what is not known about the first one, the
+        # ranking, and the tail of what was not chosen. Everything that
+        # describes HOW the run worked — including what was asked and what the
+        # definition was — is below all of that, in `_provenance_section`.
+        #
+        # WHAT MOVED, AND WHY. "No one is really going to read all of this,
+        # people are going to skim." Six sections used to sit between the
+        # title and the first option — the ask, the definition, the problem,
+        # the short version, the decision box and a synthesis headed "the
+        # recommendation" two screens above options headed "recommended". A
+        # reader reached the thing they came for on the third screen and met
+        # the word "recommended" three times before getting there.
         #
         # NOTHING HERE CHANGES WHAT THE ENGINE COMPUTED. The same findings, in
         # the same frozen rank order (I10), with the same values; this list is
         # the order they are read in.
         written = kept[:full_cap]
+        one_topic = options_are_one_topic(written)
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
-            _stat_strip(plan, findings, kept),
-            _funnel_chart(plan, findings, kept, len(written)),
-            _ask_section(run, plan),
-            _problem_section(kept, plan),
-            _headline_section(kept),
+            _answer_section(kept, full_cap, one_topic),
+            _why_this_section(synthesized_recommendation, written),
             _decision_section(plan, kept),
-            _synthesized_recommendation_section(synthesized_recommendation),
+            _stat_strip(plan, findings, kept),
             _findings_section(kept, full_cap, plan),
-            _why_number_one_section(written),
             _before_you_spend_section(written),
             _framework_section(kept, plan),
             _other_considered_section(kept, full_cap, overflow_cap),
@@ -3060,6 +3299,7 @@ def render_report_html(
                 relevance_gate_ran=relevance_gate_ran,
                 relevance_judged=relevance_judged_info,
                 recommendation_basis=recommendation_basis,
+                written=len(written),
             ),
             _ledger_section(ledger),
             _limits_section(plan, relevance_gate_ran=relevance_gate_ran),

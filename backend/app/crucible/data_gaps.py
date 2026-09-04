@@ -258,41 +258,48 @@ def options_are_one_topic(findings: Sequence[Mapping]) -> bool:
 
 #: What the report says instead of a second OPTION LABEL when the corpus
 #: produced one build described twice. It never replaces the comparison: "why
-#: this one first" is the question the reader came with, and it is answered
-#: whether or not the two turn out to be alternatives.
+#: this one first" is the question the reader came with, it is answered
+#: whether or not the two turn out to be alternatives, and it is answered on
+#: the first screen rather than after both write-ups.
 ONE_TOPIC_NOTE = (
     "These two write-ups describe the same build rather than a choice between "
-    "approaches, so they are not offered as alternatives. The comparison "
-    "below still says which comes first, and why."
+    "approaches, so we are not offering them as alternatives. Which comes "
+    "first, and why, still stands."
 )
+
+
+#: How an option's number reads in its own header. Spelled out for the
+#: handful a memo of two write-ups can ever reach, so "Number two." does not
+#: sit under a screen that said "Do number one first."
+_OPTION_WORDS = {1: "one", 2: "two", 3: "three", 4: "four", 5: "five"}
 
 
 def option_header(option: int, total: int, one_topic: bool) -> str:
     """The heading for one deep write-up's card.
 
-    EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION. Returning all-zero
-    option numbers under one-topic made every deep card fall back to the same
-    "Recommended — the full write-up" header, so a real page carried that
-    phrase twice and, counting the short-form cards, the word "Recommended"
-    seven times. A reader could not tell what they were being asked to do.
+    THE WORD "RECOMMENDED" IS NOT IN HERE ANY MORE, and its absence is the
+    point. Exactly one thing in the document is the recommendation and it is
+    the screen at the top, which names what to build and which to do first.
+    These headers used to say it too — "Option 1 — recommended." beneath a
+    section already headed "The recommendation" — so a reader met the word
+    three times in three different scopes and could not tell which was the
+    ask. Here the header's whole job is to say WHICH option this card is.
 
-    So the numbering never disappears — it decides which card is first — and
-    only its PRESENTATION changes: numbered options when the two are a real
-    choice, and a plainly subordinate header for the second when they are not.
+    THE NUMBERING NEVER DISAPPEARS — it decides which card is first, and the
+    screen above refers to the cards by number. Only its presentation changes:
+    numbered options when the two are a real choice, and a plainly
+    subordinate header for the second when they are one build described twice.
     """
     if option <= 0:
         return ""
     if one_topic:
         return (
-            "Recommended — the full write-up." if option == 1
+            "Number one." if option == 1
             else "Also written up — the same build, not an alternative."
         )
     if total <= 1:
-        return "Recommended — the full write-up."
-    return (
-        "Option 1 — recommended." if option == 1
-        else f"Option {option} — alternative."
-    )
+        return "What to build."
+    return f"Number {_OPTION_WORDS.get(option, option)}."
 
 
 def option_numbers(findings: Sequence[Mapping]) -> tuple[int, ...]:
