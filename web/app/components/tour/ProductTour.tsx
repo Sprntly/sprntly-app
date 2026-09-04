@@ -140,10 +140,13 @@ export function ProductTour() {
       workspaceCount: workspaces.length,
     }
     const resolved = stepsFor(audience)
-    // Defensive: a company with everything switched off could filter the list
-    // down to the two anchorless bookends. A "tour" of welcome-then-goodbye is
-    // worse than none, so it does not run.
-    if (resolved.length < 3) {
+    // Defensive, and the number moved with the tour. It used to be three,
+    // because twelve steps could filter down to the two anchorless bookends
+    // and a "tour" of welcome-then-goodbye is worse than none. There are no
+    // bookends now: all three steps carry content, so the only way to fall
+    // short is a company with chat switched off, which leaves two real steps
+    // and a tour still worth running. One step is a popup, not a tour.
+    if (resolved.length < 2) {
       decidedRef.current = true
       return
     }
