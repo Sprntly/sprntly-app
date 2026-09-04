@@ -19729,13 +19729,6 @@
     flex: 1;
   }
 
-  .onb-foot-meta {
-    margin-top: 34px;
-    font-size: 11px;
-    color: var(--ink-4);
-    text-align: center;
-  }
-
   /* Form primitives — scoped to the onboarding card/footer. */
   .onb-card .form-grid {
     display: grid;
