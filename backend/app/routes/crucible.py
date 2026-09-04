@@ -168,7 +168,32 @@ def get_run(run_id: int, company: WorkspaceContext = Depends(require_crucible_mo
         # indistinguishable from "does not exist".
         raise HTTPException(404, "Run not found")
     findings, ledger = runs_db.load_findings(run_id, company.company_id)
-    return {**_public(row), "findings": findings, "considered": ledger}
+    # THE REPORT, RENDERED SERVER-SIDE, IN THE SAME RESPONSE.
+    #
+    # The panel used to rebuild this document in React from the rows below —
+    # a second renderer of the same report, which is how it came to be missing
+    # the decision box and the grounded-money line the exported document had,
+    # and why every ordering rule had to be written twice and kept in step by
+    # hand. It now displays what the server produces, so there is one place a
+    # rule about this document can live.
+    #
+    # IN THIS RESPONSE RATHER THAN BEHIND ITS OWN ENDPOINT: it is derived
+    # purely from `row` and the rows already loaded here, so a second call
+    # would re-query for nothing and open a window where the panel holds a
+    # report and a run that disagree. It is string assembly over data already
+    # in memory.
+    #
+    # `findings` may be empty mid-run; the renderer handles that and returns
+    # the document it can honestly produce, which is what the panel should
+    # show while the rest is still generating.
+    from app.crucible.report import render_report_document
+
+    return {
+        **_public(row),
+        "findings": findings,
+        "considered": ledger,
+        "report_html": render_report_document(row, findings, ledger),
+    }
 
 
 @router.post("/{run_id}/confirm")

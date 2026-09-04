@@ -36,8 +36,12 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from functools import lru_cache
 from html import escape
+from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
+
+from app.html_style import inject_canonical_css
 
 from app.crucible.data_gaps import (
     DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_header,
@@ -179,7 +183,7 @@ _BAR_STYLE = "color: #1A6B47; font-family: 'IBM Plex Mono', monospace"
 def _bar_cell(value: Any, largest: Any) -> str:
     """A bar, wrapped for the page. "" when there is nothing honest to draw."""
     bar = _bar(value, largest)
-    return f'<span style="{_BAR_STYLE}">{bar}</span>' if bar else ""
+    return f'<span class="bar" style="{_BAR_STYLE}">{bar}</span>' if bar else ""
 
 
 def _bar(value: Any, largest: Any) -> str:
@@ -488,7 +492,7 @@ def _stat_strip(
     # NO `class`. The document sanitizer strips attributes — a styling hook
     # here would be silently removed from the saved artifact, so the strip is
     # built from tags the sanitizer keeps and reads as a row either way.
-    return f"<table><tbody><tr>{body}</tr></tbody></table>"
+    return f'<table class="strip"><tbody><tr>{body}</tr></tbody></table>'
 
 
 def _funnel_chart(
@@ -531,7 +535,7 @@ def _funnel_chart(
         f'<td><strong>{v:,}</strong></td></tr>'
         for k, v in stages
     )
-    return f"<table><tbody>{rows}</tbody></table>"
+    return f'<table class="chart"><tbody>{rows}</tbody></table>'
 
 
 def _decision_section(plan: dict, findings: list[dict]) -> str:
@@ -642,7 +646,7 @@ def _synthesized_recommendation_section(synth: dict) -> str:
         out.append("<p><strong>Drawn from.</strong></p>")
         out.append(_ul(
             f"{_esc_clipped(c.get('evidence'), MAX_STATEMENT_CHARS)} "
-            f"<em>— from: “"
+            f'<em class="src">— from: \u201c'
             f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
             f"”</em>"
             for c in citations[:MAX_SYNTHESIS_CITATIONS_RENDERED]
@@ -767,7 +771,7 @@ def _rice_section(
         for r in rows
     )
     out.append(
-        "<table><thead><tr>"
+        '<table class="rank"><thead><tr>'
         "<th>Theme</th><th>Reach</th><th>Impact</th><th>Confidence</th>"
         "<th>Effort</th><th>Score</th><th>Inputs</th>"
         "</tr></thead><tbody>" + body + "</tbody></table>"
@@ -852,7 +856,7 @@ def _moscow_section(
         for r in rows
     )
     out.append(
-        "<table><thead><tr>"
+        '<table class="rank"><thead><tr>'
         "<th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>"
         "<th>Source documents</th>"
         "</tr></thead><tbody>" + body + "</tbody></table>"
@@ -993,7 +997,7 @@ def _set_aside_section(pairs: list) -> str:
         for f, reason in shown
     )
     out.append(
-        "<table><thead><tr>"
+        '<table class="aside"><thead><tr>'
         "<th>Theme</th><th>What it is</th><th>Worth this cycle</th>"
         "<th>Why it was set aside</th>"
         "</tr></thead><tbody>" + rows + "</tbody></table>"
@@ -1067,7 +1071,7 @@ def _headline_section(findings: list[dict]) -> str:
         return "".join(out)
 
     top = findings[0]
-    out.append(_p(f"<strong>{_esc_statement(top)}</strong>"))
+    out.append(f'<p class="deck"><strong>{_esc_statement(top)}</strong></p>')
     band = (top.get("confidence_band") or "").strip()
     claims = len(_as_list(top.get("claim_ids")))
 
@@ -1457,7 +1461,7 @@ def _finding_block(
         _esc_clipped(label, MAX_STATEMENT_CHARS) if label
         else _esc_statement(finding)
     )
-    out = [f"<h3>{rank}. {head}</h3>"]
+    out = [f'<h3 class="finding">{rank}. {head}</h3>']
     # The argument, and the evidence under it. Built as two lists and joined
     # into one table row at the end, so a card with no recommendation degrades
     # to a single column instead of an empty cell beside a full one.
@@ -1491,10 +1495,10 @@ def _finding_block(
         # label: nothing here groups, scores or chooses, and no model is
         # consulted (I2).
         header = option_header(option, option_total, one_topic)
-        out.append(_p(
-            f"<strong>{header}</strong> "
-            f"{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}"
-        ))
+        out.append(
+            f'<p class="action"><strong>{header}</strong> '
+            f'{_esc_clipped(deep_action, MAX_STATEMENT_CHARS)}</p>'
+        )
         why.append(_p(
             f"<em>Why.</em> {_esc_clipped(deep_because, MAX_STATEMENT_CHARS)}"
         ))
@@ -1506,7 +1510,7 @@ def _finding_block(
             why.append("<p><strong>What to change.</strong></p>")
             why.append(_ul(
                 f"{_esc_clipped(c.get('text'), MAX_STATEMENT_CHARS)} "
-                f"<em>— from: “"
+                f'<em class="src">— from: \u201c'
                 f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
                 f"”</em>"
                 for c in changes[:MAX_DEEP_CHANGES]
@@ -1575,10 +1579,10 @@ def _finding_block(
     elif action and because:
         # NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. This is the
         # one-line pass over a finding that did NOT get a full write-up.
-        out.append(_p(
-            f"<strong>Suggested.</strong> "
-            f"{_esc_clipped(action, MAX_STATEMENT_CHARS)}"
-        ))
+        out.append(
+            f'<p class="action"><strong>Suggested.</strong> '
+            f'{_esc_clipped(action, MAX_STATEMENT_CHARS)}</p>'
+        )
         why.append(_p(
             f"<em>Why.</em> {_esc_clipped(because, MAX_STATEMENT_CHARS)}"
         ))
@@ -1755,7 +1759,7 @@ def _finding_block(
 
     if why:
         out.append(
-            "<table><tbody><tr>"
+            '<table class="cols"><tbody><tr>'
             f"<td>{''.join(why)}</td>"
             f"<td>{''.join(evidence)}</td>"
             "</tr></tbody></table>"
@@ -2540,7 +2544,7 @@ def _provenance_section(
     stops being read.
     """
     out = [
-        "<h2>How this was produced</h2>",
+        '<h2 class="appendix">How this was produced</h2>',
         _p(
             "What the memo above rests on: what was read, what was missing "
             "from it, and how the ranking works."
@@ -2711,6 +2715,68 @@ def render_report_html(
         if len(html) <= _BODY_LIMIT:
             return html
     return html
+
+
+#: The canonical stylesheet, read off disk once. Beside this module rather
+#: than under `skills/` — see the file's own header for why a deterministic
+#: pipeline should not be vendored as a prompt-layer skill just to own a CSS
+#: file.
+_CSS_PATH = Path(__file__).with_name("assets") / "goal-analysis.css"
+
+
+@lru_cache(maxsize=1)
+def _document_css() -> str:
+    return _CSS_PATH.read_text(encoding="utf-8")
+
+
+def render_report_document(
+    run: dict,
+    findings: Optional[list[dict]] = None,
+    ledger: Optional[list[dict]] = None,
+    plan: Optional[dict] = None,
+) -> str:
+    """The same report, in the other envelope: a self-contained HTML document.
+
+    ONE CONTENT GENERATOR, TWO ENVELOPES, and the split is the whole point.
+    `render_report_html` produces the BODY — every sentence, every number,
+    every ordering decision — and it is called here rather than reimplemented,
+    so the two can never disagree about what the report says. This function
+    adds a `<!doctype>`, a sheet and a wrapper. Nothing else.
+
+    WHY TWO ENVELOPES EXIST AT ALL. The body's first home is
+    `custom_artifacts.body_html`, which is sanitized on every write to an
+    allowlist that strips `class`, drops `<style>` with its children, and
+    keeps almost no CSS — because that document is rendered INLINE in a
+    contenteditable surface, where the app's own chrome is one DOM away. The
+    body is written to that constraint and stays written to it.
+
+    But that constraint is a property of one destination, not of the report.
+    The PRD, the evidence brief and every chat report render as a whole
+    document inside a sandboxed iframe (`web/app/components/shared/
+    HtmlReportView.tsx`, `srcDoc` + `sandbox="allow-same-origin"` and no
+    `allow-scripts`), where a stylesheet is safe because nothing can execute
+    and nothing can reach the app around it. This envelope is that path, and
+    it is why the panel no longer rebuilds the document in React: it renders
+    the same bytes the server already knows how to produce.
+
+    THE EMPTY `<style>` MARKER IS DELIBERATE. `inject_canonical_css` replaces
+    the first `<style>` element, so the sheet is spliced in by the server
+    exactly as it is for the other two documents, and re-running this on its
+    own output is idempotent.
+    """
+    body = render_report_html(run, findings, ledger, plan)
+    title = _esc(report_title(run))
+    doc = (
+        "<!doctype html><html lang=\"en\"><head>"
+        "<meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>{title}</title>"
+        "<style></style>"
+        "</head><body>"
+        f'<div class="frame"><div class="page">{body}</div></div>'
+        "</body></html>"
+    )
+    return inject_canonical_css(doc, _document_css())
 
 
 def report_title(run: dict) -> str:
