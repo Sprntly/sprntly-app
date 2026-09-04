@@ -73,6 +73,9 @@ const READY = {
   conversation_id: null, artifact_id: null,
   created_at: null, finished_at: null,
   findings: [FINDING], considered: [],
+  // The run's own rendered document — what the read-only report shows now that
+  // the panel no longer rebuilds findings in React.
+  report_html: "<h1>raise net revenue retention</h1><p>4 accounts</p>",
 }
 
 const DOC = {
@@ -113,7 +116,11 @@ describe("a report that has been edited", () => {
     render(<GoalAnalysisTab runId={7} />)
     fireEvent.click(await screen.findByTestId("goal-report-back"))
     expect(await screen.findByTestId("goal-report")).toBeTruthy()
-    expect(screen.getByTestId("goal-sized").textContent).toBe("4 accounts")
+    // Back on the RUN's own report — the document the analysis produced, not
+    // the copy being edited. What that document says is the generator's
+    // business (`backend/tests/test_crucible_report.py`); what matters here is
+    // that the reader landed back on it.
+    expect(screen.getByTitle("Goal analysis")).toBeTruthy()
   })
 
   it("says so on the read-only view, so the edited version is not orphaned", async () => {

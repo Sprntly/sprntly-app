@@ -47,41 +47,46 @@ const FINDING = {
 beforeEach(() => { get.mockReset(); confirm.mockReset() })
 afterEach(cleanup)
 
-describe("sizing", () => {
-  it("renders an unsizeable finding as unsized, never as zero", async () => {
-    // THE ONE THAT MATTERS. A dash and a 0 look similar and mean opposites.
+// SIZING MOVED INTO THE DOCUMENT, and so did its tests.
+//
+// The panel used to rebuild every finding in React — the sized figure, the
+// unsized dash, the assumed parameters beside the number. It now renders
+// `GoalAnalysisReport`, which shows the document
+// `backend/app/crucible/report.render_report_document` produced, in an iframe.
+//
+// The property those tests existed for is unchanged and still guarded: an
+// unsized finding reads as "could not be sized" and never as 0 (I3), and every
+// assumed parameter is disclosed beside the figure it qualifies. Both are
+// asserted against the real document in `backend/tests/test_crucible_report.py`
+// — the one renderer there is — rather than against a second implementation
+// that no longer exists.
+//
+// What stays here is the panel's own job: a ready run puts its document on
+// screen.
+
+describe("a ready run shows its document", () => {
+  it("renders the report for a finished run", async () => {
     get.mockResolvedValue({
       ...RUN,
-      findings: [{ ...FINDING, impact_value: null, impact: { value: null, affected_population: null } }],
+      findings: [FINDING],
+      report_html: "<h1>raise net revenue retention</h1><p>Two findings.</p>",
     })
     render(<GoalAnalysisTab runId={7} />)
-    const el = await screen.findByTestId("goal-unsized")
-    expect(el.textContent).toBe("Could not be sized")
-    // SCOPED TO THE FINDINGS, not the page. This used to be a document-wide
-    // `queryByText("0")`, which was a fair proxy while the panel showed no
-    // other numbers — the cover strip now reports counts, and "0 high
-    // confidence" is a true zero that the page SHOULD print. The property was
-    // never "the digit 0 may not appear"; it is that an unsized finding is not
-    // rendered as one, so the assertion moves to the findings themselves and
-    // keeps its bite there.
-    const list = document.querySelector(".ga-doc-findings") ?? document.body
-    expect(within(list as HTMLElement).queryByText("0")).toBeNull()
-    // Unambiguous anywhere: nothing legitimately renders "0 accounts".
-    expect(screen.queryByText("0 accounts")).toBeNull()
+    await screen.findByTestId("goal-ready")
+    const frame = screen.getByTitle("Goal analysis") as HTMLIFrameElement
+    expect(frame.getAttribute("srcdoc")).toContain("Two findings.")
   })
 
-  it("renders a sized finding in the goal's own currency", async () => {
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
+  it("says so when the run has no rendered document yet", async () => {
+    // An empty panel under the heading would read as "the analysis found
+    // nothing" — the one thing a run that simply has not rendered must not
+    // appear to say.
+    get.mockResolvedValue({ ...RUN, findings: [FINDING], report_html: "" })
     render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-sized")).textContent).toBe("4 accounts")
-  })
-
-  it("discloses every assumed parameter beside the number", async () => {
-    // I8. A methodology page nobody opens is not a disclosure.
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
-    render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-ready")).textContent)
-      .toContain("no revenue data connected")
+    await screen.findByTestId("goal-ready")
+    expect(screen.getByTestId("goal-report-pending").textContent).toMatch(
+      /no rendered report yet/i,
+    )
   })
 })
 
@@ -94,49 +99,18 @@ describe("sizing", () => {
 // cannot be confirmed) now live in `GoalGateCard.dom.test.tsx` against the card
 // that renders them.
 
-describe("nothing is quietly dropped", () => {
-  it("renders coverage notes above the findings they qualify", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      coverage_notes: [{ reason: "undated evidence", actual: "40 of 300 signals carried no date" }],
-      findings: [FINDING],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    const notes = screen.getByTestId("goal-coverage")
-    const findings = screen.getByTestId("goal-finding")
-    expect(notes.textContent).toContain("40 of 300 signals carried no date")
-    // Order is the point: a note that changes how a number reads cannot sit
-    // underneath it.
-    expect(ready.textContent!.indexOf("undated evidence"))
-      .toBeLessThan(ready.textContent!.indexOf(findings.textContent!.slice(0, 20)))
-  })
-
-  it("renders the considered list with each reason", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      considered: [{
-        id: 3, label: "onboarding friction",
-        reason: "all 4 supporting claims land within 6 days",
-        stopped_at_stage: "verification", claim_ids: ["c9"],
-      }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-considered")).textContent)
-      .toContain("all 4 supporting claims land within 6 days")
-  })
-
-  it("a run where nothing survived says so, and still shows why", async () => {
-    get.mockResolvedValue({
-      ...RUN, findings: [],
-      considered: [{ id: 1, label: "x", reason: "single account", stopped_at_stage: "verification", claim_ids: [] }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    expect(ready.textContent).toContain("Nothing survived verification")
-    expect(screen.getByTestId("goal-considered")).toBeTruthy()
-  })
-})
+// NOTHING IS QUIETLY DROPPED — asserted where the document is built.
+//
+// Coverage notes sitting above the findings they qualify, the considered list
+// keeping each item's reason, and a run where nothing survived saying so
+// rather than rendering as empty: all three are properties of the DOCUMENT,
+// and all three are asserted against it in
+// `backend/tests/test_crucible_document_consistency.py`, which reads the
+// rendered output and checks the prose against the data behind it.
+//
+// They were tested here while the panel rebuilt that document in React. It
+// does not any more, and re-asserting them against an iframe's srcdoc would be
+// testing the Python renderer through a keyhole.
 
 describe("failure", () => {
   it("turns the closed-set code into something a reader can act on", async () => {

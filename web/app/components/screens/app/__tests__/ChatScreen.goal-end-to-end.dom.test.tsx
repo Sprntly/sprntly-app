@@ -237,6 +237,40 @@ const planAsApproved = (d: Decision): GoalRunPlan => {
   }
 }
 
+/** The rendered report, built FROM THE STORED PLAN — the panel's document is
+ *  produced server-side by `crucible/report.render_report_document`, and this
+ *  stands in for it at the same seam the run row does.
+ *
+ *  Built rather than hardcoded on purpose. Every string these tests look for
+ *  has to come from the plan the wire actually carried, so a confirm that
+ *  posted the wrong definition, an exclusion that never left the browser, or a
+ *  hypothesis dropped on the way still shows up here as a document that does
+ *  not mention it. A fixed blob of HTML would pass in all three cases. */
+const reportHtmlFor = (plan: GoalRunPlan, statements: string[]): string => {
+  const read = (plan.sources ?? [])
+    .map((s) => `<li>${s.label} — ${s.signal_count} signals</li>`)
+    .join("")
+  const dropped = (plan.excluded_sources ?? [])
+    .map((t) => `<p>You dropped ${t} before the run; it is not counted above.</p>`)
+    .join("")
+  const hypotheses = (plan.hypotheses ?? []).map((h) => `<li>${h}</li>`).join("")
+  return [
+    "<!doctype html><html><body>",
+    `<h1>${plan.goal_text}</h1>`,
+    `<h2>What the definition decided</h2><p>${plan.definition_text}</p>`,
+    // Both numbers DERIVED from the plan, never written down: the total and
+    // the source count are exactly what an exclusion changes, so a dropped
+    // source that never reached the plan cannot be hidden by this fixture.
+    `<h2>What was read</h2><ul>${read}</ul>`,
+    `<p>${plan.total_signals} signals across ${(plan.sources ?? []).length} ` +
+      `source${(plan.sources ?? []).length === 1 ? "" : "s"}</p>`,
+    dropped,
+    hypotheses ? `<h2>What you already suspected</h2><ul>${hypotheses}</ul>` : "",
+    `<h2>What to do</h2>${statements.map((t) => `<p>${t}</p>`).join("")}`,
+    "</body></html>",
+  ].join("")
+}
+
 const FINDING_STATEMENT =
   "Accounts that hit the export row limit raise it again within the same month"
 
@@ -325,7 +359,25 @@ const runReady = (d: Decision): GoalRunDetail => ({
     },
   ],
   prioritisation: { plan: planAsApproved(d) },
+  report_html: reportHtmlFor(planAsApproved(d), [
+    FINDING_STATEMENT,
+    "Onboarding hand-off is raised repeatedly and never quantified.",
+  ]),
 })
+
+/** The DOCUMENT the panel is showing, as text.
+ *
+ *  It renders in a sandboxed iframe, so its content is `srcdoc` rather than
+ *  nodes in this document — jsdom parses no frame here, and it does not need
+ *  to: what these tests ask is whether a value survived the wire into the
+ *  report, and the report is that string. */
+const reportText = (): string => {
+  const frame = document.querySelector(
+    'iframe[title="Goal analysis"]',
+  ) as HTMLIFrameElement | null
+  const html = frame?.getAttribute("srcdoc") ?? ""
+  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()
+}
 
 // ── Mount ───────────────────────────────────────────────────────────────────
 
@@ -515,8 +567,7 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // whatever `confirm` carried, so a confirm that posted the proposal (or
       // nothing) shows up here as a report about a goal nobody agreed to.
       await walkTheFlow()
-      const asked = within(panelBody() as HTMLElement)
-        .getByTestId("goal-definition")
+      const asked = { textContent: reportText() }
       // The report quotes the EDIT. Quoting the proposal instead fails here,
       // because `PROPOSED` and `CONFIRMED` are deliberately different
       // sentences — a fixture where the reader accepts the proposal unchanged
@@ -532,16 +583,15 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // merely omit it. A quietly narrower run is exactly what coverage notes
       // exist to prevent.
       await walkTheFlow()
-      const read = within(panelBody() as HTMLElement)
-        .getByTestId("goal-what-was-read")
+      const read = { textContent: reportText() }
       // 18 signals across 1 source — the tracker's 12 are not in the total and
       // it is not in the list.
       expect(read.textContent).toContain("18 signals across 1 source")
       expect(read.textContent).toContain(KEPT_LABEL)
       expect(read.textContent).not.toContain(DROPPED_LABEL)
-      // ...and it is NAMED as dropped, in the same section.
-      expect(within(read).getByTestId("goal-excluded").textContent)
-        .toContain("project mgmt")
+      // …and it is NAMED as dropped rather than merely absent, which is the
+      // difference between a disclosed narrowing and a quiet one.
+      expect(read.textContent).toMatch(/dropped project_mgmt/i)
       // ...and the request that produced all of the above carried the drop.
       // Asserted last on purpose: the rendered page is the thing that can be
       // wrong while every mock stays happy, so it is what fails first.
@@ -555,8 +605,7 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // The other half of the gate-2 decision, and the one that is silently
       // droppable: nothing else on screen would look wrong without it.
       await walkTheFlow()
-      expect(within(panelBody() as HTMLElement)
-        .getByTestId("goal-hypotheses").textContent).toContain(HYPOTHESIS)
+      expect(reportText()).toContain(HYPOTHESIS)
       expect(approveRun).toHaveBeenCalledWith(
         RUN_ID,
         expect.objectContaining({ hypotheses: [HYPOTHESIS] }),
@@ -575,14 +624,14 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // which is `ChatScreen.goal-restore`'s subject, not this file's.
       expect(panelTabLabels()).toContain("Goal Analysis")
       expect(within(body).getByTestId("goal-report")).toBeTruthy()
-      expect(within(body).getAllByTestId("goal-finding")[0].textContent)
-        .toContain(FINDING_STATEMENT)
-      // I3, at the far end of the whole flow: the unsized finding says so.
-      expect(within(body).getByTestId("goal-unsized").textContent)
-        .toBe("Could not be sized")
-      // The ledger the ranking rests on is on screen too.
-      expect(within(body).getByTestId("goal-considered").textContent)
-        .toContain("Globex asked for SSO")
+      // The findings reach the reader — inside the run's own document, which
+      // is what the panel shows now.
+      expect(reportText()).toContain(FINDING_STATEMENT)
+      // I3 — that an unsized finding reads as "could not be sized" and never
+      // as 0 — is a property of the generator, asserted against the real
+      // document in `backend/tests/test_crucible_report.py`. What this flow
+      // can still say is that the document arrived whole rather than empty.
+      expect(reportText().length).toBeGreaterThan(FINDING_STATEMENT.length)
     }, 30_000)
 
   it("leaves the plan in the thread, read-only, with the dropped source struck",
