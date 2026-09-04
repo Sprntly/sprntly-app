@@ -376,6 +376,17 @@ export async function runAskGeneration(
     onStreamDrop?: OnAskStreamDrop
     /** Curated, user-facing progress copy per pipeline leg (see OnAskPhase). */
     onPhase?: OnAskPhase
+    /** This send's OWN reply-persist dedup key — NOT sent to the backend
+     *  (unlike `client_message_id` above, which the server reads to key the
+     *  USER turn). Purely a client-side bookkeeping id, persisted alongside
+     *  the ask_id (`jobResume.setPendingJob`) so that if a SECOND mount of
+     *  the same conversation-scoped ask (another tab, or a navigate-away-
+     *  and-back while this ask is still in flight) independently resumes and
+     *  persists this SAME answer, both persists carry the identical key —
+     *  the server's idempotent upsert then collapses them to one row. The
+     *  caller mints this fresh per send; omitting it leaves this ask
+     *  resumable exactly as before (no key persisted, no dedup on replay). */
+    replyClientMessageId?: string
   },
 ): Promise<AskResponse> {
   // A POST failure (4xx/5xx) propagates as-is so the route's error detail
@@ -383,7 +394,7 @@ export async function runAskGeneration(
   // A transient transport failure ("Failed to fetch") is retried first — the
   // kick-off must not fail on a momentary blip while the backend is healthy.
   const start = await withTransientRetry(() => askApi.start(question, company, opts))
-  setPendingJob("ask", company, askScope(tabId), start.ask_id)
+  setPendingJob("ask", company, askScope(tabId), start.ask_id, opts?.replyClientMessageId)
   // A cache hit comes back immediately-`ready` — there is no generation to
   // stream, so don't open an EventSource that would only ever see silence.
   const onPartial = start.status === "generating" ? opts?.onPartial : undefined

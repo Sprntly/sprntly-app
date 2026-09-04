@@ -81,19 +81,21 @@ def _assemble_private_scope_unit(monkeypatch, *, project_id: int = 9):
     return ProjectContextAssembler().assemble(req)
 
 
-def test_surface_scope_project_private_carries_six_extra_tools(monkeypatch):
+def test_surface_scope_project_private_carries_seven_extra_tools(monkeypatch):
     from app import project_delegation, project_task_execution
     from app.project_group_context import read_tools
 
     scope = _assemble_private_scope_unit(monkeypatch)
-    assert len(scope.extra_tools) == 6
+    assert len(scope.extra_tools) == 7
     names = [t["name"] for t in scope.extra_tools]
     expected = [t["name"] for t in (
         project_delegation.DELEGATE_TASK_TOOL,
         project_task_execution.EXECUTE_TASK_TOOL,
+        project_delegation.COMPLETE_TASK_TOOL,
         *read_tools(),
     )]
     assert names == expected
+    assert "complete_task" in names
     # AC9 no-leak: the GROUP-only `edit_prd` tool is NOT on the private scope,
     # and private registers no edit handler — so its `answer()` result shape
     # is unaffected by the group's in-band edit tool.
@@ -135,6 +137,100 @@ def test_private_composer_fold_addendum_byte_identical_and_delegate_free(monkeyp
     assert scope.composer_fold_addendum == expected
     assert _PRIVATE_SCOPE_DELEGATE_GUIDANCE not in scope.composer_fold_addendum
     assert "I've asked <name> to <task>" not in scope.composer_fold_addendum
+
+
+# ── post_turn realtime fan-out (agent async writer — cross-user-safe) ─────
+
+
+def test_post_turn_publishes_turn_created_to_conversation_owner_topic(monkeypatch):
+    """The execute-task progress writer (`post_turn`) is CROSS-USER-capable —
+    `post_individual_turn` can write into a teammate's own individual chat,
+    not necessarily the acting caller's (`req.user_id`). Its realtime publish
+    must key the per-user topic on the WRITTEN conversation's owner uid
+    (resolved server-side from the conversation itself), never the acting
+    caller and never the group channel."""
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+    from app.db import projects as projects_db
+    import app.db.conversations as conversations_db
+    import app.realtime as realtime_mod
+
+    monkeypatch.setattr(projects_db, "project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr(projects_db, "is_project_member", lambda *a, **k: True)
+
+    monkeypatch.setattr(
+        conversations_db, "post_individual_turn",
+        lambda conversation_id, role, content: {
+            "id": 501, "role": role, "content": content,
+            "created_at": "2026-09-02T00:00:00Z",
+        },
+    )
+    # The acting caller (`req.user_id`) is deliberately a DIFFERENT uid than
+    # the conversation's owner — proving the topic follows the owner.
+    monkeypatch.setattr(
+        conversations_db, "get_individual_conversation_owner",
+        lambda conversation_id: "owner-uid-999" if conversation_id == 777 else None,
+    )
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        realtime_mod, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    req = AssembleRequest(
+        user_id="acting-caller-u1", company_id="c1", dataset="", conversation_id=777,
+        question="q", workspace_id="w1",
+        params={"project_id": 42, "surface": "private"},
+    )
+    scope = ProjectContextAssembler().assemble(req)
+    assert scope.post_turn is not None
+
+    turn = scope.post_turn("Working on it — step 1 done.")
+    assert turn["content"] == "Working on it — step 1 done."
+
+    assert len(published) == 1
+    topic, event, payload = published[0]
+    assert topic == "project:42:user:owner-uid-999"
+    assert event == "turn.created"
+    assert set(payload) == {"id", "role", "content", "created_at"}
+    assert payload["content"] == "Working on it — step 1 done."
+    # Never the acting caller's own topic, and never the group channel.
+    assert topic != "project:42:user:acting-caller-u1"
+    assert topic != "project:42"
+
+
+def test_post_turn_publish_failure_does_not_break_the_write(monkeypatch):
+    """The publish-prep is best-effort (AD-P22): a raising owner lookup or a
+    raising `publish_broadcast` must not stop `post_turn` from returning the
+    already-written turn."""
+    from app.context_assembler import AssembleRequest
+    from app.context_assembler_project import ProjectContextAssembler
+    from app.db import projects as projects_db
+    import app.db.conversations as conversations_db
+
+    monkeypatch.setattr(projects_db, "project_belongs_to_company", lambda *a, **k: True)
+    monkeypatch.setattr(projects_db, "is_project_member", lambda *a, **k: True)
+    monkeypatch.setattr(
+        conversations_db, "post_individual_turn",
+        lambda conversation_id, role, content: {
+            "id": 502, "role": role, "content": content,
+            "created_at": "2026-09-02T00:00:00Z",
+        },
+    )
+
+    def _boom(conversation_id):
+        raise RuntimeError("simulated owner-lookup failure")
+
+    monkeypatch.setattr(conversations_db, "get_individual_conversation_owner", _boom)
+
+    req = AssembleRequest(
+        user_id="u1", company_id="c1", dataset="", conversation_id=777,
+        question="q", workspace_id="w1",
+        params={"project_id": 42, "surface": "private"},
+    )
+    scope = ProjectContextAssembler().assemble(req)
+    turn = scope.post_turn("still written despite the publish hiccup")
+    assert turn["content"] == "still written despite the publish hiccup"
 
 
 # ── byte-identity: scope=None vs SurfaceScope(main) vs omitted (AC1) ───────

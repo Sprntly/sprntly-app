@@ -223,12 +223,48 @@ def test_build_brief_folds_source_content_into_brief_prompt(isolated_settings, m
         tool_input={"assignee": "Fortune", "task_summary": "Prioritize the feedback"},
         source_content="THEMES_FROM_THE_THREAD: users want dark mode; onboarding is too slow.",
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(calls) == 1
     assert "THEMES_FROM_THE_THREAD" in calls[0]["user"], (
         "the brief prompt must carry the requester's actual content, not "
         "only the task_summary label and general project memory"
     )
+
+
+def test_delegation_confirmation_names_assignee_echoes_task_and_promises_followup(
+    isolated_settings, monkeypatch
+):
+    """A3: the assigner's confirmation (the grounded handler return — emitted
+    ONLY with a persisted delegation row) names the assignee, echoes the actual
+    task, and keeps the 'marked it done' completion promise; it is no longer the
+    terse 'Sent the brief to X's chat.'"""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    result = _delegate(
+        project, ctx.user_id, task="Review the integration test coverage"
+    )
+    assert "Fortune Adeyemi" in result  # names the assignee
+    assert "Review the integration test coverage" in result  # echoes the task
+    assert "marked it done" in result  # keeps the (now-backed) completion promise
+    assert "Sent the brief" not in result  # the old terse copy is gone
+
+
+def test_delegation_confirmation_truncates_a_long_task(isolated_settings, monkeypatch):
+    """A huge task_summary is capped (~120 chars + ellipsis) so it can't blow up
+    the one-line confirmation."""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    long_task = "Audit every module " * 40  # ~800 chars
+    result = _delegate(project, ctx.user_id, task=long_task)
+    assert "…" in result, "an over-long task must be truncated with an ellipsis"
+    # the echoed task segment (between the quotes) is capped at 120 chars
+    echoed = result.split('"')[1]
+    assert len(echoed) <= 120
+    assert "marked it done" in result
 
 
 def test_build_brief_without_source_content_is_backward_compatible(isolated_settings, monkeypatch):
@@ -241,9 +277,138 @@ def test_build_brief_without_source_content_is_backward_compatible(isolated_sett
     calls = _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
     assert len(calls) == 1
     assert "actually about" not in calls[0]["user"].lower()
+
+
+# ── Recipient-aware brief: fold the assignee's own ongoing chat ───────────
+# The brief used to be generated 100% from the assigner's side with zero
+# awareness of the assignee's chat, so it re-explained the project overview +
+# artifacts the assignee had already seen in their welcome, and ran long. It
+# now folds a READ-ONLY, owner-gated tail of the assignee's OWN individual
+# chat so it can transition naturally and stop repeating what they've seen.
+
+
+def _seed_recipient_chat(project_id: int, assignee_user_id: str, *turns: tuple[str, str]) -> int:
+    """Seed the assignee's OWN individual project chat with `(role, content)`
+    turns (their welcome + whatever they've been discussing) and return the
+    conversation id."""
+    from app.db.conversations import create_individual_project_chat, post_individual_turn
+
+    conv = create_individual_project_chat(project_id, assignee_user_id)
+    for role, content in turns:
+        post_individual_turn(conv["id"], role, content)
+    return conv["id"]
+
+
+def test_build_brief_folds_recipient_chat_tail_into_prompt(isolated_settings, monkeypatch):
+    """When the assignee already has an ongoing chat, its recent tail (their
+    welcome + what they were just discussing) is folded into the brief prompt,
+    under a header that instructs transition/no-repeat."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _seed_recipient_chat(
+        project["id"],
+        assignee_id,
+        ("assistant", "Welcome to the project — here is the overview."),
+        ("user", "RECIPIENT_WAS_DISCUSSING: the Q3 onboarding metrics."),
+    )
+    calls = _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id, task="Prioritize the feedback")
+    assert "Assigned to" in result
+    assert len(calls) == 1
+    prompt = calls[0]["user"]
+    assert "RECIPIENT_WAS_DISCUSSING" in prompt, (
+        "the brief prompt must carry the assignee's own recent chat so it can "
+        "land intelligently instead of arriving cold"
+    )
+    assert "recipient's recent chat" in prompt.lower()
+
+
+def test_brief_prompt_is_conversation_aware_dedup_and_length():
+    """The system prompt must now instruct: conversation-aware arrival,
+    de-dup of already-seen project overview/artifacts, and a hard length
+    ceiling — the three behaviors David asked for."""
+    system = project_delegation._BRIEF_SYSTEM.lower()
+    # conversation-aware arrival
+    assert "ongoing" in system
+    assert "arriving cold" in system or "transition from" in system
+    # de-dup
+    assert "do not re-explain" in system
+    assert "already seen" in system
+    assert "welcome" in system
+    # hard length ceiling
+    assert "120 words" in system
+    # lead with the task
+    assert "lead with the task" in system
+
+    weak = "Write a brief for the assignee about the task."
+    assert "do not re-explain" not in weak.lower()
+    assert "120 words" not in weak.lower()
+
+
+def test_recipient_chat_absent_is_backward_compatible(isolated_settings, monkeypatch):
+    """With NO prior assignee chat, no recipient-chat block rides the prompt —
+    behavior is byte-identical to today's context/artifact-only fold."""
+    ctx = company_client(monkeypatch)
+    project, _assignee_id = _seed_project_with_assignee(ctx)
+    calls = _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id)
+    assert "Assigned to" in result
+    assert len(calls) == 1
+    assert "recipient's recent chat" not in calls[0]["user"].lower()
+
+
+def test_recipient_chat_read_is_owner_gated_to_assignee_user_id(isolated_settings, monkeypatch):
+    """The recipient-chat read must use the ASSIGNEE's OWN user_id (the owner
+    gate on `list_individual_turns`), server-side — never the assigner's,
+    never a model-supplied id."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    get_calls: list[tuple] = []
+    list_calls: list[str] = []
+
+    def _fake_get(project_id, user_id):
+        get_calls.append((project_id, user_id))
+        return {"id": 4242}
+
+    def _fake_list(conversation_id, user_id, since=None):  # noqa: ARG001
+        list_calls.append(user_id)
+        return [{"id": 1, "role": "assistant", "content": "welcome", "created_at": "t"}]
+
+    monkeypatch.setattr(project_delegation, "get_individual_project_chat", _fake_get)
+    monkeypatch.setattr(project_delegation, "list_individual_turns", _fake_list)
+
+    _delegate(project, ctx.user_id)
+    # The recipient-tail read resolved the assignee's chat with the assignee id…
+    assert (project["id"], assignee_id) in get_calls
+    # …and every owner-gated turn read used the assignee's id, never the assigner's.
+    assert list_calls, "list_individual_turns must be called for the recipient tail"
+    assert all(uid == assignee_id for uid in list_calls)
+    assert ctx.user_id not in list_calls
+
+
+def test_recipient_chat_not_echoed_in_assigner_confirmation(isolated_settings, monkeypatch):
+    """Privacy: the assignee's chat is used ONLY to shape the brief. It must
+    never leak into the assigner-facing confirmation string."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _seed_recipient_chat(
+        project["id"],
+        assignee_id,
+        ("user", "PRIVATE_RECIPIENT_SECRET: my salary review is next week."),
+    )
+    _stub_brief_llm(monkeypatch)
+
+    result = _delegate(project, ctx.user_id, task="Draft the pricing page")
+    assert "Assigned to" in result
+    assert "PRIVATE_RECIPIENT_SECRET" not in result
+    assert "salary review" not in result
 
 
 # ── Bare "send to <roster member>" entry-gate detector ───────────────────
@@ -307,7 +472,7 @@ def test_delivery_only_into_assignee_own_individual_thread(isolated_settings, mo
     _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -399,7 +564,7 @@ def test_non_member_assignee_no_write(isolated_settings, monkeypatch):
     # now occurs, proving the gate (not something else) was blocking it.
     monkeypatch.setattr(project_delegation, "is_project_member", lambda *a, **kw: True)
     result2 = _delegate(project, ctx.user_id, assignee="Outsider")
-    assert "Sent the brief" in result2
+    assert "Assigned to" in result2
     assert len(require_client().table("project_delegations").select("id").execute().data) == 1
     assert (
         len(
@@ -566,7 +731,7 @@ def test_delegation_emits_single_assigned_genesis(isolated_settings, monkeypatch
     _stub_brief_llm(monkeypatch)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -606,7 +771,7 @@ def test_genesis_failure_does_not_rollback_delegation(isolated_settings, monkeyp
     monkeypatch.setattr(project_delegation, "record_event", _boom)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+    assert "Assigned to" in result, "the delegation must still succeed and report normally"
 
     from app.db.client import require_client
 
@@ -663,7 +828,7 @@ def test_handle_delegate_task_seeds_followup_row(isolated_settings, monkeypatch)
     before = datetime.now(timezone.utc)
     result = _delegate(project, ctx.user_id)
     after = datetime.now(timezone.utc)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     from app.db.client import require_client
 
@@ -708,7 +873,7 @@ def test_handle_delegate_task_seed_failure_is_best_effort(isolated_settings, mon
 
     with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
         result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "the delegation must still succeed and report normally"
+    assert "Assigned to" in result, "the delegation must still succeed and report normally"
 
     from app.db.client import require_client
 
@@ -779,7 +944,7 @@ def test_delegation_create_publishes_event_to_both_parties(isolated_settings, mo
     )
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     events = [p for p in published if p[1] == "delegation.event"]
     assert len(events) == 2, published
@@ -812,7 +977,7 @@ def test_self_delegation_declines_no_row_no_publish(isolated_settings, monkeypat
     # The assigner (full_name "Alex Assigner") is a member of their own project,
     # so a hand-off to "Alex" resolves to self — and is declined.
     result = _delegate(project, ctx.user_id, assignee="Alex")
-    assert "Sent the brief" not in result
+    assert "Assigned to" not in result
     assert "only hand tasks off to" in result.lower()
 
     # The ledger is never polluted with a self-row, and nothing is broadcast.
@@ -836,7 +1001,7 @@ def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, 
     monkeypatch.setattr(project_delegation, "status_dto", _boom)
 
     result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result, "a create-publish hiccup must never break the hand-off"
+    assert "Assigned to" in result, "a create-publish hiccup must never break the hand-off"
 
     from app.db.client import require_client
 
@@ -851,6 +1016,268 @@ def test_delegation_create_publish_failure_does_not_rollback(isolated_settings, 
     assert len(delegations) == 1
 
 
+# ── Assignment-email nudge (fires once per delegation) ────────────────────
+
+
+def test_delegate_task_sends_assignment_email_to_assignee(isolated_settings, monkeypatch):
+    """A successful delegation invokes `send_assignment_email` exactly once,
+    addressed to the ASSIGNEE's own email (never the assigner's), with the
+    project chat link and the assigner's roster name."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_assignment_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    result = _delegate(project, ctx.user_id)
+    assert "Assigned to" in result
+    assert len(calls) == 1
+    assert calls[0]["to_email"] == f"{assignee_id}@co.com"
+    assert calls[0]["assigner_name"] == "Alex Assigner"
+    assert calls[0]["project_id"] == project["id"]
+
+
+def test_delegate_task_assignment_email_skipped_without_recipient_email(
+    isolated_settings, monkeypatch,
+):
+    """Best-effort skip (never raises, never blocks the delegation) when
+    `emails_for_user_ids` has no email on file for the assignee."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", lambda user_ids: {})
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_assignment_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    result = _delegate(project, ctx.user_id)
+    assert "Assigned to" in result, "a missing email must never block the delegation"
+    assert calls == []
+
+
+def test_delegate_task_assignment_email_failure_is_best_effort(
+    isolated_settings, monkeypatch, caplog,
+):
+    """A raised send error is swallowed and does NOT break the delegation
+    write — mirrors every other best-effort helper in this module."""
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    _stub_brief_llm(monkeypatch)
+
+    def _boom(**kwargs):  # noqa: ARG001
+        raise RuntimeError("simulated assignment-email failure")
+
+    monkeypatch.setattr(project_delegation, "send_assignment_email", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
+        result = _delegate(project, ctx.user_id)
+    assert "Assigned to" in result
+
+    from app.db.client import require_client
+    delegations = (
+        require_client()
+        .table("project_delegations")
+        .select("id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert len(delegations) == 1
+    assert any("assignment_email_failed" in r.message for r in caplog.records)
+
+
+# ── Completion-email helper (`_notify_assigner_task_completed_email`) ─────
+# The DRY helper itself, unit-tested directly. Its wiring into all three
+# completion call sites (`notify_requester_task_completed`'s two callers +
+# `handle_complete_task` directly) is covered in
+# `test_delegation_completion_notice.py` and `test_delegation_followup.py`.
+
+
+def test_completion_email_helper_recipient_is_assigner(isolated_settings, monkeypatch):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+    monkeypatch.setattr(
+        project_delegation, "emails_for_user_ids",
+        lambda user_ids: {"U_assigner": "assigner@co.com"},
+    )
+    monkeypatch.setattr(project_delegation, "_member_first_name", lambda pid, uid: "Fortune")
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_completion_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    project_delegation._notify_assigner_task_completed_email(
+        1, 5, assignee_user_id="U_do",
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["to_email"] == "assigner@co.com"
+    assert calls[0]["assignee_name"] == "Fortune"
+
+
+def test_completion_email_helper_skips_without_recipient_email(isolated_settings, monkeypatch):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", lambda user_ids: {})
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        project_delegation, "send_completion_email",
+        lambda **kwargs: calls.append(kwargs) or True,
+    )
+
+    project_delegation._notify_assigner_task_completed_email(1, 5, assignee_user_id="U_do")
+    assert calls == []
+
+
+def test_completion_email_helper_swallows_failure(isolated_settings, monkeypatch, caplog):
+    monkeypatch.setattr(
+        project_delegation, "load_delegation_for_authz",
+        lambda delegation_id: {"assigner_user_id": "U_assigner"},
+    )
+
+    def _boom(user_ids):  # noqa: ARG001
+        raise RuntimeError("simulated profile lookup failure")
+
+    monkeypatch.setattr(project_delegation, "emails_for_user_ids", _boom)
+
+    with caplog.at_level(logging.WARNING, logger="app.project_delegation"):
+        result = project_delegation._notify_assigner_task_completed_email(
+            1, 5, assignee_user_id="U_do",
+        )
+    assert result is None
+    assert any("completion_email_failed" in r.message for r in caplog.records)
+
+
+def test_complete_task_tool_fires_completion_email(isolated_settings, monkeypatch):
+    """`handle_complete_task` (the THIRD completion path — no in-app notice
+    of its own today) invokes the SAME DRY completion-email helper as the
+    other two paths, addressed to the ASSIGNER."""
+    from app.db.project_delegations import record_delegation
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)
+    deleg = record_delegation(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        assignee_user_id=assignee_id,
+        task_summary="Ship the deck",
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=None,
+        delivered_turn_id=None,
+    )
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        project_delegation, "_notify_assigner_task_completed_email",
+        lambda project_id, delegation_id, *, assignee_user_id: calls.append(
+            (project_id, delegation_id, assignee_user_id)
+        ),
+    )
+    monkeypatch.setattr(
+        project_delegation, "list_status_for_assignee",
+        lambda project_id, user_id: [
+            {"delegation_id": deleg["id"], "status": "assigned", "task_summary": "Ship the deck"}
+        ],
+    )
+    monkeypatch.setattr(project_delegation, "status_dto", lambda delegation_id: None)
+    monkeypatch.setattr(project_delegation, "_publish_delegation_event", lambda **kwargs: None)
+
+    result = project_delegation.handle_complete_task(
+        project_id=project["id"], completer_user_id=assignee_id,
+        tool_input={"task_summary": "Ship the deck"},
+    )
+    assert "marked" in result
+    assert len(calls) == 1
+    assert calls[0] == (project["id"], deleg["id"], assignee_id)
+
+
+def test_complete_task_tool_posts_one_inapp_assigner_notice_and_one_email(
+    isolated_settings, monkeypatch,
+):
+    """The deterministic `complete_task` path must post the SAME in-app assigner
+    notice the background classifier path posts ("✓ {name} finished: {summary}"
+    into the ASSIGNER's own chat) AND send exactly ONE completion email — no
+    double-email, no double in-app turn. This restores the real-time in-app
+    notice the tool path previously dropped (it fired only the email)."""
+    from app.db import conversations as conversations_db
+    from app.db.project_delegations import record_delegation
+
+    ctx = company_client(monkeypatch)
+    project, assignee_id = _seed_project_with_assignee(ctx)  # assignee "Fortune Adeyemi"
+    deleg = record_delegation(
+        project_id=project["id"], assigner_user_id=ctx.user_id, assignee_user_id=assignee_id,
+        task_summary="Ship the deck", source_conversation_id=None, source_turn_id=None,
+        delivered_conversation_id=None, delivered_turn_id=None,
+    )
+
+    # Count emails (don't actually send).
+    email_calls: list = []
+    monkeypatch.setattr(
+        project_delegation, "_notify_assigner_task_completed_email",
+        lambda project_id, delegation_id, *, assignee_user_id: email_calls.append(
+            (project_id, delegation_id, assignee_user_id)
+        ),
+    )
+    monkeypatch.setattr(
+        project_delegation, "list_status_for_assignee",
+        lambda project_id, user_id: [
+            {"delegation_id": deleg["id"], "status": "assigned", "task_summary": "Ship the deck"}
+        ],
+    )
+    # Skip the ledger-liveness DTO publish so the ONLY in-app turn this asserts
+    # on is the assigner completion notice itself.
+    monkeypatch.setattr(project_delegation, "status_dto", lambda delegation_id: None)
+
+    # Capture every in-app turn posted + which chat it lands in.
+    turn_calls: list = []
+    original_post = project_delegation.post_individual_turn
+
+    def _spy_post(conversation_id, role, content):
+        turn_calls.append({"conversation_id": conversation_id, "role": role, "content": content})
+        return original_post(conversation_id, role, content)
+
+    monkeypatch.setattr(project_delegation, "post_individual_turn", _spy_post)
+
+    chat_owners: list = []
+    original_chat = project_delegation.create_individual_project_chat
+
+    def _spy_chat(project_id, user_id):
+        chat_owners.append(user_id)
+        return original_chat(project_id, user_id)
+
+    monkeypatch.setattr(project_delegation, "create_individual_project_chat", _spy_chat)
+
+    result = project_delegation.handle_complete_task(
+        project_id=project["id"], completer_user_id=assignee_id,
+        tool_input={"task_summary": "Ship the deck"},
+    )
+    assert result.startswith("Got it")
+
+    # Exactly ONE completion email (no double-email).
+    assert len(email_calls) == 1
+
+    # Exactly ONE in-app assigner notice, correct background-path wording,
+    # posted into the ASSIGNER's own chat (no double in-app turn).
+    notice_turns = [t for t in turn_calls if t["content"].startswith("✓")]
+    assert len(notice_turns) == 1, turn_calls
+    assert notice_turns[0]["content"] == "✓ Fortune finished: Ship the deck"
+    assert notice_turns[0]["role"] == "assistant"
+    assert chat_owners == [ctx.user_id]  # the assigner's own chat, exactly once
+
+
 # ── Cost / observability (AC10/AC11) ──────────────────────────────────────
 
 
@@ -861,7 +1288,7 @@ def test_delegation_emits_one_brief_cost_line(isolated_settings, monkeypatch, ca
 
     with caplog.at_level(logging.INFO, logger="app.llm_telemetry"):
         result = _delegate(project, ctx.user_id)
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     brief_lines = [
         r.getMessage() for r in caplog.records if "projects.delegation.brief" in r.getMessage()

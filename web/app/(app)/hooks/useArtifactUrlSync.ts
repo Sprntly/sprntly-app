@@ -248,6 +248,20 @@ export function useArtifactUrlSync() {
 
     if (contentPanelTab == null) {
       if (!had.prd && !had.evidence && !had.ticket) return
+      // A main-chat PRD fork nav into a project is in flight (bindActiveProject
+      // set content.activeProjectId, then pushed `/projects?…&prd=<id>`). On
+      // that route the project surface (ProjectDetailScreen) OWNS the artifact
+      // params: it captures the inbound `?prd=` on its first render and restores
+      // the PRD in-place beside the project chat. The content panel is
+      // momentarily closed by the route-change effect on arrival, so this
+      // reflect would otherwise see `contentPanelTab == null` and STRIP the very
+      // `?prd=` the push just placed — racing (and beating) that restore, so the
+      // panel never reopens and the URL loses the PRD. Bow out. Scoped to
+      // /projects WHILE a project is active; every other route still strips on
+      // panel-close exactly as before (and a cold /projects deep-link, where
+      // activeProjectId is null, is unaffected — its restore already wins the
+      // race via the first-render param capture).
+      if (pathname === "/projects" && content.activeProjectId != null) return
       params.delete(PRD_PARAM)
       params.delete(EVIDENCE_PARAM)
       params.delete(TICKET_PARAM)
@@ -302,6 +316,18 @@ export function useArtifactUrlSync() {
       return
     }
 
+    // A main-chat PRD fork nav into a project has begun: bindActiveProject set
+    // content.activeProjectId, then `router.push('/projects?…&prd=<id>')`. Until
+    // that push commits, this globally-mounted reflect can still fire one more
+    // time on the STALE `/` (main) route — and would `router.replace('/?prd=')`,
+    // clobbering the push and stranding the user on `/` (the reported D1 bug).
+    // The PRD's URL home is now the project surface, so the reflect bows out of
+    // the main route entirely while a project is active. Scoped to the `/` route
+    // + PRD arm only: a PRD opened on `/` WITHOUT a project (activeProjectId
+    // null) still reflects `?prd=` on `/` exactly as before, and /projects (the
+    // real destination) still reflects normally once the panel reopens there.
+    if (want.key === PRD_PARAM && pathname === "/" && content.activeProjectId != null) return
+
     // Mark this value as already-consumed BEFORE writing it, so the
     // URL→drawer effects above don't mistake our own reflected write for a
     // fresh inbound deep link and re-invoke openPrdTab — that re-invocation
@@ -318,5 +344,5 @@ export function useArtifactUrlSync() {
     params.set(want.key, want.value)
     router.replace(`${pathname}?${params}`, { scroll: false })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, pathname, router, reflectDisabled])
+  }, [contentPanelTab, content.prd?.prd_id, content.evidenceId, content.activeProjectId, pathname, router, reflectDisabled])
 }

@@ -2477,7 +2477,7 @@ def test_stale_connector_ask_reaches_project_branch_end_to_end(monkeypatch):
         extra_tools=({"name": "get_project_memory"},),
     )
 
-    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset):
+    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset, **kwargs):
         return {"answer": "project-scoped-context", "_skill_source": "project-tools"}
 
     monkeypatch.setattr(qa, "_try_scoped_tool_answer", _fake_scoped_tool_answer)

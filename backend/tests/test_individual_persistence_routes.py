@@ -273,6 +273,102 @@ def test_terminal_outcome_persisted(tenant_client, isolated_settings):
     assert turns[1]["content"] == "I generated that PRD but couldn't attach it. Try again."
 
 
+# ── Realtime publish-on-write (Gap 2) ─────────────────────────────────────
+
+
+def test_individual_turns_route_publishes_turn_created_to_owner_topic(tenant_client, isolated_settings, monkeypatch):
+    """Both persisted turns (user + assistant) publish `turn.created` on the
+    CALLER'S OWN per-user topic — never the group channel — carrying only the
+    whitelisted DTO."""
+    import app.routes.projects as projects_route
+
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        projects_route, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/individual/turns",
+        json={"client_message_id": "rt-1", "question": "make me a PRD", "answer": "Generated and attached."},
+    )
+    assert resp.status_code == 200, resp.text
+
+    events = [p for p in published if p[1] == "turn.created"]
+    assert len(events) == 2, published
+    topics = {topic for topic, _e, _p in events}
+    assert topics == {f"project:{project_id}:user:{t.user_id}"}
+    # Never the group channel.
+    assert f"project:{project_id}" not in topics
+    roles = {payload["role"] for _t, _e, payload in events}
+    assert roles == {"user", "assistant"}
+    for _t, _e, payload in events:
+        assert set(payload) == {"id", "role", "content", "created_at"}
+
+
+def test_individual_turns_route_publish_failure_does_not_break_persist(tenant_client, isolated_settings, monkeypatch):
+    """The publish is best-effort (AD-P22): a raising `publish_broadcast` must
+    never roll back or fail the already-written turn pair."""
+    import app.routes.projects as projects_route
+
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+
+    def _boom(topic, event, payload):
+        raise RuntimeError("simulated realtime failure")
+
+    monkeypatch.setattr(projects_route, "publish_broadcast", _boom)
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/individual/turns",
+        json={"client_message_id": "rt-2", "question": "make tickets", "answer": "Done."},
+    )
+    assert resp.status_code == 200, resp.text
+
+    from app.db import conversations as conversations_db
+
+    conv = conversations_db.get_individual_project_chat(project_id, t.user_id)
+    turns = _turns(conv["id"], t.user_id)
+    assert [tn["role"] for tn in turns] == ["user", "assistant"]
+
+
+def test_prd_edit_route_publishes_turn_created_to_owner_topic(tenant_client, isolated_settings, monkeypatch):
+    """The PRD-edit path's owned persist also publishes `turn.created` on the
+    caller's own per-user topic — same whitelist, same privacy invariant."""
+    import app.routes.projects as projects_route
+
+    monkeypatch.setenv("PROJECT_PRD_EDIT_ENABLED", "1")
+    t = tenant_client.make(slug="acme")
+    project_id = _seed_project(t, isolated_settings)
+
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
+        "html": "<html><body><h1>Doc v2</h1></body></html>",
+        "sections_changed": ["Requirements"],
+        "summary": "Tightened requirements.",
+    })
+
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        projects_route, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    resp = t.client.post(
+        f"/v1/projects/{project_id}/prd/chat-edit",
+        json={"instruction": "tighten requirements", "client_message_id": "edit-rt-1"},
+    )
+    assert resp.status_code == 200, resp.text
+
+    events = [p for p in published if p[1] == "turn.created"]
+    assert len(events) == 2, published
+    topics = {topic for topic, _e, _p in events}
+    assert topics == {f"project:{project_id}:user:{t.user_id}"}
+    assert f"project:{project_id}" not in topics
+
+
 def test_non_member_cannot_persist(tenant_client, isolated_settings):
     t = tenant_client.make(slug="acme")
     project_id = _seed_project(t, isolated_settings)

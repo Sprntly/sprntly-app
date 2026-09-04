@@ -5593,19 +5593,27 @@ export const conversationsApi = {
    *  `reply` is the assistant turn's STRUCTURED payload — everything the turn
    *  showed beyond its prose, which `content` alone cannot hold (see
    *  `PersistedTurnReply`). Omitted on user turns, and the backend drops it on
-   *  one regardless. */
+   *  one regardless.
+   *
+   *  `clientMessageId`: an assistant turn's reply-persist dedup key (project
+   *  individual chat only — the server ignores it everywhere else). A
+   *  same-key retry collapses to the SAME row via the backend's idempotent
+   *  upsert instead of inserting a second one. Omitted by every other
+   *  caller (main chat, a user turn), byte-identical to before. */
   addTurn: (
     conversationId: number,
     role: "user" | "assistant",
     content: string,
     attachments?: TurnAttachment[],
     reply?: PersistedTurnReply | null,
+    clientMessageId?: string,
   ) =>
     api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
       role,
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
       ...(reply ? { reply } : {}),
+      ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
     }),
   /** REWIND the conversation to just before `turnId` — deletes that turn and
    *  every turn after it. `turnId` must be a USER turn: you rewind to a
@@ -6539,20 +6547,24 @@ export const projectsApi = {
    *  project plus in-tenant non-members (workspace, then company), each
    *  tagged `kind`, filtered by `q` (casefold-contains on name/email) and
    *  capped at 20 — never anyone outside the project's company. A non-member
-   *  caller gets 403. */
+   *  caller gets 403.
+   *
+   *  `pending_invites` (lower-cased emails) is the single source the picker
+   *  uses to render "Invited" for a not-yet-accepted invite — including a
+   *  brand-new email typed into the by-email row, which never appears in
+   *  `candidates`. Company-wide by construction (`workspace_invites`'
+   *  `(company_id, email)` uniqueness) and already excludes expired-by-age
+   *  rows — see `db/team.py::list_pending_invite_emails`. */
   candidateSearch: (id: number | string, q: string) =>
-    api
-      .get<{
-        candidates: {
-          kind: "member" | "workspace" | "company"
-          user_id: string
-          name: string | null
-          email: string | null
-        }[]
-      }>(
-        `/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`,
-      )
-      .then((r) => r.candidates),
+    api.get<{
+      candidates: {
+        kind: "member" | "workspace" | "company"
+        user_id: string
+        name: string | null
+        email: string | null
+      }[]
+      pending_invites: string[]
+    }>(`/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`),
   /** Add an artifact ref to the project
    *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
    *  ownership validation happens server-side; a foreign/absent artifact

@@ -19,6 +19,23 @@ delegations delivered into THIS conversation via
 empty, `maybe_ingest_status` returns WITHOUT ever calling the LLM. This is
 what keeps the classifier from firing on ordinary chat traffic.
 
+Linkage gap (`delivered_conversation_id IS NULL`): that column is an FK to
+`conversations` with `on delete set null` — if the assignee's individual
+project chat row is ever deleted (e.g. a chat reset) and recreated, any
+STILL-OPEN delegation that had pointed at the old row goes link-less
+forever; a strict `== conversation_id` match would silently never classify
+it again. `list_status_for_assignee` already scopes candidates to THIS
+`project_id` + THIS assignee, and the caller of `maybe_ingest_status`
+(`ask_job_runner.py`, gated on `context_source.kind == "project"`, see
+`context_assembler_project.py`) only ever passes the replier's OWN
+individual project chat conversation — there is no group-chat surface
+left to conflate with (retired). So a link-less row is unambiguously
+"this assignee's open task in this project", and the conversation it is
+being classified in is unambiguously the assignee's own — accepting it as
+a candidate here reproduces the exact multi-candidate disambiguation the
+classifier already does for two ordinary open tasks sharing one
+individual chat, never a NEW cross-conversation or cross-user match.
+
 Soft-done contradiction rule (the inbound half of the soft-done handshake
 the outbound follow-up sweep depends on): ANY status-changing reply is
 fresh evidence contradicting an earlier INFERRED completion. So every
@@ -53,7 +70,11 @@ from app.llm_telemetry import RunUsage, log_llm_run
 # why the inbound reply path needs them too. No new realtime channel/event
 # name; both broadcast on the existing per-user `project:{id}:user:{uid}`
 # topics.
-from app.project_delegation import _publish_brief_delivered, _publish_delegation_event
+from app.project_delegation import (
+    _notify_assigner_task_completed_email,
+    _publish_brief_delivered,
+    _publish_delegation_event,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -302,7 +323,15 @@ def notify_requester_task_completed(
     private project chat. Best-effort / never raises: a failed post must not
     roll back a durably-recorded completion (mirrors the delegation handler's
     non-fatal posture). Reuses `_route_to_requester` (loads the assigner +
-    posts) + `_display_first_name` (the completer's first name)."""
+    posts) + `_display_first_name` (the completer's first name).
+
+    Also fires the shared best-effort transactional completion email
+    to the assigner via `project_delegation._notify_assigner_task_completed_email`
+    — the SAME DRY helper `handle_complete_task` calls directly (that path
+    has no in-app notice today), so all three completion paths email
+    identically. Called unconditionally, independent of whether the
+    in-app notice above succeeded — the email helper is entirely
+    self-contained/never-raising."""
     try:
         name = _display_first_name(project_id, assignee_user_id)
         summary = (task_summary or "").strip()
@@ -313,6 +342,9 @@ def notify_requester_task_completed(
             "delegation_completion_notice_failed project_id=%s delegation_id=%s",
             project_id, delegation_id,
         )
+    _notify_assigner_task_completed_email(
+        project_id, delegation_id, assignee_user_id=assignee_user_id
+    )
 
 
 def _apply_classification(
@@ -367,6 +399,21 @@ def _apply_classification(
                 project_id, delegation_id,
                 assignee_user_id=replier_user_id, task_summary=row.get("task_summary"),
             )
+            # Assignee-facing confirmation safety net: post a "marked done"
+            # turn into the ASSIGNEE's OWN chat too. This background classifier
+            # path catches the completion phrasings the deterministic
+            # `complete_task` gate (`skill_router.is_project_completion_request`)
+            # misses — those turns never reach `handle_complete_task`, whose
+            # authoritative reply the assignee would otherwise have seen — so
+            # without this the assignee gets NO confirmation their report
+            # registered. Reuses the module's own `_post_to_own_chat` helper
+            # (same mechanic the requester notice uses). Does NOT duplicate the
+            # completion write — that already happened via `record_event`
+            # above — only adds the assignee-facing post beside the existing
+            # assigner notification. Best-effort like every notify here.
+            summary = (row.get("task_summary") or "").strip()
+            confirm = f"✓ Marked done: {summary}" if summary else "✓ Marked done."
+            _post_to_own_chat(project_id, replier_user_id, confirm)
         delegation_followups_db.upsert_followup(delegation_id, pending_done_since=None)
     elif intent == "done_inferred":
         delegation_followups_db.upsert_followup(
@@ -453,7 +500,14 @@ def maybe_ingest_status(
         row
         for row in open_rows
         if row.get("status") in delegation_events_db.OPEN_STATES
-        and row.get("delivered_conversation_id") == conversation_id
+        and (
+            row.get("delivered_conversation_id") == conversation_id
+            # Link-less row (see module docstring): still THIS assignee's
+            # open task in THIS project (list_status_for_assignee's own
+            # filter), classified in THIS conversation which is always
+            # their own individual project chat — never a broader match.
+            or row.get("delivered_conversation_id") is None
+        )
     ]
     if not open_rows:
         return  # AC10 — zero LLM calls when there is no open delegation to classify against
