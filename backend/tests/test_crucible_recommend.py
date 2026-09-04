@@ -1161,7 +1161,7 @@ def test_a_finding_with_no_survivable_change_gets_no_deep_recommendation():
 
 def test_open_questions_are_not_required_to_be_grounded():
     """"Keep open_questions and what_would_falsify — being ungrounded is
-    appropriate for a question", per the ticket. Still lint-checked."""
+    appropriate for a question". Still lint-checked."""
     claims_by_id = {c.id: c for c in _two_finding_corpus()}
     rec = _deep_rec(open_questions=[
         "Is there a system that could resolve this we have never discussed?",
@@ -1460,7 +1460,7 @@ def test_quoted_list_pricing_basis_is_none_when_nothing_carries_pricing():
 
 
 def test_quoted_list_pricing_basis_fires_with_no_named_money_target():
-    """THE HARD REQUIREMENT this ticket exists to prove: unlike
+    """THE HARD REQUIREMENT this exists to prove: unlike
     `recommendation_basis` (only computed inside `resolve_recommendation_
     count`'s money-target branch), this must fire on a plain, non-dollar
     goal — proving it is not accidentally gated the same way."""

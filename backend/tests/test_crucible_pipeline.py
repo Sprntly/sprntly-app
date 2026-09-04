@@ -165,7 +165,7 @@ def test_a_sized_finding_discloses_the_missing_value_per_account():
 
 # ── Grounded commercial figures ride alongside Impact, never inside it ───────
 # `native_units` carries the evidence; `value`/`affected_population`/
-# `movable_gap`/`value_per_unit` are computed EXACTLY as before this ticket —
+# `movable_gap`/`value_per_unit` are computed EXACTLY as they were before —
 # proving the addition is additive, not a change to how anything is sized.
 
 
@@ -1454,12 +1454,23 @@ def test_two_claims_sharing_one_ungroupable_cluster_do_not_break_the_theme_count
 
 # ── The statement a reader actually has to judge ─────────────────────────────
 
-def test_a_finding_quotes_one_of_its_claims():
+def test_a_finding_carries_a_summary_of_one_of_its_claims():
     """`N claims concern "X"` is a table-of-contents entry: it names a topic and
     says how often it came up, and a reader cannot judge it, argue with it, or
-    take it to anyone. Against the same corpus the chat surface answers with
-    quotes and account counts; the report answered with a label. So the
-    strongest claim comes with it, as reported speech."""
+    take it to anyone. So the strongest supporting claim travels with it.
+
+    IT IS A SUMMARY, AND IT SAYS SO — WHICH IS WHY THIS TEST WAS RENAMED. It
+    used to arrive as `for example, "…"`, and the quotation marks were a
+    correctness bug rather than a style: a stored assertion is an extractor
+    paraphrase (the verbatim is validated against the transcript and then
+    discarded by design), and `example_for` paraphrase-cuts and ellipsises it
+    on top of that. Presenting text at three removes from anything spoken as
+    a quotation claimed someone said those words in that order. The lead-in
+    now does the job the quotes were doing — attributing the framing to the
+    source — without the false claim.
+    """
+    from app.crucible.pipeline import EXAMPLE_LEAD_IN
+
     claims = [
         claim("c1", assertion="PDF export fails on decks over 200 slides"),
         claim("c2", days_ago=40),
@@ -1467,12 +1478,17 @@ def test_a_finding_quotes_one_of_its_claims():
     ]
     out = run(claims)
     said = out.findings[0].statement
-    assert "for example" in said
+    # Attributed to a source, as a summary. Read off the constant so the two
+    # cannot drift apart silently.
+    assert EXAMPLE_LEAD_IN in said
+    assert "summarising" in EXAMPLE_LEAD_IN
     assert "PDF export fails on decks over 200 slides" in said
+    # And never dressed as a verbatim.
+    assert "\u201c" not in said and "\u201d" not in said
 
 
-def test_the_quoted_example_is_cut_at_a_causal_connective():
-    """The example is reported speech, not our analysis. It goes through the
+def test_the_summarised_example_is_cut_at_a_causal_connective():
+    """The example is the source's framing, not our analysis. It goes through the
     same cut the label gets, so a source's own "because" cannot arrive in a
     sentence the reader will read as ours."""
     claims = [

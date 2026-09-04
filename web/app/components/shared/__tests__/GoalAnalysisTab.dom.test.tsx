@@ -1,14 +1,32 @@
 // @vitest-environment jsdom
 //
-// The Goal Analysis panel. What is tested here is not layout — it is the four
-// places where a plausible-looking rendering would be a lie:
+// The Goal Analysis panel: the states it can be in, and what it does with the
+// report once there is one.
 //
-//   1. An unsized finding rendered as 0. "We could not size this" and "this is
-//      worth nothing" lead to OPPOSITE decisions (I3).
-//   2. The confirmation step rendered as a spinner. A run stops and asks what
-//      the goal means; that question is the product, not an interruption.
-//   3. Coverage notes buried under the findings they qualify.
-//   4. The considered list dropped, leaving a ranking to be taken on faith.
+// THE PANEL STOPPED BEING A RENDERER. It used to rebuild the whole document in
+// React from `run.findings`, in parallel with the Python that renders the
+// exported copy — two renderers of one report, sharing no code, each holding
+// its own copy of every rule about how a finding is written out. It now
+// displays the bytes the server produced (`report_html`) inside a sandboxed
+// iframe, and `GoalAnalysisReport.tsx`'s own header records why.
+//
+// SO THE ASSERTIONS ABOUT WHAT THE DOCUMENT SAYS MOVED WITH THE CODE THAT SAYS
+// IT, to `backend/tests/test_crucible_report.py` and its siblings, which run
+// against the real renderer rather than a second implementation of it:
+//
+//   * an unsized finding rendered as 0 (I3)      -> test_crucible_report.py
+//     `test_an_unsized_finding_says_so_and_is_never_a_number`, and end to end
+//     in test_crucible_document_consistency.py's `_assert_null_is_never_zero_
+//     or_small`, which checks every place a size appears;
+//   * coverage notes qualifying what they qualify -> test_crucible_report.py
+//     `test_coverage_notes_sit_inside_what_was_read_not_in_a_footer`;
+//   * the considered list, with each reason      -> test_crucible_report.py
+//     `test_the_ruled_out_ledger_keeps_its_reasons`;
+//   * a run where nothing survived               -> test_crucible_report.py
+//     `test_a_run_with_no_findings_says_the_ledger_is_the_result`.
+//
+// What is left here is what this component still decides: which state to show,
+// and that the report it was given reaches the reader unaltered.
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
@@ -47,94 +65,46 @@ const FINDING = {
 beforeEach(() => { get.mockReset(); confirm.mockReset() })
 afterEach(cleanup)
 
-describe("sizing", () => {
-  it("renders an unsizeable finding as unsized, never as zero", async () => {
-    // THE ONE THAT MATTERS. A dash and a 0 look similar and mean opposites.
-    get.mockResolvedValue({
-      ...RUN,
-      findings: [{ ...FINDING, impact_value: null, impact: { value: null, affected_population: null } }],
-    })
+describe("the report the run produced", () => {
+  // A SHORT, RECOGNISABLE STAND-IN for what `render_report_document` emits.
+  // The panel's job is to pass it through, so the fixture only has to be
+  // distinguishable — what the real document SAYS is asserted against the real
+  // renderer, in the Python suite named in this file's header.
+  const REPORT =
+    "<!doctype html><html><body><h1>raise net revenue retention</h1>" +
+    "<p>Could not be sized</p></body></html>"
+
+  const frame = () => screen.getByTitle("Goal analysis") as HTMLIFrameElement
+
+  it("shows the document the run produced, unaltered", async () => {
+    get.mockResolvedValue({ ...RUN, report_html: REPORT, findings: [FINDING] })
     render(<GoalAnalysisTab runId={7} />)
-    const el = await screen.findByTestId("goal-unsized")
-    expect(el.textContent).toBe("Could not be sized")
-    // SCOPED TO THE FINDINGS, not the page. This used to be a document-wide
-    // `queryByText("0")`, which was a fair proxy while the panel showed no
-    // other numbers — the cover strip now reports counts, and "0 high
-    // confidence" is a true zero that the page SHOULD print. The property was
-    // never "the digit 0 may not appear"; it is that an unsized finding is not
-    // rendered as one, so the assertion moves to the findings themselves and
-    // keeps its bite there.
-    const list = document.querySelector(".ga-doc-findings") ?? document.body
-    expect(within(list as HTMLElement).queryByText("0")).toBeNull()
-    // Unambiguous anywhere: nothing legitimately renders "0 accounts".
-    expect(screen.queryByText("0 accounts")).toBeNull()
+    await screen.findByTestId("goal-ready")
+    // Every character of it, so a panel that summarised, truncated or
+    // re-ordered the report would fail here rather than look tidy.
+    expect(frame().getAttribute("srcdoc")).toContain(
+      "<h1>raise net revenue retention</h1>")
+    expect(frame().getAttribute("srcdoc")).toContain("Could not be sized")
   })
 
-  it("renders a sized finding in the goal's own currency", async () => {
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
+  it("cannot execute anything the document carries", async () => {
+    // The report is server-generated but it quotes tenant text, and this is
+    // the boundary it crosses into the reader's session.
+    get.mockResolvedValue({ ...RUN, report_html: REPORT })
     render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-sized")).textContent).toBe("4 accounts")
+    await screen.findByTestId("goal-ready")
+    expect(frame().getAttribute("sandbox")).toBe("allow-same-origin")
   })
 
-  it("discloses every assumed parameter beside the number", async () => {
-    // I8. A methodology page nobody opens is not a disclosure.
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
+  it("says so rather than going blank when there is no report yet", async () => {
+    // A run still generating, or one read by a client older than the field.
+    // An empty panel with two document buttons under it reads as "the
+    // analysis found nothing".
+    get.mockResolvedValue({ ...RUN, report_html: null, findings: [FINDING] })
     render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-ready")).textContent)
-      .toContain("no revenue data connected")
-  })
-})
-
-// THE CONFIRMATION GATE MOVED TO THE CHAT THREAD.
-//
-// It is a question, and questions belong in the conversation — a PM has to be
-// able to scroll back and see what was asked and what they answered. The four
-// guarantees that lived here (the question renders rather than a spinner, the
-// proposal prefills, the user's EDIT is what gets sent, an empty definition
-// cannot be confirmed) now live in `GoalGateCard.dom.test.tsx` against the card
-// that renders them.
-
-describe("nothing is quietly dropped", () => {
-  it("renders coverage notes above the findings they qualify", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      coverage_notes: [{ reason: "undated evidence", actual: "40 of 300 signals carried no date" }],
-      findings: [FINDING],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    const notes = screen.getByTestId("goal-coverage")
-    const findings = screen.getByTestId("goal-finding")
-    expect(notes.textContent).toContain("40 of 300 signals carried no date")
-    // Order is the point: a note that changes how a number reads cannot sit
-    // underneath it.
-    expect(ready.textContent!.indexOf("undated evidence"))
-      .toBeLessThan(ready.textContent!.indexOf(findings.textContent!.slice(0, 20)))
-  })
-
-  it("renders the considered list with each reason", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      considered: [{
-        id: 3, label: "onboarding friction",
-        reason: "all 4 supporting claims land within 6 days",
-        stopped_at_stage: "verification", claim_ids: ["c9"],
-      }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-considered")).textContent)
-      .toContain("all 4 supporting claims land within 6 days")
-  })
-
-  it("a run where nothing survived says so, and still shows why", async () => {
-    get.mockResolvedValue({
-      ...RUN, findings: [],
-      considered: [{ id: 1, label: "x", reason: "single account", stopped_at_stage: "verification", claim_ids: [] }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    expect(ready.textContent).toContain("Nothing survived verification")
-    expect(screen.getByTestId("goal-considered")).toBeTruthy()
+    await screen.findByTestId("goal-ready")
+    expect((await screen.findByTestId("goal-report-pending")).textContent)
+      .toContain("no rendered report yet")
   })
 })
 

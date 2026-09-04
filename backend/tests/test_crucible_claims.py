@@ -164,7 +164,7 @@ def test_a_grounded_commercial_amount_becomes_a_magnitude_claim():
 
 def test_a_commercial_term_without_a_grounded_amount_stays_a_mechanism_claim():
     """The un-grounded, common case (a paraphrase with no real number behind
-    it) is UNCHANGED by this ticket: `commercial_term` still defaults to
+    it) is UNCHANGED by the change above: `commercial_term` still defaults to
     `mechanism`, capped at `reported` — the pre-existing, deliberate gap
     documented on `KIND_TO_CLAIM_TYPE`."""
     claim = project_signal(sig(

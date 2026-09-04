@@ -214,9 +214,22 @@ def _document(claims: Sequence[Claim], *, plan: Optional[dict] = None,
 
 # ── Reading the document back ────────────────────────────────────────────────
 
-_BLOCK = re.compile(r"<h3>(\d+)\. (.*?)</h3>(.*?)(?=<h[23]>|$)", re.S)
-_OVERFLOW_ROW = re.compile(r"<li>(\d+)\. (.*?)</li>")
+#: A full write-up. The card carries a styling hook for the document
+#: envelope's stylesheet, which is not something a reader sees.
+_BLOCK = re.compile(
+    r'<h3 class="finding">(\d+)\. (.*?)</h3>(.*?)(?=<h[23][^>]*>|$)', re.S)
+#: A row of the tail — everything ranked below the write-ups. It used to be a
+#: one-line `<li>` per finding; it is now a table whose last column says what
+#: put each below, and the rank number is still the first cell.
+_TAIL_ROW = re.compile(
+    r"<tr><td>(\d+)</td><td><strong>(.*?)</strong></td>"
+    r"<td>(.*?)</td><td>(.*?)</td><td>(.*?)</td></tr>", re.S)
 _PARAGRAPH = re.compile(r"<p>(.*?)</p>", re.S)
+#: The facts under a write-up's claim — reach, band, claims, documents. They
+#: used to be a sentence in the running prose ("Measured at: 14 accounts · …")
+#: and are now a strip; none of the numbers was dropped in the move, which is
+#: what lets this file go on checking them against the row.
+_CHIPS = re.compile(r'<p class="chips">(.*?)</p>', re.S)
 
 
 def _count(word: str) -> int:
@@ -225,91 +238,117 @@ def _count(word: str) -> int:
 
 
 def _section(html: str, heading: str) -> str:
-    """One `<h2>` section's text, up to the next one."""
-    start = html.index(f"<h2>{heading}</h2>")
-    return _from(html, start)
+    """One section's text, up to the next heading at its level or above.
+
+    ANY LEVEL, because the document has two registers now. The memo's own
+    sections are `<h2>`; everything describing how the run worked is `<h3>`
+    inside the "How this was produced" appendix. A locator that only knew
+    about `<h2>` would silently return the whole appendix for any of them.
+
+    Matched with a trailing `[^<]*` so a heading that carries a count —
+    "Considered and ruled out (100)" — is found by its stable prefix.
+    """
+    m = re.search(r"<h([1-4])[^>]*>" + re.escape(heading) + r"[^<]*</h\1>", html)
+    assert m, f"the document has no {heading!r} section"
+    level = int(m.group(1))
+    return _from(html, m.start(), level)
 
 
-def _from(html: str, start: int) -> str:
+def _from(html: str, start: int, level: int = 2) -> str:
     rest = html[start:]
-    nxt = rest.find("<h2>", 1)
-    return rest if nxt == -1 else rest[:nxt]
+    nxt = re.search(rf"<h[1-{level}][^>]*>", rest[1:])
+    return rest[:nxt.start() + 1] if nxt else rest
 
 
-#: The findings section, located STRUCTURALLY. Its `<h2>` is a CLAIM, not a
-#: label — `_findings_heading` prints the top-ranked finding's own statement —
-#: so there is no fixed title to search for, and matching one would break the
-#: moment the copy moved. What is stable is the pairing: the findings heading
-#: is the only `<h2>` immediately followed by the ranking lede.
-_FINDINGS_H2 = re.compile(r"<h2>[^<]*</h2><p>(?:Not r|R)anked by reach")
-#: How many findings that heading says are on the run. Absent by design on a
-#: run with exactly one — the claim already describes the whole section, and
-#: "the strongest of 1 findings below" would be nonsense.
-_FINDINGS_TOTAL = re.compile(r"the strongest of ([\d,]+) findings below</h2>")
+#: The findings section — the write-ups, in full.
+_FINDINGS_H2 = re.compile(r"<h2[^>]*>Each one, in full</h2>")
+#: How many findings the document says were ranked below the write-ups.
+#: Absent by design when there are none, which is the only case where the
+#: write-ups really are the whole set.
+_TAIL_TOTAL = re.compile(r"<h2[^>]*>The other ([\d,]+) we did not choose</h2>")
+#: The remainder past what the tail table can hold — counted, never dropped.
+_TAIL_BEYOND = re.compile(r"and ([\d,]+) more, all of them on the run")
 
 
 def _findings_text(html: str) -> str:
-    """The findings section alone.
+    """The write-ups alone.
 
-    Blocks and overflow rows are counted INSIDE it, because both patterns are
-    generic enough to match elsewhere — a ledger label that happened to begin
-    "3. " would otherwise be counted as a finding, and a count that can be
-    inflated by tenant text is not a count.
+    Blocks are counted INSIDE it, because the pattern is generic enough to
+    match elsewhere — a ledger label that happened to begin "3. " would
+    otherwise be counted as a finding, and a count that can be inflated by
+    tenant text is not a count.
     """
     m = _FINDINGS_H2.search(html)
+    return _from(html, m.start()) if m else ""
+
+
+def _tail_text(html: str) -> str:
+    """The tail section alone, for the same reason `_findings_text` is scoped:
+    the ranking table above it is also a table of numbered-looking rows."""
+    m = _TAIL_TOTAL.search(html)
     return _from(html, m.start()) if m else ""
 
 
 # ── The consistency assertions ───────────────────────────────────────────────
 
 def _assert_the_counts_match_the_data(doc: Doc) -> None:
-    """Every number the prose states is the number of the things it counts."""
+    """Every number the prose states is the number of the things it counts.
+
+    THE DOCUMENT'S SHAPE CHANGED AND THE IDENTITY DID NOT. It used to write up
+    everything to a size cap and list the rest as one-line rows under the same
+    heading; it now writes up two, tables the next twenty with a column saying
+    why each ranked below, and counts everything past that. So the arithmetic
+    below reads three places instead of two — but it is the same arithmetic,
+    and it is still the only thing standing between a memo and an excerpt that
+    reads like a whole.
+    """
+    from app.crucible.report import (
+        MAX_OTHER_CONSIDERED_ROWS, MAX_WRITTEN_UP_FINDINGS,
+    )
     html, rows = doc.html, doc.rows
 
     heading = _FINDINGS_H2.search(html)
-    total = _FINDINGS_TOTAL.search(html)
+    total = _TAIL_TOTAL.search(html)
     if not rows:
         assert heading is None
         assert total is None
         assert "Nothing survived verification" in html
-    elif len(rows) == 1:
-        # One finding: the heading IS the claim, and names no total, because
-        # there is nothing sitting under it to count.
+    elif len(rows) <= MAX_WRITTEN_UP_FINDINGS:
+        # Everything got a write-up, so there is no tail to count.
         assert heading, "the findings section lost its heading"
         assert total is None
     else:
         assert heading, "the findings section lost its heading"
-        assert total, "the findings heading lost its total"
+        assert total, "the tail lost the count of what it stands for"
         said = int(total.group(1).replace(",", ""))
-        assert said == len(rows), (
-            f"heading says {said} findings, the run has {len(rows)}"
+        assert said == len(rows) - MAX_WRITTEN_UP_FINDINGS, (
+            f"the tail says {said}, the run has {len(rows)} findings and "
+            f"writes up {MAX_WRITTEN_UP_FINDINGS}"
         )
 
     listed = _findings_text(html)
     blocks = _BLOCK.findall(listed)
-    overflow = _OVERFLOW_ROW.findall(listed)
-    beyond = re.search(r"A further (\d+) findings are on the run", listed)
-    unlisted = int(beyond.group(1)) if beyond else 0
+    tail = _TAIL_ROW.findall(_tail_text(html))
+    beyond = _TAIL_BEYOND.search(html)
+    unlisted = int(beyond.group(1).replace(",", "")) if beyond else 0
 
-    # NOTHING VANISHES. Full blocks + one-line rows + the counted remainder is
-    # the whole run, or the document has quietly become an excerpt.
-    assert len(blocks) + len(overflow) + unlisted == len(rows), (
-        f"{len(blocks)} blocks + {len(overflow)} rows + {unlisted} unlisted "
+    # NOTHING VANISHES. Write-ups + tabled rows + the counted remainder is the
+    # whole run, or the document has quietly become an excerpt.
+    assert len(blocks) + len(tail) + unlisted == len(rows), (
+        f"{len(blocks)} write-ups + {len(tail)} rows + {unlisted} unlisted "
         f"!= {len(rows)} findings"
     )
-    # And the numbering is one unbroken sequence, so a reader who sees "37."
-    # knows there are 36 above it.
-    printed = [int(n) for n, _s, _b in blocks] + [int(n) for n, _s in overflow]
+    assert len(blocks) == min(len(rows), MAX_WRITTEN_UP_FINDINGS)
+    assert len(tail) <= MAX_OTHER_CONSIDERED_ROWS
+    # And the numbering is one unbroken sequence, so a reader who sees "17."
+    # knows there are 16 above it.
+    printed = [int(n) for n, _s, _b in blocks] + [int(r[0]) for r in tail]
     assert printed == list(range(1, len(printed) + 1)), "the rank numbers skip"
 
-    said = re.search(r"The next (\d+) findings are listed below", listed)
-    assert bool(said) == bool(overflow), (
-        "the overflow list and the sentence announcing it must appear together"
-    )
-    if said:
-        assert int(said.group(1)) == len(overflow), (
-            f"it said {said.group(1)} and printed {len(overflow)}"
-        )
+    # The remainder sentence and a remainder appear together or not at all.
+    assert bool(beyond) == (
+        len(rows) > MAX_WRITTEN_UP_FINDINGS + MAX_OTHER_CONSIDERED_ROWS
+    ), "the counted remainder and the sentence announcing it must agree"
 
     # Each block's own numbers are its own row's.
     for rank, statement, body in blocks:
@@ -317,27 +356,32 @@ def _assert_the_counts_match_the_data(doc: Doc) -> None:
         assert statement[:60] in row["statement"] or statement.startswith(
             row["statement"][:60]
         ), f"block {rank} is not showing row {rank}"
-        claims = re.search(r"(\d+) claims?</p>", body)
-        assert claims, f"block {rank} lost its claim count"
-        assert int(claims.group(1)) == len(row["claim_ids"]), (
-            f"block {rank} says {claims.group(1)} claims, the row rests on "
-            f"{len(row['claim_ids'])}"
+        chips = _CHIPS.search(body)
+        assert chips, f"block {rank} lost its facts strip"
+        said_claims = [
+            c for c in chips.group(1).split(" \u00b7 ")
+            if re.fullmatch(r"\d+ claims?", c)
+        ]
+        assert said_claims, f"block {rank} lost its claim count"
+        assert int(said_claims[0].split()[0]) == len(row["claim_ids"]), (
+            f"block {rank} says {said_claims[0]}, the row rests on "
+            f"{len(row['claim_ids'])} claims"
         )
 
     if rows:
-        # The headline is about the row the list puts first — otherwise the
-        # document opens by summarising something other than what it ranks.
-        headline = _section(html, "The short version")
-        assert doc.rows[0]["statement"][:60] in headline.replace(
-            "&#x27;", "'").replace("&quot;", '"').replace("&amp;", "&")
-        rests = re.search(r"resting on (\d+) claims?", headline)
-        assert rests, "the headline lost its claim count"
+        # WHY THE FIRST FINDING IS FIRST is about the row the list puts first —
+        # otherwise the document explains a position it did not give. This
+        # used to be a headline above the findings and is now the appendix's
+        # placement note; it is the same claim about the same row.
+        placement = _section(html, "Why the first finding is first")
+        rests = re.search(r"resting on (\d+) claims?", placement)
+        assert rests, "the placement note lost its claim count"
         assert int(rests.group(1)) == len(rows[0]["claim_ids"])
 
     # How many could not be sized, wherever the document says it.
     unsized = sum(1 for r in rows if r["impact_value"] is None)
     for stated in re.findall(
-        r"(?:and )?(\w+) of (?:them|these) could not be sized", html
+        r"(\w+) of these we could not size at all", html
     ):
         assert _count(stated) == unsized, (
             f"the prose says {stated} unsized, the run has {unsized}"
@@ -391,7 +435,15 @@ def _assert_what_was_read_is_what_the_plan_kept(doc: Doc) -> None:
 _CONTRADICTIONS = (
     ("Ranked by reach", "Nothing in this reading could be sized"),
     ("largest thing this reading found", "Could not be sized"),
-    ("rank lower by reach", "not by size, which nothing here had"),
+    # PAIR FOUR, RE-POINTED. Its original halves — an overflow line promising
+    # "rank lower by reach" under a lede that had denied one — are both gone
+    # with the one-line overflow list. The defect they stood for is not: a
+    # document that denies it could size anything must not then name the
+    # largest of the things it sized, or claim a reach ranking anywhere.
+    ("Not ranked by reach", "largest of the ones we could size"),
+    ("Not ranked by reach", "Ranked by reach"),
+    # KEPT THOUGH BOTH ARE NOW ABSENT: these are sentences that must not come
+    # back, and a pair that never fires is the point of a regression guard.
     ("measured against that sentence", "not selected for your goal"),
     ("nothing has been dropped", "not listed here"),
 )
@@ -407,7 +459,7 @@ def _assert_no_two_sentences_contradict(doc: Doc) -> None:
 #: Claims about the ORDER or the SIZE of what was found. Every one of them is
 #: only true under a condition, and each shipped once without it.
 _SUPERLATIVES = ("largest thing this reading found",
-                 "largest of the ones that could be sized")
+                 "largest of the ones we could size")
 
 
 def _assert_every_size_claim_is_earned(doc: Doc) -> None:
@@ -452,13 +504,22 @@ def _assert_every_size_claim_is_earned(doc: Doc) -> None:
                     f"same breath that it could not be sized: {para[:160]}"
                 )
 
-    # The overflow line's ranking basis is the lede's.
-    if "The next" in html and "findings are listed below" in html:
-        if sized:
-            assert "rank lower by reach" in html
+    # THE TAIL SAYS WHAT EACH ROW IS WORTH, AND IT CANNOT INVENT A SIZE.
+    # The overflow paragraph that used to assert "ranked lower by reach" over
+    # unsized findings is now a table with a Worth column, so the same defect
+    # would show up as a number in a cell that has none behind it. Checked per
+    # row against the run rather than as one sentence about the whole tail.
+    for rank, _label, _what, worth, _why in _TAIL_ROW.findall(_tail_text(html)):
+        row = rows[int(rank) - 1]
+        if row["impact_value"] is None:
+            assert worth == "Unsized", (
+                f"tail row {rank} has no size and renders {worth!r}"
+            )
         else:
-            assert "rank lower by reach" not in html
-            assert "not by size, which nothing here had" in html
+            assert worth != "Unsized", (
+                f"tail row {rank} is sized at {row['impact_value']} and "
+                f"renders as unsized"
+            )
 
 
 def _assert_null_is_never_zero_or_small(doc: Doc) -> None:
@@ -479,8 +540,11 @@ def _assert_null_is_never_zero_or_small(doc: Doc) -> None:
     assert rendered_unsized == ("Could not be sized" in listed)
 
     for rank, _statement, body in blocks:
-        meta = _PARAGRAPH.search(body)
-        assert meta, f"block {rank} lost its meta line"
+        # THE FACTS STRIP, not the first paragraph of the card. A write-up now
+        # opens with the problem it addresses, so the first `<p>` is prose and
+        # the numbers moved to the strip below it.
+        meta = _CHIPS.search(body)
+        assert meta, f"block {rank} lost its facts strip"
         reach = meta.group(1).split(" · ")[0]
         if int(rank) in unsized_ranks:
             assert reach == "Could not be sized", (
@@ -496,7 +560,10 @@ def _assert_null_is_never_zero_or_small(doc: Doc) -> None:
     # the same defect as rendering it 0, one register softer.
     for m in re.finditer(r"\bsmall\w*\b", html):
         window = html[max(0, m.start() - 30):m.start()]
-        assert "not a " in window or "without being " in window, (
+        # IMMEDIATELY DENIED, not merely denied somewhere nearby. The three
+        # forms the document uses: "not a small one", "not small", and
+        # "without being small".
+        assert re.search(r"(?:not a |not |without being )$", window), (
             f"...{html[max(0, m.start() - 60):m.start() + 40]}..."
         )
 
@@ -525,27 +592,56 @@ def _assert_the_definition_does_not_claim_to_have_selected(doc: Doc) -> None:
             )
     if "<blockquote>" in html:
         # A recorded definition MUST carry its own disclaimer, in its own
-        # section — the correction three sections lower is not a correction if
-        # the claim above it is the one a reader takes away.
-        establish = _section(html, "What this was asked to establish")
-        assert "did not decide which findings appear below" in establish
+        # section — the correction further down is not a correction if the
+        # claim above it is the one a reader takes away. The section that
+        # carries it is now "What the definition decided", in the appendix
+        # with the rest of the method; none of these runs ran the relevance
+        # gate, so it is the honest did-not-filter branch that must appear.
+        decided = _section(html, "What the definition decided")
+        assert "Nothing here was filtered or ranked by your definition" in decided
     assert "These findings were not selected for your goal." in html
 
 
 def _assert_the_ledger_adds_up(doc: Doc) -> None:
+    """The ledger COUNTS IN FULL AND NAMES IN PART, and the two must agree.
+
+    It used to truncate the list and then say how many rows it had cut. It now
+    groups the whole ledger by reason — the per-reason totals are the numbers
+    a reader actually uses, and computing them over a truncated slice made
+    them wrong — and caps only how many candidates each group NAMES, saying
+    how many more died the same way.
+
+    Bookkeeping rows are not candidates: the "N further candidates" overflow
+    summary and the ungroupable-signal row stand for what the ledger could not
+    hold, and counting them as rejections is a defect this file has already
+    caught once.
+    """
+    from app.crucible.pipeline import AGGREGATE_STAGES
     html, ledger = doc.html, doc.ledger
     heading = re.search(r"<h2>Considered and ruled out \((\d+)\)</h2>", html)
     if not ledger:
         assert heading is None
         return
-    assert heading and int(heading.group(1)) == len(ledger)
-    grouped = sum(int(n) for n in re.findall(r"<p><strong>(\d+)</strong> died", html))
-    further = re.search(r"(\d+) further rejections", html)
-    assert grouped + (int(further.group(1)) if further else 0) == len(ledger), (
-        f"the reason groups account for {grouped} of {len(ledger)} rejections"
+    candidates = [r for r in ledger
+                  if (r.get("stopped_at_stage") or "") not in AGGREGATE_STAGES]
+    assert heading, "the ledger lost its heading"
+    assert int(heading.group(1)) == len(candidates), (
+        f"the heading counts {heading.group(1)} rejections; {len(candidates)} "
+        f"of the {len(ledger)} rows are candidates and the rest are bookkeeping"
     )
-    for row in ledger[:20]:
-        assert row["label"][:80] in html
+    # The reason groups account for every candidate.
+    grouped = sum(int(n) for n in re.findall(r"<p><strong>(\d+)</strong> died", html))
+    assert grouped == len(candidates), (
+        f"the reason groups account for {grouped} of {len(candidates)} rejections"
+    )
+    # And what each group named plus what it says it did not name is its own
+    # total, so no candidate is dropped between the count and the list.
+    named = len(re.findall(r"<li><strong>", _section(html, "Considered and ruled out")))
+    unnamed = sum(int(n) for n in re.findall(
+        r"and (\d+) more for the same reason", html))
+    assert named + unnamed == len(candidates), (
+        f"{named} named + {unnamed} counted != {len(candidates)} candidates"
+    )
 
 
 def assert_internally_consistent(doc: Doc) -> None:
@@ -639,18 +735,19 @@ def test_the_document_a_real_run_produces_is_internally_consistent(shape):
     assert_internally_consistent(_document(_CORPORA[shape]()))
 
 
-def test_a_run_that_overruns_the_block_cap_is_still_internally_consistent():
-    """The overflow path, from claims rather than from fixtures. The count in
-    "The next N findings" is the number of rows printed, the ranks continue
-    unbroken from the last full block, and nothing is lost between them."""
-    doc = _document(_many_themes_corpus())
-    from app.crucible.report import MAX_FULL_FINDING_BLOCKS
+def test_a_run_that_overruns_the_write_up_cap_is_still_internally_consistent():
+    """The tail path, from claims rather than from fixtures. The count in the
+    tail heading is the number of findings ranked below the write-ups, the
+    ranks continue unbroken from the last write-up, and nothing is lost
+    between them."""
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
 
-    assert len(doc.rows) > MAX_FULL_FINDING_BLOCKS, (
+    doc = _document(_many_themes_corpus())
+    assert len(doc.rows) > MAX_WRITTEN_UP_FINDINGS, (
         "this corpus no longer overruns the cap, so the test is not exercising "
         "what it claims"
     )
-    assert "The next" in doc.html
+    assert _TAIL_TOTAL.search(doc.html), "expected a tail section"
     assert_internally_consistent(doc)
 
 
@@ -664,12 +761,14 @@ def test_a_run_too_large_even_for_the_overflow_list_counts_every_finding():
     So the identity has to hold across all three states at once: full blocks
     plus listed rows plus the counted remainder is the whole run.
     """
-    from app.crucible.report import MAX_FULL_FINDING_BLOCKS, MAX_OVERFLOW_ROWS
+    from app.crucible.report import (
+        MAX_OTHER_CONSIDERED_ROWS, MAX_WRITTEN_UP_FINDINGS,
+    )
 
     doc = _document(_many_sized_themes(
-        MAX_FULL_FINDING_BLOCKS + MAX_OVERFLOW_ROWS + 60))
-    assert re.search(r"A further (\d+) findings are on the run", doc.html), (
-        "this corpus no longer overruns the overflow list, so the third state "
+        MAX_WRITTEN_UP_FINDINGS + MAX_OTHER_CONSIDERED_ROWS + 60))
+    assert _TAIL_BEYOND.search(doc.html), (
+        "this corpus no longer overruns the tail table, so the third state "
         "is not being exercised"
     )
     assert "nothing has been dropped" not in doc.html
@@ -731,8 +830,9 @@ def test_the_definition_section_never_claims_to_have_chosen_the_findings():
     _assert_the_definition_does_not_claim_to_have_selected(doc)
     _assert_no_two_sentences_contradict(doc)
     # Both halves, in the order a reader meets them.
-    assert doc.html.index("did not decide which findings appear below") < \
-        doc.html.index("These findings were not selected for your goal.")
+    assert doc.html.index(
+        "Nothing here was filtered or ranked by your definition"
+    ) < doc.html.index("These findings were not selected for your goal.")
 
 
 def test_the_overflow_line_never_claims_a_ranking_the_lede_denied():
@@ -740,14 +840,18 @@ def test_the_overflow_line_never_claims_a_ranking_the_lede_denied():
     reach" unconditionally, directly beneath a lede that had just said nothing
     here could be sized."""
     unsized = _document(_many_unsized_themes())
-    assert "The next" in unsized.html, "expected the overflow paragraph"
+    assert _TAIL_TOTAL.search(unsized.html), "expected a tail section"
     assert "rank lower by reach" not in unsized.html
-    assert "not by size, which nothing here had" in unsized.html
+    # Every tail row says its size is unknown, so nothing in the tail can be
+    # read as a size ordering the lede had just denied.
+    worths = {r[3] for r in _TAIL_ROW.findall(_tail_text(unsized.html))}
+    assert worths == {"Unsized"}, worths
     _assert_every_size_claim_is_earned(unsized)
 
-    # The control: a run that CAN size its findings keeps the sentence.
+    # The control: a run that CAN size its findings says so, in the same cell.
     sized = _document(_many_sized_themes())
-    assert "rank lower by reach" in sized.html
+    assert "Ranked by reach" in sized.html
+    assert "Unsized" not in _tail_text(sized.html)
     _assert_every_size_claim_is_earned(sized)
 
 
@@ -885,10 +989,21 @@ def test_the_bookkeeping_numbers_are_still_stated():
 
 def test_the_report_does_not_promise_it_listed_everything():
     """"Everything that was considered is listed below" is false the moment the
-    list overflows — which is the ordinary case on a real corpus."""
+    list overflows — which is the ordinary case on a real corpus.
+
+    THE PROMISE NOT TO OVERCLAIM IS UNCHANGED; WHAT KEEPS IT MOVED. It used to
+    be a clause in the no-findings lede explaining the ledger's counting rule
+    in the abstract. The ledger now states the rule where it applies — per
+    reason, beside the list it qualifies — so a reader meets it at the point
+    it matters instead of three screens above."""
     html = _aggregate_doc()
     assert "Everything that was considered is listed below" not in html
-    assert "the remainder is counted with it" in html
+    assert re.search(r"and \d+ more for the same reason", html), (
+        "the ledger named a subset without saying it had"
+    )
+    assert "counted above and not named here" in html
+    # And the bookkeeping is still stated, as bookkeeping.
+    assert "1476 further candidates" in html
 
 # ── Excluding a source narrows what the run PROMISES, not just what it reads ──
 
