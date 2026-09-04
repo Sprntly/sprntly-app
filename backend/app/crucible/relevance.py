@@ -31,6 +31,14 @@ everything I2 was protecting:
   - IT FAILS OPEN. If the call dies, every finding stays. A failed relevance
     pass that quietly hid three hundred findings would make a thin report look
     like a decisive one, which is the worst outcome available here.
+  - IT IS DRAWN ONCE PER RUN. A model call is a draw, not a lookup, and two
+    draws over an identical corpus kept 38 of 60 findings and then 49 of 60 —
+    a 29% swing in what the customer is told bears on their goal, from nothing
+    but resampling. Everything else in the pipeline is deterministic, so a
+    stage that is not makes the engine's central claim false. The verdict is
+    now drawn once, stored on the run, and read back
+    (`judge_relevance`/`dump_verdicts`/`load_verdicts`). A NEW run still
+    judges fresh; the same run can no longer answer differently.
   - A CONFLICT IS NEVER SET ASIDE. Two sources that may both speak disagreeing
     is the most decision-relevant thing a run can find — `_rank` already puts
     it first regardless of size, and no relevance judgement outranks that.
@@ -253,8 +261,47 @@ def judge_relevance(
     goal_text: str,
     definition_text: str,
     findings: Sequence[Finding],
+    run_meta: Optional[dict] = None,
 ) -> dict[str, Verdict]:
     """Which findings bear on the goal. Absent id == judged relevant.
+
+    JUDGE ONCE. TAKE THE FIRST SAMPLE AND KEEP IT.
+    ----------------------------------------------
+    A model call is a draw, not a lookup, and this one is a SELECTION. Two
+    runs over an identical corpus — same goal, same definition, the same 60
+    findings, identical input token counts — kept 38 and 49. An eleven-finding
+    swing in what a customer is told bears on their goal, from nothing but
+    resampling. Everything else in the run reproduced exactly; this stage was
+    the only thing that could not. Two people asking the same question saw
+    materially different documents, which makes the engine's central claim —
+    that the same substrate produces the same ranking — false.
+
+    So `run_meta` is the run's own `prioritisation` blob, and a verdict set
+    already drawn for that run is READ BACK rather than re-drawn — the
+    discipline, and the reason for it, that `figure_class.classify_figures`
+    already states for classification: a stored answer is a fact to read, not
+    a question to re-ask. The caller persists a fresh draw with
+    `dump_verdicts`; `load_verdicts` is what this reads.
+
+    NEVER RE-ROLL TO CHECK. Re-judging and comparing is not verification; it
+    is a second sample, and choosing between two samples makes the answer a
+    function of how many times you looked.
+
+    A DELIBERATE RE-RUN STILL RE-JUDGES, and that is the point of scoping the
+    store to the RUN rather than to the goal or the corpus. A new run is a new
+    row with an empty `prioritisation`, so it draws fresh — a reader who asks
+    again gets a genuinely new analysis. What can no longer happen is the SAME
+    run answering differently on a re-enrichment.
+
+    A partial draw stays partial. If the deadline cut the gate off after 40 of
+    60, those 40 are what is stored and what comes back; the other 20 stay
+    unjudged, which `partition` already treats as KEEP and the renderer
+    already discloses as "not evaluated". Re-judging only the remainder would
+    be a second draw wearing a different name.
+
+    READ BACK BEFORE `_offline()` IS EVEN CONSULTED, because reading a stored
+    fact is not a model call and there is no reason to withhold it from a
+    caller that has one.
 
     TOTAL — never raises, and never returns a verdict it did not get. A finding
     the model did not answer for, or a chunk whose call failed, is simply not in
@@ -262,6 +309,13 @@ def judge_relevance(
     property: the cost of keeping an irrelevant finding is a line in a list, and
     the cost of hiding a relevant one is the answer.
     """
+    stored = load_verdicts(run_meta or {})
+    if stored is not None:
+        logger.info(
+            "crucible_relevance_reused verdicts=%s findings=%s",
+            len(stored), len(findings),
+        )
+        return stored
     if _offline() or not findings:
         return {}
 
@@ -311,6 +365,65 @@ def judge_relevance(
                 done += len(c)
             i += len(wave)
     return verdicts
+
+
+#: Where a drawn verdict set lives on the run.
+#:
+#: RIDES IN `prioritisation`, THE RUN'S OWN JSON, so this needs no migration
+#: against the shared Supabase — the same reasoning `_progress`,
+#: `findings_extra_by_rank` and `set_aside_by_rank` already use, and the
+#: established place for exactly this kind of per-finding extra.
+VERDICTS_KEY = "relevance_verdicts"
+
+#: Bumped only if the stored shape changes incompatibly. A blob with an
+#: unrecognised version is treated as absent, which re-draws — the same
+#: direction everything else here fails in.
+VERDICTS_VERSION = 1
+
+
+def dump_verdicts(verdicts: dict[str, Verdict]) -> dict:
+    """A drawn verdict set, in the shape stored on the run.
+
+    SPLIT BY OUTCOME rather than stored as one map of objects, because only
+    one side of it carries text: a `true` verdict's `reason` is always empty
+    (the schema says so, and `_judge_chunk` drops a `false` that arrives
+    without one), so storing an object per kept finding would be a few
+    hundred `{"bears_on_goal": true, "reason": ""}` in a JSON column for no
+    information. Round-trips exactly — see `load_verdicts`.
+    """
+    return {
+        "version": VERDICTS_VERSION,
+        "bears": sorted(fid for fid, v in verdicts.items() if v.bears_on_goal),
+        "set_aside": {
+            fid: v.reason for fid, v in verdicts.items() if not v.bears_on_goal
+        },
+    }
+
+
+def load_verdicts(run_meta: dict) -> Optional[dict[str, Verdict]]:
+    """The verdicts already drawn for this run, or None if none ever were.
+
+    NONE AND `{}` ARE DIFFERENT ANSWERS, and conflating them is how this
+    would quietly keep re-rolling. An empty map is a real outcome — a gate
+    that ran and got back nothing usable — and must read back as "already
+    drawn, drew nothing" so the re-run does not take a second sample. Only
+    the absence of the key at all means the gate has never run here.
+    """
+    if not isinstance(run_meta, dict):
+        return None
+    blob = run_meta.get(VERDICTS_KEY)
+    if not isinstance(blob, dict) or blob.get("version") != VERDICTS_VERSION:
+        return None
+    out: dict[str, Verdict] = {}
+    for fid in blob.get("bears") or []:
+        if isinstance(fid, str):
+            out[fid] = Verdict(True, "")
+    aside = blob.get("set_aside")
+    if isinstance(aside, dict):
+        for fid, reason in aside.items():
+            if isinstance(fid, str) and isinstance(reason, str):
+                out[fid] = Verdict(False, reason)
+    return out
 
 
 def partition(

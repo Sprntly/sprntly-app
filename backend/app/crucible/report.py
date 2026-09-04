@@ -646,9 +646,9 @@ def _synthesized_recommendation_section(synth: dict) -> str:
         out.append("<p><strong>Drawn from.</strong></p>")
         out.append(_ul(
             f"{_esc_clipped(c.get('evidence'), MAX_STATEMENT_CHARS)} "
-            f'<em class="src">— from: \u201c'
+            f'<em class="src">{_SOURCE_LEAD_IN} '
             f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
-            f"”</em>"
+            f"</em>"
             for c in citations[:MAX_SYNTHESIS_CITATIONS_RENDERED]
         ))
     return "".join(out)
@@ -1238,7 +1238,7 @@ KILL_SIGNAL_CAVEAT = (
 #: full stop.
 #:
 #: THE CITATIONS ARE NOT LOST. Every accepted `change` renders its claim id's
-#: own assertion text beside it ("— from: “…”"), which is the provenance a
+#: own assertion text beside it (`_SOURCE_LEAD_IN`), which is the provenance a
 #: reader can actually use. The inline brackets are leakage from the model's
 #: scratchpad, not a second, better citation.
 _CLAIM_REF = re.compile(
@@ -1246,16 +1246,61 @@ _CLAIM_REF = re.compile(
     r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\]"
 )
 
+#: THE PUNCTUATION THE MODEL WRAPPED AROUND THE IDS, which removing the ids
+#: leaves behind. `_CLAIM_REF` takes the bracket group and the space before
+#: it and nothing else, so prose written as `…before any purchase can proceed
+#: ([id], [id])` rendered `…before any purchase can proceed (,)` — three
+#: characters of the model's scratchpad punctuation, sitting in a sentence a
+#: client reads. Seen live: `(,)`, `()` after a single citation, and a space
+#: stranded before a full stop.
+#:
+#: MATCHED ON EMPTINESS, NOT ON POSITION. A group is only removed when what
+#: is left inside it is separators and whitespace — never when a word
+#: survives — so `(a 10-day trial [id])` keeps its parentheses and its
+#: content, and only a parenthesis that was holding nothing BUT citations
+#: goes. That is the difference between cleaning up after the stripper and
+#: deleting an author's aside that happened to sit next to a citation.
+_EMPTY_REF_GROUP = re.compile(
+    r"\s*\(\s*[,;:&/·–—-]*\s*\)"
+    r"|\s*\[\s*[,;:&/·–—-]*\s*\]"
+)
+
+#: A separator left with nothing on one side of it. `A [id], B [id]` is fine
+#: — both ids go and the comma still joins two things — but a citation that
+#: was itself a list item leaves `A, , B`, `(, B)` or `(A ,)`.
+_DOUBLED_SEP = re.compile(r"(?:\s*,\s*){2,}")
+_OPENING_SEP = re.compile(r"([(\[])\s*[,;]\s*")
+_CLOSING_SEP = re.compile(r"\s*[,;]\s*([)\]])")
+
+#: Whitespace stranded before punctuation that never takes a space before it.
+#: Excludes the ellipsis, which `cluster.example_for` appends deliberately.
+_SPACE_BEFORE_PUNCT = re.compile(r"[ \t]+([,.;:!?)\]])")
+_RUN_OF_SPACES = re.compile(r"[ \t]{2,}")
+
 
 def strip_claim_refs(text: str) -> str:
-    """Model-authored prose with its inline `[claim-id]` references removed.
+    """Model-authored prose with its inline `[claim-id]` references removed,
+    and with the punctuation that was wrapping them removed too.
 
     Applied at the render boundary rather than in `recommend.py`, for the same
     reason the lint runs there: the stored recommendation stays exactly what
     the model returned, and every renderer strips independently, so neither
     can be the one that forgot.
+
+    TWO PASSES, DELIBERATELY. Matching the ids together with their wrapper in
+    one expression would need every arrangement the model might write —
+    `([id])`, `([id], [id])`, `[[id]; [id]]`, `([id] and [id])` — and the one
+    arrangement not enumerated is the one that ships a `(,)`. Removing the
+    ids first and then removing what is provably empty afterwards has no such
+    list to keep complete.
     """
-    return _CLAIM_REF.sub("", text or "")
+    out = _CLAIM_REF.sub("", text or "")
+    out = _EMPTY_REF_GROUP.sub("", out)
+    out = _DOUBLED_SEP.sub(", ", out)
+    out = _OPENING_SEP.sub(r"\1", out)
+    out = _CLOSING_SEP.sub(r"\1", out)
+    out = _SPACE_BEFORE_PUNCT.sub(r"\1", out)
+    return _RUN_OF_SPACES.sub(" ", out).strip()
 
 
 #: Sentence-final punctuation. A string already ending in one of these does
@@ -1327,14 +1372,102 @@ def _esc_clipped(value: Any, limit: int) -> str:
     return _esc(_clip(value if isinstance(value, str) else str(value or ""), limit))
 
 
+#: NOTHING IN A GOAL ANALYSIS IS A QUOTATION, AND NOTHING MAY LOOK LIKE ONE.
+#: `graph.extractor` validates a verbatim quote against the transcript, uses
+#: it to gate the write, and then discards it by design — no raw source text
+#: is ever stored. So every `content`, every theme label derived from one and
+#: every `example` is a PARAPHRASE, and several are additionally cut at a
+#: causal connective and ellipsised (`cluster.example_for`). Four render
+#: sites used to set that text in curly quotes, which told a reader that a
+#: named company said those words in that order. None did.
+#:
+#: The evidence still has to READ as evidence, so the visual separation is
+#: kept — a blockquote, an italic provenance line — and only the false claim
+#: to be verbatim is removed, replaced by a lead-in that says what the text
+#: actually is. These constants exist so the wording cannot drift between
+#: the four places it appears.
+#:
+#: How a summarised example is introduced wherever this module renders one.
+#: Mirrors `pipeline.EXAMPLE_LEAD_IN`, which does the same job inside the
+#: stored statement — one phrase, so a reader meets the same signal in the
+#: sentence, the blockquote and the provenance line rather than three.
+_EXAMPLE_LEAD_IN = "Summarising one source:"
+
+#: The same lead-in mid-sentence, where the statement builder puts it.
+#: MUST STAY EQUAL TO `pipeline.EXAMPLE_LEAD_IN` — `_findings_heading` cuts a
+#: statement here, so a heading and a card would show the same words twice if
+#: the two drifted. Not imported, because `report` renders stored dicts and
+#: has never needed the pipeline module to do it.
+_STATEMENT_EXAMPLE_LEAD_IN = "— summarising one source:"
+
+#: How the claim a recommendation was drawn from is introduced, beside it.
+#: "from" rather than any verb of speech, for the same reason: the text after
+#: it is the claim's stored assertion, which is the extractor's summary of
+#: the source and not the source.
+_SOURCE_LEAD_IN = "— summarised from the source:"
+
+#: The theme lead-in `pipeline._statement_parts` writes, and the quoted shape
+#: it used to write. Both are matched below.
+_THEME_LEAD_IN = "a reported theme:"
+
+#: THE OLD QUOTED SHAPE, AS STORED. Rows written before the statement builder
+#: stopped using quotation marks carry
+#: `N claims across M accounts concern “Topic” — for example, “Example”.`
+#: Those rows are not rewritten in the database — see `_restate_statement` —
+#: so this is how the renderer recognises them.
+_LEGACY_THEME = re.compile(r"\b(concerns?) “([^“”]*)”")
+_LEGACY_EXAMPLE = re.compile(
+    r"\s*— for example,\s*“([^“”]*)”\.?\s*$"
+)
+
+
+def _restate_statement(statement: str) -> str:
+    """A stored statement with any quotation marks around reported text
+    replaced by an attribution.
+
+    WHY THE RENDERER AND NOT A BACKFILL. The extractor validates a verbatim
+    quote against the transcript, uses it to gate the write and then discards
+    it by design, so every stored `content` — and therefore every theme label
+    and every example built from one — is a PARAPHRASE. Presenting a
+    paraphrase in curly quotes tells a reader that a named company said those
+    words; nobody did. The builder no longer writes that shape
+    (`pipeline._statement_parts`), but hundreds of already-stored rows do, and
+    a run rendered from them would keep making the claim. Rewriting the rows
+    would edit the record of what a past run decided, which is a worse trade
+    than rewriting the presentation of it.
+
+    STRUCTURAL, NOT HEURISTIC. The old shape was generated by this codebase,
+    not by a model, so both halves of it are matched exactly where the builder
+    put them — after "concern"/"concerns" for the theme, and as the trailing
+    "— for example, …" clause. A quotation anywhere else in a statement is not
+    this engine's and is left alone.
+    """
+    text = (statement or "").strip()
+    if not text:
+        return text
+    text = _LEGACY_THEME.sub(rf"\1 {_THEME_LEAD_IN} \2", text, count=1)
+    m = _LEGACY_EXAMPLE.search(text)
+    if m:
+        example = m.group(1).strip()
+        head = text[: m.start()].rstrip().rstrip(".")
+        text = f"{head} {_STATEMENT_EXAMPLE_LEAD_IN} {example}"
+        if not text.endswith((".", "!", "?", "…")):
+            text += "."
+    return text
+
+
 def _statement_text(finding: dict) -> str:
     """A finding's statement, bounded, cut on a word boundary."""
-    return _clip(finding.get("statement") or "", MAX_STATEMENT_CHARS)
+    return _clip(
+        _restate_statement(finding.get("statement") or ""), MAX_STATEMENT_CHARS
+    )
 
 
 def _esc_statement(finding: dict) -> str:
     """The statement, escaped, with the BOUND ON THE ESCAPED length."""
-    return _esc_clipped(finding.get("statement") or "", MAX_STATEMENT_CHARS)
+    return _esc_clipped(
+        _restate_statement(finding.get("statement") or ""), MAX_STATEMENT_CHARS
+    )
 
 
 
@@ -1665,9 +1798,10 @@ def _finding_block(
     on the record, and says which of the two it is.
     """
     # THE THEME IS THE HEADING. It used to be the whole sentence — "30 claims
-    # across 11 accounts concern “Sales Pipeline” — for example, “…”" — so the
-    # one word a reader scans for sat mid-clause, in quotes, behind two numbers
-    # that the chips on the next line repeat verbatim.
+    # across 11 accounts concern a reported theme: Sales Pipeline —
+    # summarising one source: …" — so the one word a reader scans for sat
+    # mid-clause, behind two numbers that the chips on the next line repeat
+    # verbatim.
     #
     # FALLS BACK TO THE SENTENCE when there is no label, which is every run
     # stored before this shipped and every fixture that predates it.
@@ -1725,9 +1859,9 @@ def _finding_block(
             why.append("<p><strong>What to change.</strong></p>")
             why.append(_ul(
                 f"{_esc_clipped(c.get('text'), MAX_STATEMENT_CHARS)} "
-                f'<em class="src">— from: \u201c'
+                f'<em class="src">{_SOURCE_LEAD_IN} '
                 f"{_esc_clipped(c.get('cited_claim'), MAX_PARAM_BASIS_CHARS)}"
-                f"”</em>"
+                f"</em>"
                 for c in changes[:MAX_DEEP_CHANGES]
             ))
         open_qs = [
@@ -1884,15 +2018,25 @@ def _finding_block(
                 f"figures actually quoted, not a projection."
             ))
 
-    # ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote — "this is exactly
-    # what they said". Only when the heading is the label: with the sentence as
-    # the heading the quote is already inside it, and `example` is empty
+    # ONE CLAIM, SUMMARISED, SET APART — "this is the kind of thing behind the
+    # count". Only when the heading is the label: with the sentence as the
+    # heading the example is already inside it, and `example` is empty
     # whenever the statement fell back to its plain form.
+    #
+    # STILL A BLOCKQUOTE, BUT NO LONGER IN QUOTATION MARKS. The indent is
+    # doing the work it should have been doing alone — setting the evidence
+    # apart so it reads as evidence. The curly quotes were doing work they
+    # had no right to: `graph.extractor` validates a verbatim quote against
+    # the transcript, uses it to gate the write and then discards it by
+    # design, so `example` is an extractor paraphrase that `example_for` has
+    # additionally cut and may have ellipsised. Set in quotes, that told a
+    # reader a named account said words nobody said. The lead-in says what
+    # the text actually is instead.
     example = (finding.get("example") or "").strip()
     if label and example:
         evidence.append(
-            f"<blockquote>\u201c{_esc_clipped(example, MAX_STATEMENT_CHARS)}"
-            f"\u201d</blockquote>"
+            f"<blockquote><em>{_EXAMPLE_LEAD_IN}</em> "
+            f"{_esc_clipped(example, MAX_STATEMENT_CHARS)}</blockquote>"
         )
 
     confidence = _as_dict(finding.get("confidence"))
@@ -2182,19 +2326,22 @@ def _findings_heading(findings: list[dict]) -> str:
     names how many more sit under it. Exactly one finding needs no such
     qualifier: the claim already describes the whole section.
 
-    CUT BEFORE THE FINDING'S OWN QUOTE, not after it. `pipeline.py`'s
-    statement-builder embeds a supporting quote at "— for example,
-    “…”" precisely when a finding has no `label` — and a labelless
-    finding's own `<h3>` card (`_finding_block`) falls back to that SAME
-    statement for ITS heading. Reusing the whole sentence here would put the
-    identical quoted words in two headings back to back, about the same
-    theme — the exact duplication `Finding.label`'s own docstring exists to
-    avoid ("a terrible thing to SCAN"). Cutting at the same clause boundary
-    leaves the claim here and the quote where it already is: in the card
-    below, or in its blockquote.
+    CUT BEFORE THE FINDING'S OWN EXAMPLE, not after it. `pipeline.py`'s
+    statement-builder embeds a supporting example at
+    `_STATEMENT_EXAMPLE_LEAD_IN` precisely when a finding has no `label` —
+    and a labelless finding's own `<h3>` card (`_finding_block`) falls back
+    to that SAME statement for ITS heading. Reusing the whole sentence here
+    would put the identical words in two headings back to back, about the
+    same theme — the exact duplication `Finding.label`'s own docstring exists
+    to avoid ("a terrible thing to SCAN"). Cutting at the same clause
+    boundary leaves the claim here and the example where it already is: in
+    the card below, or in its blockquote.
+
+    THROUGH `_restate_statement`, so a row stored in the old quoted shape is
+    cut at the same place a new one is.
     """
-    statement = (findings[0].get("statement") or "").strip()
-    core = statement.split("— for example,", 1)[0].strip()
+    statement = _restate_statement(findings[0].get("statement") or "")
+    core = statement.split(_STATEMENT_EXAMPLE_LEAD_IN, 1)[0].strip().rstrip(",")
     claim = _esc_clipped(core or statement, MAX_STATEMENT_CHARS)
     if len(findings) > 1:
         return f"{claim} — the strongest of {len(findings):,} findings below"
@@ -2489,7 +2636,8 @@ def _other_considered_section(
     silent degradation this file exists to prevent.
 
     THE LABEL, NOT THE STATEMENT. A statement is a whole sentence ("30 claims
-    across 11 accounts concern X — for example, …"); twenty of those is a
+    across 11 accounts concern a reported theme: X — summarising one source:
+    …"); twenty of those is a
     wall. The label is the one phrase a reader scans for, and the statement is
     the fallback for a run stored before labels existed.
     """
