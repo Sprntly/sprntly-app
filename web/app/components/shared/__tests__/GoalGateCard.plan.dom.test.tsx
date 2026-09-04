@@ -702,7 +702,7 @@ describe("the gate asks what it cannot know", () => {
   })
 })
 
-describe("the gate asks only what the CHOSEN framework needs (AC-5)", () => {
+describe("the gate asks only what the CHOSEN framework needs", () => {
   // Replaces the fixed three above with the batch `plan.questions` carries —
   // derived server-side from which framework this run actually picked.
   const withQuestions = (questions: GoalRunPlan["questions"]) =>

@@ -154,7 +154,7 @@ def test_a_causal_action_is_now_dropped_by_the_lint():
     assert _check("Fix the export path", "three accounts named it") is not None
 
 
-# ─── AC-1/AC-2/AC-3: the deep pass ────────────────────────────────────────────
+# ─── The deep pass ────────────────────────────────────────────────────────────
 #
 # Apurva: "once we pick the top two, then we could just compare them." David:
 # "the number of projects really has to be in context of the question and
@@ -217,7 +217,7 @@ def _build_two():
     return corpus, result
 
 
-# ── AC-2: the count is arithmetic over frozen scores, never an LLM's choice ──
+# ── The count is arithmetic over frozen scores, never an LLM's choice ───────
 
 def test_named_count_is_honoured():
     assert _named_count("What are two things I can do about this?") == 2
@@ -1060,7 +1060,7 @@ def test_named_target_in_the_wrong_unit_falls_back_and_says_so():
     assert "dollars" in result.basis and "accounts" in result.basis
 
 
-# ── AC-3: the groundedness gate ──────────────────────────────────────────────
+# ── The groundedness gate ────────────────────────────────────────────────────
 
 def test_grounded_in_accepts_real_overlap_and_rejects_invention():
     claim_text = "Tier 1 enterprise buyers require court-admissible citation chains"
@@ -1173,7 +1173,7 @@ def test_open_questions_are_not_required_to_be_grounded():
     )
 
 
-# ── AC-1: the top two are compared, deterministically, never by a model ─────
+# ── The top two are compared, deterministically, never by a model ───────────
 
 def test_deep_schema_declares_no_decision_field():
     """I2, checked against the ACTUAL schema sent to the model — the same
@@ -1305,7 +1305,7 @@ def test_the_basis_reflects_drops_when_kept_deep_is_less_than_promised(monkeypat
                     "because": "Two accounts named the six-week onboarding",
                     "changes": [{
                         # NEVER SHOWN for this finding — the citation gate
-                        # (AC-3) must drop the whole deep recommendation.
+                        # must drop the whole deep recommendation.
                         "claim_id": "not-a-real-claim-id",
                         "evidence": "onboarding takes six weeks to complete",
                         "change": "Automate the onboarding checklist",
@@ -1405,9 +1405,9 @@ def test_deep_pass_survives_a_gateway_that_dies(monkeypatch):
 
 
 def test_deep_recommendation_never_moves_the_ranking():
-    """AC-6, extended to the deep pass: the pipeline run before and after is
-    identical, exactly like `test_recommendations_never_move_the_ranking`
-    above."""
+    """The ranking is frozen before the deep pass, and stays frozen: the
+    pipeline run before and after is identical, exactly like
+    `test_recommendations_never_move_the_ranking` above."""
     corpus = _two_finding_corpus()
     before = build_findings(corpus, currency="accounts", now=NOW)
     deep = {
@@ -1616,9 +1616,14 @@ def test_two_deep_recommendations_are_synthesized(monkeypatch):
 
 
 def test_a_synthesis_citation_not_already_cited_by_a_deep_rec_is_dropped():
-    """The gate this ticket most needs to hold: a citation the synthesis
-    invents — a real claim id, but one no per-finding deep recommendation
-    being combined actually cited — must be dropped, not trusted."""
+    """The gate that most has to hold: a citation the synthesis invents — a
+    real claim id, but one no per-finding deep recommendation being combined
+    actually cited — must be dropped, not trusted.
+
+    `bound_action` is keyword-only and REQUIRED: the action is the rank-1 kept
+    recommendation's own wording, passed in by the caller, and whatever the
+    model put in `rec["action"]` is ignored outright. The fixtures below pass
+    it explicitly for that reason."""
     claims_by_id = {c.id: c for c in _two_finding_corpus()}
     allowed = {"c1"}  # only c1 was cited by a per-finding deep recommendation
     rec = {
@@ -1630,7 +1635,10 @@ def test_a_synthesis_citation_not_already_cited_by_a_deep_rec_is_dropped():
             {"claim_id": "d1", "evidence": "onboarding takes six weeks to complete"},
         ],
     }
-    out = _synthesis_acceptable(rec, "reported", allowed, claims_by_id)
+    out = _synthesis_acceptable(
+        rec, "reported", allowed, claims_by_id,
+        bound_action="Do the combined thing",
+    )
     assert out is None
 
 
@@ -1644,34 +1652,49 @@ def test_a_synthesis_citation_whose_evidence_does_not_overlap_is_dropped():
              "evidence": "Bluebook citation formatting is an industry standard"},
         ],
     }
-    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    out = _synthesis_acceptable(
+        rec, "reported", {"c1"}, claims_by_id,
+        bound_action="Do the combined thing",
+    )
     assert out is None
 
 
 def test_a_synthesis_quoting_a_figure_is_dropped():
     claims_by_id = {c.id: c for c in _two_finding_corpus()}
     rec = {
-        "action": "Recover $50K in retained ARR",
         "because": "Because of the evidence",
         "citations": [
             {"claim_id": "c1", "evidence": "export runs time out past 10k rows"},
         ],
     }
-    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    # THE FIGURE GOES IN `bound_action`, not in `rec`: the bound action is the
+    # only action that can reach a reader, so it is the one the figure gate
+    # has to be checked against. Left in `rec["action"]` this fixture would
+    # pass without exercising the gate at all.
+    out = _synthesis_acceptable(
+        rec, "reported", {"c1"}, claims_by_id,
+        bound_action="Recover $50K in retained ARR",
+    )
     assert out is None
 
 
 def test_a_grounded_synthesis_citation_is_kept():
     claims_by_id = {c.id: c for c in _two_finding_corpus()}
     rec = {
-        "action": "Fix the export timeout",
+        # A DIFFERENT ACTION FROM THE BOUND ONE, on purpose: what the model
+        # returned here must never reach the output.
+        "action": "Rewrite the whole export subsystem",
         "because": "Three accounts hit the same timeout",
         "citations": [
             {"claim_id": "c1", "evidence": "export runs time out past 10k rows"},
         ],
     }
-    out = _synthesis_acceptable(rec, "reported", {"c1"}, claims_by_id)
+    out = _synthesis_acceptable(
+        rec, "reported", {"c1"}, claims_by_id,
+        bound_action="Fix the export timeout",
+    )
     assert out is not None
+    assert out.action == "Fix the export timeout"
     assert out.citations[0].claim_id == "c1"
     assert out.citations[0].cited_claim == "export runs time out past 10k rows"
 
@@ -1699,8 +1722,8 @@ def test_synthesis_survives_a_gateway_that_dies(monkeypatch):
 
 
 def test_synthesis_never_moves_the_ranking():
-    """AC-6, extended to the synthesis pass: running it changes nothing about
-    the pipeline's own frozen output."""
+    """The ranking is frozen before the synthesis pass too: running it changes
+    nothing about the pipeline's own frozen output."""
     corpus = _two_finding_corpus()
     before = build_findings(corpus, currency="accounts", now=NOW)
     deep_by_id = {
