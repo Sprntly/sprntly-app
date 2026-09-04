@@ -42,8 +42,8 @@
  */
 import { EFFORT_ABSENT, MAX_RICE_ROWS, RICE_INPUT_COUNT, riceFor } from "../../lib/goalRice"
 import {
-  CALL_COUNT_FLOOR_NOTE, MAX_MOSCOW_ROWS, hasCallCount, moscowFor,
-  typeBucket,
+  CALL_COUNT_FLOOR_NOTE, MAX_MOSCOW_ROWS, TYPE_BUCKET_BLOCKER,
+  TYPE_BUCKET_PREFERENCE, hasCallCount, moscowFor, typeBucket,
 } from "../../lib/goalMoscow"
 import {
   DATA_GAPS_HEADING, ONE_TOPIC_NOTE, dataGapsFor, optionHeader,
@@ -51,7 +51,6 @@ import {
 } from "../../lib/goalDataGaps"
 import { stop, stripClaimRefs, upperFirst } from "../../lib/goalProse"
 import { frameworkDisplayName } from "../../lib/goalFrameworkDisplay"
-import { findingsHeading } from "../../lib/goalFindingsHeading"
 import type { GoalFinding, GoalRunDetail, GoalRunPlan } from "../../lib/api"
 
 /** How many rejections render expanded. Beyond this the ledger folds, because
@@ -72,27 +71,66 @@ const KILL_SIGNAL_CAVEAT =
   + "reads what people said, not a metric series, so nothing is watching for "
   + "this on your behalf. Someone has to go and look."
 
-/** How many findings get a FULL write-up in "What the evidence says" —
- *  mirroring `backend/app/crucible/report.py`'s `MAX_DETAILED_FINDINGS`
- *  (== `MAX_RICE_ROWS`, that file's own comment explains the "10, not 150"
- *  reasoning in full). Kept equal to the RICE/MoSCoW table's row cap on
- *  purpose: the document is a decision memo, so a full block is reserved for
- *  the same themes the ranking put first in the table above, and the two
- *  sections must not disagree about what mattered.
+/** How many findings get a FULL write-up, and how many of the rest get one
+ *  line — mirroring `backend/app/crucible/report.py`'s
+ *  `MAX_WRITTEN_UP_FINDINGS` / `MAX_OTHER_CONSIDERED_ROWS`.
  *
- *  A run with more findings than this is NOT truncated — see
- *  `MAX_OVERFLOW_FINDINGS` below. Rendering every finding in full (the bug
- *  this constant fixes) put 529 full blocks on screen on a real run and made
- *  the panel unusable. */
-const MAX_DETAILED_FINDINGS = MAX_RICE_ROWS
+ *  BOTH COME FROM THE READER, NOT FROM A LIMIT. Asked what he wanted this to
+ *  be, he described it himself: "finding number one could be, hey, maybe
+ *  build XYZ … and then we go to item number two … and then the bottom will
+ *  be other things that we considered — these are 20 other things that you
+ *  could also build." Two write-ups, then twenty lines. Deliberately not
+ *  derived from `MAX_RICE_ROWS` or any size budget, so a later change to one
+ *  of those cannot silently move an editorial decision.
+ *
+ *  NOTHING IS DROPPED: everything past the twenty is counted in a sentence,
+ *  and everything past that is still on the run. */
+const MAX_WRITTEN_UP_FINDINGS = 2
+const MAX_OTHER_CONSIDERED_ROWS = 20
 
-/** The compact overflow list's rows, mirroring `report.py`'s
- *  `MAX_OVERFLOW_ROWS`. 1,000 rather than a smaller number for the same
- *  reason `report.py` picked it: a smaller cap silently degraded a real run
- *  that had more findings than the cap, which is the exact failure this
- *  feature exists to avoid. Whatever is beyond even this is still COUNTED,
- *  never dropped in silence. */
-const MAX_OVERFLOW_FINDINGS = 1_000
+/** The set-aside appendix, capped the same way and for the same reason: at 95
+ *  rows a table of what was NOT the answer was named as one of the things
+ *  making this unreadable. The heading still carries the true total. */
+const MAX_SET_ASIDE_ROWS = MAX_OTHER_CONSIDERED_ROWS
+
+/** A chart, drawn in characters.
+ *
+ *  The exported document (`report.py`) has no choice: it is stored in
+ *  `custom_artifacts.body_html`, whose sanitizer drops `<svg>` with its
+ *  children and keeps no `width`/`height`/`border` CSS, so a bar there has to
+ *  be made of glyphs. This panel is not sanitized and could draw a real box —
+ *  but the two renderers share no code and drift by exactly this kind of
+ *  "here we can do better", so the panel draws the same bar from the same
+ *  proportion. It also means a reader comparing the panel against the
+ *  exported document sees one chart, not two that disagree.
+ *
+ *  Colour and numeral face are the canonical report palette
+ *  (`backend/skills/prd-author/assets/prd.css`). Inline rather than a class
+ *  because this component's stylesheet is `globals.css`, and the same style
+ *  has to be expressible in the exported document, where classes are stripped. */
+const BAR_CELLS = 20
+const BAR_STYLE = {
+  color: "#1A6B47",
+  fontFamily: "'IBM Plex Mono', monospace",
+}
+
+/** A bar proportional to `largest`, or null when there is nothing honest to
+ *  draw. NEVER DRAWN FOR AN UNSIZED VALUE (I3): null renders as "Not
+ *  measured" at the call site, because a zero-length bar in a column of long
+ *  ones asserts "small", which is the one thing an unknown must never say.
+ *  A non-zero value always gets at least one cell, so real-but-tiny stays
+ *  visible. Mirrors `report.py`'s `_bar`. */
+function Bar({ value, largest }: { value: number | null; largest: number }) {
+  if (value == null || !(value > 0) || !(largest > 0)) return null
+  const cells = Math.max(1, Math.min(BAR_CELLS, Math.round(BAR_CELLS * value / largest)))
+  return <span style={BAR_STYLE}>{"\u2588".repeat(cells)}</span>
+}
+
+/** The largest reach among a set of rows — the bar's scale. An unsized
+ *  finding contributes nothing to it and draws nothing. */
+function largestReach(rows: readonly GoalFinding[]): number {
+  return rows.reduce((n, f) => Math.max(n, f.impact_value ?? 0), 0)
+}
 
 /** A clipped finding label/statement for one line of the compact overflow
  *  list — mirrors `report.py`'s `_esc_statement` / `MAX_STATEMENT_CHARS`
@@ -146,12 +184,14 @@ function Sized({ f, idPrefix = "goal" }: { f: GoalFinding; idPrefix?: string }) 
 //: the same `dataGaps` identity instead of a fresh `[]` literal on each render.
 const EMPTY_GAPS: readonly string[] = []
 
-/** One ranked finding, written out: what it says, how big it is, how much of
- *  it we trust, what it rests on, and what had to be assumed to state it. */
+/** One ranked finding, written out as a memo item: the action, then — in two
+ *  columns beneath it — the argument on the left and the evidence it rests on
+ *  on the right. */
 function ReportFinding({
   f, rank, sharedWeakest = false, sharedCap = false,
   sharedAssumptions = false, option = 0, dataGaps = [],
   oneTopic = false, oneTopicNote = "", optionTotal = 0,
+  deferComparison = false, deferGaps = false, showCallNote = true,
 }: {
   f: GoalFinding
   rank: number
@@ -164,15 +204,30 @@ function ReportFinding({
    *  fields the engine already produced; no model call. */
   dataGaps?: readonly string[]
   /** Set on EVERY card of a run whose top two write-ups name the same topic.
-   *  Suppresses "Why this over the next" — there is no "next" being offered as
-   *  an alternative, and a sentence reaching for a distinction that does not
-   *  exist is worse than silence. */
+   *  Suppresses the option numbering; the note explaining why is rendered
+   *  once, in "Why number one". */
   oneTopic?: boolean
   /** How many deep write-ups this run rendered — decides whether a single one
    *  is headed as "the" recommendation or as "Option 1" of several. */
   optionTotal?: number
-  /** Rendered once, on the recommended card, in place of that comparison. */
+  /** Rendered once, on the recommended card, when the comparison is NOT being
+   *  deferred to its own section below. */
   oneTopicNote?: string
+  /** "Why this over the next" reads AFTER both write-ups when there are two
+   *  of them — "but I think you should do number one because it's the most
+   *  important one" is a comparison between them, not a footnote inside the
+   *  first. With only one write-up there is no "next" to read it after, so it
+   *  stays on the card. Mirrors `report.py`'s `defer_comparison`. */
+  deferComparison?: boolean
+  /** `dataGaps` still arrives when the gaps are lifted out to "Before you
+   *  spend": the card has to KNOW it carries them, because that is also what
+   *  suppresses its own open-questions list — the middle of the same list. */
+  deferGaps?: boolean
+  /** The call-count floor note is ONE fact about how the corpus was ingested,
+   *  not a judgement about this finding, and it used to print under every card
+   *  that showed a call count. The section sets this for the first card it
+   *  applies to and clears it for the rest. */
+  showCallNote?: boolean
   /** Hoisted to the top of the section because every finding assumes the
    *  identical thing. Suppressed here rather than emptied upstream, so the
    *  finding itself is untouched and the two renderers cannot disagree about
@@ -183,56 +238,36 @@ function ReportFinding({
   sharedWeakest?: boolean
   sharedCap?: boolean
 }) {
-  return (
-    <li className="ga-doc-finding" data-testid="goal-finding">
-      {/* THE THEME IS THE HEADING. It used to be the whole sentence — "30
-          claims across 11 accounts concern “Sales Pipeline” — for example, …"
-          — so the one word a reader scans for sat mid-clause, in quotes,
-          behind two numbers the chips on the next line repeat verbatim.
-          Heading, chips, quote: each fact once, where it is looked for.
-          FALLS BACK TO THE SENTENCE for runs stored before `label` shipped. An
-          empty heading would be a worse regression than the run-on. */}
-      <div className="ga-doc-finding-head">
-        <span className="ga-doc-rank" aria-hidden="true">{rank}</span>
-        <p className="ga-finding-statement">
-          {(f.label || "").trim() || f.statement}
-        </p>
-      </div>
-      {/* ── WHAT TO DO, FIRST. ────────────────────────────────────────────
-          Apurva: "this is only the issues, no suggestion on how to solve or
-          what's the exact recommendation from it". The suggestion leads and
-          its justification sits under it, so a reader who stops after two
-          lines has the actionable half.
-          ABSENT IS NORMAL: only the top findings get one, and anything that
-          quoted a figure, promised an outcome or failed the lint was dropped
-          rather than repaired.
-          THE DEEP PASS TAKES PRECEDENCE over the flat one when both exist —
-          the same findings feed both LLM calls, and showing both would put
-          two suggestions on one finding. */}
-      {(f.deep_recommendation?.action || "").trim()
-        && (f.deep_recommendation?.because || "").trim() ? (
-        <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
-          {/* A DIFFERENT HEADER FROM THE FLAT PASS BELOW, deliberately. Both
-              used to say the identical "Recommended." — the only visible
-              discriminator was whether a "What to change" list happened to
-              follow. Mirrors `report.py`'s `_finding_block` fix. */}
-          {/* OPTION N, NOT A REPEATED "Recommended". Every deep write-up
-              carried the identical header, so a column of them read as a list
-              to work through rather than as a choice between named
-              alternatives with a stated preference. Option 1 is the one the
-              single recommendation is bound to and carries the "Why this over
-              the next" sentence below. Mirrors `report.py`'s
-              `_finding_block`. */}
-          <p><strong>{optionHeader(option, optionTotal, oneTopic)}</strong>{" "}
-            {stripClaimRefs(f.deep_recommendation!.action)}</p>
+  const deep = f.deep_recommendation
+  const hasDeep = Boolean((deep?.action || "").trim() && (deep?.because || "").trim())
+  const flat = f.recommendation
+  const hasFlat = Boolean((flat?.action || "").trim() && (flat?.because || "").trim())
+
+  // ── WHAT TO DO, FIRST — then, underneath it, two columns: the argument on
+  //    the left and the evidence it rests on on the right. The shape is the
+  //    reader's own: "maybe build XYZ. This is because five companies have
+  //    asked for it … this is exactly what they said." Stacked paragraphs
+  //    made a reader scroll to find out whether a recommendation had anything
+  //    behind it. Mirrors `report.py`'s `_finding_block`, which builds the
+  //    same two columns as a two-cell table row because the sanitizer on the
+  //    exported document keeps no grid or flex CSS.
+  //
+  //    NO ACCOUNT IS NAMED, AND THAT IS NOT AN OMISSION: a stored finding
+  //    carries how MANY accounts a theme touches and never which. The
+  //    evidence column states the reach and names the SOURCE DOCUMENTS, which
+  //    is what is actually on the record.
+  const why = (
+    <>
+      {hasDeep ? (
+        <>
           <p className="ga-finding-rec-why">
-            <em>Why.</em> {stripClaimRefs(f.deep_recommendation!.because)}
+            <em>Why.</em> {stripClaimRefs(deep!.because)}
           </p>
-          {f.deep_recommendation!.changes.length ? (
+          {deep!.changes.length ? (
             <>
               <p><strong>What to change.</strong></p>
               <ul className="ga-assumed" data-testid="goal-finding-changes">
-                {f.deep_recommendation!.changes.map((c, i) => (
+                {deep!.changes.map((c, i) => (
                   <li key={i}>
                     {stripClaimRefs(c.text)} <em>— from: “{c.cited_claim}”</em>
                   </li>
@@ -241,97 +276,60 @@ function ReportFinding({
             </>
           ) : null}
           {/* SUPPRESSED ON THE CARD THAT CARRIES THE GAPS LIST — these same
-              questions are the middle of it. Shown in both places a reader
-              sees one list of open questions and then a second containing
-              them again under a heading implying they are something else. */}
-          {f.deep_recommendation!.open_questions.length && !dataGaps.length ? (
+              questions are the middle of it. */}
+          {deep!.open_questions.length && !dataGaps.length ? (
             <>
               <p><strong>Still open.</strong></p>
               <ul className="ga-assumed">
-                {f.deep_recommendation!.open_questions.map((q, i) => (
+                {deep!.open_questions.map((q, i) => (
                   <li key={i}>{q}</li>
                 ))}
               </ul>
             </>
           ) : null}
-          {f.deep_recommendation!.what_would_falsify ? (
+          {deep!.what_would_falsify ? (
             <p className="ga-weakest" data-testid="goal-finding-kill-signal">
-              <b>Kill signal.</b> {stripClaimRefs(f.deep_recommendation!.what_would_falsify)}{" "}
+              <b>Kill signal.</b> {stripClaimRefs(deep!.what_would_falsify)}{" "}
               <em>{KILL_SIGNAL_CAVEAT}</em>
             </p>
           ) : null}
-          {/* ALWAYS RENDERED WHEN IT EXISTS. This paragraph is the
-              deliverable — "once we pick the top two, then we could just
-              compare them" — and an earlier pass suppressed it on exactly the
-              runs it was written for: the one-topic branch took it down along
-              with the option labels, so the engine computed the sentence and
-              the page never printed it. Whether two write-ups are
-              alternatives, and which comes first, are different questions.
-              The one-topic note sits BESIDE it, never instead of it. */}
-          {f.deep_recommendation!.comparison ? (
+          {deep!.comparison && !deferComparison ? (
             <p className="ga-weakest" data-testid="goal-finding-comparison">
-              <b>Why this over the next.</b> {f.deep_recommendation!.comparison}
+              <b>Why this over the next.</b> {deep!.comparison}
             </p>
           ) : null}
-          {oneTopicNote ? (
+          {oneTopicNote && !deferComparison ? (
             <p className="ga-weakest" data-testid="goal-finding-one-topic">
               <b>Why these are not two options.</b> {oneTopicNote}
             </p>
           ) : null}
-          {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────
-              Only on the recommended card, assembled deterministically from
-              fields the engine already produced — no model call, nothing
-              scored (I2). GAPS, NOT ACTIONS: the heading says "close these
-              before you spend" rather than "next steps" so it cannot be read
-              as work competing with the recommendation above it. Corpus-level
-              gaps (`plan.cannot_answer`) are excluded on purpose and rendered
-              once, in their own section. Mirrors `report.py`. */}
-          {dataGaps.length ? (
-            <div data-testid="goal-finding-data-gaps">
-              <p>
-                <strong>{DATA_GAPS_HEADING}</strong>{" "}
-                These are gaps in what is known about this option, not work to
-                schedule.
-              </p>
-              <ul className="ga-assumed">
-                {dataGaps.map((g, i) => (
-                  <li key={i}>{g}</li>
-                ))}
-              </ul>
-            </div>
-          ) : null}
-        </div>
-      ) : (f.recommendation?.action || "").trim()
-        && (f.recommendation?.because || "").trim() ? (
-        <div className="ga-finding-rec" data-testid="goal-finding-recommendation">
-          {/* NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. Both passes
-              used it, so a page with two write-ups and five short-form cards
-              said "Recommended" seven times. Mirrors `report.py`. */}
-          <p><strong>Suggested.</strong> {stripClaimRefs(f.recommendation!.action)}</p>
+        </>
+      ) : hasFlat ? (
+        <>
           <p className="ga-finding-rec-why">
-            <em>Why.</em> {stripClaimRefs(f.recommendation!.because)}
+            <em>Why.</em> {stripClaimRefs(flat!.because)}
           </p>
-          {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED —
-              not left as a bare fact in "How many got a full recommendation"
-              while this card sits below it looking like an unexplained
-              absence. `deep_attempted` is only set on a finding that was IN
-              the top N a count named or defaulted to but whose evidence did
-              not clear the citation gate (or a deep pass that failed
-              outright) — never on one simply ranked past N. Mirrors
-              `report.py`'s `_finding_block`; the specific reason lives once,
-              in the recommendation-basis note above, and this points there
-              rather than restating it. */}
+          {/* THE SHORTFALL, CONNECTED TO THE FINDING IT ACTUALLY DROPPED.
+              `deep_attempted` is only set on a finding that was IN the top N
+              but whose evidence did not clear the citation gate — never on
+              one simply ranked past N. The specific reason lives once, under
+              how this was produced, and this points there. */}
           {f.deep_attempted ? (
             <p className="ga-weakest" data-testid="goal-finding-deep-shortfall">
-              This finding was one of the ones in line for a full write-up.
-              It did not get one this run — see “How many got a full
-              recommendation” above for why — so the recommendation above is
-              the plain version, not a downgrade of a deeper one you are
-              missing.
+              This was in line for a full write-up and did not get one this
+              run — see “How many got a full recommendation” under how this
+              was produced. The suggestion above is the plain version, not a
+              downgrade of a deeper one you are missing.
             </p>
           ) : null}
-        </div>
+        </>
       ) : null}
+    </>
+  )
+
+  const evidence = (
+    <>
+      <p><strong>What this rests on.</strong></p>
       <div className="ga-finding-meta">
         <Sized f={f} />
         {f.confidence_band ? (
@@ -351,10 +349,9 @@ function ReportFinding({
           </span>
         ) : null}
       </div>
-      {/* ONE CLAIM, IN ITS SOURCE'S OWN WORDS, set as a quote. Only when the
-          heading is the label — with the sentence as the heading the quote is
-          already inside it, and repeating it is the duplication this pass
-          removes. */}
+      {/* ONE CLAIM, IN ITS SOURCE'S OWN WORDS — "this is exactly what they
+          said". Only when the heading is the label: with the sentence as the
+          heading the quote is already inside it. */}
       {(f.label || "").trim() && (f.example || "").trim() ? (
         <blockquote className="ga-finding-example" data-testid="goal-finding-example">
           “{f.example}”
@@ -370,23 +367,21 @@ function ReportFinding({
       {f.confidence?.cap_reason && !sharedCap ? (
         <p className="ga-cap">{f.confidence.cap_reason}</p>
       ) : null}
-      {/* WHERE IT CAME FROM, beside the claim it supports. Without this the
-          panel showed the literal word "corpus" as the only provenance, so a
-          reader could not check a single finding against anything. */}
+      {/* WHERE IT CAME FROM, beside the claim it supports — the difference
+          between an argument and an assertion. */}
       {f.surfaced_by?.length ? (
         <p className="ga-sources" data-testid="goal-sources">
           <span className="ga-sources-label">Source documents</span>{" "}
           {f.surfaced_by.join(" · ")}
         </p>
       ) : null}
-      {/* THE FLOOR, SAID IN WORDS. A call provider is extracted one pass per
-          call, so a collapsed entry carries how many CALLS it stands for —
-          but anything ingested before that changed was batched several calls
-          to a document, so the number can only be a lower bound. Printed only
-          where a call count is actually shown; "≥" alone is a symbol a reader
-          has to interpret and the reason for it is not guessable. Mirrors
-          `report.py`'s source block. */}
-      {hasCallCount(f.surfaced_by ?? []) ? (
+      {/* THE FLOOR, SAID IN WORDS, AND SAID ONCE. A call provider is extracted
+          one pass per call, so a collapsed entry carries how many CALLS it
+          stands for — but anything ingested before that changed was batched
+          several calls to a document, so the number can only be a lower
+          bound. One fact about ingest, not about this finding: `showCallNote`
+          is set by the section for the first card it applies to. */}
+      {showCallNote && hasCallCount(f.surfaced_by ?? []) ? (
         <p className="ga-cap" data-testid="goal-call-count-floor">
           <em>{CALL_COUNT_FLOOR_NOTE}</em>
         </p>
@@ -401,6 +396,75 @@ function ReportFinding({
             </li>
           ))}
         </ul>
+      ) : null}
+    </>
+  )
+
+  return (
+    <li className="ga-doc-finding" data-testid="goal-finding">
+      {/* THE THEME IS THE HEADING. It used to be the whole sentence — "30
+          claims across 11 accounts concern “Sales Pipeline” — for example, …"
+          — so the one word a reader scans for sat mid-clause, in quotes,
+          behind two numbers the chips on the next line repeat verbatim.
+          FALLS BACK TO THE SENTENCE for runs stored before `label` shipped. */}
+      <div className="ga-doc-finding-head">
+        <span className="ga-doc-rank" aria-hidden="true">{rank}</span>
+        <p className="ga-finding-statement">
+          {(f.label || "").trim() || f.statement}
+        </p>
+      </div>
+      {/* ABSENT IS NORMAL, not an error: only the top findings get a
+          suggestion, and anything that quoted a figure, promised an outcome
+          or failed the lint was dropped rather than repaired. THE DEEP PASS
+          TAKES PRECEDENCE over the flat one when both exist. */}
+      {hasDeep ? (
+        <p data-testid="goal-finding-recommendation">
+          {/* EXACTLY ONE CARD MAY BE HEADED AS THE RECOMMENDATION, and which
+              header each card gets is `optionHeader`'s decision, so the panel
+              and the exported document cannot word it differently. */}
+          <strong>{optionHeader(option, optionTotal, oneTopic)}</strong>{" "}
+          {stripClaimRefs(deep!.action)}
+        </p>
+      ) : hasFlat ? (
+        // NOT "Recommended.", WHICH IS THE DEEP CARD'S WORD. This is the
+        // one-line pass over a finding that did NOT get a full write-up.
+        <p data-testid="goal-finding-recommendation">
+          <strong>Suggested.</strong> {stripClaimRefs(flat!.action)}
+        </p>
+      ) : null}
+      {hasDeep || hasFlat ? (
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <tbody>
+            <tr>
+              <td style={{ verticalAlign: "top", width: "52%", paddingRight: 18 }}>
+                <div className="ga-finding-rec">{why}</div>
+              </td>
+              <td style={{ verticalAlign: "top" }}>{evidence}</td>
+            </tr>
+          </tbody>
+        </table>
+      ) : (
+        // No recommendation on this finding, so there is no left-hand column
+        // and nothing to sit beside. One column, full width.
+        evidence
+      )}
+      {/* ── WHAT WE DO NOT KNOW ABOUT WHAT WE JUST RECOMMENDED. ────────────
+          Only on the recommended card, assembled deterministically from
+          fields the engine already produced — no model call, nothing scored
+          (I2). GAPS, NOT ACTIONS. Full width, under both columns, because it
+          qualifies the whole card. */}
+      {dataGaps.length && !deferGaps ? (
+        <div data-testid="goal-finding-data-gaps">
+          <p>
+            <strong>{DATA_GAPS_HEADING}</strong>{" "}
+            Gaps in what is known about this option, not work to schedule.
+          </p>
+          <ul className="ga-assumed">
+            {dataGaps.map((g, i) => (
+              <li key={i}>{g}</li>
+            ))}
+          </ul>
+        </div>
       ) : null}
     </li>
   )
@@ -429,7 +493,7 @@ export function GoalAnalysisReport({
   busy?: boolean
 }) {
   const plan: GoalRunPlan | undefined = run.prioritisation?.plan
-  // AC-2: how many findings got a full recommendation, and why — a sentence
+  // How many findings got a full recommendation, and why — a sentence
   // computed from the goal's own ask, never a bare number. Mirrors
   // `report.py`'s `_recommendation_basis_section`, same placement.
   const recommendationBasis = (run.prioritisation?.recommendation_basis || "").trim()
@@ -659,6 +723,86 @@ export function GoalAnalysisReport({
   const gaps = plan?.cannot_answer ?? []
   const notes = run.coverage_notes ?? []
 
+  // ── THE MEMO'S RUNNING ORDER, IN THE READER'S OWN WORDS. ────────────────
+  //
+  //   "finding number one could be, hey, maybe build XYZ … and then we go to
+  //    item number two … but I think you should do number one because it's
+  //    the most important one … so this is the RICE prioritization, with the
+  //    table. And then the bottom will be other things that we considered."
+  //
+  // Two write-ups, why the first one, the table, the tail — and everything
+  // describing HOW the run worked below all of it, under "how this was
+  // produced". Mirrors `render_report_html`'s assembly order exactly.
+  //
+  // NOTHING HERE CHANGES WHAT THE ENGINE COMPUTED: same findings, same frozen
+  // rank order (I10), same values. This is the order they are read in.
+  const written = findings.slice(0, MAX_WRITTEN_UP_FINDINGS)
+  const otherConsidered = findings.slice(MAX_WRITTEN_UP_FINDINGS)
+  const otherListed = otherConsidered.slice(0, MAX_OTHER_CONSIDERED_ROWS)
+  const otherBeyond = otherConsidered.length - otherListed.length
+  // The comparison reads after BOTH write-ups when there are two; with one
+  // there is no "next" to read it after, so it stays on the card.
+  const deferComparison = written.length > 1
+  const comparison = deferComparison
+    ? (written.map((f) => (f.deep_recommendation?.comparison || "").trim())
+        .find(Boolean) || "")
+    : ""
+  // ONE CALL-COUNT FLOOR NOTE PER DOCUMENT — it is a fact about how the corpus
+  // was ingested, not a judgement about any one finding, and it used to print
+  // under every card that showed a call count.
+  const callNoteIndex = written.findIndex((f) => hasCallCount(f.surfaced_by ?? []))
+  const setAsideShown = setAside.slice(0, MAX_SET_ASIDE_ROWS)
+  // The ranking table's rows, and the scale its reach bars are drawn against
+  // — the widest reach among the rows actually rendered, so a bar is read
+  // against its own table. An unsized row contributes nothing and draws
+  // nothing (I3).
+  const rankRows = findings.slice(0, isMoscowFramework ? MAX_MOSCOW_ROWS : MAX_RICE_ROWS)
+  const rankLargest = largestReach(rankRows)
+  // The funnel's three theme stages share one scale. Signals are NOT on it:
+  // thousands of signals cluster into tens of themes, so putting both on one
+  // axis would draw a full-width bar beside three single cells and hide the
+  // step the reader needs. The signal count leads the funnel as the number it
+  // is. Mirrors `report.py`'s `_funnelChart` reasoning.
+  const funnelStages: [string, number][] = ([
+    ["Themes found", allFindings.length],
+    ["Bear on this goal", findings.length],
+    ["Written up here", written.length],
+  ] as [string, number][]).filter(([, v]) => v > 0)
+  const funnelLargest = funnelStages.reduce((n, [, v]) => Math.max(n, v), 0)
+  // THE PROBLEM STATEMENT'S INPUTS — every one a read of something the
+  // engine already produced. The KIND of claim behind the top finding is the
+  // whole of whether there is a problem at all: a blocker reads differently
+  // from a preference, and a theme that merely describes the world is neither.
+  // No model is called and no narrative is invented (I2). Mirrors
+  // `report.py`'s `_problem_section`.
+  const topBucket = headline
+    ? typeBucket((headline as { claim_types?: string[] }).claim_types ?? [])
+    : null
+  const topSized = headline ? headline.impact_value != null : false
+  // WHEN THE CORPUS DOES NOT SUPPORT A PROBLEM STATEMENT, SAY SO. A theme
+  // that neither blocks nor is asked for AND could not be sized is not a
+  // problem; manufacturing urgency for it is worse than saying nothing, on a
+  // product whose entire claim is that it does not overstate.
+  const noProblemStated =
+    topBucket !== TYPE_BUCKET_BLOCKER
+    && topBucket !== TYPE_BUCKET_PREFERENCE
+    && !topSized
+  const topClaims = headline?.claim_ids?.length ?? 0
+  const topSources = (headline?.surfaced_by ?? []).filter(Boolean).length
+  const topBecause = (
+    (headline?.deep_recommendation?.because || "").trim()
+    || (headline?.recommendation?.because || "").trim()
+  )
+  const decisionOwner = (plan?.decision_owner || "").trim()
+  const neededBy = (plan?.needed_by || "").trim()
+  const decisionReach = findings
+    .filter((f) => f.impact_value != null)
+    .reduce((n, f) => n + (f.impact_value ?? 0), 0)
+  const conflictClause =
+    `An authoritative disagreement is placed above ${bucketClause ? "both" : "all of it"}`
+    + ": two sources that may both speak contradicting each other is worth"
+    + " more than either alone."
+
   return (
     <article className="ga-doc" data-testid="goal-report">
       <header className="ga-doc-header">
@@ -696,237 +840,14 @@ export function GoalAnalysisReport({
         ) : null}
       </header>
 
-      {/* ── 1. What this was asked to establish ──────────────────────────── */}
-      <section className="ga-doc-section" data-testid="goal-definition">
-        <h2 className="ga-doc-h2">What this was asked to establish</h2>
-        {definition ? (
-          <>
-            <p className="ga-doc-lede">
-              You confirmed this goal means, in your own words:
-            </p>
-            <blockquote className="ga-doc-quote">{definition}</blockquote>
-            {/* WHAT THIS SENTENCE ACTUALLY GOVERNS. Claim SELECTION still
-                never sees the definition (`build_findings` runs with no goal
-                argument). But the LIST a reader is shown is a different
-                question, and `judge_relevance` now answers it, handed this
-                exact sentence — so a run that ran the gate must not deny
-                having filtered by it. Mirrors `report.py`'s
-                `_definition_section`. */}
-            {relevanceGateRan ? (
-              <p className="ga-doc-note" data-testid="goal-definition-note">
-                This is the sentence the run was given to work from, and it is
-                recorded here so a decision can be defended against it. It
-                shaped which findings appear below: each was checked against
-                it for whether it bears on this goal, and any that did not are
-                listed separately, with the reason, further down. If it is not
-                what you meant, say so before you rely on any of this.
-              </p>
-            ) : (
-              <p className="ga-doc-note" data-testid="goal-definition-note">
-                This is the sentence the run was given to work from, and it is
-                recorded here so a decision can be defended against it. It did
-                not decide which findings appear below — nothing here was
-                filtered or ranked by it. If it is not what you meant, say so
-                before you rely on any of this.
-              </p>
-            )}
-          </>
-        ) : (
-          // Stated, not skipped. A report with no recorded definition is a
-          // report whose subject is unknown, and hiding that would make it
-          // look like the ordinary case.
-          <p className="ga-doc-note" data-testid="goal-no-definition">
-            No confirmed definition was recorded for this run, so what the goal
-            means is not on the record. Read everything below as being about
-            the goal as typed, nothing narrower.
-          </p>
-        )}
-      </section>
-
-      {/* ── 2. What was read ─────────────────────────────────────────────── */}
-      <section className="ga-doc-section" data-testid="goal-what-was-read">
-        <h2 className="ga-doc-h2">What was read</h2>
-        {plan ? (
-          <>
-            <p className="ga-doc-lede">
-              {plan.total_signals.toLocaleString()} signal
-              {plan.total_signals === 1 ? "" : "s"} across{" "}
-              {plan.sources.length} source
-              {plan.sources.length === 1 ? "" : "s"}. Each one can witness some
-              things and not others, which is why they are listed separately
-              rather than totalled.
-            </p>
-            <ul className="ga-doc-sources">
-              {plan.sources.map((s) => (
-                <li key={s.source_type} data-testid="goal-read-source">
-                  <span className="ga-doc-source-count">
-                    {s.signal_count.toLocaleString()}
-                  </span>{" "}
-                  <b>{s.label}</b> — {s.witnesses}
-                </li>
-              ))}
-            </ul>
-            {excluded.length ? (
-              <p className="ga-doc-note" data-testid="goal-excluded">
-                You excluded {excluded.map(humanSource).join(", ")} before
-                this ran, so nothing below rests on it.
-              </p>
-            ) : null}
-          </>
-        ) : (
-          <p className="ga-doc-note" data-testid="goal-no-plan">
-            This run kept no record of which sources it read, so what is below
-            cannot be checked against its own inputs.
-          </p>
-        )}
-
-        {/* Coverage sits HERE — above the findings — and not in a footer.
-            A note that a third of the evidence was undated changes how every
-            line beneath it should be read, and a degradation discovered after
-            the conclusion has already done its damage. */}
-        {notes.length ? (
-          <>
-            <h3 className="ga-doc-h3">What was missing from it</h3>
-            <ul className="ga-coverage" data-testid="goal-coverage">
-              {notes.map((n, i) => (
-                <li key={i}>
-                  <b>{n.reason}</b> — {n.actual}
-                </li>
-              ))}
-            </ul>
-          </>
-        ) : null}
-      </section>
-
-      {/* ── 3. The short version ─────────────────────────────────────────── */}
-      {/* ── HOW THIS WAS RANKED. ───────────────────────────────────────
-          The skill's output spec: the ranked list is the deliverable, and it
-          ships WITH a "how we scored it" table so the ranking is reviewable
-          rather than a black box — every input marked real or assumed, and the
-          one we cannot fill named rather than filled.
-          The table NEVER re-sorts: `_rank` froze the order before any of this
-          ran, and a scoring table that reordered would be the prioritisation
-          step mutating the ranking (I10). */}
-      {framework && findings.length && !isMoscowFramework ? (
-        <section className="ga-doc-section" data-testid="goal-rice">
-          <h2 className="ga-doc-h2">How this was ranked ({frameworkLabel})</h2>
-          {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
-          <ul className="ga-doc-note">
-            <li><strong>Reach</strong> — how many of your accounts the theme
-              touches. Counted, not estimated.</li>
-            <li><strong>Impact</strong> — how directly it bears on the metric,
-              read from the kind of claim behind it: something blocked outranks
-              something asked for, which outranks something described.{" "}
-              <em>That ordering is ours, not your data&rsquo;s.</em></li>
-            <li><strong>Confidence</strong> — the band the evidence earned.</li>
-            <li><strong>Effort</strong> — <em>{EFFORT_ABSENT}</em>. Nothing in
-              your connected sources carries a person-month, and inventing one
-              would put a number in front of you that no evidence supports.</li>
-          </ul>
-          <div className="ga-rice-scroll">
-            <table className="ga-rice">
-              <thead>
-                <tr>
-                  <th>Theme</th><th>Reach</th><th>Impact</th>
-                  <th>Confidence</th><th>Effort</th><th>Score</th><th>Inputs</th>
-                </tr>
-              </thead>
-              <tbody>
-                {findings.slice(0, MAX_RICE_ROWS).map((f) => {
-                  const r = riceFor(f)
-                  return (
-                    <tr key={f.id}>
-                      <td>{r.label}</td>
-                      <td>{r.reach === null ? "—" : `${r.reach} ${r.reachUnit}`}</td>
-                      <td>{r.impact}</td>
-                      <td>{r.confidenceBand}</td>
-                      <td>{EFFORT_ABSENT}</td>
-                      <td>{r.score === null ? "—" : r.score.toFixed(1)}</td>
-                      <td>{r.inputsPresent} of {RICE_INPUT_COUNT}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          {/* NO SILENT CAPS. */}
-          {findings.length > MAX_RICE_ROWS ? (
-            <p className="ga-doc-note">
-              The {findings.length - MAX_RICE_ROWS} findings below these are
-              ranked in the list that follows, but not scored out here — a table
-              this long stops being one.
-            </p>
-          ) : null}
-          <p className="ga-doc-note">
-            No effort estimate was supplied for any of these, so the score is
-            reach × impact × confidence. That is not a gap in the ranking: an
-            effort applied equally to every row divides them all by the same
-            number and cannot change their order.
-          </p>
-        </section>
-      ) : null}
-
-      {/* ── HOW THIS WAS RANKED, WHEN THE FRAMEWORK IS MOSCOW. ─────────────
-          MoSCoW is what this run picked when nothing connected carries a
-          number — RICE's Reach and Impact would both come back unmeasured on
-          every row rather than ranking anything. Same non-reordering
-          discipline as the RICE table above (I10): rows render in the order
-          `_rank` already froze. */}
-      {framework && findings.length && isMoscowFramework ? (
-        <section className="ga-doc-section" data-testid="goal-moscow">
-          <h2 className="ga-doc-h2">How this was ranked ({frameworkLabel})</h2>
-          {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
-          <ul className="ga-doc-note">
-            <li><strong>MUST</strong> — a stated blocker: something is
-              stopping an account today. <em>Marked <strong>MUST?</strong>{" "}
-              when only one source document backs it.</em></li>
-            <li><strong>SHOULD / COULD</strong> — a stated preference:
-              something an account asked for.</li>
-            <li>Graded by how many <strong>independent source
-              documents</strong> back each one, not by raw claim count.</li>
-          </ul>
-          <div className="ga-rice-scroll">
-            <table className="ga-rice">
-              <thead>
-                <tr>
-                  <th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>
-                  <th>Source documents</th>
-                </tr>
-              </thead>
-              <tbody>
-                {findings.slice(0, MAX_MOSCOW_ROWS).map((f) => {
-                  const r = moscowFor(f)
-                  return (
-                    <tr key={f.id}>
-                      <td>{r.label}</td>
-                      <td>{r.bucket}</td>
-                      <td>{r.bucketBasis}</td>
-                      <td>{r.reach === null ? "—" : `${r.reach} ${r.reachUnit}`}</td>
-                      <td>{r.docCount}</td>
-                    </tr>
-                  )
-                })}
-              </tbody>
-            </table>
-          </div>
-          {findings.length > MAX_MOSCOW_ROWS ? (
-            <p className="ga-doc-note">
-              The {findings.length - MAX_MOSCOW_ROWS} findings below these are
-              ranked in the list that follows, but not bucketed out here — a
-              table this long stops being one.
-            </p>
-          ) : null}
-        </section>
-      ) : null}
-
-      {/* ── THE HEADLINE NUMBERS, ON ONE LINE. ────────────────────────────
-          Memo p1 closes its cover with a strip. Every number in it already
-          exists in this document, spread across four paragraphs — the strip is
-          the difference between knowing the shape of the answer at a glance
-          and assembling it yourself.
-          NO DATA WINDOW cell: claim dates on this substrate are the INGEST
-          clock, so a window printed from them would be when we read the
-          evidence wearing the clothes of the period it covers. */}
+      {/* ── THE HEADLINE NUMBERS, ON ONE LINE, AT THE TOP. ────────────────
+          Reading the current output the customer put the line exactly here:
+          the content started at "the short version", and everything above it
+          was, in his words, information that "should not be in the final
+          report". So the document opens with the title, the numbers, and the
+          answer. NO DATA WINDOW cell: claim dates on this substrate are the
+          INGEST clock, so a window printed from them would be when we read
+          the evidence wearing the clothes of the period it covers. */}
       {allFindings.length ? (
         <section className="ga-doc-section" data-testid="goal-strip">
           <div className="ga-strip">
@@ -938,13 +859,10 @@ export function GoalAnalysisReport({
               ["High confidence",
                findings.filter((f) => f.confidence_band === "high").length.toLocaleString()],
               // NOT "with A recommendation" — that read as the same count the
-              // prose below names ("the top 2 get a full recommendation"),
-              // which counts only the DEEP pass. This cell counts flat OR
-              // deep — the union, mirroring `report.py`'s `_stat_strip` —
-              // so a run can show 8 here and 2 there, both true, about two
-              // different senses of the word. Also fixed here: this used to
-              // check `f.recommendation` alone, undercounting a finding whose
-              // ONLY suggestion was the deep one.
+              // recommendation-basis note makes, which counts only the DEEP
+              // pass. This cell counts flat OR deep — the union, mirroring
+              // `report.py`'s `_stat_strip` — so a run can show 8 here and 2
+              // there, both true, about two different senses of the word.
               ...(findings.some((f) => f.recommendation?.action || f.deep_recommendation?.action)
                 ? [["Flagged with any suggestion",
                     findings.filter((f) => f.recommendation?.action || f.deep_recommendation?.action)
@@ -967,43 +885,138 @@ export function GoalAnalysisReport({
         </section>
       ) : null}
 
-      {/* ── THE FUNNEL, BEFORE ANYTHING IS SHOWN. ─────────────────────────
-          The first thing a filtered list owes its reader. A filtered list that
-          does not say it was filtered is the more confident-looking of the two,
-          and the less honest. Silent when nothing was set aside — a funnel with
-          one step is not a funnel. */}
-      {setAside.length ? (
-        <section className="ga-doc-section" data-testid="goal-funnel">
-          <h2 className="ga-doc-h2">What bears on this goal</h2>
-          <p className="ga-doc-lede">
-            <strong>
-              {allFindings.length} themes were found. {findings.length} bear on
-              this goal.
-            </strong>{" "}
-            The other {setAside.length} are listed at the end with the reason
-            each was set aside — they are not gone, and a theme set aside for
-            this goal may be the answer to a different one.
-          </p>
+      {/* ── THE FUNNEL, AS A SHAPE. ───────────────────────────────────────
+          Every number here already existed in the document; what did not was
+          the narrowing, which was three paragraphs in three different
+          sections. Every bar carries its own number, and a stage with nothing
+          in it is omitted rather than drawn at zero. */}
+      {funnelStages.length > 1 ? (
+        <section className="ga-doc-section" data-testid="goal-funnel-chart">
+          <table style={{ width: "100%", borderCollapse: "collapse" }}>
+            <tbody>
+              {plan?.total_signals ? (
+                <tr>
+                  <td>Signals read</td>
+                  <td />
+                  <td><strong>{plan.total_signals.toLocaleString()}</strong></td>
+                </tr>
+              ) : null}
+              {funnelStages.map(([label, value]) => (
+                <tr key={label}>
+                  <td>{label}</td>
+                  <td><Bar value={value} largest={funnelLargest} /></td>
+                  <td><strong>{value.toLocaleString()}</strong></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </section>
       ) : null}
-      {/* The relevance gate's disclosure half. `relevance.py` promises "the renderer says
-          how many were not evaluated" — the gate has a hard budget and a
-          wall-clock deadline that can stop it early, and until this fired,
-          nothing ever said so. Separate from the funnel above: this fires
-          even when nothing was set aside, because a reader still needs to
-          know the "found" count can include themes the gate never got to.
-          Mirrors `report.py`'s `_relevance_coverage_section`. */}
-      {relevanceJudged && relevanceJudged.considered > relevanceJudged.judged ? (
-        <section className="ga-doc-section" data-testid="goal-relevance-coverage">
+
+      {/* ── THE ASK, IN THREE LINES. The reference plan opens with exactly
+          this — "Your question: increase revenue by 2%" — and a memo that
+          does not restate its own question makes a reader hold it in their
+          head while reading the answer. SHORT ON PURPOSE: the goal, the
+          confirmed definition verbatim, and the one line saying what the
+          definition is for. What the definition did and did not DECIDE is
+          method and reads in the appendix. */}
+      <section className="ga-doc-section" data-testid="goal-definition">
+        <h2 className="ga-doc-h2">The ask</h2>
+        {run.goal_text ? (
           <p className="ga-doc-note">
-            Of the {relevanceJudged.considered} themes found, this run
-            evaluated {relevanceJudged.judged} for relevance to your goal
-            before its time or cost budget ran out. The other{" "}
-            {relevanceJudged.considered - relevanceJudged.judged} were never
-            judged and are kept in the list above — unjudged, not irrelevant.
+            <strong>Your question.</strong> {run.goal_text}
           </p>
+        ) : null}
+        {definition ? (
+          <>
+            <p className="ga-doc-lede">
+              You confirmed this means, in your own words:
+            </p>
+            <blockquote className="ga-doc-quote">{definition}</blockquote>
+            <p className="ga-doc-note" data-testid="goal-definition-note">
+              Recorded here so a decision can be defended against it.
+            </p>
+          </>
+        ) : (
+          // Stated, not skipped. A report with no recorded definition is a
+          // report whose subject is unknown, and hiding that would make it
+          // look like the ordinary case.
+          <p className="ga-doc-note" data-testid="goal-no-definition">
+            No confirmed definition was recorded for this run, so what the goal
+            means is not on the record. Read what follows as being about the
+            goal as typed, nothing narrower.
+          </p>
+        )}
+      </section>
+
+      {/* ── THE PROBLEM: the one paragraph that says why this matters rather
+          than what we found. ASSEMBLED, NEVER AUTHORED — the top-ranked
+          finding's own label, the kind of claim behind it, the reach and
+          claim and source counts it actually carries, and its own "why".
+          AND IT REFUSES TO OVERSTATE: with no blocker at the top and nothing
+          sized it says what the corpus does support, in one line. Mirrors
+          `report.py`'s `_problem_section`. */}
+      {headline ? (
+        <section className="ga-doc-section" data-testid="goal-problem">
+          <h2 className="ga-doc-h2">The problem</h2>
+          {noProblemStated ? (
+            <p className="ga-doc-note">
+              The evidence does not state a problem here: the strongest theme
+              describes the world rather than blocking or asking for anything,
+              and it could not be sized. What follows is what was found, not a
+              case for acting on it.
+            </p>
+          ) : (
+            <>
+              <p className="ga-doc-headline">
+                {(headline.label || "").trim() || headline.statement}
+              </p>
+              <p className="ga-doc-note">
+                {topBucket === TYPE_BUCKET_BLOCKER ? (
+                  <>
+                    The evidence has this blocking accounts today, not as
+                    something they would merely prefer.
+                  </>
+                ) : topBucket === TYPE_BUCKET_PREFERENCE ? (
+                  <>
+                    Accounts are asking for this. Nothing in the evidence says
+                    they are blocked by it.
+                  </>
+                ) : (
+                  <>
+                    The evidence describes this rather than asking for or
+                    blocking anything, so read it as context rather than as
+                    something stopping you.
+                  </>
+                )}{" "}
+                Measured at: <Sized f={headline} idPrefix="goal-problem" />
+                {topClaims ? ` · ${topClaims} claim${topClaims === 1 ? "" : "s"}` : ""}
+                {topSources
+                  ? ` · ${topSources} source document${topSources === 1 ? "" : "s"}`
+                  : ""}
+                .
+                {/* I3, again and for the same reason: a missing size is not a
+                    small one, and a problem statement is exactly where that
+                    would be read as one. */}
+                {!topSized ? (
+                  <>
+                    {" "}A missing size is not a small one: how many accounts
+                    this touches is unknown, not zero.
+                  </>
+                ) : null}
+              </p>
+              {/* THE FINDING'S OWN REASONING, quoted from the finding rather
+                  than restated, so this paragraph and the write-up below it
+                  cannot say two different things. */}
+              {topBecause ? (
+                <p className="ga-doc-note">{stripClaimRefs(topBecause)}</p>
+              ) : null}
+            </>
+          )}
         </section>
       ) : null}
+
+      {/* ── THE SHORT VERSION. Where the customer said the content starts. */}
       <section className="ga-doc-section" data-testid="goal-headline">
         <h2 className="ga-doc-h2">The short version</h2>
         {headline ? (
@@ -1047,8 +1060,7 @@ export function GoalAnalysisReport({
                   It is listed first{lead}. Nothing in this reading could be
                   sized, so what orders these is the kind of claim behind each
                   one — what blocks an account above what an account only asks
-                  for — with how sure we are breaking ties inside a kind
-                  — the order says how sure each one is, not how big.
+                  for — with how sure we are breaking ties inside a kind.
                 </>
               )}
             </p>
@@ -1064,19 +1076,49 @@ export function GoalAnalysisReport({
         )}
       </section>
 
+      {/* ── THE DECISION: who signs off, by when, and what is at stake.
+          ONLY WHAT WAS ANSWERED — a reader who skipped the plan gate's
+          questions gets no box rather than a box of blanks, because a
+          decision box with an empty owner implies the decision has a home
+          when it does not. WHAT IS AT STAKE IS DERIVED, NOT ASSERTED: this
+          corpus cannot forecast, so the line states what the evidence COUNTS.
+          Mirrors `report.py`'s `_decision_section`, which the panel did not
+          render at all until the memo restructure put the decision at the
+          top. */}
+      {decisionOwner || neededBy ? (
+        <section className="ga-doc-section" data-testid="goal-decision">
+          <h2 className="ga-doc-h2">The decision</h2>
+          <p className="ga-doc-note">
+            {decisionOwner ? <><strong>Owner</strong> {decisionOwner}</> : null}
+            {decisionOwner && neededBy ? " · " : null}
+            {neededBy ? <><strong>Needed by</strong> {neededBy}</> : null}
+          </p>
+          {decisionReach > 0 ? (
+            <p className="ga-doc-note">
+              The findings that bear on this goal touch{" "}
+              <strong>{decisionReach.toLocaleString()} accounts</strong>
+              {accountValue > 0 ? (
+                <>
+                  {" "}— about{" "}
+                  {Math.round(decisionReach * accountValue).toLocaleString()} on
+                  your own figure of {accountValue.toLocaleString()} per
+                  account, which is an estimate you gave rather than something
+                  measured
+                </>
+              ) : null}
+              . That is what the evidence counts, not a forecast of what changes
+              if you act.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
       {/* THE ONE RECOMMENDATION FOR THE WHOLE REPORT — narrated across the
-          per-finding deep recommendations already shown above, never a
-          replacement for them. Positioned right after "The short version" so
-          it reads as the primary answer, ahead of the money footnotes and the
-          findings list below. Mirrors `report.py`'s
-          `_synthesized_recommendation_section`, same wording and structure.
-          Silent when there was nothing to synthesize — see the type's own
-          comment in `api.ts`.
-          KEPT IN ITS OWN SECTION, never merged into `recommendationBasis`'s
-          or `listPricingBasis`'s paragraph below: one is a narrated
-          recommendation, the other two are dollar-bearing footnotes, and a
-          reader should never be tempted to read one as informing the
-          other. */}
+          per-finding deep recommendations below, never a replacement for
+          them. Silent when there was nothing to synthesize. KEPT IN ITS OWN
+          SECTION, never merged with the money footnotes: one is a narrated
+          recommendation, the others are dollar-bearing, and a reader should
+          never be tempted to read one as informing the other. */}
       {synthesizedAction && synthesizedBecause ? (
         <section className="ga-doc-section" data-testid="goal-synthesized-recommendation">
           <h2 className="ga-doc-h2">The recommendation</h2>
@@ -1101,138 +1143,55 @@ export function GoalAnalysisReport({
         </section>
       ) : null}
 
-      {recommendationBasis ? (
-        <p className="ga-doc-note" data-testid="goal-recommendation-basis">
-          {/* CAPITALISED AND TERMINATED, because it follows a bold full stop
-              and is therefore the start of a sentence. `recommendationBasis`
-              is authored as a clause — it also renders mid-sentence elsewhere
-              — so left alone it produced "How many got a full recommendation.
-              you named a target of…". Mirrors `report.py`. */}
-          <strong>How many got a full recommendation.</strong>{" "}
-          {stop(upperFirst(recommendationBasis))}
-        </p>
-      ) : null}
-
-      {/* A RANGE, IN ITS OWN PARAGRAPH, NEVER BESIDE THE COMMITTED FIGURE
-          ABOVE. One is a sum of money people agreed to; the other is a rate
-          card quoted to whoever asked, whose total is meaningless — a
-          $30,000 tier quoted sixteen times is not $480,000. Kept as its own
-          block, never merged into `recommendationBasis`'s paragraph or any
-          other, so a reader is never shown a range and a sum close enough
-          together to be tempted to add them. Mirrors `report.py`'s
-          `_findings_section`, which places its own list-pricing paragraph
-          the same way. */}
-      {listPricingBasis ? (
-        <p className="ga-doc-note" data-testid="goal-list-pricing-basis">
-          {listPricingBasis}
-        </p>
-      ) : null}
-
-      {/* ── 4. The findings, ranked ──────────────────────────────────────── */}
+      {/* ── WHAT TO DO: the two write-ups. ───────────────────────────────── */}
       {findings.length ? (
         <section className="ga-doc-section">
-          {/* A CLAIM, NOT A LABEL. Mirrors `report.py`'s `_findings_heading`
-              exactly, via the shared `findingsHeading` helper — see its own
-              comment for why this is the top-ranked finding's own statement,
-              cut before its example quote, rather than a static section
-              title. */}
-          <h2 className="ga-doc-h2">{findingsHeading(findings)}</h2>
-          <p className="ga-doc-lede" data-testid="goal-findings-lede">
-            {anythingSized ? (
-              unsized && headlineCovers !== "full" ? (
-                <>
-                  Ranked by reach — how many accounts each theme touches, and{" "}
-                  {unsized === 1 ? "one" : unsized} of them could not be sized at
-                  all.
-                  {/* The caveat only when the headline did not make it. With an
-                      unsized top row it did — three lines above — and saying it
-                      again is the repetition the feedback named. */}
-                  {headlineCovers === "none" ? (
-                    <>
-                      {" "}An unsized theme sorts last without being small: its
-                      size is unknown, not zero.
-                    </>
-                  ) : null}{" "}
-                  {bucketClause}An authoritative disagreement is placed
-                  above both, because two sources that may
-                  both speak contradicting each other is worth more than either
-                  of them alone.
-                </>
+          <h2 className="ga-doc-h2">What to do</h2>
+          {/* HOW MUCH OF THE UNSIZED DISCLOSURE THE HEADLINE ALREADY MADE —
+              three states, not two: the middle one states the caveat and
+              never names the count, so treating it as covered would drop
+              "257 of them could not be sized" out of the page entirely. */}
+          {unsized && headlineCovers !== "full" ? (
+            <p className="ga-doc-lede" data-testid="goal-findings-lede">
+              {unsized === 1 ? "One" : unsized} of these could not be sized
+              {headlineCovers === "caveat" ? (
+                "."
               ) : (
                 <>
-                  Ranked by reach — how many accounts each theme touches.{" "}
-                  {bucketClause}An
-                  authoritative disagreement is placed above both, because two
-                  sources that may both speak contradicting each other is worth
-                  more than either of them alone.
+                  {" "}— an unsized theme sorts last without being small: its
+                  size is unknown, not zero.
                 </>
-              )
-            ) : (
-              <>
-                {/* WHAT THE ORDER ACTUALLY IS, before any caveat about it.
-                    `_rank`'s key is (conflict, claim-type bucket, reach,
-                    confidence), and this paragraph used to omit the bucket
-                    entirely — so on a corpus nothing could size it said the
-                    list was "ordered by confidence" when what had ordered it
-                    was blockers above preferences. Mirrors `report.py`. */}
-                Not ranked by reach: nothing here could be sized.{" "}
-                {bucketClause}An authoritative disagreement is placed above
-                both, because two sources that may both speak contradicting
-                each other is worth more than either of them alone.
-                {/* AND WHETHER WHAT IS LEFT CARRIES ANYTHING. `_rank`'s last
-                    term is a confidence SCORE, never rendered — the reader
-                    sees bands, and with no outcome evidence anywhere every
-                    band comes out the same, so a caveat is owed. But the
-                    caveat used to read "not as a verdict on which matters
-                    more", printed inches under a recommendation BOUND to
-                    position 1 — the page telling a reader to act on a ranking
-                    while disowning it. Blockers genuinely do sort above
-                    preferences now, so position carries real meaning down to
-                    where the bucket runs out. Scoped to what is still true. */}
-                {oneBand ? (
-                  <>
-                    {" "}Past that, findings of the same kind are ordered by a
-                    confidence score this report does not print, and every
-                    finding here carries the same confidence band — so read the
-                    gap between two neighbours in the same group as narrow,
-                    rather than as a verdict on which matters more.
-                  </>
-                ) : null}
-              </>
-            )}
-          </p>
+              )}
+            </p>
+          ) : null}
           {sharedWeakest ? (
             <p className="ga-doc-note" data-testid="goal-shared-weakest">
-              <strong>Every finding below has the same weakest link</strong>, so
-              it is stated here once rather than repeated on each of them:{" "}
-              {sharedWeakest}
-              {/* The cap is its own sentence and arrives uncapitalised
-                  ("capped at medium: …"), so joining it after a full stop
-                  rendered "…are not. capped at medium". Joined with a
-                  semicolon it reads as the clause it is. */}
+              <strong>Every finding has the same weakest link</strong>, stated
+              once rather than on each: {sharedWeakest}
+              {/* The cap arrives uncapitalised ("capped at medium: …"), so a
+                  full stop before it rendered "…are not. capped at medium". */}
               {sharedCap ? `; ${sharedCap}.` : "."}
             </p>
           ) : sharedCap ? (
             <p className="ga-doc-note" data-testid="goal-shared-cap">
-              <strong>Every finding below is capped the same way</strong>, so it
-              is stated here once rather than on each of them: {sharedCap}.
+              <strong>Every finding is capped the same way</strong>, stated
+              once rather than on each: {sharedCap}.
             </p>
           ) : null}
           {sharedAssumptions?.length ? (
             <div className="ga-doc-note" data-testid="goal-shared-assumptions">
               <p>
-                {/* SAYS HOW MANY IT SPEAKS FOR. "Every finding below" is false
-                    when only the sized ones carry an assumption, and a hoisted
+                {/* SAYS HOW MANY IT SPEAKS FOR. "Every finding" is false when
+                    only the sized ones carry an assumption, and a hoisted
                     sentence that overstates its scope is worse than the
                     repetition it replaced. */}
                 <strong>
                   {carriers.length === findings.length
-                    ? "Every finding below rests on the same assumption"
-                    : `${carriers.length} of the findings below rest on the same assumption`}
+                    ? "Every finding rests on the same assumption"
+                    : `${carriers.length} findings rest on the same assumption`}
                   {sharedAssumptions.length > 1 ? "s" : ""}
                 </strong>
-                , so {sharedAssumptions.length > 1 ? "they are" : "it is"}{" "}
-                stated here once rather than repeated on each of them:
+                , stated once rather than on each:
               </p>
               <ul className="ga-assumed">
                 {sharedAssumptions.map((p) => (
@@ -1243,8 +1202,17 @@ export function GoalAnalysisReport({
               </ul>
             </div>
           ) : null}
+          {/* A RANGE, IN ITS OWN PARAGRAPH, NEVER BESIDE A COMMITTED FIGURE.
+              One is a sum of money people agreed to; the other is a rate card
+              quoted to whoever asked, whose total is meaningless — a $30,000
+              tier quoted sixteen times is not $480,000. */}
+          {listPricingBasis ? (
+            <p className="ga-doc-note" data-testid="goal-list-pricing-basis">
+              {listPricingBasis}
+            </p>
+          ) : null}
           <ol className="ga-doc-findings">
-            {findings.slice(0, MAX_DETAILED_FINDINGS).map((f, i) => (
+            {written.map((f, i) => (
               <ReportFinding
                 key={f.id}
                 f={f}
@@ -1261,101 +1229,194 @@ export function GoalAnalysisReport({
                 oneTopicNote={
                   oneTopic && i === recommendedGapsIndex ? ONE_TOPIC_NOTE : ""
                 }
+                deferComparison={deferComparison}
+                deferGaps
+                showCallNote={i === callNoteIndex}
               />
             ))}
           </ol>
-          {/* NO SILENT CAPS. A full write-up is reserved for the same
-              `MAX_DETAILED_FINDINGS` the RICE/MoSCoW table above scores —
-              everything past it is still on the run, listed one line each in
-              the same rank order, with the count stated. This is the fix for
-              the bug where this section rendered every finding in full (529
-              of them on a real run) with no cap at all; mirrors
-              `report.py`'s `_findings_section` tail. */}
-          {findings.length > MAX_DETAILED_FINDINGS ? (
-            <div data-testid="goal-findings-overflow">
-              <p className="ga-doc-note">
-                The next{" "}
-                {Math.min(
-                  findings.length - MAX_DETAILED_FINDINGS,
-                  MAX_OVERFLOW_FINDINGS
-                )}{" "}
-                findings are listed below in rank order rather than in full —
-                a full write-up is reserved for the {MAX_DETAILED_FINDINGS}{" "}
-                the ranking put first. Every one of them is still on the run
-                itself.
-              </p>
-              <ul className="ga-doc-list">
-                {findings
-                  .slice(
-                    MAX_DETAILED_FINDINGS,
-                    MAX_DETAILED_FINDINGS + MAX_OVERFLOW_FINDINGS
-                  )
-                  .map((f, i) => (
-                    <li key={f.id} data-testid="goal-finding-overflow-row">
-                      {MAX_DETAILED_FINDINGS + i + 1}. {overflowStatement(f)}
-                    </li>
-                  ))}
-              </ul>
-              {findings.length - MAX_DETAILED_FINDINGS > MAX_OVERFLOW_FINDINGS ? (
-                <p className="ga-doc-note">
-                  A further{" "}
-                  {findings.length - MAX_DETAILED_FINDINGS - MAX_OVERFLOW_FINDINGS}{" "}
-                  findings are on the run and are not listed here, because
-                  this list has a size limit. They were not dropped from the
-                  analysis.
-                </p>
-              ) : null}
-            </div>
+        </section>
+      ) : null}
+
+      {/* ── WHY NUMBER ONE. "But I think you should do number one because
+          it's the most important one" — the comparison, read AFTER both
+          write-ups rather than inside the first. The sentence itself is
+          unchanged and still comes off the engine's own
+          `deep_recommendation.comparison`; only where it sits has moved. */}
+      {written.length > 1 && (comparison || oneTopic) ? (
+        <section className="ga-doc-section" data-testid="goal-why-number-one">
+          <h2 className="ga-doc-h2">Why number one</h2>
+          {comparison ? (
+            <p className="ga-doc-note" data-testid="goal-finding-comparison">
+              {comparison}
+            </p>
           ) : null}
-          {/* ── CONSIDERED AND SET ASIDE. ───────────────────────────────────
-              NOT A DELETION. Each of these was found, corroborated and ranked
-              exactly like the findings above; what changed is that it does not
-              answer the question that was asked. The reason beside each is what
-              makes the filter arguable — a reader who disagrees can see precisely
-              what was judged and say so. */}
-          {setAside.length ? (
-            <div className="ga-doc-aside" data-testid="goal-set-aside">
-              <h3 className="ga-doc-h3">
-                Considered and set aside for this goal ({setAside.length})
-              </h3>
-              <p className="ga-doc-note">
-                Each of these was found and ranked like the findings above. They
-                are here because they do not bear on the goal as you defined it,
-                not because the evidence was weak.
-              </p>
-              {/* THE MEMO'S FOUR COLUMNS. A bullet list carried two of them — the
-                  label and the reason — so what the theme actually SAID and what it
-                  was worth were dropped, which are the two a reader needs in order to
-                  disagree with the verdict. */}
-              <div className="ga-rice-scroll">
-                <table className="ga-rice">
-                  <thead>
-                    <tr>
-                      <th>Theme</th><th>What it is</th>
-                      <th>Worth this cycle</th><th>Why it was set aside</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {setAside.map(([f, reason]) => (
-                      <tr key={f.id}>
-                        <td><strong>{(f.label || "").trim() || f.statement}</strong></td>
-                        <td>{(f.example || "").trim() || f.statement}</td>
-                        {/* I3 as a vocabulary: never a misleading zero. */}
-                        <td>{f.impact_value == null
-                          ? "Unsized"
-                          : `${f.impact_value} ${f.currency || "accounts"}`}</td>
-                        <td>{reason}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+          {oneTopic ? (
+            <p className="ga-doc-note" data-testid="goal-finding-one-topic">
+              <b>Why these are not two options.</b> {ONE_TOPIC_NOTE}
+            </p>
           ) : null}
         </section>
       ) : null}
 
-      {/* ── 5. What you already believed ─────────────────────────────────── */}
+      {/* ── BEFORE YOU SPEND: what is not known about the thing being
+          recommended. The same list the recommended card used to print
+          inside itself, lifted out now that the memo runs two write-ups
+          instead of ten — it qualifies the recommendation the document is
+          making, not one card among many. GAPS, NOT ACTIONS: the heading
+          says "before you spend" rather than "next steps" precisely so it
+          cannot be read as work competing with the recommendation above it.
+          Corpus-level gaps render once, at the end. */}
+      {recommendedGaps.length ? (
+        <section className="ga-doc-section" data-testid="goal-finding-data-gaps">
+          <h2 className="ga-doc-h2">Before you spend</h2>
+          <p className="ga-doc-note">
+            Gaps in what is known about the recommended option, not work to
+            schedule.
+          </p>
+          <ul className="ga-assumed">
+            {recommendedGaps.map((g, i) => (
+              <li key={i}>{g}</li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {/* ── THE RANKING, WITH REACH BARS. ────────────────────────────────
+          The table NEVER re-sorts: `_rank` froze the order before any of this
+          ran, and a scoring table that reordered would be the prioritisation
+          step mutating the ranking (I10). How its terms are DEFINED is method
+          and reads under "how this was produced"; the table itself is part of
+          the memo, where the customer put it: "so this is the RICE
+          prioritization, with the table." */}
+      {framework && findings.length && !isMoscowFramework ? (
+        <section className="ga-doc-section" data-testid="goal-rice">
+          <h2 className="ga-doc-h2">The ranking ({frameworkLabel})</h2>
+          <div className="ga-rice-scroll">
+            <table className="ga-rice">
+              <thead>
+                <tr>
+                  <th>Theme</th><th>Reach</th><th>Impact</th>
+                  <th>Confidence</th><th>Effort</th><th>Score</th><th>Inputs</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rankRows.map((f) => {
+                  const r = riceFor(f)
+                  return (
+                    <tr key={f.id}>
+                      <td>{r.label}</td>
+                      {/* NOT "—", AND NEVER A ZERO-LENGTH BAR (I3): an
+                          unmeasured theme and a measured-and-tiny one lead to
+                          opposite decisions. */}
+                      <td>
+                        {r.reach === null ? "Not measured" : (
+                          <>
+                            {r.reach} {r.reachUnit}
+                            <br />
+                            <Bar value={r.reach} largest={rankLargest} />
+                          </>
+                        )}
+                      </td>
+                      <td>{r.impact}</td>
+                      <td>{r.confidenceBand}</td>
+                      <td>{EFFORT_ABSENT}</td>
+                      <td>{r.score === null ? "—" : r.score.toFixed(1)}</td>
+                      <td>{r.inputsPresent} of {RICE_INPUT_COUNT}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {/* NO SILENT CAPS. */}
+          {findings.length > MAX_RICE_ROWS ? (
+            <p className="ga-doc-note">
+              The other {findings.length - MAX_RICE_ROWS} are listed below, not
+              scored out here — a table this long stops being one.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
+      {/* MoSCoW is what this run picked when nothing connected carries a
+          number — RICE's Reach and Impact would both come back unmeasured on
+          every row rather than ranking anything. Same non-reordering
+          discipline as the RICE table above (I10). */}
+      {framework && findings.length && isMoscowFramework ? (
+        <section className="ga-doc-section" data-testid="goal-moscow">
+          <h2 className="ga-doc-h2">The ranking ({frameworkLabel})</h2>
+          <div className="ga-rice-scroll">
+            <table className="ga-rice">
+              <thead>
+                <tr>
+                  <th>Theme</th><th>Bucket</th><th>Why</th><th>Reach</th>
+                  <th>Source documents</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rankRows.map((f) => {
+                  const r = moscowFor(f)
+                  return (
+                    <tr key={f.id}>
+                      <td>{r.label}</td>
+                      <td>{r.bucket}</td>
+                      <td>{r.bucketBasis}</td>
+                      <td>
+                        {r.reach === null ? "Not measured" : (
+                          <>
+                            {r.reach} {r.reachUnit}
+                            <br />
+                            <Bar value={r.reach} largest={rankLargest} />
+                          </>
+                        )}
+                      </td>
+                      <td>{r.docCount}</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+          {findings.length > MAX_MOSCOW_ROWS ? (
+            <p className="ga-doc-note">
+              The other {findings.length - MAX_MOSCOW_ROWS} are listed below,
+              not bucketed out here — a table this long stops being one.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
+      {/* ── OTHER THINGS CONSIDERED. "And then the bottom will be other
+          things that we considered — these are 20 other things that you could
+          also build." One line each, in the run's own rank order, with
+          everything past the cap COUNTED: a list that stops without saying so
+          reads as the complete set, which is the silent degradation this
+          feature exists to prevent. */}
+      {otherConsidered.length ? (
+        <section className="ga-doc-section" data-testid="goal-findings-overflow">
+          <h2 className="ga-doc-h2">
+            Other things considered ({otherConsidered.length})
+          </h2>
+          <p className="ga-doc-note">
+            Ranked below the two above. One line each, in rank order — all of
+            them are on the run.
+          </p>
+          <ul className="ga-doc-list">
+            {otherListed.map((f, i) => (
+              <li key={f.id} data-testid="goal-finding-overflow-row">
+                {MAX_WRITTEN_UP_FINDINGS + i + 1}. {overflowStatement(f)}
+              </li>
+            ))}
+          </ul>
+          {otherBeyond > 0 ? (
+            <p className="ga-doc-note">
+              and {otherBeyond} more, all on the run.
+            </p>
+          ) : null}
+        </section>
+      ) : null}
+
       {hypotheses.length ? (
         <section className="ga-doc-section" data-testid="goal-hypotheses">
           <h2 className="ga-doc-h2">What you already believed</h2>
@@ -1364,36 +1425,293 @@ export function GoalAnalysisReport({
               <li key={i}>{h}</li>
             ))}
           </ul>
-          {/* NOT a verdict. The engine does not yet test a stated hypothesis
+          {/* NOT a verdict. The engine does not test a stated hypothesis
               against the claims, and rendering these beside the findings
               without saying so would let a reader infer that silence meant
-              "not supported" — which would be a conclusion nothing produced. */}
+              "not supported" — a conclusion nothing produced. */}
           <p className="ga-doc-note">
-            This reading did not test these. It reports what it found, and
-            nothing above was matched against what you wrote here — so their
-            absence from the findings is not evidence against them.
+            This reading did not test these. Nothing above was matched against
+            what you wrote here, so their absence from the findings is not
+            evidence against them.
           </p>
         </section>
       ) : null}
 
-      {/* ── 6. Considered and ruled out ──────────────────────────────────── */}
+      {/* ── HOW THIS WAS PRODUCED. ────────────────────────────────────────
+          Five sections that used to be the first five. Reading the current
+          output the customer put the line at "the short version": everything
+          above it — what this was asked to establish, what was read, the
+          source breakdown, what was missing, how it was ranked — was, in his
+          words, "all of this information should not be in the final report".
+
+          MOVED, NEVER DELETED, and that distinction is the whole design.
+          Several of these lines are the disclosures this feature is built on:
+          that a run was filtered by a definition, that a third of the evidence
+          was undated, that a ranking term could not be filled. A memo whose
+          provenance has been deleted is not shorter, it is unfalsifiable.
+
+          PER-FINDING DISCLOSURES DO NOT MOVE — an unsized value, an
+          assumption behind one specific finding, the weakest link on one theme
+          stay attached to the finding they qualify. */}
+      <section className="ga-doc-section" data-testid="goal-provenance">
+        <h2 className="ga-doc-h2">How this was produced</h2>
+        <p className="ga-doc-note">
+          What the memo above rests on: what was read, what was missing from it,
+          and how the ranking works.
+        </p>
+
+        <h3 className="ga-doc-h3">What was read</h3>
+        {plan ? (
+          <>
+            <p className="ga-doc-lede">
+              {plan.total_signals.toLocaleString()} signal
+              {plan.total_signals === 1 ? "" : "s"} across{" "}
+              {plan.sources.length} source
+              {plan.sources.length === 1 ? "" : "s"}, listed separately because
+              each witnesses different things.
+            </p>
+            <ul className="ga-doc-sources">
+              {plan.sources.map((s) => (
+                <li key={s.source_type} data-testid="goal-read-source">
+                  <span className="ga-doc-source-count">
+                    {s.signal_count.toLocaleString()}
+                  </span>{" "}
+                  <b>{s.label}</b> — {s.witnesses}
+                </li>
+              ))}
+            </ul>
+            {excluded.length ? (
+              <p className="ga-doc-note" data-testid="goal-excluded">
+                You excluded {excluded.map(humanSource).join(", ")} before this
+                ran, so nothing above rests on it.
+              </p>
+            ) : null}
+          </>
+        ) : (
+          <p className="ga-doc-note" data-testid="goal-no-plan">
+            This run kept no record of which sources it read, so what is above
+            cannot be checked against its own inputs.
+          </p>
+        )}
+        {notes.length ? (
+          <>
+            <h4 className="ga-doc-h3">What was missing from it</h4>
+            <ul className="ga-coverage" data-testid="goal-coverage">
+              {notes.map((n, i) => (
+                <li key={i}>
+                  <b>{n.reason}</b> — {n.actual}
+                </li>
+              ))}
+            </ul>
+          </>
+        ) : null}
+
+        {/* THE FIRST THING A FILTERED LIST OWES ITS READER. Silent when
+            nothing was set aside — a funnel with one step is not a funnel. */}
+        {setAside.length ? (
+          <div data-testid="goal-funnel">
+            <h3 className="ga-doc-h3">What bears on this goal</h3>
+            <p className="ga-doc-lede">
+              <strong>
+                {allFindings.length} themes were found. {findings.length} bear
+                on this goal.
+              </strong>{" "}
+              The other {setAside.length} are listed with the reason each was
+              set aside — not gone, and one set aside for this goal may be the
+              answer to a different one.
+            </p>
+          </div>
+        ) : null}
+        {/* The relevance gate's disclosure half: the gate has a hard budget and
+            a wall-clock deadline that can stop it early, and until this fired
+            nothing ever said so. Separate from the funnel above, because this
+            fires even when nothing was set aside. */}
+        {relevanceJudged && relevanceJudged.considered > relevanceJudged.judged ? (
+          <p className="ga-doc-note" data-testid="goal-relevance-coverage">
+            Of the {relevanceJudged.considered} themes found, this run evaluated{" "}
+            {relevanceJudged.judged} for relevance to your goal before its time
+            or cost budget ran out. The other{" "}
+            {relevanceJudged.considered - relevanceJudged.judged} are still
+            counted as found and are kept in the list — unjudged, not
+            irrelevant.
+          </p>
+        ) : null}
+
+        {/* WHAT THE CONFIRMED DEFINITION DID AND DID NOT DECIDE. Claim
+            SELECTION never sees it on either branch (`build_findings` runs
+            with no goal argument). What changed when the relevance gate
+            shipped is which findings a reader is SHOWN, and a run that ran
+            the gate must not print the sentence denying it. `relevanceGateRan`
+            is true only when the gate completed without raising — never
+            guessed from whether anything was set aside, because a gate that
+            judged everything true still ran. */}
+        <h3 className="ga-doc-h3">What the definition decided</h3>
+        {relevanceGateRan ? (
+          <p className="ga-doc-note" data-testid="goal-definition-decided">
+            Every theme was checked against your confirmed definition for
+            whether it bears on the goal, and what did not is listed below with
+            the reason. Nothing was SELECTED by it: a theme reaches that check
+            because it is in the evidence you approved.
+          </p>
+        ) : (
+          <p className="ga-doc-note" data-testid="goal-definition-decided">
+            Nothing here was filtered or ranked by your definition — a theme
+            appears because it is in the evidence you approved, not because it
+            bears on what you asked about.
+          </p>
+        )}
+
+        {/* HOW THE RANKING'S TERMS ARE DEFINED. RICE's letters carry
+            assumptions this corpus cannot all satisfy, and a reader who
+            assumes the standard ones will misread the table above. */}
+        {framework && findings.length ? (
+          <div data-testid="goal-ranking-legend">
+            <h3 className="ga-doc-h3">How the ranking works ({frameworkLabel})</h3>
+            {frameworkReason ? <p className="ga-doc-note">{frameworkReason}</p> : null}
+            {isMoscowFramework ? (
+              <ul className="ga-doc-note">
+                <li><strong>MUST</strong> — a stated blocker: something is
+                  stopping an account today. <em>Marked <strong>MUST?</strong>{" "}
+                  when only one source document backs it.</em></li>
+                <li><strong>SHOULD / COULD</strong> — a stated preference:
+                  something an account asked for.</li>
+                <li>Graded by how many <strong>independent source
+                  documents</strong> back each one, not by raw claim count.</li>
+              </ul>
+            ) : (
+              <>
+                <ul className="ga-doc-note">
+                  <li><strong>Reach</strong> — how many of your accounts the
+                    theme touches. Counted, not estimated.</li>
+                  <li><strong>Impact</strong> — how directly it bears on the
+                    metric, read from the kind of claim behind it: something
+                    blocked outranks something asked for, which outranks
+                    something described.{" "}
+                    <em>That ordering is ours, not your data&rsquo;s.</em></li>
+                  <li><strong>Confidence</strong> — the band the evidence
+                    earned.</li>
+                  <li><strong>Effort</strong> — <em>{EFFORT_ABSENT}</em>.
+                    Nothing connected carries a person-month, and inventing one
+                    would put a number in front of you that no evidence
+                    supports.</li>
+                </ul>
+                <p className="ga-doc-note">
+                  With no effort anywhere, the score is reach × impact ×
+                  confidence. An effort applied equally to every row divides
+                  them all by the same number and cannot change their order.
+                </p>
+              </>
+            )}
+          </div>
+        ) : null}
+
+        {/* WHAT THE ORDER ACTUALLY IS. `_rank`'s key is (conflict, claim-type
+            bucket, reach, confidence); each clause is stated only when the
+            term it names did work on this run. */}
+        {findings.length ? (
+          <p className="ga-doc-note" data-testid="goal-ordering-note">
+            {anythingSized ? (
+              <>Ranked by reach — how many accounts each theme touches.{" "}</>
+            ) : (
+              <>Not ranked by reach: nothing here could be sized.{" "}</>
+            )}
+            {bucketClause}
+            {conflictClause}
+            {!anythingSized && oneBand ? (
+              <>
+                {" "}Within a kind, findings are ordered by a confidence score
+                this report does not print, and every finding here carries the
+                same band — so read the gap between two neighbours in one group
+                as narrow.
+              </>
+            ) : null}
+          </p>
+        ) : null}
+
+        {recommendationBasis ? (
+          <p className="ga-doc-note" data-testid="goal-recommendation-basis">
+            {/* CAPITALISED AND TERMINATED, because it follows a bold full stop
+                and is the start of a sentence. `recommendationBasis` is
+                authored as a clause — it also renders mid-sentence elsewhere. */}
+            <strong>How many got a full recommendation.</strong>{" "}
+            {stop(upperFirst(recommendationBasis))}
+          </p>
+        ) : null}
+
+        {/* ── CONSIDERED AND SET ASIDE. NOT A DELETION: each of these was found,
+            corroborated and ranked exactly like the findings above; what changed
+            is that it does not answer the question that was asked. The reason
+            beside each is what makes the filter arguable. CAPPED for the same
+            reason the tail above is — at 95 rows this table was named as one of
+            the things making the document unreadable — with the heading
+            carrying the true total. */}
+        {setAside.length ? (
+          <div className="ga-doc-aside" data-testid="goal-set-aside">
+            <h3 className="ga-doc-h3">
+              Considered and set aside for this goal ({setAside.length})
+            </h3>
+            <p className="ga-doc-note">
+              Found and ranked like the findings above. They are here because they
+              do not bear on the goal as you defined it, not because the evidence
+              was weak.
+            </p>
+            <div className="ga-rice-scroll">
+              <table className="ga-rice">
+                <thead>
+                  <tr>
+                    <th>Theme</th><th>What it is</th>
+                    <th>Worth this cycle</th><th>Why it was set aside</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {setAsideShown.map(([f, reason]) => (
+                    <tr key={f.id}>
+                      <td><strong>{(f.label || "").trim() || f.statement}</strong></td>
+                      <td>{(f.example || "").trim() || f.statement}</td>
+                      {/* I3 as a vocabulary: never a misleading zero. */}
+                      <td>{f.impact_value == null
+                        ? "Unsized"
+                        : `${f.impact_value} ${f.currency || "accounts"}`}</td>
+                      <td>{reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {setAside.length > setAsideShown.length ? (
+              <p className="ga-doc-note">
+                and {setAside.length - setAsideShown.length} more set aside, all
+                on the run.
+              </p>
+            ) : null}
+          </div>
+          ) : null}
+
+        {/* SAID ONCE, AND SAID PLAINLY, because the memo above is read as
+            though it named accounts and it does not. A finding carries how
+            MANY accounts a theme touches; which ones is never stored. Stating
+            the limit here is the alternative to a write-up implying a customer
+            list it cannot produce. */}
+        <p className="ga-doc-note" data-testid="goal-accounts-not-named">
+          Accounts are counted, not named: this reading records how many
+          accounts a theme touches, never which ones. Where a name appears it is
+          a source document.
+        </p>
+      </section>
+
       {run.considered?.length ? (
         <section className="ga-doc-section" data-testid="goal-considered">
           {/* OPEN while the list is short, folded once it is long — but the
               COUNT is in the summary either way, so the ledger is never
-              silently thin. A run can reject a hundred candidates, and an
-              unfolded hundred pushes "what this cannot tell you" off the end
-              of the document, which is the one section a reader must reach. */}
+              silently thin. */}
           <details open={run.considered.length <= RULED_OUT_OPEN_MAX}>
             <summary className="ga-doc-h2 ga-doc-summary">
               Considered and ruled out ({ruledOutCandidates.length})
             </summary>
-            {/* WHAT KILLED THEM, not just that something did. "Each one died
-                for a stated reason" is true and, printed beside every label,
-                reads as 102 reasons — a real run had 102 rejections and FIVE
-                causes, half of them one rule and half another, which the flat
-                list made invisible without counting by hand. The counts are
-                the actionable part: one cause at 49 is one thing to fix. */}
+            {/* WHAT KILLED THEM, not just that something did. A real run had
+                102 rejections and FIVE causes, half of them one rule and half
+                another, which a flat list made invisible without counting by
+                hand. The counts are the actionable part. */}
             <p className="ga-doc-lede">
               A ranking whose rejections are invisible is a ranking you have to
               take on faith. Each of these was a candidate and each one died for
@@ -1434,33 +1752,26 @@ export function GoalAnalysisReport({
         </section>
       ) : null}
 
-      {/* ── 7. What this cannot tell you ─────────────────────────────────── */}
       <section className="ga-doc-section ga-doc-limits" data-testid="goal-limits">
         <h2 className="ga-doc-h2">What this cannot tell you</h2>
         <p className="ga-doc-lede">
           This reading is qualitative. It sizes a theme by reach — how many
-          accounts it touches — and it does not produce a point estimate, an
-          effort figure, a prioritisation score or a significance test, because
-          nothing it read carries the numbers those need. Where you expected one
-          of those, this is why it is absent.
+          accounts it touches — and produces no point estimate, effort figure or
+          significance test, because nothing it read carries the numbers those
+          need.
         </p>
         {/* WHICH FINDINGS APPEAR WAS NOT ALWAYS DECIDED BY THE GOAL, and this
             note is what said so — correctly, until a relevance gate shipped.
-            Claim SELECTION still never sees the goal, but the list a reader
-            is SHOWN is a different question, and `judge_relevance` now
-            answers it. A run that ran the gate must not deny having filtered
-            by it. `relevanceGateRan` is true only when the gate
-            completed without raising. Mirrors `report.py`'s
-            `_limits_section`. */}
+            A run that ran the gate must not deny having filtered by it. */}
         {relevanceGateRan ? (
           <p className="ga-doc-note" data-testid="goal-not-selected">
             <strong>These findings were filtered for relevance to your
             goal.</strong>{" "}
             A model checked every theme against your goal and definition and
             kept what could plausibly bear on it; what did not is listed
-            separately below, with the reason. Being in the evidence you
-            approved AND surviving that check is still not a claim about how
-            much a theme matters — judge that yourself.
+            separately, with the reason. Being in the evidence you approved AND
+            surviving that check is still not a claim about how much a theme
+            matters — judge that yourself.
           </p>
         ) : (
           <p className="ga-doc-note" data-testid="goal-not-selected">
@@ -1495,6 +1806,7 @@ export function GoalAnalysisReport({
           </p>
         )}
       </section>
+
     </article>
   )
 }

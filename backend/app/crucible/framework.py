@@ -66,7 +66,7 @@ def display_name(framework: str) -> str:
 @dataclass(frozen=True)
 class FrameworkChoice:
     """The framework this run will use, and why — shown in the plan and in
-    the finished report (AC-2). `reason` is written as a full sentence so it
+    the finished report. `reason` is written as a full sentence so it
     can be rendered directly, without a caller reconstructing prose from
     flags."""
     framework: str                          # "rice" | "moscow"
@@ -102,8 +102,10 @@ def select_framework(
                 "rice",
                 "your team set RICE as the prioritisation framework at "
                 f"onboarding, and a numeric source is connected — "
-                f"{numeric_named} — so RICE can size a finding rather than "
-                "only count it.",
+                f"{numeric_named} — so reach is countable and RICE has "
+                "something to score. It still sizes a theme by how many "
+                "accounts it touches, never in money: nothing here carries a "
+                "per-account value.",
                 declared=declared_norm, honoured_declared=True,
             )
         return FrameworkChoice(
@@ -145,9 +147,10 @@ def _choose_from_data(has_numeric: bool, numeric_named: str) -> FrameworkChoice:
     if has_numeric:
         return FrameworkChoice(
             "rice",
-            f"a numeric source is connected — {numeric_named} — so a "
-            "finding's reach and impact can be sized rather than only "
-            "counted.",
+            f"a numeric source is connected — {numeric_named} — so reach is "
+            "countable and RICE has something to score. It still sizes a "
+            "theme by how many accounts it touches, never in money: nothing "
+            "here carries a per-account value.",
         )
     return FrameworkChoice(
         "moscow",
@@ -158,7 +161,7 @@ def _choose_from_data(has_numeric: bool, numeric_named: str) -> FrameworkChoice:
     )
 
 
-#: The cap AC-5 asks for, stated once rather than discovered by counting a
+#: The cap on plan questions, stated once rather than discovered by counting a
 #: list. RICE asks the one thing its own arithmetic needs (`account_value`)
 #: plus the two decision-process questions every framework's decision box
 #: uses regardless of ranking method (`decision_owner`, `needed_by`). MoSCoW
@@ -171,10 +174,10 @@ def questions_for(framework: str) -> tuple[PlanQuestion, ...]:
     once, never invented if skipped (the gap is carried into the output
     instead; see `derive_gaps_and_promises`).
 
-    `account_value` is RICE-specific: it is David's own reading of the RICE
-    dimensions ("Reach will be how many companies are impacted… the impact
-    will be based on... if in the call we told them it's going to be a
-    dollar") — the only question here that feeds a framework's ARITHMETIC
+    `account_value` is RICE-specific: it follows the product owner's stated
+    reading of the RICE dimensions — reach is how many companies are
+    impacted, and impact is read against what a company said a thing was
+    worth — and it is the only question here that feeds a framework's ARITHMETIC
     rather than its decision box. Asking it under MoSCoW would collect a
     number nothing downstream multiplies, which is the dishonest-ask this
     function exists to avoid: a run must not solicit an input it will not
@@ -202,7 +205,7 @@ def questions_for(framework: str) -> tuple[PlanQuestion, ...]:
         why="Named on the decision box alongside the owner.",
     ))
     assert len(questions) <= MAX_PLAN_QUESTIONS, (
-        "AC-5's cap: a plan question set grew past what a reader should be "
+        "the plan-question cap: a set grew past what a reader should be "
         "asked in one batch."
     )
     return tuple(questions)
