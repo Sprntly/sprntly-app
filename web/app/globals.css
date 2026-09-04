@@ -21076,13 +21076,6 @@
     transform: scale(1);
   }
 
-  .onb-card .conn-note {
-    margin-top: 14px;
-    font-size: 11.5px;
-    color: var(--ink-3);
-    line-height: 1.5;
-  }
-
   /* "Connect later" link in the footer meta strip. */
   .onb-footer .meta .onb-skip-link {
     background: none;

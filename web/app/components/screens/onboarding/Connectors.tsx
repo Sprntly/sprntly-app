@@ -566,11 +566,6 @@ export function Connectors() {
         })}
       </div>
 
-      <p className="conn-note">
-        OAuth and API-key connections are configured in Settings → Connectors
-        after onboarding. Selections here pre-stage what you intend to wire up.
-      </p>
-
       <ConnectorConnectModal
         providerId={modalProvider}
         activeCompany={workspace.slug}
