@@ -74,7 +74,7 @@ export function priorityPill(value: string | null | undefined): { label: string;
 }
 
 const AVATAR_PALETTE = [
-  { bg: "#FDE2E4", color: "#C13838" }, { bg: "#E0F0E9", color: "#179463" },
+  { bg: "#FDE2E4", color: "#C13838" }, { bg: "#E0F0E9", color: "var(--accent, #17191A)" },
   { bg: "#E4E9FD", color: "#3B5BDB" }, { bg: "#FBEAD7", color: "#B5740F" },
   { bg: "#EADCF7", color: "#7C3AED" },
 ]

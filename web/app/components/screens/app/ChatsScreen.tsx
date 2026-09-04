@@ -26,10 +26,10 @@ import { EmptyPane } from "../../shared/EmptyPane"
 type AgentType = "pm" | "oncall" | "ds" | "design" | "ask"
 
 const AGENT_CONFIG: Record<AgentType, { label: string; bg: string; color: string; iconBg: string; iconColor: string }> = {
-  pm:     { label: "PM AGENT",      bg: "#DBF1E7", color: "#0E6E49", iconBg: "#DBF1E7", iconColor: "#179463" },
+  pm:     { label: "PM AGENT",      bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)", iconBg: "var(--accent-soft, #EEEFF0)", iconColor: "var(--accent, #17191A)" },
   oncall: { label: "ON-CALL AGENT", bg: "#FEE2E2", color: "#DC2626", iconBg: "#FEF2F2", iconColor: "#DC2626" },
   ds:     { label: "DS AGENT",      bg: "#DBEAFE", color: "#1E40AF", iconBg: "#EFF6FF", iconColor: "#2563EB" },
-  design: { label: "DESIGN AGENT",  bg: "#DBF1E7", color: "#0E6E49", iconBg: "#F0FDF4", iconColor: "#179463" },
+  design: { label: "DESIGN AGENT",  bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)", iconBg: "#F0FDF4", iconColor: "var(--accent, #17191A)" },
   ask:    { label: "ASK",           bg: "#F3F4F6", color: "#6B7280", iconBg: "#F3F4F6", iconColor: "#6B7280" },
 }
 
@@ -101,8 +101,8 @@ function PinGlyph({ filled, size = 13 }: { filled: boolean; size?: number }) {
       width={size}
       height={size}
       viewBox="0 0 24 24"
-      fill={filled ? "var(--accent, #179463)" : "none"}
-      stroke={filled ? "var(--accent, #179463)" : "var(--ink-4, #B0AEA6)"}
+      fill={filled ? "var(--accent, #17191A)" : "none"}
+      stroke={filled ? "var(--accent, #17191A)" : "var(--ink-4, #B0AEA6)"}
       strokeWidth="1.8"
       strokeLinecap="round"
       strokeLinejoin="round"
@@ -709,7 +709,7 @@ export function ChatsScreen() {
           onClick={goToNewChat}
           style={{
             fontSize: 13, padding: "8px 18px", borderRadius: 999,
-            background: "var(--accent, #179463)", color: "#fff", border: "none",
+            background: "var(--accent, #17191A)", color: "#fff", border: "none",
             fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6,
             whiteSpace: "nowrap", flexShrink: 0,
           }}

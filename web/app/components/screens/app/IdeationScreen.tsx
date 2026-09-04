@@ -37,7 +37,7 @@ interface IdeationIdea {
 const IDEA_TYPES: IdeaType[] = ["New initiative", "UI", "Infra", "Bug", "Research"]
 
 const TYPE_STYLE: Record<IdeaType, { color: string; bg: string; border: string }> = {
-  "New initiative": { color: "#179463", bg: "#eaf7f1", border: "#9bdcc1" },
+  "New initiative": { color: "var(--accent, #17191A)", bg: "#eaf7f1", border: "var(--accent-2, #C7CACC)" },
   UI:               { color: "#5b50b8", bg: "#f0eefb", border: "#c5c0ee" },
   Infra:            { color: "#b06a10", bg: "#fef3e2", border: "#f0c07a" },
   Bug:              { color: "#c13838", bg: "#fdeaea", border: "#f5b3b3" },
@@ -526,7 +526,7 @@ function ProposedContent({
 // and done are the only actions the backend returns for the Completed tab.
 const ACTION_STYLE: Record<CompletedItem["action"], { label: string; style: { color: string; bg: string; border: string } }> = {
   prd_created: { label: "PRD created", style: { color: "#5b50b8", bg: "#f0eefb", border: "#c5c0ee" } },
-  done:        { label: "Done",        style: { color: "#179463", bg: "#eaf7f1", border: "#9bdcc1" } },
+  done:        { label: "Done",        style: { color: "var(--accent, #17191A)", bg: "#eaf7f1", border: "var(--accent-2, #C7CACC)" } },
 }
 
 function formatSurfacedDate(iso: string | null): string {

@@ -24,8 +24,8 @@ const badgeStyle: React.CSSProperties = {
 
 const badgeAccentStyle: React.CSSProperties = {
   ...badgeStyle,
-  background: "#DBF1E7",
-  color: "#0E6E49",
+  background: "var(--accent-soft, #EEEFF0)",
+  color: "var(--accent-ink, #16181A)",
 }
 
 const summaryBoxStyle: React.CSSProperties = {
@@ -300,7 +300,7 @@ export function EvidenceScreen() {
                 <div style={metaLabelStyle}>{m.label}</div>
                 <div style={{
                   ...metaValueStyle,
-                  color: m.valueClass === "pos" ? "#179463" : m.valueClass === "neg" ? "#DC2626" : metaValueStyle.color,
+                  color: m.valueClass === "pos" ? "var(--accent, #17191A)" : m.valueClass === "neg" ? "#DC2626" : metaValueStyle.color,
                 }}>
                   {m.value}
                   {m.note && <span style={{ fontSize: 11, color: "var(--ink-4, #B0AEA6)", marginLeft: 4 }}>{m.note}</span>}
@@ -347,7 +347,7 @@ export function EvidenceScreen() {
               onClick={handleGeneratePrd}
               style={{
                 ...btnStyle,
-                background: "var(--accent, #179463)",
+                background: "var(--accent, #17191A)",
                 color: "#fff",
                 border: "none",
               }}

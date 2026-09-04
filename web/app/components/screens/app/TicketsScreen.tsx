@@ -56,7 +56,7 @@ const COLUMNS: InternalTicket["status"][] = ["Backlog", "In progress", "In revie
 const CATEGORIES = ["Product", "Design", "Backend", "Frontend", "AI", "Infra", "Analytics", "CS"]
 
 const COL_DOT: Record<string, string> = {
-  Backlog: "#AAB3AE", "In progress": "#2a6ec8", "In review": "#c16a0b", Done: "#179463",
+  Backlog: "#AAB3AE", "In progress": "#2a6ec8", "In review": "#c16a0b", Done: "var(--accent, #17191A)",
 }
 
 const PRIORITY_LABELS: Record<string, string> = {
@@ -69,7 +69,7 @@ const PRIORITY_STYLE: Record<string, { bg: string; color: string }> = {
 }
 
 const CAT_STYLE: Record<string, { bg: string; color: string; bordercolor: string }> = {
-  Product: { bg: "#DBF1E7", color: "#0E6E49", bordercolor: "#9BDcc1" }, Design: { bg: "#DBF1E7", color: "#0E6E49", bordercolor: "#9BDcc1" },
+  Product: { bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)", bordercolor: "#9BDcc1" }, Design: { bg: "var(--accent-soft, #EEEFF0)", color: "var(--accent-ink, #16181A)", bordercolor: "#9BDcc1" },
   Backend: { bg: "#D1FAE5", color: "#065F46", bordercolor: "#9BDcc1" }, Frontend: { bg: "#EDE9FE", color: "#6D28D9", bordercolor: "#BDABE0" },
   AI: { bg: "#FEF3C7", color: "#92400E", bordercolor: "#F0BF73" }, Infra: { bg: "#DBEAFE", color: "#1E40AF", bordercolor: "#9BDcc1" },
   Analytics: { bg: "#E0E7FF", color: "#3730A3", bordercolor: "#BDABE0" }, CS: { bg: "#DBEAFE", color: "#1E40AF", bordercolor: "#9CBDEA" },
@@ -193,7 +193,7 @@ function AddTicketModal({ onClose, onAdd }: { onClose: () => void; onAdd: (t: In
         <div style={{ padding: "0 22px 18px", display: "flex", justifyContent: "flex-end", gap: 8 }}>
           <button type="button" onClick={onClose} style={{ ...toolBtnStyle, padding: "7px 16px" }}>Cancel</button>
           <button type="button" onClick={handleSubmit} disabled={!title.trim() || busy} style={{
-            fontSize: 12, padding: "7px 16px", background: title.trim() && !busy ? "var(--accent, #179463)" : "#ccc", color: "#fff",
+            fontSize: 12, padding: "7px 16px", background: title.trim() && !busy ? "var(--accent, #17191A)" : "#ccc", color: "#fff",
             border: "none", borderRadius: 7, fontWeight: 600, cursor: title.trim() && !busy ? "pointer" : "not-allowed",
           }}>{busy ? "Creating..." : pushClickUp ? "Create & push to ClickUp" : "Create ticket"}</button>
         </div>
@@ -216,11 +216,11 @@ function KanbanCard({ ticket, onDragStart, onClick, isDone, isSelected }: {
     <div draggable onDragStart={(e) => onDragStart(e, ticket.id)} onClick={() => onClick(ticket)}
       style={{
         background: "#fff", borderRadius: 10,
-        border: isSelected ? "2px solid var(--accent, #179463)" : "1px solid var(--line, #E8E6E0)",
+        border: isSelected ? "2px solid var(--accent, #17191A)" : "1px solid var(--line, #E8E6E0)",
         padding: isSelected ? "13px 15px" : "14px 15px", cursor: "pointer",
         opacity: isDone ? 0.55 : 1, transition: "box-shadow 0.15s, opacity 0.2s, border 0.15s",
       }}
-      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.border = "1px solid var(--accent-2, #9BDCC1)" }}
+      onMouseEnter={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.border = "1px solid var(--accent-2, var(--accent-2, #C7CACC))" }}
       onMouseLeave={(e) => { if (!isSelected) (e.currentTarget as HTMLDivElement).style.border = "1px solid var(--line, #E8E6E0)" }}
     >
       <div style={{ fontSize: 13.5, fontWeight: 500, color: "var(--ink, #1A1A17)", lineHeight: 1.45, marginBottom: 10 }}>{ticket.title}</div>
@@ -270,7 +270,7 @@ function KanbanColumn({ status, tickets, onDragStart, onDrop, onCardClick, selec
         style={{
           display: "flex", flexDirection: "column", gap: 10, minHeight: 120, padding: 4, borderRadius: 12,
           background: dragOver ? "rgba(23,148,99,0.04)" : "transparent",
-          border: dragOver ? "2px dashed var(--accent, #179463)" : "2px dashed transparent",
+          border: dragOver ? "2px dashed var(--accent, #17191A)" : "2px dashed transparent",
           transition: "background 0.15s, border 0.15s",
         }}
       >
@@ -398,7 +398,7 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
         {/* AI Summary */}
         {ticket.description && (
           <div style={{ background: "#edf8f2", borderRadius: 10, padding: "14px 16px", marginBottom: 20, border: "1px solid var(--line, #E8E6E0)" }}>
-            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--accent, #179463)", marginBottom: 6 }}><IconSparkles/> AI Summary</div>
+            <div style={{ fontSize: 10, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em", color: "var(--accent, #17191A)", marginBottom: 6 }}><IconSparkles/> AI Summary</div>
             <div style={{ fontSize: 12.5, color: "#4a554f", lineHeight: 1.55 }}>
               {ticket.description.slice(0, 200)}{ticket.description.length > 200 ? "..." : ""}
             </div>
@@ -460,7 +460,7 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
               placeholder="Add a comment..." style={{ ...inputStyle, flex: 1 }} />
             <button type="button" onClick={addComment} disabled={!commentText.trim()} style={{
               fontSize: 12, padding: "6px 14px", borderRadius: 7, border: "none", fontWeight: 600, cursor: commentText.trim() ? "pointer" : "not-allowed",
-              background: commentText.trim() ? "var(--accent, #179463)" : "#ccc", color: "#fff",
+              background: commentText.trim() ? "var(--accent, #17191A)" : "#ccc", color: "#fff",
             }}>Post</button>
           </div>
         </div>
@@ -487,7 +487,7 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
       {/* Footer */}
       <div style={{ padding: "12px 20px", borderTop: "1px solid var(--line, #E8E6E0)", display: "flex", alignItems: "center", justifyContent: "space-between", fontSize: 12, color: "var(--ink-3, #8C8A84)", position: "relative" }}>
         <span style={{ color: "#15201b", fontWeight: 400, fontSize: 12 }}>
-          {pushStatus === "done" && <span style={{ color: "var(--accent, #179463)", fontWeight: 500 }}>{pushMessage}</span>}
+          {pushStatus === "done" && <span style={{ color: "var(--accent, #17191A)", fontWeight: 500 }}>{pushMessage}</span>}
           {pushStatus === "error" && <span style={{ color: "#DC2626", fontWeight: 500 }}>{pushMessage}</span>}
           {pushStatus === "pushing" && <span style={{ fontWeight: 500 }}>Pushing...</span>}
           {pushStatus === "idle" && <><strong style={{ fontWeight: 500 }}>Ticket synced</strong> · PRD attached</>}
@@ -498,7 +498,7 @@ function TicketDetailPanel({ ticket, onClose, onUpdate, onDelete }: {
             border: "1px solid var(--line, #E8E6E0)", background: showListPicker ? "var(--surface-2, #F4F1EA)" : "var(--surface, #fff)",
             cursor: pushStatus === "pushing" ? "not-allowed" : "pointer", color: "var(--ink-2, #5A5853)",
           }}>Send to ClickUp</button>
-          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, background: "var(--accent, #179463)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 400 }}>Send to Claude Code</button>
+          <button type="button" style={{ fontSize: 11.5, padding: "5px 12px", borderRadius: 30, background: "var(--accent, #17191A)", color: "#fff", border: "none", cursor: "pointer", fontWeight: 400 }}>Send to Claude Code</button>
 
           {/* ClickUp list picker dropdown */}
           {showListPicker && (
@@ -605,7 +605,7 @@ export function TicketsScreen() {
             <div style={{ display: "flex", gap: 8 }}>
               <button type="button" style={toolBtnStyle}><IconUpload size={13} color="#5A5853" /> Import CSV</button>
               <button type="button" onClick={() => setShowAdd(true)} style={{
-                fontSize: 12, padding: "5px 12px", background: "var(--accent, #179463)", color: "#fff", border: "none",
+                fontSize: 12, padding: "5px 12px", background: "var(--accent, #17191A)", color: "#fff", border: "none",
                 borderRadius: 15, fontWeight: 400, display: "inline-flex", alignItems: "center", gap: 5, cursor: "pointer",
               }}><IconPlus size={13} color="#fff" /> Add ticket</button>
             </div>
