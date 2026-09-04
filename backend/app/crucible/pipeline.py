@@ -41,6 +41,7 @@ from app.crucible.types import (
     ConfidenceInputs,
     Finding,
     GoalCurrency,
+    GraphRelation,
     GroundedFigure,
     Impact,
     ImpactInputs,
@@ -683,6 +684,113 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+#: The verbs worth putting in a SENTENCE, and the words to use for them.
+#:
+#: `SUPPORTS` and `AFFECTS` are deliberately absent, for two different reasons.
+#: `SUPPORTS` is the majority verb and means "this claim agrees with the
+#: theme" — which is corroboration, the one quantity that must stay out of how
+#: big a finding is, and putting a count of it in the headline sentence invites
+#: precisely the reading I1 exists to prevent. `AFFECTS` is the extractor's
+#: catch-all: it lands on more claim kinds than any other verb and reduces in
+#: prose to "is about", which the statement already says. Both still travel in
+#: `Finding.graph_relations` for a renderer that wants the full breakdown; they
+#: just do not earn a clause.
+#:
+#: The three that remain are the DIRECTED ones — each asserts something about
+#: the theme that no single claim's type carries on its own.
+_RELATION_PHRASE: dict[str, str] = {
+    "BLOCKED_BY": "blocked on it",
+    "REQUESTS": "asking for it",
+    "PRESSURES": "naming competitive pressure on it",
+}
+
+#: Rendered in this order regardless of counts, so two findings never describe
+#: the same mix in a different order. Blockers first: they are the scarcest
+#: verb in the graph and the one a reader can act on soonest.
+_RELATION_PROSE_ORDER: tuple[str, ...] = ("BLOCKED_BY", "REQUESTS", "PRESSURES")
+
+
+def _graph_relations(
+    claims: Sequence[Claim], accounts: Sequence[str],
+) -> Optional[tuple[GraphRelation, ...]]:
+    """What the knowledge graph asserts about this group, counted.
+
+    THIS IS THE WHOLE CROSS-CLAIM STEP, and it is deliberately arithmetic. The
+    graph holds no signal-to-signal edge — every edge it writes runs from a
+    signal to an entity — so there is no path between two claims to walk and no
+    general graph reasoning to do. What there IS: a finding is a group of
+    claims that all point at ONE theme, so the verbs on those edges are already
+    directly comparable, and their composition is a fact about the group that
+    no member states alone. Four claims blocked on a theme six others are
+    asking for is a sentence only visible from here.
+
+    `accounts` is the goal-scoped population from the caller, so a name that
+    scored out of the goal cannot walk back in through this door.
+
+    Returns `None`, never `()`, when the graph themed none of these claims —
+    I3. An empty tuple would render as "no blockers", which the graph did not
+    say.
+    """
+    by_relation: dict[str, list[Claim]] = {}
+    for c in claims:
+        relation = getattr(c, "graph_relation", None)
+        if relation:
+            by_relation.setdefault(relation, []).append(c)
+    if not by_relation:
+        return None
+
+    scope = set(accounts)
+    rows: list[GraphRelation] = []
+    for relation, members in by_relation.items():
+        named: list[str] = []
+        for c in members:
+            for name in c.population.segments.get("customer_side", ()):
+                if name in scope and name not in named:
+                    named.append(name)
+        rows.append(GraphRelation(relation, len(members), tuple(named)))
+    # MOST CLAIMS FIRST, TIES ON THE NAME. The tie-break is what makes the
+    # order a function of the evidence rather than of dict insertion order —
+    # same discipline the theme fold uses for picking a representative.
+    rows.sort(key=lambda r: (-r.claims, r.relation))
+    return tuple(rows)
+
+
+def _relation_clause(relations: Optional[Sequence[GraphRelation]]) -> str:
+    """The graph's verbs as a clause, or "" when there is nothing to say.
+
+    Phrased as REPORTED STRUCTURE — "the graph links 4 of them to this as
+    blocked on it" — rather than as our own assertion, for the same reason the
+    topic is quoted: this is an edge somebody's extractor wrote and a user can
+    already see elsewhere in the product, not a conclusion this engine reached.
+
+    Says nothing causal by construction: it counts claims and names the verb.
+    The caller lints the assembled sentence anyway and falls back if it fails.
+    """
+    if not relations:
+        return ""
+    by_relation = {r.relation: r for r in relations}
+    parts: list[str] = []
+    for relation in _RELATION_PROSE_ORDER:
+        row = by_relation.get(relation)
+        if row is None or row.claims < 1:
+            continue
+        phrase = _RELATION_PHRASE[relation]
+        # THE ACCOUNTS ONLY WHEN THERE ARE ANY. "(0 accounts)" states that
+        # nobody is affected, when the truth is that no claim in this group
+        # named a customer — I3 in a sentence.
+        if row.accounts:
+            n = len(row.accounts)
+            phrase += f" ({n} account{'' if n == 1 else 's'})"
+        parts.append(f"{row.claims} {phrase}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        joined = parts[0]
+    else:
+        joined = ", ".join(parts[:-1]) + " and " + parts[-1]
+    return f" The graph links {joined}."
+
+
 class Refutation(NamedTuple):
     """Why a candidate died, in two registers.
 
@@ -889,7 +997,11 @@ def build_findings(
         # wants the theme in the corpus's own words. Rendering the key is how
         # the first version put "c490" in front of a user.
         label = _label(group, key)
-        statement, example = _statement_parts(label, group, accounts)
+        # COMPUTED BEFORE THE STATEMENT, because the statement reads it. Scoped
+        # to `accounts` — the goal-intersected set — so the population filter
+        # applies to the graph's verbs exactly as it applies to sizing.
+        relations = _graph_relations(group, accounts)
+        statement, example = _statement_parts(label, group, accounts, relations)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
             drops["uncausal"] += 1
@@ -951,6 +1063,12 @@ def build_findings(
                 solution_evidence_absent=solution_evidence_absent,
             ),
             adjudication=_adjudicate(group),
+            # ON THE FINDING, NEVER ON `impact_inputs`. That placement is the
+            # I1 boundary in this change: `ImpactInputs` is the only thing
+            # `score_impact` is meant to read, and a per-relation claim count
+            # sitting inside it would be a corroboration quantity one line away
+            # from becoming a size bonus.
+            graph_relations=relations,
         )
         findings.append(finding)
 
@@ -1028,6 +1146,15 @@ def build_findings(
             # rather than derived at the call site, so the subtraction cannot
             # drift from how the clustering actually keyed.
             "ungroupable_groups": ungroupable_groups,
+            # HOW MANY FINDINGS THE GRAPH ACTUALLY SAID SOMETHING ABOUT. Worth
+            # publishing rather than inferring: if the verbs stop arriving —
+            # an extractor change, a tenant backfilled before the edge existed
+            # — the findings do not break, they quietly go back to naming a
+            # topic and a count, which is the failure this was built to fix and
+            # is invisible in the output itself.
+            "findings_with_graph_relations": sum(
+                1 for f in findings if f.graph_relations
+            ),
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },
@@ -1277,13 +1404,17 @@ def _label(claims: Sequence[Claim], key: str) -> str:
     return max(counts, key=lambda k: (counts[k], -order[k]))
 
 
-def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+def _statement(
+    label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
+) -> str:
     """The sentence alone. See `_statement_parts` for why there are two."""
-    return _statement_parts(label, claims, accounts)[0]
+    return _statement_parts(label, claims, accounts, relations)[0]
 
 
 def _statement_parts(
     label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
 ) -> tuple[str, str]:
     """The statement, AND the example quote it used — or "" when it used none.
 
@@ -1362,5 +1493,32 @@ def _statement_parts(
             f"\u2014 for example, \u201c{example}\u201d."
         )
         if lint_claim(candidate, strongest.strength).ok:
-            return candidate, example
-    return plain, ""
+            return _with_relations(candidate, strongest, relations), example
+
+    # THE CLAUSE STILL APPLIES WHEN THERE IS NO EXAMPLE. A group whose quote
+    # was unusable \u2014 or identical to its own label \u2014 is exactly the
+    # table-of-contents entry the example was added to fix, so it is the last
+    # place to withhold the one other thing there is to say about it.
+    return _with_relations(plain, strongest, relations), ""
+
+
+def _with_relations(
+    statement: str,
+    strongest: Optional[Claim],
+    relations: Optional[Sequence[GraphRelation]],
+) -> str:
+    """`statement` plus what the graph asserts, IF that survives the lint.
+
+    IT CAN ONLY EVER ADD \u2014 the same contract the example clause holds itself
+    to, and for the same reason: the caller treats an unlintable statement as a
+    DROP, so a clause that failed I5 would silently delete findings rather than
+    render them plainly. Anything unlintable falls back to the statement it was
+    handed, untouched.
+    """
+    if strongest is None or not relations:
+        return statement
+    clause = _relation_clause(relations)
+    if not clause:
+        return statement
+    enriched = statement + clause
+    return enriched if lint_claim(enriched, strongest.strength).ok else statement

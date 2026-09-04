@@ -113,8 +113,29 @@ _SEPARATORS = re.compile(r"[-&/+|_,\u2010-\u2015]+")
 _PUNCT_EDGES = ' \t\n\r.,;:!?\'"“”‘’()[]{}<>*-–—/&|_'
 
 
-def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
-    """signal id -> (representative theme entity id, its label), from the graph.
+#: The verbs the extractor may put on a signal -> theme edge. Read here purely
+#: to reject anything outside the closed set before it reaches a claim: the
+#: column is CHECK-constrained to the full 22-value vocabulary, of which only
+#: these five can appear on this edge, and a `RELATES_TO` fallback row means
+#: the model proposed a verb nobody has agreed the meaning of.
+_SIGNAL_THEME_RELATIONS = frozenset(
+    {"SUPPORTS", "REQUESTS", "AFFECTS", "PRESSURES", "BLOCKED_BY"}
+)
+
+
+def load_theme_map(company_id: str) -> dict[str, tuple[str, str, Optional[str]]]:
+    """signal id -> (representative theme entity id, its label, edge verb).
+
+    THE THIRD ELEMENT WAS ALREADY BEING FETCHED AND THROWN AWAY. The query
+    below has always selected `type`; nothing read it. So the graph was
+    asserting `BLOCKED_BY` / `REQUESTS` / `PRESSURES` on the very rows this
+    module pages through for theme labels, while the engine re-derived the
+    same distinction downstream from claim-type strings. Carrying it costs one
+    tuple slot and no extra round trip.
+
+    `None` when the verb is absent or outside the five the extractor is allowed
+    to write — never a default like `SUPPORTS`, because "the graph did not say"
+    and "the graph said they agree" are different facts (I3).
 
     Read in two steps because the tables are shaped very differently: the
     relationship rows are narrow and page cheaply, while `kg_entity` carries an
@@ -174,17 +195,23 @@ def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
             if r.get("type") == THEME_TYPE and (r.get("canonical_label") or "").strip():
                 themes[r["id"]] = r["canonical_label"].strip()
 
-    out: dict[str, tuple[str, str]] = {}
+    out: dict[str, tuple[str, str, Optional[str]]] = {}
     for e in edges:
         label = themes.get(e.get("target_id"))
         if not label:
             continue
         signal_id = str(e.get("source_id"))
+        verb = e.get("type")
+        # THE VERB TRAVELS WITH THE EDGE THAT WON, not with the signal. A
+        # signal joined to two themes can carry two different verbs, and
+        # pairing the surviving theme with some other edge's verb would state a
+        # relation the graph never asserted about that pair.
+        relation = verb if verb in _SIGNAL_THEME_RELATIONS else None
         # FIRST EDGE WINS, in id order. A signal can be joined to several
         # themes; picking deterministically matters more than picking the
         # "best" one, because a run that groups differently on a re-run is not
         # reproducible, which is the whole claim this engine makes.
-        out.setdefault(signal_id, (e["target_id"], label))
+        out.setdefault(signal_id, (e["target_id"], label, relation))
 
     # SYNONYM THEMES ARE FOLDED BEFORE ANYTHING DOWNSTREAM SEES THEM.
     #
@@ -202,17 +229,27 @@ def load_theme_map(company_id: str) -> dict[str, tuple[str, str]]:
     in_play = {v[0] for v in out.values()}
     if len(in_play) > 1:
         counts: dict[str, int] = {}
-        for entity_id, _ in out.values():
+        for entity_id, _, _ in out.values():
             counts[entity_id] = counts.get(entity_id, 0) + 1
         labels = {e: themes[e] for e in in_play if e in themes}
         canonical = canonicalize_themes(labels, counts)
         if canonical:
+            # THE VERB SURVIVES THE FOLD UNCHANGED. It was asserted about the
+            # shard, and the fold's entire premise is that the shard and its
+            # representative name one topic — so "blocked on
+            # 'enterprise compliance requirements'" reads as "blocked on
+            # 'Enterprise compliance infrastructure'" only because those were
+            # judged the same subject. If that judgement is ever wrong the verb
+            # is misattributed with it, which is a reason to trust the fold, not
+            # a reason to drop the verb: dropping it would silently discard the
+            # relation for every merged topic, i.e. exactly the biggest ones.
             out = {
                 signal_id: (
                     canonical.get(entity_id, entity_id),
                     labels.get(canonical.get(entity_id, entity_id), label),
+                    relation,
                 )
-                for signal_id, (entity_id, label) in out.items()
+                for signal_id, (entity_id, label, relation) in out.items()
             }
     return out
 
@@ -429,12 +466,22 @@ def canonicalize_themes(
 
 def assign_themes(
     claims: Sequence[Claim],
-    theme_map: Mapping[str, tuple[str, str]],
+    theme_map: Mapping[str, tuple[str, str, Optional[str]]],
 ) -> tuple[list[Claim], list[int], dict]:
-    """Stamp the graph's theme onto every claim it knows about.
+    """Stamp the graph's theme — and the verb it used — onto every claim it
+    knows about.
 
     Returns the claims, the indexes of those the graph did NOT theme (so the
     caller can fall back to embeddings for exactly those), and stats.
+
+    THE VERB DOES NOT AFFECT GROUPING. `subject_cluster_id` stays keyed on the
+    theme alone, so two claims about one topic stay in one finding whether the
+    graph called them `BLOCKED_BY` or `SUPPORTS`. Keying on the pair would
+    split every mixed topic into one finding per verb and destroy the only
+    thing the verb is useful for — being read ACROSS the claims of a group.
+
+    Tolerates a 2-tuple so a stored or hand-built map from before the verb
+    existed still assigns themes instead of raising.
     """
     out = list(claims)
     unthemed: list[int] = []
@@ -443,10 +490,21 @@ def assign_themes(
         if not found:
             unthemed.append(i)
             continue
-        entity_id, label = found
-        out[i] = replace(out[i], subject_cluster_id=f"kg:{entity_id}", subject=label)
+        entity_id, label = found[0], found[1]
+        relation = found[2] if len(found) > 2 else None
+        out[i] = replace(
+            out[i], subject_cluster_id=f"kg:{entity_id}", subject=label,
+            graph_relation=relation,
+        )
     return out, unthemed, {
         "themed": len(claims) - len(unthemed),
         "unthemed": len(unthemed),
         "kg_themes": len({v[0] for v in theme_map.values()}),
+        # HOW MUCH OF THE GRAPH'S OWN VOCABULARY SURVIVED INTO THE CLAIMS. A
+        # run where this is 0 on a tenant with edges means the verbs were
+        # dropped somewhere between the query and here, which is invisible in
+        # the output otherwise — the findings simply go back to saying nothing.
+        "graph_relations": sum(
+            1 for c in out if getattr(c, "graph_relation", None)
+        ),
     }
