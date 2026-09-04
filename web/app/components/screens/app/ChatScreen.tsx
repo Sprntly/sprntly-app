@@ -5378,6 +5378,11 @@ export function ChatScreen() {
           // approve click is what adopts it either way — this carries the
           // change, not the agreement.
           definition_text: decision.definition_text,
+          // The gate's own questions. Undefined for anything left blank, which
+          // is what the server reads as unanswered.
+          account_value: decision.account_value,
+          decision_owner: decision.decision_owner,
+          needed_by: decision.needed_by,
         })
         patchTurn(tabId, turnId, {
           goalGate: undefined,

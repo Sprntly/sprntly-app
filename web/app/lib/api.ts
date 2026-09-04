@@ -1128,12 +1128,33 @@ export const goalAnalysisApi = {
        *  so an unedited approve cannot round-trip a definition through the
        *  client and back, where a stale card could quietly overwrite it. */
       definition_text?: string
+      /** ── ANSWERS TO WHAT THE RUN CANNOT KNOW. ────────────────────────
+       *  The plan gate asks these (framework.questions_for) and the card
+       *  collects them; each is an ASSUMPTION the document labels as one
+       *  where it uses it, never evidence.
+       *
+       *  OMITTED MEANS UNANSWERED, and the server reads it that way — a key
+       *  present with an empty value would be recorded as an answer. The card
+       *  already drops blanks before it gets here, so absence is the only way
+       *  "not answered" can arrive. */
+      account_value?: number
+      decision_owner?: string
+      needed_by?: string
     },
   ) =>
     api.post<GoalRun>(`/v1/crucible/${runId}/approve`, {
       excluded_sources: opts?.excluded_sources ?? [],
       hypotheses: opts?.hypotheses ?? [],
       ...(opts?.definition_text ? { definition_text: opts.definition_text } : {}),
+      // `!== undefined` rather than truthiness: these are answers, and the
+      // server's own "unanswered" test is absence. Truthiness would also drop
+      // an empty string the card cannot produce, so the stricter test costs
+      // nothing and cannot silently swallow a real answer.
+      ...(opts?.account_value !== undefined
+        ? { account_value: opts.account_value } : {}),
+      ...(opts?.decision_owner !== undefined
+        ? { decision_owner: opts.decision_owner } : {}),
+      ...(opts?.needed_by !== undefined ? { needed_by: opts.needed_by } : {}),
     }),
 
   /** This run's report document, or a 404 when it has none yet. */
