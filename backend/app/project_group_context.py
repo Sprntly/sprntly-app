@@ -54,6 +54,7 @@ _TYPE_LABELS = {
     "evidence": "Evidence",
     "report": "Reports",
     "ticket_set": "Ticket sets",
+    "custom_artifact": "Documents",
 }
 
 
@@ -368,6 +369,19 @@ def _artifact_content_for(atype: str, artifact_id: int, company_id: str) -> str 
         if not row:
             return None
         return (row.get("html") or "").strip() or "(empty report)"
+    if atype == "custom_artifact":
+        # An uploaded document (or a generated one) — its readable text lives in
+        # `body_html`, the same sanitized field the report branch returns. The
+        # caller (`_handle_get_artifact_content`) clamps to
+        # `_ARTIFACT_CONTENT_CHARS`, matching every other branch here. WITHOUT
+        # this branch the agent lists the doc on the manifest but answers "I
+        # couldn't read that artifact's content."
+        from app.db.custom_artifacts import get_artifact
+
+        row = get_artifact(company_id, artifact_id)
+        if not row:
+            return None
+        return (row.get("body_html") or "").strip() or "(empty document)"
     if atype == "prototype":
         # Prototype code lives in checkpoints and is large/non-textual; the
         # manifest already carries its title/status, so surface a pointer
