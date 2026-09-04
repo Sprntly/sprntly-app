@@ -431,6 +431,22 @@ class Claim:
     #: summed, ranged, or refused — is a fixed table in `pipeline`, not
     #: anything the classifier returns.
     figure_class: Optional[str] = None
+    #: THE VERB THE GRAPH ALREADY PUT ON THIS CLAIM'S EDGE TO ITS THEME — one
+    #: of `SUPPORTS` / `REQUESTS` / `AFFECTS` / `PRESSURES` / `BLOCKED_BY`, or
+    #: `None` when the graph did not theme this claim at all.
+    #:
+    #: NOT A SECOND CLAIM TYPE, and the distinction is the whole reason this
+    #: field earns its place. The verb on its own is ~90% predictable from
+    #: `type` (a `BLOCKED_BY` edge sits on a deal-blocker claim, a `REQUESTS`
+    #: edge on a feature request), so reading it as a per-claim label would be
+    #: re-deriving what `type` already says. What it adds is DIRECTION: it
+    #: names the theme the claim is blocked on or asking for, and that target
+    #: is shared across claims from documents nobody read together. The value
+    #: is therefore only ever visible in AGGREGATE — see
+    #: `pipeline._graph_relations`.
+    #:
+    #: I3: `None` means the graph asserted nothing here, never "unrelated".
+    graph_relation: Optional[str] = None
     raw: Any = None           # original payload, always retained
 
     def __post_init__(self) -> None:
@@ -667,6 +683,28 @@ class EffortEstimate:
         return self.weeks is not None
 
 
+# ── Graph-asserted relations ─────────────────────────────────────────────────
+
+class GraphRelation(NamedTuple):
+    """One verb the knowledge graph asserts between a finding's claims and its
+    theme, with how much of the finding stands behind it.
+
+    A COUNT OF CLAIMS, DELIBERATELY NOT A SCORE. This travels on `Finding`, and
+    `score_impact` is handed the whole `Finding` — so a number here is one
+    refactor away from becoming a size bonus, which is I1's failure mode
+    exactly. It is listed in `invariants._FINDING_MUTATIONS` so the flagship I1
+    sweep mutates it and fails loudly if impact ever starts reading it.
+
+    `accounts` is the customer-side names behind those claims, already scoped
+    to the goal population by the caller. Empty when no claim named one — which
+    is why prose must check it rather than printing "0 accounts".
+    """
+    #: `SUPPORTS` / `REQUESTS` / `AFFECTS` / `PRESSURES` / `BLOCKED_BY`.
+    relation: str
+    claims: int
+    accounts: tuple[str, ...]
+
+
 # ── Finding ──────────────────────────────────────────────────────────────────
 
 Adjudication = Literal[
@@ -714,3 +752,15 @@ class Finding:
     #: form — never re-derived, because an example that is innocent alone can be
     #: causal in a sentence and the lint runs on the sentence.
     example: str = ""
+    #: WHAT THE GRAPH ASSERTS ABOUT THIS FINDING'S THEME, in its own closed
+    #: vocabulary, ordered most-claims-first with ties broken on the relation
+    #: name so a re-run cannot reorder it.
+    #:
+    #: `None` — NOT `()` — when no claim in the group carried an edge. I3: a
+    #: finding the graph said nothing about must read as unmeasured, and an
+    #: empty tuple renders as "no blockers, no requests", which is a claim the
+    #: graph never made. `()` is unreachable by construction here, so a
+    #: renderer that sees it is looking at a hand-built fixture.
+    #:
+    #: FOR RENDERING AND FOR PROSE, NEVER FOR SIZE. See `GraphRelation`.
+    graph_relations: Optional[tuple[GraphRelation, ...]] = None

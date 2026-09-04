@@ -41,6 +41,7 @@ from app.crucible.types import (
     ConfidenceInputs,
     Finding,
     GoalCurrency,
+    GraphRelation,
     GroundedFigure,
     Impact,
     ImpactInputs,
@@ -683,6 +684,113 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     return tuple(seen)
 
 
+#: The verbs worth putting in a SENTENCE, and the words to use for them.
+#:
+#: `SUPPORTS` and `AFFECTS` are deliberately absent, for two different reasons.
+#: `SUPPORTS` is the majority verb and means "this claim agrees with the
+#: theme" — which is corroboration, the one quantity that must stay out of how
+#: big a finding is, and putting a count of it in the headline sentence invites
+#: precisely the reading I1 exists to prevent. `AFFECTS` is the extractor's
+#: catch-all: it lands on more claim kinds than any other verb and reduces in
+#: prose to "is about", which the statement already says. Both still travel in
+#: `Finding.graph_relations` for a renderer that wants the full breakdown; they
+#: just do not earn a clause.
+#:
+#: The three that remain are the DIRECTED ones — each asserts something about
+#: the theme that no single claim's type carries on its own.
+_RELATION_PHRASE: dict[str, str] = {
+    "BLOCKED_BY": "blocked on it",
+    "REQUESTS": "asking for it",
+    "PRESSURES": "naming competitive pressure on it",
+}
+
+#: Rendered in this order regardless of counts, so two findings never describe
+#: the same mix in a different order. Blockers first: they are the scarcest
+#: verb in the graph and the one a reader can act on soonest.
+_RELATION_PROSE_ORDER: tuple[str, ...] = ("BLOCKED_BY", "REQUESTS", "PRESSURES")
+
+
+def _graph_relations(
+    claims: Sequence[Claim], accounts: Sequence[str],
+) -> Optional[tuple[GraphRelation, ...]]:
+    """What the knowledge graph asserts about this group, counted.
+
+    THIS IS THE WHOLE CROSS-CLAIM STEP, and it is deliberately arithmetic. The
+    graph holds no signal-to-signal edge — every edge it writes runs from a
+    signal to an entity — so there is no path between two claims to walk and no
+    general graph reasoning to do. What there IS: a finding is a group of
+    claims that all point at ONE theme, so the verbs on those edges are already
+    directly comparable, and their composition is a fact about the group that
+    no member states alone. Four claims blocked on a theme six others are
+    asking for is a sentence only visible from here.
+
+    `accounts` is the goal-scoped population from the caller, so a name that
+    scored out of the goal cannot walk back in through this door.
+
+    Returns `None`, never `()`, when the graph themed none of these claims —
+    I3. An empty tuple would render as "no blockers", which the graph did not
+    say.
+    """
+    by_relation: dict[str, list[Claim]] = {}
+    for c in claims:
+        relation = getattr(c, "graph_relation", None)
+        if relation:
+            by_relation.setdefault(relation, []).append(c)
+    if not by_relation:
+        return None
+
+    scope = set(accounts)
+    rows: list[GraphRelation] = []
+    for relation, members in by_relation.items():
+        named: list[str] = []
+        for c in members:
+            for name in c.population.segments.get("customer_side", ()):
+                if name in scope and name not in named:
+                    named.append(name)
+        rows.append(GraphRelation(relation, len(members), tuple(named)))
+    # MOST CLAIMS FIRST, TIES ON THE NAME. The tie-break is what makes the
+    # order a function of the evidence rather than of dict insertion order —
+    # same discipline the theme fold uses for picking a representative.
+    rows.sort(key=lambda r: (-r.claims, r.relation))
+    return tuple(rows)
+
+
+def _relation_clause(relations: Optional[Sequence[GraphRelation]]) -> str:
+    """The graph's verbs as a clause, or "" when there is nothing to say.
+
+    Phrased as REPORTED STRUCTURE — "the graph links 4 of them to this as
+    blocked on it" — rather than as our own assertion, for the same reason the
+    topic is quoted: this is an edge somebody's extractor wrote and a user can
+    already see elsewhere in the product, not a conclusion this engine reached.
+
+    Says nothing causal by construction: it counts claims and names the verb.
+    The caller lints the assembled sentence anyway and falls back if it fails.
+    """
+    if not relations:
+        return ""
+    by_relation = {r.relation: r for r in relations}
+    parts: list[str] = []
+    for relation in _RELATION_PROSE_ORDER:
+        row = by_relation.get(relation)
+        if row is None or row.claims < 1:
+            continue
+        phrase = _RELATION_PHRASE[relation]
+        # THE ACCOUNTS ONLY WHEN THERE ARE ANY. "(0 accounts)" states that
+        # nobody is affected, when the truth is that no claim in this group
+        # named a customer — I3 in a sentence.
+        if row.accounts:
+            n = len(row.accounts)
+            phrase += f" ({n} account{'' if n == 1 else 's'})"
+        parts.append(f"{row.claims} {phrase}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        joined = parts[0]
+    else:
+        joined = ", ".join(parts[:-1]) + " and " + parts[-1]
+    return f" The graph links {joined}."
+
+
 class Refutation(NamedTuple):
     """Why a candidate died, in two registers.
 
@@ -889,7 +997,11 @@ def build_findings(
         # wants the theme in the corpus's own words. Rendering the key is how
         # the first version put "c490" in front of a user.
         label = _label(group, key)
-        statement, example = _statement_parts(label, group, accounts)
+        # COMPUTED BEFORE THE STATEMENT, because the statement reads it. Scoped
+        # to `accounts` — the goal-intersected set — so the population filter
+        # applies to the graph's verbs exactly as it applies to sizing.
+        relations = _graph_relations(group, accounts)
+        statement, example = _statement_parts(label, group, accounts, relations)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
             drops["uncausal"] += 1
@@ -951,6 +1063,12 @@ def build_findings(
                 solution_evidence_absent=solution_evidence_absent,
             ),
             adjudication=_adjudicate(group),
+            # ON THE FINDING, NEVER ON `impact_inputs`. That placement is the
+            # I1 boundary in this change: `ImpactInputs` is the only thing
+            # `score_impact` is meant to read, and a per-relation claim count
+            # sitting inside it would be a corroboration quantity one line away
+            # from becoming a size bonus.
+            graph_relations=relations,
         )
         findings.append(finding)
 
@@ -1028,6 +1146,15 @@ def build_findings(
             # rather than derived at the call site, so the subtraction cannot
             # drift from how the clustering actually keyed.
             "ungroupable_groups": ungroupable_groups,
+            # HOW MANY FINDINGS THE GRAPH ACTUALLY SAID SOMETHING ABOUT. Worth
+            # publishing rather than inferring: if the verbs stop arriving —
+            # an extractor change, a tenant backfilled before the edge existed
+            # — the findings do not break, they quietly go back to naming a
+            # topic and a count, which is the failure this was built to fix and
+            # is invisible in the output itself.
+            "findings_with_graph_relations": sum(
+                1 for f in findings if f.graph_relations
+            ),
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },
@@ -1155,6 +1282,35 @@ MAX_NAMED_SOURCES = 4
 #: provider is what gets rendered — with the call COUNT beside it.
 _SYNC_BATCH = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
 
+#: THE OTHER MACHINE-MINTED DOCUMENT NAME, and it reached a client's screen.
+#: `scripts/backfill_fireflies_kg.py` stamps `f"{provider}-backfill-
+#: {rec.external_id}"`, so a backfilled transcript arrives named
+#: `fireflies-backfill-<26-character provider id>`. That is not the
+#: `-sync-batch-<n>` shape, so it passed `_document_label` untouched and one
+#: staging run rendered FIFTY of them, each presented to the reader as the
+#: name of a document they might go and look up. It is an opaque provider id;
+#: there is nothing to look up.
+#:
+#: NOT ONLY A DISPLAY BUG. Each one also counted as its own document in
+#: `moscow.document_count`, which decides `MUST` vs `MUST?` — so the raw ids
+#: were a ranking input as well as an eyesore.
+#:
+#: ONE RECORD, ONE CALL. The backfill script loops per Fireflies record, so
+#: unlike a sync batch there is no ambiguity: a `-backfill-<id>` document IS
+#: one transcript, and `_sources_of` counts it as one call.
+#:
+#: GATED ON A KNOWN PROVIDER, unlike `_SYNC_BATCH`, and the asymmetry is
+#: deliberate. `-sync-batch-<n>` ends in a bare integer and is a shape no
+#: human names a file, so an unknown prefix there is safely assumed to be a
+#: new connector. `-backfill-<anything>` is not: `2026-backfill-plan.docx` is
+#: a document somebody could genuinely have written, and collapsing it would
+#: hide a real source behind a provider label. Requiring the prefix to be a
+#: provider this engine actually knows costs a one-line edit when a backfill
+#: script is written for a new connector, and the failure mode of forgetting
+#: is the harmless one — a raw name renders, rather than a real document
+#: disappearing.
+_BACKFILL_DOC = re.compile(r"^([a-z0-9_]+)-backfill-[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+
 #: Providers whose `-sync-batch-<n>` is one CALL rather than one chunk. Kept
 #: in step with `kg_ingest.runner._CALL_PROVIDERS`, which is the set that
 #: actually decides per-call extraction, and duplicated rather than imported
@@ -1174,18 +1330,46 @@ _PROVIDER_LABELS = {
     "gong": "Gong call transcripts",
 }
 
+#: Every provider this engine can name. `_BACKFILL_DOC` is only trusted for
+#: one of these — see the note on that pattern.
+_KNOWN_PROVIDERS = frozenset(_PROVIDER_LABELS) | _CALL_PROVIDERS
+
+
+def _batch_provider(doc: str) -> Optional[str]:
+    """The provider that minted this document name, when the name is one this
+    engine generated rather than one a human would recognise.
+
+    Both machine-minted shapes in one place, because the two callers below
+    have to agree about which names collapse: a name `_document_label`
+    rewrites but `_sources_of` does not recognise would be counted as a
+    separate document under a shared label, which is the double-count the
+    collapsing exists to prevent.
+    """
+    m = _SYNC_BATCH.match(doc)
+    if m:
+        return m.group(1)
+    m = _BACKFILL_DOC.match(doc)
+    if m and m.group(1) in _KNOWN_PROVIDERS:
+        return m.group(1)
+    return None
+
 
 def _document_label(doc: str) -> str:
     """The name to show for one source document.
 
     Real document names — `slack/#mvp-product (part 2/3)`, a Drive filename —
-    pass through untouched. Only the sync-batch shape is rewritten, and only
-    because its number identifies nothing a reader could look up.
+    pass through untouched. Only the machine-minted shapes are rewritten
+    (`_batch_provider`), and only because the number or opaque id in them
+    identifies nothing a reader could look up.
+
+    THE STORED NAME IS NOT TOUCHED, here or anywhere upstream.
+    `call_digest._SYNC_BATCH_DOC` matches the `-sync-batch-<n>` shape on the
+    stored value as a double-counting filter, so renaming at the source would
+    break that filter silently. This is a display decision and stays one.
     """
-    m = _SYNC_BATCH.match(doc)
-    if not m:
+    provider = _batch_provider(doc)
+    if provider is None:
         return doc
-    provider = m.group(1)
     return _PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
 
 
@@ -1216,6 +1400,11 @@ def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
     pinned all of them at `MUST?` (`moscow.THIN_EVIDENCE_DOCS` is 2) and made
     `MUST` unreachable there — document count carried no signal at all.
 
+    BACKFILLED TRANSCRIPTS COLLAPSE THE SAME WAY (`_BACKFILL_DOC`). They are
+    the same thing under a different minted name, and leaving them out meant
+    a run rendered fifty raw provider ids as fifty document names AND fed
+    fifty into the count.
+
     THE CALL COUNT IS A FLOOR, AND SAYS SO IN THE OUTPUT (`≥ N calls`).
     Per-call extraction is recent; anything ingested before it genuinely
     batched several calls under one `-sync-batch-<n>` name, so a corpus that
@@ -1239,8 +1428,8 @@ def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
             continue
         label = _document_label(doc)
         counts[label] = counts.get(label, 0) + 1
-        m = _SYNC_BATCH.match(doc)
-        if m and m.group(1) in _CALL_PROVIDERS:
+        provider = _batch_provider(doc)
+        if provider in _CALL_PROVIDERS:
             call_docs.setdefault(label, set()).add(doc)
     if not counts:
         return ()
@@ -1277,13 +1466,47 @@ def _label(claims: Sequence[Claim], key: str) -> str:
     return max(counts, key=lambda k: (counts[k], -order[k]))
 
 
-def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+#: How a theme label is introduced in a finding's sentence.
+#:
+#: THIS IS THE REPLACEMENT FOR A PAIR OF QUOTATION MARKS, and it has the same
+#: job: to say that the words after it are the sources' framing of the topic
+#: and not the engine's own assertion. What it does NOT do is claim anyone
+#: said them in that order — which the quotes did, falsely, because a stored
+#: assertion is an extractor paraphrase (the verbatim quote is validated
+#: against the transcript and then discarded by design) and `label_for` cuts
+#: it at the first causal connective on top of that.
+#:
+#: `report._restate_statement` rewrites the old quoted shape into this one at
+#: render time, so a row written before this change reads correctly too.
+THEME_LEAD_IN = "a reported theme:"
+
+#: How the supporting example is introduced. Same reasoning as `THEME_LEAD_IN`
+#: and, if anything, a stronger case: `cluster.example_for` paraphrase-cuts
+#: AND ellipsises, so the text is at three removes from anything spoken.
+EXAMPLE_LEAD_IN = "— summarising one source:"
+
+
+def _stopped(text: str) -> str:
+    """`text` with exactly one closing full stop.
+
+    Unconditional appending is what produced "….", because `example_for` ends
+    a truncated example in an ellipsis of its own.
+    """
+    t = (text or "").rstrip()
+    return t if (not t or t[-1] in ".!?…") else t + "."
+
+
+def _statement(
+    label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
+) -> str:
     """The sentence alone. See `_statement_parts` for why there are two."""
-    return _statement_parts(label, claims, accounts)[0]
+    return _statement_parts(label, claims, accounts, relations)[0]
 
 
 def _statement_parts(
     label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
 ) -> tuple[str, str]:
     """The statement, AND the example quote it used — or "" when it used none.
 
@@ -1304,11 +1527,23 @@ def _statement_parts(
     "drives" — those need causal evidence, and a corpus of tickets and calls
     does not have any.
 
-    The topic is QUOTED. It comes from a signal's own words, so presenting it
-    unquoted would read as our description of the business; quoted, it is
-    plainly reported speech, which is what it is. `cluster.label_for` has
-    already cut it at the first causal connective, so a source's own "because"
-    cannot arrive here and be attributed to us.
+    THE TOPIC IS ATTRIBUTED, NOT QUOTED, and the difference is the whole
+    reason this changed. It used to sit in curly quotes, as a device to mark
+    it as reported speech rather than our description of the business — the
+    marking is right and is kept, but quotation marks were the wrong way to
+    do it. `graph.extractor` validates a verbatim quote against the transcript
+    and then discards it by design (no raw dumps), so a stored assertion is
+    ALWAYS a paraphrase; `cluster.label_for` then cuts it at the first causal
+    connective. Curly quotes around that promised the reader the words are the
+    speaker's when they are the extractor's, trimmed. A cleaned-up quote is a
+    fabrication wearing quotation marks.
+
+    SO THE DEVICE IS REPLACED, NOT DROPPED. "a reported theme:" does the same
+    job the quotes did — it says these words come from the sources rather than
+    from the engine — and the colon delimits the label just as unambiguously,
+    without claiming anyone said them in that order. Same for the example
+    below: labelled as a summary of what a source said, which is exactly what
+    it is.
     """
     n = len(claims)
     where = (
@@ -1323,20 +1558,24 @@ def _statement_parts(
     # which is the same defect one word to the right.
     claims_word = "claim" if n == 1 else "claims"
     concern = "concerns" if n == 1 else "concern"
-    plain = f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d."
+    plain = f"{n} {claims_word}{where} {concern} {THEME_LEAD_IN} {topic}."
 
-    # AND ONE OF THEM, IN THE SOURCE'S OWN WORDS.
+    # AND ONE OF THEM, AS A SOURCE'S POINT WAS SUMMARISED.
     #
-    # "4 claims concern 'Mobile editor keystroke loss'" is a table-of-contents
-    # entry, not a finding: it names a topic and says how many times it came
-    # up. A reader cannot judge it, argue with it, or take it to anyone —
-    # which is the whole job. Read against the same corpus, the chat surface
-    # answers with account counts and quotes; the report answered with a label.
+    # "4 claims concern a reported theme: Mobile editor keystroke loss" is a
+    # table-of-contents entry, not a finding: it names a topic and says how
+    # many times it came up. A reader cannot judge it, argue with it, or take
+    # it to anyone — which is the whole job. Read against the same corpus, the
+    # chat surface answers with account counts and evidence; the report
+    # answered with a label.
     #
-    # SO: quote the strongest claim beside the count. Reported speech, exactly
-    # like the topic — this asserts nothing we have not been told, and adds no
-    # causation, because the example goes through `label_for`, the same cut at
-    # the first causal connective the label already gets.
+    # SO: the strongest claim goes beside the count, LABELLED AS A SUMMARY.
+    # Reported speech, exactly like the topic — this asserts nothing we have
+    # not been told, and adds no causation, because the example goes through
+    # `example_for`, the same cut at the first causal connective the label
+    # already gets. It is NOT presented as a quotation, because it is not one:
+    # `example_for` takes an extractor paraphrase, cuts it at a connective,
+    # and may ellipsise it.
     #
     # AND IT CAN ONLY EVER ADD. The example is linted before it is used, and a
     # failure falls back to `plain` rather than dropping the finding — the
@@ -1345,8 +1584,9 @@ def _statement_parts(
     strongest = max(claims, key=lambda c: c.strength_score, default=None)
     said = (getattr(strongest, "assertion", "") or "").strip()
     # `label_for("")` returns the literal string "unlabelled", so an empty
-    # assertion rendered `for example, "unlabelled"` — a quotation mark around
-    # a word no source ever said, which is worse than no example at all.
+    # assertion rendered `for example, "unlabelled"` — the engine's own filler
+    # presented as something a source said, which is worse than no example at
+    # all.
     # `example_for`, not `label_for`: same causal cut, its own length budget,
     # and it ends where a reader can tell it ended.
     example = example_for(said) if said else ""
@@ -1354,13 +1594,40 @@ def _statement_parts(
         strongest is not None
         and example
         and example.lower() != topic.lower()
-        # A quote that only repeats the label teaches nothing and costs a line.
+        # An example that only repeats the label teaches nothing, costs a line.
         and example.lower() not in topic.lower()
     ):
         candidate = (
-            f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d "
-            f"\u2014 for example, \u201c{example}\u201d."
+            f"{n} {claims_word}{where} {concern} {THEME_LEAD_IN} {topic} "
+            f"{EXAMPLE_LEAD_IN} {_stopped(example)}"
         )
         if lint_claim(candidate, strongest.strength).ok:
-            return candidate, example
-    return plain, ""
+            return _with_relations(candidate, strongest, relations), example
+
+    # THE CLAUSE STILL APPLIES WHEN THERE IS NO EXAMPLE. A group whose quote
+    # was unusable \u2014 or identical to its own label \u2014 is exactly the
+    # table-of-contents entry the example was added to fix, so it is the last
+    # place to withhold the one other thing there is to say about it.
+    return _with_relations(plain, strongest, relations), ""
+
+
+def _with_relations(
+    statement: str,
+    strongest: Optional[Claim],
+    relations: Optional[Sequence[GraphRelation]],
+) -> str:
+    """`statement` plus what the graph asserts, IF that survives the lint.
+
+    IT CAN ONLY EVER ADD \u2014 the same contract the example clause holds itself
+    to, and for the same reason: the caller treats an unlintable statement as a
+    DROP, so a clause that failed I5 would silently delete findings rather than
+    render them plainly. Anything unlintable falls back to the statement it was
+    handed, untouched.
+    """
+    if strongest is None or not relations:
+        return statement
+    clause = _relation_clause(relations)
+    if not clause:
+        return statement
+    enriched = statement + clause
+    return enriched if lint_claim(enriched, strongest.strength).ok else statement

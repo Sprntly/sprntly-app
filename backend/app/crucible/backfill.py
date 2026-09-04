@@ -1,5 +1,14 @@
-"""Deterministic backfill: recover a stated commercial figure a historical
-`kg_signal.content` paraphrase already carries, with zero LLM calls.
+"""Deterministic backfills over historical `kg_signal` rows, with zero LLM
+calls: recover the commercial FIGURE a paraphrase already states, and the
+ACCOUNT whose call the signal came from.
+
+TWO SWEEPS, ONE MODULE, DIFFERENT SOURCES. The figure sweep (first half)
+re-reads `content`. The attribution sweep (second half, from "Recovering WHO
+stated the figure") never parses text at all — it joins `source_call_id` to
+`call_index.account`, because a company name read out of prose is a
+fabrication risk a number is not. They share the pager's population, the
+audit table, the dry-run-by-default contract and the purge-before-re-run
+discipline; they share no parsing rules and version independently.
 
 WHY THIS EXISTS. The extraction pass now writes a grounded
 `amount`/`currency`/`basis`/`certainty` shape onto `commercial_term`/`pricing`
@@ -82,7 +91,12 @@ from typing import Any, Optional, Sequence
 
 from app.db import crucible_backfill_runs
 from app.db.client import require_client
-from app.graph.extractor import _AMOUNT_ELIGIBLE_KINDS, _grounded_amount_properties
+from app.graph.extractor import (
+    ACCOUNT_PROPERTY_KEY,
+    _AMOUNT_ELIGIBLE_KINDS,
+    _grounded_account_name,
+    _grounded_amount_properties,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -987,4 +1001,500 @@ def purge_backfilled_amounts(
         "examined": examined,
         "cleared": cleared,
         "amounts": distribution,
+    }
+
+
+# ── Recovering WHO stated the figure ─────────────────────────────────────────
+#
+# WHY A SECOND SWEEP. The sweep above recovers the NUMBER a historical signal
+# states. On its own that is half a claim: "$10,000" is not evidence until it
+# can be attributed to the organisation that said it, and the customer-facing
+# ask this feeds ("five companies each said they'd spend ten thousand
+# dollars") is an attribution question before it is an arithmetic one.
+# Measured on a real tenant corpus, of 900 commercial/pricing signals, 214
+# carried an `amount` and 2 named an account — so attribution, not
+# extraction of the figure, is the binding constraint.
+#
+# The extraction passes now contract an account name (see
+# `app.graph.extractor._grounded_account_name`), but only for text read from
+# here on. Every signal already in the graph predates that contract and will
+# never gain a name from a prompt change, exactly as the amount sweep's own
+# population would never have gained a figure.
+#
+# WHERE THE NAME COMES FROM, AND WHY NOT FROM THE PARAPHRASE. The sweep above
+# reads its number out of `content`, because a number is cheap to recognise
+# in prose and expensive to get wrong in only one direction. A company NAME
+# is the opposite: no regex can tell "Acme" the customer from "Acme" the
+# competitor from "Acme" the tool someone mentioned, and a wrong attribution
+# is worse than none — it puts a figure in a specific company's mouth. That
+# rules the paraphrase out as a source entirely.
+#
+# So this sweep does not parse text at all. It joins on provenance the graph
+# already holds: a signal distilled from a catalogued call carries
+# `source_call_id`, and `call_index.account` is that call's external
+# organisation, derived from participant email domains minus our own
+# (`app.call_index.derive_account`). That value is a FACT about who was in
+# the room, not a reading of what was said — it cannot hallucinate a company
+# that was not on the call, and it is already `NULL` for internal calls
+# rather than guessed. A signal whose call has no account gets nothing, which
+# is the correct outcome and not a failure.
+#
+# THE CONSEQUENCE, STATED PLAINLY. Names are not canonicalised anywhere in
+# this system. The only normalisation that exists is a placeholder list and a
+# 3-80 character rule, so "Acme", "Acme Corp" and a domain-derived "Acme"
+# will render as separate accounts if they arrive by different routes. This
+# sweep's own output is at least internally consistent — every name it writes
+# comes from the same domain-derivation function, so two calls with the same
+# customer domain always produce the identical string — but a name an
+# extraction pass wrote from a transcript ("Acme Corporation") will not
+# merge with one this sweep derived from `acme.com` ("Acme"). No resolver is
+# invented here; a count over these names is a count of name SPELLINGS, and
+# any reader that reports it as a count of companies is overstating it.
+
+#: Bump when the derivation rules below change, so an old run's names are
+#: never silently compared against a newer rule. Deliberately a separate
+#: constant from `PATTERN_VERSION`: the two sweeps write different keys from
+#: different sources and revise independently.
+#:
+#: `call-account-v1` — join `kg_signal.source_call_id` to `call_index.account`,
+#: validated through the extractor's shared name gate. No text parsing.
+ACCOUNT_PATTERN_VERSION = "call-account-v1"
+
+#: The provenance marker every name this sweep writes carries, and the thing
+#: that makes its undo surgical — the same role `BACKFILL_CERTAINTY` plays for
+#: the amount sweep. A name written by an extraction pass never carries it
+#: (the extractor's sanitiser writes `account` and nothing else, and drops
+#: every key it is not documented to hold), so the purge below can clear
+#: exactly this sweep's rows and can never strike a name a customer's own
+#: words put there.
+ACCOUNT_SOURCE_KEY = "account_source"
+BACKFILL_ACCOUNT_SOURCE = "derived-from-call-participants"
+
+#: How many of the most frequent account names the run report shows. Same
+#: role the amount distribution's `top_10` plays: the counts can look perfect
+#: on a run that attributes everything to one wrong name, and this block is
+#: the part that shows it.
+_TOP_ACCOUNTS = 10
+
+
+@dataclass
+class AccountCounts:
+    examined: int = 0
+    enriched: int = 0
+    skipped_already_has_account: int = 0
+    skipped_not_from_a_call: int = 0
+    skipped_call_not_indexed: int = 0
+    skipped_call_has_no_account: int = 0
+    skipped_name_refused: int = 0
+
+    def as_dict(self) -> dict[str, int]:
+        return {
+            SKIP_ALREADY_HAS_ACCOUNT: self.skipped_already_has_account,
+            SKIP_NOT_FROM_A_CALL: self.skipped_not_from_a_call,
+            SKIP_CALL_NOT_INDEXED: self.skipped_call_not_indexed,
+            SKIP_CALL_HAS_NO_ACCOUNT: self.skipped_call_has_no_account,
+            SKIP_NAME_REFUSED: self.skipped_name_refused,
+        }
+
+    @property
+    def total_skipped(self) -> int:
+        return (
+            self.skipped_already_has_account
+            + self.skipped_not_from_a_call
+            + self.skipped_call_not_indexed
+            + self.skipped_call_has_no_account
+            + self.skipped_name_refused
+        )
+
+
+#: The signal already names an account — from an extraction pass, or from an
+#: earlier run of this sweep. Never overwritten: a name a speaker's own words
+#: produced outranks one derived from an email domain, and re-deriving is how
+#: a sweep quietly relabels rows it has no business relabelling. This skip is
+#: also the resume checkpoint, exactly as `already_has_amount` is above.
+SKIP_ALREADY_HAS_ACCOUNT = "already_has_account"
+#: The signal was not distilled from a catalogued call, so there is no
+#: participant list to derive an organisation from. The single largest
+#: refusal on any corpus that ingests more than calls, and not a defect.
+SKIP_NOT_FROM_A_CALL = "not_from_a_call"
+#: The signal names a call that is not in `call_index` for this company —
+#: an index that has not been synced, or a call deleted from the source
+#: since. Distinguished from "no account" because the fix is different: this
+#: one is repaired by syncing the index and re-running.
+SKIP_CALL_NOT_INDEXED = "call_not_indexed"
+#: The call is indexed but has no external account — every participant was
+#: internal or on a generic consumer domain. `derive_account` returning
+#: `None` is it declining to guess, and this sweep declines with it.
+SKIP_CALL_HAS_NO_ACCOUNT = "call_has_no_account"
+#: The indexed account failed the shared name gate (a placeholder, out of the
+#: 3-80 character band, prose-shaped). Expected to be near-zero given where
+#: the value comes from; counted separately so a non-zero value is visible
+#: rather than folded into "no account".
+SKIP_NAME_REFUSED = "name_refused"
+
+
+@dataclass
+class AccountDecision:
+    """What the sweep decided about one signal — the pure half, shared by the
+    live write path and any offline check, so the two cannot drift."""
+
+    signal_id: str
+    #: "enriched" | SKIP_ALREADY_HAS_ACCOUNT | SKIP_NOT_FROM_A_CALL
+    #: | SKIP_CALL_NOT_INDEXED | SKIP_CALL_HAS_NO_ACCOUNT | SKIP_NAME_REFUSED
+    outcome: str
+    new_properties: Optional[dict[str, Any]] = None
+
+
+def decide_account_for_signal(
+    properties: dict[str, Any] | None,
+    source_call_id: Any,
+    call_accounts: dict[int, Any],
+) -> AccountDecision:
+    """Pure decision function: given one signal's `properties`, the call it
+    came from, and the company's call-id → account map, decide whether it can
+    be attributed — and if so, return the exact new `properties` to write.
+
+    Touches `account`/`account_source` only; every other key passes through
+    unchanged. Never invents: if the call has no account, or the value does
+    not survive the shared name gate, the key is simply not written and the
+    signal stays unattributed. An absent attribution must read as "we do not
+    know who said this", never as a company named "Unknown" (I3).
+    """
+    props = dict(properties or {})
+    existing = props.get(ACCOUNT_PROPERTY_KEY)
+    if isinstance(existing, str) and existing.strip():
+        return AccountDecision(signal_id="", outcome=SKIP_ALREADY_HAS_ACCOUNT)
+
+    if not isinstance(source_call_id, int) or isinstance(source_call_id, bool):
+        return AccountDecision(signal_id="", outcome=SKIP_NOT_FROM_A_CALL)
+    if source_call_id not in call_accounts:
+        return AccountDecision(signal_id="", outcome=SKIP_CALL_NOT_INDEXED)
+
+    raw = call_accounts[source_call_id]
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return AccountDecision(signal_id="", outcome=SKIP_CALL_HAS_NO_ACCOUNT)
+
+    # The SAME gate the extraction passes apply to a model-written name — one
+    # validator, not two, for the same reason `_grounded_amount_properties` is
+    # shared: a name recovered here and a name read at ingest must land in the
+    # identical shape and pass the identical bar.
+    name = _grounded_account_name({ACCOUNT_PROPERTY_KEY: raw})
+    if not name:
+        return AccountDecision(signal_id="", outcome=SKIP_NAME_REFUSED)
+
+    new_props = dict(props)
+    new_props[ACCOUNT_PROPERTY_KEY] = name
+    new_props[ACCOUNT_SOURCE_KEY] = BACKFILL_ACCOUNT_SOURCE
+    return AccountDecision(signal_id="", outcome="enriched", new_properties=new_props)
+
+
+def account_distribution(names: Sequence[str]) -> Optional[dict[str, Any]]:
+    """Count, distinct-spelling count, and the most frequent names a run
+    minted (or would mint). A permanent part of the report, not a diagnostic:
+    a run that attributes 400 signals to one name is a broken run whose
+    counts look excellent, and this is the block that shows it.
+
+    `distinct` is labelled a SPELLING count on purpose — see the section note
+    above on the absence of any canonical entity join.
+    """
+    if not names:
+        return None
+    tally: dict[str, int] = {}
+    for name in names:
+        tally[name] = tally.get(name, 0) + 1
+    ordered = sorted(tally.items(), key=lambda kv: (-kv[1], kv[0]))
+    return {
+        "count": len(names),
+        "distinct_spellings": len(tally),
+        "top": ordered[:_TOP_ACCOUNTS],
+    }
+
+
+def _page_signals_for_attribution(
+    client: Any, company_id: str, page: int, kinds: Sequence[str],
+) -> list[dict[str, Any]]:
+    """The attribution sweep's read. Identical population and ordering to
+    `_page_eligible_signals`, plus the `source_call_id` this sweep joins on —
+    a separate function rather than a widened one so the amount sweep's read
+    is untouched by a column only this sweep needs.
+    """
+    offset = page * _PAGE_SIZE
+    resp = (
+        client.table("kg_signal")
+        .select("id, kind, content, properties, source_call_id")
+        .eq("enterprise_id", company_id)
+        .in_("kind", sorted(kinds))
+        .order("id")
+        .range(offset, offset + _PAGE_SIZE - 1)
+        .execute()
+    )
+    return resp.data or []
+
+
+def _load_call_accounts(client: Any, company_id: str) -> dict[int, Any]:
+    """`call_index.id` → `account` for ONE company, read once per run rather
+    than per signal. Tenant-scoped in the query, so a signal can only ever be
+    attributed from its own company's call index — the id is a global bigint
+    and an unscoped lookup would happily resolve another tenant's call.
+    """
+    out: dict[int, Any] = {}
+    page = 0
+    while True:
+        offset = page * _PAGE_SIZE
+        resp = (
+            client.table("call_index")
+            .select("id, account")
+            .eq("company_id", company_id)
+            .order("id")
+            .range(offset, offset + _PAGE_SIZE - 1)
+            .execute()
+        )
+        rows = resp.data or []
+        for row in rows:
+            call_id = row.get("id")
+            if isinstance(call_id, int) and not isinstance(call_id, bool):
+                out[call_id] = row.get("account")
+        if len(rows) < _PAGE_SIZE or len(out) >= _MAX_ROWS_PER_RUN:
+            break
+        page += 1
+    return out
+
+
+def run_account_backfill(
+    *,
+    company_id: str,
+    apply: bool,
+    limit: Optional[int] = None,
+    kinds: Optional[Sequence[str]] = None,
+) -> dict[str, Any]:
+    """Sweep this company's historical signals and attribute each one to the
+    organisation whose call it came from, where the call index knows it.
+
+    ELIGIBILITY MIRRORS INGEST, AND DEFAULTS TO THE AMOUNT SWEEP'S OWN
+    POPULATION. `kinds` defaults to `_AMOUNT_ELIGIBLE_KINDS`
+    (`commercial_term`, `pricing`) — the exact rows a stated figure can
+    attach to, and therefore the exact rows where a missing attribution costs
+    something today. The parameter exists because the extraction contract
+    itself is kind-agnostic (a named product gap is as attributable as a
+    named price), so widening this is a flag, not a rewrite — but widening it
+    is a deliberate operator decision with its own dry run, never the default.
+
+    `apply=False` is the default a caller must opt out of explicitly: a dry
+    run performs every read and every decision, reports exactly what it would
+    change, and writes nothing. An audit row lands either way.
+    """
+    if not company_id:
+        raise ValueError("company_id is required — there is no global mode")
+
+    kinds = tuple(kinds) if kinds else tuple(sorted(_AMOUNT_ELIGIBLE_KINDS))
+    client = require_client()
+    counts = AccountCounts()
+    minted: list[str] = []
+    mode = "apply" if apply else "dry_run"
+    run_row = crucible_backfill_runs.start(
+        company_id=company_id, mode=mode, pattern_version=ACCOUNT_PATTERN_VERSION,
+    )
+    run_id = run_row.get("id")
+
+    try:
+        call_accounts = _load_call_accounts(client, company_id)
+        page = 0
+        while True:
+            rows = _page_signals_for_attribution(client, company_id, page, kinds)
+            if not rows:
+                break
+            for row in rows:
+                if limit is not None and counts.examined >= limit:
+                    break
+                if counts.examined >= _MAX_ROWS_PER_RUN:
+                    break
+                counts.examined += 1
+                decision = decide_account_for_signal(
+                    row.get("properties"), row.get("source_call_id"), call_accounts,
+                )
+                if decision.outcome == SKIP_ALREADY_HAS_ACCOUNT:
+                    counts.skipped_already_has_account += 1
+                elif decision.outcome == SKIP_NOT_FROM_A_CALL:
+                    counts.skipped_not_from_a_call += 1
+                elif decision.outcome == SKIP_CALL_NOT_INDEXED:
+                    counts.skipped_call_not_indexed += 1
+                elif decision.outcome == SKIP_CALL_HAS_NO_ACCOUNT:
+                    counts.skipped_call_has_no_account += 1
+                elif decision.outcome == SKIP_NAME_REFUSED:
+                    counts.skipped_name_refused += 1
+                elif decision.outcome == "enriched":
+                    counts.enriched += 1
+                    minted.append(
+                        str((decision.new_properties or {})[ACCOUNT_PROPERTY_KEY])
+                    )
+                    if apply:
+                        (
+                            client.table("kg_signal")
+                            .update({"properties": decision.new_properties})
+                            .eq("enterprise_id", company_id)
+                            .eq("id", row["id"])
+                            .execute()
+                        )
+            if (
+                (limit is not None and counts.examined >= limit)
+                or counts.examined >= _MAX_ROWS_PER_RUN
+                or len(rows) < _PAGE_SIZE
+            ):
+                break
+            page += 1
+
+        crucible_backfill_runs.finish(
+            run_id=run_id,
+            company_id=company_id,
+            status="completed",
+            examined_count=counts.examined,
+            enriched_count=counts.enriched,
+            skipped_counts=counts.as_dict(),
+        )
+    except Exception as exc:  # noqa: BLE001 - record the failure, then re-raise
+        crucible_backfill_runs.finish(
+            run_id=run_id,
+            company_id=company_id,
+            status="failed",
+            examined_count=counts.examined,
+            enriched_count=counts.enriched,
+            skipped_counts=counts.as_dict(),
+            error=str(exc),
+        )
+        logger.warning(
+            "crucible_account_backfill_run_error company_id=%s run_id=%s",
+            company_id, run_id, exc_info=True,
+        )
+        raise
+
+    distribution = account_distribution(minted)
+    if distribution:
+        # Counts only. The names themselves are customer identities and go to
+        # the operator's own console in the returned summary — the review
+        # surface they exist for — not into an application log line.
+        logger.info(
+            "crucible_account_backfill run_id=%s company_id=%s mode=%s "
+            "attributed=%s distinct_spellings=%s",
+            run_id, company_id, mode, distribution["count"],
+            distribution["distinct_spellings"],
+        )
+
+    return {
+        "run_id": run_id,
+        "company_id": company_id,
+        "mode": mode,
+        "pattern_version": ACCOUNT_PATTERN_VERSION,
+        "kinds": list(kinds),
+        "examined": counts.examined,
+        "enriched": counts.enriched,
+        "skipped": counts.as_dict(),
+        "total_skipped": counts.total_skipped,
+        "accounts": distribution,
+    }
+
+
+#: The only keys an attributed row gained, and therefore the only keys its
+#: purge may take away. Mirrors `decide_account_for_signal`'s write set.
+PURGEABLE_ACCOUNT_KEYS = (ACCOUNT_PROPERTY_KEY, ACCOUNT_SOURCE_KEY)
+
+
+def decide_purge_for_account(
+    properties: dict[str, Any] | None,
+) -> Optional[dict[str, Any]]:
+    """The new `properties` for one signal if this sweep attributed it, or
+    `None` to leave it alone.
+
+    `ACCOUNT_SOURCE_KEY == BACKFILL_ACCOUNT_SOURCE` is what makes the undo
+    surgical, exactly as `BACKFILL_CERTAINTY` does for the amount sweep. An
+    extraction-time name never carries that marker — the checklist
+    sanitiser writes `account` and drops every key it is not documented to
+    hold, so it cannot emit `account_source` — which means this can identify
+    precisely the rows this sweep wrote and never a name a customer's own
+    words put there.
+    """
+    props = dict(properties or {})
+    if props.get(ACCOUNT_SOURCE_KEY) != BACKFILL_ACCOUNT_SOURCE:
+        return None
+    return {k: v for k, v in props.items() if k not in PURGEABLE_ACCOUNT_KEYS}
+
+
+def purge_backfilled_account_names(
+    *,
+    company_id: str,
+    apply: bool = False,
+    limit: Optional[int] = None,
+    kinds: Optional[Sequence[str]] = None,
+) -> dict[str, Any]:
+    """Strip `account`/`account_source` from exactly the signals a previous
+    run of the attribution sweep wrote, for ONE company.
+
+    Exists for the same reason the amount purge does: the sweep's own
+    idempotency guard skips any signal that already names an account, so a
+    corrected rule can never repair a row an earlier rule wrote. Rows minted
+    under an old `ACCOUNT_PATTERN_VERSION` have to be cleared first.
+
+    Tenant scoping is the first filter, not the last — every read and every
+    write names `company_id`. The provenance marker is global and the
+    database is shared, so a predicate matching on it alone would reach other
+    tenants' rows. There is no all-companies mode, the same as the sweep.
+
+    `apply=False` is the default: a dry run reports what it WOULD clear and
+    writes nothing.
+    """
+    if not company_id:
+        raise ValueError("company_id is required — there is no global mode")
+
+    kinds = tuple(kinds) if kinds else tuple(sorted(_AMOUNT_ELIGIBLE_KINDS))
+    client = require_client()
+    examined = 0
+    cleared = 0
+    cleared_names: list[str] = []
+
+    page = 0
+    while True:
+        rows = _page_signals_for_attribution(client, company_id, page, kinds)
+        if not rows:
+            break
+        for row in rows:
+            if limit is not None and examined >= limit:
+                break
+            if examined >= _MAX_ROWS_PER_RUN:
+                break
+            examined += 1
+            props = row.get("properties") or {}
+            new_props = decide_purge_for_account(props)
+            if new_props is None:
+                continue
+            cleared += 1
+            name = props.get(ACCOUNT_PROPERTY_KEY)
+            if isinstance(name, str) and name:
+                cleared_names.append(name)
+            if apply:
+                (
+                    client.table("kg_signal")
+                    .update({"properties": new_props})
+                    .eq("enterprise_id", company_id)
+                    .eq("id", row["id"])
+                    .execute()
+                )
+        if (
+            (limit is not None and examined >= limit)
+            or examined >= _MAX_ROWS_PER_RUN
+            or len(rows) < _PAGE_SIZE
+        ):
+            break
+        page += 1
+
+    distribution = account_distribution(cleared_names)
+    logger.info(
+        "crucible_account_backfill_purge company_id=%s mode=%s examined=%s cleared=%s",
+        company_id, "apply" if apply else "dry_run", examined, cleared,
+    )
+    return {
+        "company_id": company_id,
+        "mode": "apply" if apply else "dry_run",
+        "kinds": list(kinds),
+        "examined": examined,
+        "cleared": cleared,
+        "accounts": distribution,
     }

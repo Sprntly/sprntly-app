@@ -31,6 +31,7 @@ import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useSt
 // its own composer. Reused (not duplicated) so the two surfaces stay verbatim.
 import { BUSY_ENTER_HINT_LEAD, BUSY_ENTER_HINT_TAIL } from "../ChatScreen"
 import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
+import { crucibleOn } from "../../../../lib/onboarding/types"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
@@ -65,6 +66,7 @@ import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
 import { GreetingTurnBody } from "./GreetingTurnBody"
+import { useProjectGoalAnalysis } from "./useProjectGoalAnalysis"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
 import { useConversationGeneration } from "../useConversationGeneration"
@@ -249,7 +251,7 @@ export function useProjectConversation(
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId), [projectId])
   const { activeCompany } = useCompany()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
   const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   const name = profileDisplayName(profile) || "You"
@@ -278,6 +280,9 @@ export function useProjectConversation(
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The composer's Goal Analysis MODE — the `+`-menu affordance, present only
+  // while the company is enrolled. Host-owned exactly as main keeps it.
+  const [goalMode, setGoalMode] = useState(false)
   const [clarifyPopupDismissed, setClarifyPopupDismissed] = useState<Record<string, boolean>>({})
   const [questionDockEl, setQuestionDockEl] = useState<HTMLDivElement | null>(null)
   const threadRef = useRef<ThreadTurn[]>(thread)
@@ -930,6 +935,62 @@ export function useProjectConversation(
     runProjectClarifiedGeneration(combined, pc.sourceDocs, detail || "Generate now")
   }, [pendingClarify, runProjectClarifiedGeneration])
 
+  // ── Goal Analysis, in this project's thread ────────────────────────────────
+  //
+  // The planner already resolves a goal typed here to `analyse_goal` and the
+  // shared switch already has the case — what was missing was the EXECUTOR, so
+  // `dispatchChatIntent` fell through to `onAnswer` and a goal came back as an
+  // ordinary answer with nothing to say it had been understood as one.
+  //
+  // A gate turn with NO `query` is a card, not something the user said.
+  // Persisting one writes an empty user row that replays as a blank message on
+  // every later restore — so the plan turn appends to the thread only, while
+  // the opening turn (which carries the reader's sentence) persists through the
+  // ordinary path. This is why the gates do not reuse `emitTurn`, which
+  // persists unconditionally.
+  const emitGoalTurn = useCallback((turn: ThreadTurn) => {
+    setThread((prev) => [...prev, turn])
+    if (turn.query) pushPendingConversation(turn.id, turn.query, convKey)
+  }, [convKey, pushPendingConversation])
+  const patchGoalTurn = useCallback(
+    (turnId: string, update: (t: ThreadTurn) => ThreadTurn) => {
+      setThread((prev) => prev.map((t) => (t.id === turnId ? update(t) : t)))
+    }, [])
+  // The SAME global side panel every other artifact on this surface opens into
+  // — `ContentPanel` already renders a Goal Analysis tab off `content.goalRunId`
+  // and this surface already drives it for PRDs, tickets, reports, evidence and
+  // documents. Not the project artifact drawer and not a modal: a run opening
+  // somewhere else would be a third pattern for no reason.
+  const openGoalPanel = useCallback((runId: number) => {
+    setContent({ goalRunId: runId })
+    openContentPanel("goal")
+  }, [setContent, openContentPanel])
+
+  // The ENTITLEMENT is read once, here, and spent in exactly one place: the
+  // composer's `+`-menu entry (`goalModeAvailable`, in the host bag below), so
+  // an unenrolled company is never offered the feature.
+  //
+  // The EXECUTOR is mounted unconditionally, exactly as main mounts its own,
+  // and deliberately not gated on this flag. The entitlement is already
+  // enforced twice server-side — the planner drops `analyse_goal` to `answer`
+  // when `crucible` is off (`ask_planner`, fail-closed) and the route refuses
+  // with 403 — whereas gating the client slot on a flag that is `undefined`
+  // until `workspace` resolves would reintroduce, for that window, the exact
+  // silent fall-through to `onAnswer` this change exists to remove.
+  const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
+  const goal = useProjectGoalAnalysis({
+    mountedRef,
+    // Get-or-create THIS project's durable conversation. On every send but the
+    // very first this is already on the ref and returns synchronously, which is
+    // why this surface needs none of main's polling for a row a freshly spawned
+    // tab does not have yet.
+    resolveConversationId: ensureProjectConv,
+    emitGoalTurn,
+    patchGoalTurn,
+    openGoalPanel,
+    showToast,
+  })
+
   // ── The single-conversation submit (intent dispatch → shared flows/actions) ─
   const submitAsk = useCallback(async (rawQuery: string) => {
     const trimmed = rawQuery.trim()
@@ -1023,6 +1084,35 @@ export function useProjectConversation(
           envelope,
           { hasEditTarget: targetPrdId != null, editTargetPrdId: targetPrdId, ticketsTarget },
           useChatIntentExecutors({
+            // A GOAL TYPED INTO A PROJECT CHAT REACHES GOAL ANALYSIS. Without
+            // this slot the planner routed `analyse_goal` correctly and this
+            // client dropped it to `onAnswer` — a goal answered as an ordinary
+            // question, with no definition confirmed and nothing approved,
+            // which is precisely the behaviour the feature exists to replace.
+            //
+            // The slot must be PRESENT and must ACT: `dispatchChatIntent`
+            // decides `handled` from the executor's presence, never its return
+            // value, so an omitted slot is indistinguishable from the bug.
+            //
+            // `trimmed` is what the reader typed; `goalText` is what the
+            // planner extracted from it. Both travel: the run works from the
+            // goal, the thread shows the sentence.
+            //
+            // AND IT SETTLES, unlike main's otherwise-identical slot. Main
+            // settles its pending send unconditionally BEFORE the classify
+            // await, so its Goal Analysis executor deliberately does not — but
+            // this surface settles per-executor (every sibling below ends with
+            // the same call, and so does the grounded-ask fallthrough). Copying
+            // main's omission here would strand the composer's placeholder
+            // bubble on screen for the life of the run.
+            //
+            // Settled AFTER the start call, not before: `startGoalAnalysis`
+            // puts its turn on the thread synchronously, ahead of its first
+            // await, so the placeholder is replaced rather than blanked.
+            onAnalyseGoal: (goalText: string) => {
+              void goal.startGoalAnalysis(goalText, trimmed)
+              settlePendingSend()
+            },
             onGenerateTickets: (env) => {
               if (docFile) {
                 // Doc + "make tickets": import the doc as a PRD, then break it
@@ -1193,7 +1283,30 @@ export function useProjectConversation(
     composer.setDraft(""); composer.setPinnedSkill(null); composer.setPlusMenuOpen(false)
     void submitAsk(q)
   }, [composer, submitAsk, convKey])
+  // Goal mode intercepts the submit BEFORE the ask path: a run takes the goal
+  // in the reader's own words, so the slash trigger the ordinary submit can
+  // splice in front of it must never happen. A normal send falls straight
+  // through. Guards mirror `handleComposerSubmit` above so goal mode behaves
+  // identically under an empty draft or an in-flight ask.
+  const handleGoalOrComposerSubmit = useCallback(() => {
+    if (!goalMode) { handleComposerSubmit(); return }
+    const q = composer.draft.trim()
+    if (q.length < 1) return
+    if (askingRef.current.has(convKey)) { composer.showComposerHint("busy"); return }
+    if (composer.voice.listening) composer.voice.cancel()
+    composer.setDraft(""); composer.setPlusMenuOpen(false)
+    setGoalMode(false)
+    // ONE argument: in goal mode the sentence the reader typed IS the goal, so
+    // there is no planner extraction to show alongside it.
+    void goal.startGoalAnalysis(q)
+  }, [goalMode, handleComposerSubmit, composer, convKey, goal])
+
+  // Enter-to-send has to respect the mode too. Only the plain Enter is
+  // overridden — the slash palette keeps its own navigation below.
   const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (goalMode && e.key === "Enter" && !e.shiftKey && !composer.slashOpen) {
+      e.preventDefault(); handleGoalOrComposerSubmit(); return
+    }
     if (composer.slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); composer.setSlashActive((i) => (i + 1) % composer.filteredSkills.length); return }
       if (e.key === "ArrowUp") { e.preventDefault(); composer.setSlashActive((i) => (i - 1 + composer.filteredSkills.length) % composer.filteredSkills.length); return }
@@ -1201,7 +1314,20 @@ export function useProjectConversation(
       if (e.key === "Escape") { e.preventDefault(); composer.setShowSlash(false); composer.setSlashFromMenu(false); return }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleComposerSubmit() }
-  }, [composer, handleComposerSubmit])
+  }, [composer, handleComposerSubmit, goalMode, handleGoalOrComposerSubmit])
+
+  // The `+` menu's THIRD item, which `ChatComposer` appends only when
+  // `goalModeAvailable` — so indices 0 and 1 keep meaning what they always
+  // meant, and an unenrolled company has no index 2 to select.
+  const handleGoalOrPlusMenuSelect = useCallback((index: number) => {
+    if (index === 2) {
+      composer.setPlusMenuOpen(false)
+      setGoalMode(true)
+      composer.composerRef.current?.focus()
+      return
+    }
+    composer.handlePlusMenuSelect(index)
+  }, [composer])
 
   const handleComposerInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     composer.handleComposerInput(e)
@@ -1471,12 +1597,15 @@ export function useProjectConversation(
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
-    // The project GROUP surface has no Goal Analysis. Named explicitly rather
-    // than omitted: `MapMainTurnsDeps` requires these so a surface cannot drop
-    // them with a clean `tsc`, which is how the in-thread gates shipped inert.
-    goalGateBusyTurnId: undefined,
-    confirmGoalDefinition: undefined,
-    approveGoalPlan: undefined,
+    // Both Goal Analysis gates are answered IN THE THREAD, here as on main:
+    // the run asks what the goal means and the reader answers; it states what
+    // it will read and the reader approves, drops a source, or says what they
+    // already expect. Only the finished report — a document, not a question —
+    // goes to the panel. `MapMainTurnsDeps` requires all three, so dropping
+    // one is a build error rather than a silently inert feature.
+    goalGateBusyTurnId: goal.goalGateBusyTurnId,
+    confirmGoalDefinition: goal.confirmGoalDefinition,
+    approveGoalPlan: goal.approveGoalPlan,
     activeTab: { id: convKey, prdId: meta.prdId ?? null, prd: meta.prd ?? null, prdGenerating: !!meta.prdGenerating, pendingClarify: meta.pendingClarify },
     name, userInitials, skillForQuery: composer.skillForQuery,
     ticketSetActionState: (meta.ticketSetStatus === "generating" ? "running" : meta.ticketSetStatus === "ready" ? "ready" : meta.ticketSetStatus === "failed" ? "failed" : null),
@@ -1503,7 +1632,7 @@ export function useProjectConversation(
       turn.reply?.answer?.includes(MORE_MARKER)
         ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
         : null,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit, goal])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
@@ -1517,9 +1646,16 @@ export function useProjectConversation(
     slashOpen: composer.slashOpen, filteredSkills: composer.filteredSkills, slashActive: composer.slashActive,
     composerRef: composer.composerRef, fileInputRef: composer.fileInputRef, voice: composer.voice,
     handleSlashSelect: composer.handleSlashSelect, setSlashActive: composer.setSlashActive,
-    handleComposerInput, handleComposerKeyDown, handleComposerSubmit,
+    handleComposerInput, handleComposerKeyDown,
+    handleComposerSubmit: handleGoalOrComposerSubmit,
     setPlusMenuActive: composer.setPlusMenuActive, setPlusMenuOpen: composer.setPlusMenuOpen,
-    handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
+    handlePlusMenuSelect: handleGoalOrPlusMenuSelect, setAttachments: composer.setAttachments,
+    // Goal Analysis mode. `goalModeAvailable` is the ONE place the entitlement
+    // shows: off → `ChatComposer` never appends the `+`-menu entry, so the
+    // project surface neither offers nor implies a feature the company does
+    // not have (and the planner would drop to `answer` anyway).
+    goalMode, goalModeAvailable: goalAnalysisOn,
+    onExitGoalMode: () => setGoalMode(false),
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,
     handleToggleVoice: composer.handleToggleVoice,
     // Empty-state greeting: unset → `ConversationView` renders its default

@@ -396,7 +396,7 @@ def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
     vocabulary carries the new kinds, and the properties description shows the
     owner/due/status shape. PROMPT_VERSION is bumped so re-extraction cache-busts.
     """
-    assert ex.PROMPT_VERSION == "extract-doc-v3"
+    assert ex.PROMPT_VERSION == "extract-doc-v4"
 
     system = ex._SYSTEM.lower()
     for term in ("pricing", "commercial", "capabilit", "logistic",
