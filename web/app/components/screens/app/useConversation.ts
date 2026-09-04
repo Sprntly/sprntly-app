@@ -631,6 +631,22 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       const hasAttachments = attachments.length > 0
+      // CAPTURED, THEN CLEARED, in the same tick the turn is rendered.
+      //
+      // The chip used to sit in the composer until extraction came back — a
+      // server round trip of several seconds, on a send whose TEXT had already
+      // vanished (`handleComposerSubmit` clears the draft immediately). So the
+      // reader watched a document they had already sent, still attached, and
+      // reasonably wondered whether it had gone. It followed them to other
+      // tabs too, because the composer is one instance for all of them.
+      //
+      // The lateness was not an oversight: the failure path below needs the
+      // attachments back for a retry. Clearing here and RESTORING there gets
+      // both — the chip goes when the message does, and a failed extraction
+      // hands the file back rather than leaving it stuck to a send that
+      // already happened.
+      const sentAttachments = attachments
+      if (hasAttachments) setAttachments([])
       // Chips render from NAMES here; each attachment's content is folded on
       // AFTER extraction resolves (below). The folded text still rides `sendQuery`.
       const newTurn: ThreadTurn = {
@@ -788,7 +804,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {
-                  setAttachments([])
+                  // No `setAttachments([])` here: the send already cleared the
+                  // composer, and `docFile` was captured before it did.
                   importPrdCommandFlow(docFile, {
                     openTickets: true, seedQuery: trimmed,
                     artifactTemplateId: env.artifact_template_id,
@@ -884,7 +901,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               },
               onGeneratePrd: (env) => {
                 if (docFile) {
-                  setAttachments([])
+                  // Cleared at send; see the tickets branch above.
                   importPrdCommandFlow(docFile, {
                     openTickets: false, seedQuery: trimmed,
                     artifactTemplateId: env.artifact_template_id,
@@ -1046,7 +1063,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
       if (hasAttachments) {
         setBusyTabs((prev) => addToSet(prev, targetTabId))
-        const pending = attachments
+        // The captured list, not the state — that was emptied at send.
+        const pending = sentAttachments
         let ctx: string
         try {
           // Per attachment: extract text ONCE (client-text | early-extracted |
@@ -1064,7 +1082,6 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
             : t))
           sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
-          setAttachments([]) // clear after successful extraction only
         } catch (e) {
           // Extraction failed: roll the optimistic turn back so no ghost
           // "thinking" bubble is stranded, but KEEP the attachments for retry.
@@ -1080,6 +1097,11 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
               : t))
           }
+          // THE FILE COMES BACK. The turn is rolled back above, so the send
+          // never happened as far as the thread is concerned — leaving the
+          // composer empty would mean the reader had to find and attach it
+          // again to act on the toast this line shows them.
+          setAttachments((current) => (current.length > 0 ? current : sentAttachments))
           showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
           return
         }

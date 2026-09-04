@@ -14,7 +14,7 @@
 // observable: the sticky/opaque pin, and the wheel redirect's arithmetic with
 // the scroll metrics stubbed in.
 import * as React from "react"
-import { act, cleanup, render, screen, within } from "@testing-library/react"
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -447,5 +447,43 @@ describe("ChatScreen — tab separators", () => {
     renderScreen()
     const tab = within(list()).getByText("Conversation number 2").closest(".chat-tab") as HTMLElement
     expect(tab.style.position).toBe("relative")
+  })
+})
+
+// ── The composer belongs to the tab you are looking at ───────────────────────
+// Reported: "I add a document and send, and I still see the document attached
+// in my chat box. And when I move to another tab, I also see the document
+// there."
+//
+// The second half is this: there is ONE composer for every tab (one <textarea>
+// with two mount points), so whatever is in it shows wherever you go. The
+// draft has always been cleared on a tab switch. The attachment was not, so a
+// file picked on one tab followed the reader to the next and looked as though
+// it had been sent there.
+
+describe("ChatScreen — the composer's attachment belongs to one tab", () => {
+  it("clears the attachment when you switch tabs, the way the draft does", async () => {
+    seedManyTabs()
+    sessionStorage.setItem("sprntly_chat_active_tab_anon_acme", "tab-0")
+    renderScreen()
+
+    // Attach a file on the tab we are on.
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement
+    expect(input).toBeTruthy()
+    await act(async () => {
+      fireEvent.change(input, {
+        target: { files: [new File(["notes"], "brief.txt", { type: "text/plain" })] },
+      })
+    })
+    await waitFor(() =>
+      expect(screen.queryAllByTestId("attachment-chip").length).toBeGreaterThan(0),
+    )
+
+    // Move to another tab: the composer is the same instance, so what it holds
+    // has to be the tab's, not the session's.
+    const other = within(list()).getByText("Conversation number 3")
+    await act(async () => { fireEvent.click(other) })
+
+    expect(screen.queryAllByTestId("attachment-chip")).toHaveLength(0)
   })
 })
