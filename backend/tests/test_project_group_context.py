@@ -372,3 +372,71 @@ def test_private_context_block_byte_identical(monkeypatch):
         f"Artifacts: {manifest}"
     )
     assert pgc.assemble_private_project_context(1, "user-1", "acme", "c1") == expected
+
+
+# ── has_project_context: the broader admission signal (Fix B2) ─────────────
+
+
+def test_has_project_context_true_for_memory_summary_only(monkeypatch):
+    """A project with a memory summary but NO artifacts has context to read —
+    so a 'what is the context of this project' ask can be admitted into the
+    read-tool loop rather than answered from workspace breadth."""
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": "We chose Stripe."})
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
+    assert pgc.has_project_context(1, "acme", "c1") is True
+
+
+def test_has_project_context_true_for_prd_only_no_memory(monkeypatch):
+    """A project with a PRD but an EMPTY memory summary still has readable
+    context — a `prd` is one of the types `_artifact_content_for` can read."""
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": ""})
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [{"type": "prd", "id": 1, "title": "Our PRD"}],
+    )
+    assert pgc.has_project_context(1, "acme", "c1") is True
+
+
+def test_has_project_context_false_for_empty_project(monkeypatch):
+    """No memory summary AND no readable artifact → False, so the admission
+    disjunct sends NOTHING extra through the loop (byte-identical routing)."""
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {"summary_md": ""})
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", lambda **kw: [])
+    assert pgc.has_project_context(1, "acme", "c1") is False
+
+
+def test_has_project_context_false_for_pointer_only_artifacts(monkeypatch):
+    """A project whose only artifacts are pointer-only types (prototype /
+    ticket_set — NOT in the readable-context set) and no memory → False:
+    those carry no synthesizable context body, matching what
+    `_artifact_content_for` can actually return."""
+    monkeypatch.setattr(pgc.memory_db, "get_summary", lambda pid: {})
+    monkeypatch.setattr(
+        pgc, "list_artifacts_for_project",
+        lambda **kw: [
+            {"type": "prototype", "id": 1, "title": "Clickable"},
+            {"type": "ticket_set", "id": 2, "title": "Tickets"},
+        ],
+    )
+    assert pgc.has_project_context(1, "acme", "c1") is False
+
+
+def test_has_project_context_degrades_to_false_on_read_failure(monkeypatch):
+    """Best-effort (AD-P7): a read failure in EITHER the memory summary or the
+    artifact fan-out degrades to False (pre-existing routing), never raising
+    into scope assembly."""
+    def _boom(*a, **k):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(pgc.memory_db, "get_summary", _boom)
+    monkeypatch.setattr(pgc, "list_artifacts_for_project", _boom)
+    assert pgc.has_project_context(1, "acme", "c1") is False
+
+
+def test_readable_context_types_match_artifact_content_reader():
+    """The readable-context type set stays in lockstep with the artifact
+    branches `_artifact_content_for` returns a body for — the exact
+    `prd|evidence|report|custom_artifact` family the read tool can surface."""
+    assert pgc._READABLE_CONTEXT_TYPES == frozenset(
+        {"prd", "evidence", "report", "custom_artifact"}
+    )

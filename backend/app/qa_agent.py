@@ -2412,8 +2412,21 @@ def _try_scoped_tool_answer(
     # free text, so a rendered ledger table can only ever reflect the tool's
     # actual return, never conversation context.
     task_ledger_narrations: list[str] = []
+    # True once this turn read PROJECT CONTENT — the project's memory
+    # (`get_project_memory`) or an artifact's body (`get_artifact_content`).
+    # A "context of this project" / "explain this project" ask enters the
+    # loop and legitimately reads BOTH content and the ledger; without this
+    # flag the ledger override below (`elif task_ledger_narrations`) would
+    # clobber the model's synthesized context answer with the raw
+    # `get_task_ledger` return ("This project has no delegated tasks yet."),
+    # the exact staging failure. Gating that override on `not content_read`
+    # keeps the synthesis when content was consulted, while a pure "what's
+    # open?" (ledger read alone → content_read False) still gets the grounded
+    # ledger — the anti-fabrication guarantee is preserved.
+    content_read = False
 
     def _dispatch(name: str, tool_input: dict) -> str:
+        nonlocal content_read
         from app.project_group_context import dispatch_read_tool
 
         read = dispatch_read_tool(
@@ -2423,6 +2436,8 @@ def _try_scoped_tool_answer(
         if read is not None:
             if name == "get_task_ledger":
                 task_ledger_narrations.append(read)
+            elif name in ("get_project_memory", "get_artifact_content"):
+                content_read = True
             return read
         if name == "edit_prd" and scope.edit_prd_handler is not None:
             # In-band PRD edit → applies DIRECTLY through the shared editor
@@ -2590,13 +2605,22 @@ def _try_scoped_tool_answer(
         # `edit_prd` call's actual result. Last call wins — mirrors "the
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
-    elif task_ledger_narrations:
+    elif task_ledger_narrations and not content_read:
         # Ground the ledger table in the tool's real return — the read-tool
         # sibling of the write-tool overrides above. Last call wins, same
         # precedent: a model that calls `get_task_ledger` more than once this
         # turn (e.g. once, then again after a delegate/complete call earlier
         # in the SAME loop failed to reach this branch) is shown the most
         # recent real read.
+        #
+        # `not content_read`: only a PURE ledger read (a "what's open?" /
+        # "who's working on what?" task question) is clobbered with the raw
+        # ledger. A context/why/explain ask that ALSO read the project's
+        # memory or an artifact keeps the model's synthesis — the ledger was
+        # one input among several, not the answer. This is the deterministic
+        # half of Fix A (the prompt in `_PRIVATE_SCOPE_ROLE` is the nudge);
+        # anti-fabrication is preserved because the model only reaches this
+        # synthesis after actually reading grounded content this turn.
         text = task_ledger_narrations[-1]
 
     # Empty-text guard (the primary empty-loop fix). Reached only when NO
@@ -2817,18 +2841,24 @@ def answer(
         and (
             is_project_tool_request(routing_text, history)
             or is_project_content_request(routing_text, history)
-            # A SUBSTANTIVE factual question in a project that HAS uploaded
-            # documents — admitted so the model can `get_artifact_content` a
-            # document before the composer deflects (Babajide decision,
-            # accepting the extra-turn latency for doc-projects only). STRICTLY
-            # gated on `scope.has_project_documents`, so an ordinary project
-            # sends nothing extra through the loop. Still subject to every
-            # AND-clause below (connector-skip, report-defer, ticket-defer): a
-            # named-connector, report-phrased, or ticket/delegation turn still
-            # yields to its own path. The loop degrades to the composer on an
-            # empty read, so a false-positive admission self-heals.
+            # A SUBSTANTIVE factual OR context question in a project that HAS
+            # readable context — a memory summary OR ≥1 readable artifact (PRD /
+            # evidence / report / uploaded document) — admitted so the model can
+            # `get_project_memory` / `get_artifact_content` before the composer
+            # deflects (Babajide decision, accepting the extra-turn latency only
+            # when there IS context to read). GENERALIZED from the original
+            # `has_project_documents` gate to `has_project_context`: this closes
+            # the "explain this project" case where the answer lives in the PRD
+            # or thin memory, not an uploaded doc. STRICTLY gated on
+            # `scope.has_project_context`, so an EMPTY project (no memory, no
+            # readable artifact) sends nothing extra through the loop —
+            # byte-identical routing. Still subject to every AND-clause below
+            # (connector-skip, report-defer, ticket-defer): a named-connector,
+            # report-phrased, or ticket/delegation turn still yields to its own
+            # path. The loop degrades to the composer on an empty read, so a
+            # false-positive admission self-heals.
             or (
-                scope.has_project_documents
+                scope.has_project_context
                 and is_substantive_project_question(routing_text, history)
             )
             # A bare "send/assign/hand/route to <roster member>" — no

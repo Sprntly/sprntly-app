@@ -2084,9 +2084,19 @@ def is_project_completion_request(question: str, history: list[dict] | None = No
 #: verb. Deliberately reuses the same shape as `_PROJECT_TOOL_MENTION_VETO`
 #: (the phrasings that gate vetoes are exactly the ones this gate wants),
 #: but this is a POSITIVE match, not a veto.
+#:
+#: `explain|describe|walk\s+me\s+through` (+ `overview\s+of|run\s?down|
+#: brief\s+(?:me|us)`) are lifted VERBATIM from `_DOCUMENT_READ_VERB` above —
+#: the same request-to-be-told-about-a-thing verbs, not new regex. They close
+#: the "explain this project" gap: that ask carries the `this project`/`context`
+#: noun but had no admitted intent verb, so it never entered the read-tool loop
+#: and got answered from workspace breadth (the wrong project) when memory was
+#: thin.
 _PROJECT_CONTENT_INTENT = re.compile(
     r"^\s*(?:what|who|how|when|where|which)\b"
-    r"|\b(?:summarize|summarise|catch\s+me\s+up|tell\s+me\s+about|status\s+of|"
+    r"|\b(?:summarize|summarise|explain|describe|walk\s+me\s+through|"
+    r"overview\s+of|run\s?down|brief\s+(?:me|us)|"
+    r"catch\s+me\s+up|tell\s+me\s+about|status\s+of|"
     r"read\s+(?:me\s+)?the|what'?s?\s+(?:in|on)|list|show\s+me|give\s+me|open)\b",
     re.I,
 )

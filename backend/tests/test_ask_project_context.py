@@ -137,13 +137,18 @@ def test_ask_with_project_folds_memory_and_role(tenant_client, isolated_settings
     add_entry(project["id"], body="Ship by Friday — no exceptions.", author_user_id=t.user_id)
 
     fake_llm["payload"] = _STANDARD_PAYLOAD
-    # A plain-context question (NOT project-content/tool-shaped): the unified
-    # engine's gate declines it, so it folds project context via the composer
-    # fall-through (`_fold_project_context`) — the path that carries the
-    # AUTHORITATIVE preamble. A content-shaped question ("what should I know
-    # about this project?") instead takes the scoped tool path, where the same
-    # facts ride the SYSTEM prompt without the preamble (covered by the
-    # `context_source` gates below).
+    # A SUBSTANTIVE project question ("give me your honest take on where we
+    # are") in a project that HAS shared memory now routes to the scoped TOOL
+    # LOOP: it is admitted by `is_substantive_project_question` +
+    # `has_project_context` (a memory summary is project context), rather than
+    # falling through to the composer. The guarantee this test pins is
+    # unchanged — the project's memory summary, the caller's memory entry, and
+    # their job_role all reach the model — but on the admitted path those facts
+    # ride the tool-loop SYSTEM prompt (assembled by
+    # `assemble_private_project_context`) instead of the composer's
+    # AUTHORITATIVE fold. The composer-preamble fold itself is still exercised by
+    # `test_shared_preamble_equals_prior_ask_literal` below (an EMPTY project,
+    # which is NOT admitted to the loop and so keeps the composer path).
     start = t.client.post(
         "/v1/ask",
         json={
@@ -155,15 +160,17 @@ def test_ask_with_project_folds_memory_and_role(tenant_client, isolated_settings
     body = _poll_ask(t.client, start["ask_id"])
     assert body["status"] == "ready"
     assert len(fake_llm["calls"]) == 1
-    prompt = fake_llm["calls"][0]["user"]
-    # The private project chat folds an AUTHORITATIVE project-facts block
-    # (the same breadth the @Sprntly group agent gets) rather than the older
-    # passive "[Project context]" header — the framing tells the model these
-    # lines are the source of truth and NOT to deflect to "connect a connector".
-    assert "AUTHORITATIVE for THIS project" in prompt
-    assert "This project tracks the Q3 onboarding launch." in prompt
-    assert "Ship by Friday — no exceptions." in prompt
-    assert "Product Manager" in prompt
+    call = fake_llm["calls"][0]
+    # Routed through the agentic tool loop, not the single-shot composer: the
+    # `run_tool_loop` stub records `dispatch`/`tools` in kwargs; `call_json`
+    # (the composer) does not. This is the intended routing change.
+    assert "dispatch" in call["kwargs"], sorted(call["kwargs"].keys())
+    # The project's memory (summary + the caller's entry) and the caller's
+    # job_role still reach the model — now via the tool-loop system prompt.
+    grounding = f"{call['system']}\n{call['user']}"
+    assert "This project tracks the Q3 onboarding launch." in grounding
+    assert "Ship by Friday — no exceptions." in grounding
+    assert "Product Manager" in grounding
 
 
 # ---- AC10 — single-sourced preamble, byte-identical for the private surface -

@@ -254,6 +254,25 @@ class ProjectContextAssembler:
         except Exception:  # noqa: BLE001 — best-effort, AD-P7
             has_docs = False
 
+        # ── Project-context presence (routing signal) ────────────────────────
+        # The broader sibling of `has_docs`: whether this project has ANY
+        # readable context (a memory summary OR ≥1 readable artifact — PRD /
+        # evidence / report / uploaded document). Carried on the scope so the
+        # sixth-branch admission disjunct admits a substantive CONTEXT question
+        # ("explain this project") into the read-tool loop when there is context
+        # to read — instead of answering from workspace breadth. Reuses the same
+        # fan-out + memory-summary reads; EMPTY project → False (byte-identical
+        # routing). Best-effort: a read failure degrades to False.
+        has_context = False
+        try:
+            from app.project_group_context import has_project_context
+
+            has_context = has_project_context(
+                project_id, req.dataset, req.company_id
+            )
+        except Exception:  # noqa: BLE001 — best-effort, AD-P7
+            has_context = False
+
         # ── Project instructions block ───────────────────────────────────────
         # Single-sourced format both surfaces use (`_instructions_block`); folded
         # into `system_addendum` below (never `context_payload`). Best-effort.
@@ -432,4 +451,5 @@ class ProjectContextAssembler:
             },
             post_turn=post_turn,
             has_project_documents=has_docs,
+            has_project_context=has_context,
         )

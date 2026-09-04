@@ -135,6 +135,17 @@ class SurfaceScope:
     #: main/workspace scopes and for projects with no uploaded documents, so
     #: their routing is byte-identical to before this field existed.
     has_project_documents: bool = False
+    #: True when THIS project surface has ANY readable context — a memory
+    #: summary OR ≥1 readable artifact (`prd`/`evidence`/`report`/uploaded
+    #: `custom_artifact`). The broader sibling of `has_project_documents`:
+    #: read by the sixth-branch admission disjunct so a substantive CONTEXT
+    #: question ("explain this project", "what is the context of this project")
+    #: on a project with a PRD or thin memory is admitted into the read-tool
+    #: loop instead of being answered from workspace breadth (the wrong
+    #: project). Default False for main/workspace scopes and for EMPTY projects
+    #: (no memory, no readable artifact), so their routing is byte-identical to
+    #: before this field existed — nothing extra reaches the loop.
+    has_project_context: bool = False
 
     @property
     def is_noop(self) -> bool:

@@ -142,6 +142,48 @@ def has_project_documents(project_id: int, dataset: str, company_id: str) -> boo
     return any(it.get("type") == "custom_artifact" for it in items)
 
 
+#: The artifact types `_artifact_content_for` can actually return a readable
+#: body for AND that carry project context worth admitting a context question
+#: into the loop to read. Deliberately a subset of everything the manifest can
+#: list (prototype/ticket_set are pointer-only, not context) — kept in sync
+#: with the `prd|evidence|report|custom_artifact` branches of
+#: `_artifact_content_for`.
+_READABLE_CONTEXT_TYPES = frozenset({"prd", "evidence", "report", "custom_artifact"})
+
+
+def has_project_context(project_id: int, dataset: str, company_id: str) -> bool:
+    """True when this project has ANY readable context to synthesize a
+    "what is the context of this project" / "explain this project" answer
+    from — a memory summary OR ≥1 READABLE artifact (a `prd`, `evidence`,
+    `report`, or uploaded `custom_artifact` — the types `_artifact_content_for`
+    can read). The broader sibling of `has_project_documents` (which keys only
+    on uploaded `custom_artifact`s and still gates `_skip_project_connectors`);
+    this one is the signal `SurfaceScope.has_project_context` carries into the
+    sixth-branch admission disjunct, so a substantive context question on a
+    project with a PRD or thin memory is admitted into the read-tool loop
+    instead of being answered from workspace breadth.
+
+    Reuses the SAME primitives the read tools already read — the tenant-scoped
+    `list_artifacts_for_project` fan-out and `memory_db.get_summary` — not a
+    bespoke query. Best-effort (AD-P7): a read failure degrades to False (the
+    pre-existing routing, no admission), never raising into scope assembly. An
+    EMPTY project (no memory summary, no readable artifact) returns False, so
+    nothing extra reaches the loop and composer behavior is byte-identical."""
+    try:
+        summary = memory_db.get_summary(project_id) or {}
+        if (summary.get("summary_md") or "").strip():
+            return True
+    except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+        pass
+    try:
+        items = list_artifacts_for_project(
+            project_id=project_id, dataset=dataset, company_id=company_id
+        )
+    except Exception:  # noqa: BLE001 — best-effort, never blocks the answer
+        return False
+    return any(it.get("type") in _READABLE_CONTEXT_TYPES for it in items)
+
+
 def _roster_block(project_id: int) -> str:
     """"<name> — <job_role>" lines for every human member of this project.
     Degrades to a placeholder on a read failure (AD-P7)."""
