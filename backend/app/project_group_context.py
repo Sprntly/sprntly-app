@@ -233,9 +233,9 @@ LIST_PROJECT_ARTIFACTS_TOOL = {
     "name": "list_project_artifacts",
     "description": (
         "List every artifact attached to this project (PRDs, prototypes, "
-        "evidence, reports, ticket sets) with their type, id, and title. Call "
-        "this to answer how many/which artifacts exist, or to find an artifact's "
-        "id before reading its content."
+        "evidence, reports, ticket sets, documents) with their type, id, and "
+        "title. Call this to answer how many/which artifacts exist, or to find "
+        "an artifact's id before reading its content."
     ),
     "input_schema": {"type": "object", "properties": {}, "additionalProperties": False},
 }
@@ -244,16 +244,17 @@ GET_ARTIFACT_CONTENT_TOOL = {
     "name": "get_artifact_content",
     "description": (
         "Read the full content of ONE artifact on this project — e.g. a PRD's "
-        "body, an evidence brief, or a report. Pass the artifact_type and "
-        "artifact_id exactly as returned by list_project_artifacts. Call this "
-        "when asked what a specific document says or to summarize it."
+        "body, an evidence brief, a report, or an uploaded document. Pass the "
+        "artifact_type and artifact_id exactly as returned by "
+        "list_project_artifacts. Call this when asked what a specific document "
+        "says or to summarize it."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
             "artifact_type": {
                 "type": "string",
-                "enum": ["prd", "prototype", "evidence", "report", "ticket_set"],
+                "enum": ["prd", "prototype", "evidence", "report", "ticket_set", "custom_artifact"],
                 "description": "the artifact's type, from list_project_artifacts",
             },
             "artifact_id": {

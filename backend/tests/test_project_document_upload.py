@@ -280,3 +280,51 @@ def test_documents_label():
     from app.project_group_context import _TYPE_LABELS
 
     assert _TYPE_LABELS["custom_artifact"] == "Documents"
+
+
+# ── Tool-schema ↔ handler sync (guards against half-wiring a readable type) ──
+
+
+def _handler_supported_types() -> set[str]:
+    """The artifact types `_artifact_content_for` actually reads, derived from
+    its source (`atype == "..."` branches). Deriving this rather than
+    hardcoding is the whole point: a future branch added to the handler without
+    a matching enum entry (or vice versa) is exactly the half-wiring that
+    shipped documents un-readable, and this set makes that state a red test."""
+    import inspect
+    import re
+
+    from app import project_group_context as pgc
+
+    src = inspect.getsource(pgc._artifact_content_for)
+    return set(re.findall(r'atype == "([a-z_]+)"', src))
+
+
+def test_get_artifact_content_enum_matches_handler():
+    from app.project_group_context import GET_ARTIFACT_CONTENT_TOOL
+
+    enum = set(
+        GET_ARTIFACT_CONTENT_TOOL["input_schema"]["properties"]["artifact_type"]["enum"]
+    )
+    handled = _handler_supported_types()
+
+    # Every readable type the model may name is one the handler can serve, and
+    # every type the handler serves is offered to the model — no half-wiring in
+    # either direction.
+    assert enum == handled, (
+        f"tool enum {sorted(enum)} out of sync with handler {sorted(handled)}"
+    )
+    # The regression that prompted this guard: documents must be reachable.
+    assert "custom_artifact" in enum
+
+
+def test_tool_descriptions_mention_documents():
+    from app.project_group_context import (
+        GET_ARTIFACT_CONTENT_TOOL,
+        LIST_PROJECT_ARTIFACTS_TOOL,
+    )
+
+    # The listing tool advertises documents as a discoverable type...
+    assert "document" in LIST_PROJECT_ARTIFACTS_TOOL["description"].lower()
+    # ...and the read tool advertises them as a readable type.
+    assert "document" in GET_ARTIFACT_CONTENT_TOOL["description"].lower()
