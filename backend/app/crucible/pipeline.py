@@ -18,17 +18,22 @@ question.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
+from bisect import bisect_right
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, NamedTuple, Optional, Sequence
 
+from app.crucible.figure_class import RANGE_CLASS, SUMMABLE_CLASS
 from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
+from app.crucible.moscow import type_bucket
 from app.crucible.scoring import score_confidence, score_impact
 from app.crucible.types import (
+    SIZE_BANDS,  # noqa: F401  (re-exported: callers read the band vocabulary here)
     Adjudication,
     AssumedParam,
     Claim,
@@ -36,8 +41,11 @@ from app.crucible.types import (
     ConfidenceInputs,
     Finding,
     GoalCurrency,
+    GraphRelation,
+    GroundedFigure,
     Impact,
     ImpactInputs,
+    _band_for_rank,
 )
 
 logger = logging.getLogger(__name__)
@@ -107,6 +115,508 @@ UNGROUPED_STAGE = "ungrouped"
 AGGREGATE_STAGES = frozenset({OVERFLOW_STAGE, UNGROUPED_STAGE})
 
 
+#: The `native_units` key carrying a finding's deduplicated, transcript-stated
+#: dollar sum. Named once so the code that WRITES the sum and the code that
+#: BANDS on it can never read different keys — a silent typo there would mean
+#: no dollar finding ever bands, and nothing would fail.
+#: The SUMMABLE money: issued quotes, contract values, named deals. This is
+#: the only figure a money target may be answered from.
+COMMITTED_USD_UNIT = "commercial_committed_usd"
+#: How much of that came off a paraphrase rather than a verified quote.
+COMMITTED_USD_DERIVED_UNIT = "commercial_committed_usd_derived"
+
+#: LIST PRICING IS A RANGE, NEVER A SUM, and it is reported in parts that
+#: cannot be added back into one: the two ends, how many distinct prices
+#: there were, and how many accounts heard them. There is deliberately no
+#: total here — a rate card quoted to sixteen accounts has no total.
+LIST_PRICE_MIN_UNIT = "commercial_list_price_min"
+LIST_PRICE_MAX_UNIT = "commercial_list_price_max"
+LIST_PRICE_DISTINCT_UNIT = "commercial_list_price_distinct"
+LIST_PRICE_ACCOUNTS_UNIT = "commercial_list_price_accounts"
+
+#: How many DISTINCT accounts must be quoted the identical figure before it
+#: is treated as a rate card rather than a coincidence.
+#:
+#: MEASURED, AND ITS LIMITS MEASURED TOO. On a 61-row stratified sample the
+#: dominant list price appeared across 16 distinct accounts, so any
+#: threshold from 2 to 4 catches it identically. Three is chosen because two
+#: accounts agreeing on a round number is a plausible coincidence between
+#: negotiated deals and three is not.
+#:
+#: WHAT THIS SIGNAL CANNOT DO. In that same sample it fires on ONE of ~13
+#: distinct list prices — the other twelve were each quoted once, where
+#: repetition says nothing at all. So modality is an OVERRIDE that catches a
+#: rate card wearing the wrong kind; it is not the classifier. See
+#: `_figure_is_committed`.
+LIST_PRICE_MIN_ACCOUNTS = 3
+
+#: Phrases that mark a figure as money someone has actually committed to.
+#: Taken from the genuine rows in the sample: "A $9,000 quote was issued",
+#: "contract value was updated to $2,000", "deals nearing closure with two
+#: accounts, together valued at $165k".
+_COMMITTED_PHRASE = re.compile(
+    r"\bquote\b|\bquoted\b|\bcontract\s+value\b|\bvalued\s+at\b"
+    r"|\bdeal\b|\bclosed\b|\bsigned\b|\brenewed\b",
+    re.IGNORECASE,
+)
+
+#: Phrases that mark a figure as a rate card entry.
+_LIST_PRICE_PHRASE = re.compile(
+    r"\bstarts\s+at\b|\bstarting\s+at\b|\bannual\s+subscription\b"
+    r"|\bper\s+hour\b|\bper\s+seat\b|\bper\s+user\b"
+    r"|\bone[-\s]time\s+fee\b|\blist\s+price\b|\bprice\s+list\b",
+    re.IGNORECASE,
+)
+
+#: The extractor kind that means "a price", as opposed to "a term of a
+#: deal". This is the ROUTER, because it is the only signal with an opinion
+#: about every row: the extraction pass already judged what the signal is.
+_LIST_PRICE_KIND = "pricing"
+
+
+def repeated_amounts(claims: Sequence[Claim]) -> frozenset[float]:
+    """Amounts quoted to `LIST_PRICE_MIN_ACCOUNTS` or more DISTINCT accounts
+    anywhere in the corpus — a rate card, not a set of coincidences.
+
+    CORPUS-WIDE ON PURPOSE, not per finding. The sixteen mentions of one
+    price were sixteen separate sales calls and land in whatever clusters
+    their subjects put them; counting only within a finding would miss the
+    pattern precisely when it is most pronounced.
+    """
+    accounts_by_amount: defaultdict[float, set[str]] = defaultdict(set)
+    for c in claims:
+        if c.magnitude is None:
+            continue
+        for account in c.population.segments.get("accounts", ()) or ("",):
+            accounts_by_amount[float(c.magnitude)].add(account)
+    return frozenset(
+        amount for amount, accounts in accounts_by_amount.items()
+        if len({a for a in accounts if a}) >= LIST_PRICE_MIN_ACCOUNTS
+    )
+
+
+def _figure_is_committed(
+    claim: Claim, amount: float, list_price_amounts: frozenset[float],
+) -> bool:
+    """Is this money someone has agreed to, or a price on a rate card?
+
+    THREE SIGNALS, IN THE ORDER THE EVIDENCE SUPPORTS.
+
+    1. MODALITY OVERRIDES EVERYTHING, because a figure quoted to three or
+       more distinct accounts is a rate card whatever it is labelled. This
+       is the one signal that generalises to a tenant whose phrasing we have
+       never seen — but it was measured firing on only one of ~13 distinct
+       list prices in the sample, so it cannot be asked to do the job alone.
+    2. PHRASES, where the text says outright which it is.
+    3. KIND, WHICH MAY ONLY EXCLUDE. The extraction pass already judged
+       whether the signal is a `pricing` fact or a `commercial_term`, and it
+       is the only one of the three with an opinion about every row — but a
+       `commercial_term` label is a weak signal, and it is attached to the
+       lower-precision of the two populations.
+
+    A POSITIVE SIGNAL IS REQUIRED, and this function used to end
+    `return claim.artifact_type != _LIST_PRICE_KIND`, which did the exact
+    opposite of the paragraph below it: a `commercial_term` row matching
+    NEITHER phrase is a tie, and that line resolved the tie by admitting it.
+    It routed the whole weaker population into the summed total on the
+    strength of a label. A live spot-check found 2 of 11 rows in the
+    committed head were real deals, and both of the real ones had matched a
+    phrase anyway — so requiring the phrase removed nine wrong rows and cost
+    nothing.
+
+    Ties go to NOT committed. Every failure in this feature's history has
+    been over-claiming, and a figure wrongly left out of the sum understates
+    a total, where one wrongly added invents money.
+    """
+    # A PROBABILISTIC LABEL MAY NOT OVERTURN A DETERMINISTIC ONE IN THE
+    # DIRECTION THAT INFLATES A TOTAL.
+    #
+    # The extraction pass already judged this row a PRICE. A live run found
+    # the classifier promoting one anyway — "internal annual license is
+    # priced at $24,000 with a 20% discount applied", `kind = pricing`,
+    # phrasing "priced at", called `deal_value` — and $24,000 of discounted
+    # list price entered the committed total.
+    #
+    # This is the ties-go-to-not-committed principle one layer up. The
+    # classifier may still move a figure OUT of the sum, which is the safe
+    # direction; it may not move one in over the extractor's objection.
+    if claim.artifact_type == _LIST_PRICE_KIND:
+        return False
+
+    # THE CLASSIFIER DECIDES WHERE IT HAS SPOKEN, from a fixed table. The
+    # model returned a category; which categories may be summed is settled
+    # here, in deterministic code, and is not something the model can move.
+    if claim.figure_class is not None:
+        return claim.figure_class == SUMMABLE_CLASS
+    if amount in list_price_amounts:
+        return False
+    text = claim.assertion or ""
+    if _LIST_PRICE_PHRASE.search(text):
+        return False
+    return bool(_COMMITTED_PHRASE.search(text))
+
+
+def _figure_is_list_price(claim: Claim, amount: float,
+                          list_price_amounts: frozenset[float]) -> bool:
+    """May this figure appear in the non-additive pricing range?
+
+    A THIRD STATE EXISTS AND IT IS THE POINT. Before the classifier every
+    figure was either summed or ranged, so a salary or a competitor's fee
+    that failed the committed test silently became the pricing MAXIMUM — one
+    candidate's "$3.7M TCV at a previous employer" rendered the range as
+    $1,000 – $3,700,000. A figure can now be neither: refused outright, with
+    its category as the reason.
+    """
+    if claim.figure_class is not None:
+        # A `pricing` row the classifier tried to promote to `deal_value` is
+        # refused from the sum above — and it does not then vanish. The
+        # extractor judged it a price, so a price is what it stays. The
+        # classifier may still move such a row to a REFUSAL category
+        # (compensation, hypothetical, …), which is the safe direction and
+        # is honoured; it simply cannot relabel a price as committed money.
+        if (claim.artifact_type == _LIST_PRICE_KIND
+                and claim.figure_class == SUMMABLE_CLASS):
+            return True
+        return claim.figure_class == RANGE_CLASS
+    # Without a classification, the deterministic rules keep their previous
+    # meaning: anything not admitted to the sum was a price.
+    return not _figure_is_committed(claim, amount, list_price_amounts)
+
+#: The `certainty` marker a figure recovered from a written summary carries
+#: (`app.crucible.backfill.BACKFILL_CERTAINTY`). Declared here rather than
+#: imported because `backfill` is an operator tool that imports the graph
+#: extractor and a DB client; the read path must not pull that in to answer a
+#: question about one string. The value is pinned by a test on both sides.
+BACKFILL_CERTAINTY_MARKER = "derived-from-summary"
+
+
+def _account_key(accounts: Sequence[str]) -> str:
+    """A stable, opaque identity for the account(s) a figure belongs to.
+
+    STABLE, so two runs over the same corpus deduplicate identically —
+    Python's own `hash()` is salted per process and would make the output
+    depend on which process produced it, which is the reproducibility claim
+    this engine makes against asking a general model the same question.
+
+    OPAQUE, because this value rides on scored objects that get logged and
+    diffed. Deduplication needs to know two figures belong to the same
+    customer; nothing downstream needs to know which customer, and a digest
+    grants the first while refusing the second.
+    """
+    if not accounts:
+        return ""
+    joined = "\x1f".join(sorted(accounts))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def deduped_grounded_figures(
+    group: Sequence[Claim],
+    list_price_amounts: frozenset[float] = frozenset(),
+) -> tuple[GroundedFigure, ...]:
+    """The DISTINCT transcript-stated dollar figures among this finding's
+    claims — the single source of truth for the grounded sum, which is simply
+    these added up.
+
+    DO NOT "SIMPLIFY" THIS INTO `sum(c.magnitude for c in group)`. One deal
+    restated in five messages is five claims carrying one figure; adding them
+    gives five times the money, which turns HOW OFTEN something was said into
+    HOW BIG it is — corroboration deciding size, the single failure the
+    separation of impact from confidence exists to prevent. It was merely a
+    wrong display line while the sum was display-only. It is now also the
+    number that orders findings and the number summed toward a reader's
+    stated money target, so the same defect would inflate a target by
+    whatever the repetition rate happened to be.
+
+    The identity of a figure is `(the accounts it is attached to, the
+    amount)`:
+
+      * named account — the same amount on the same account is one figure,
+        however many claims restate it. Two accounts naming the same amount
+        stay two figures.
+      * no named account — the amount alone is the identity, which collapses
+        an anonymous restatement of one deal.
+      * an anonymous amount already attributed to some account is dropped
+        entirely. Most often that is the same deal in a message that did not
+        name the customer, and between double-counting a real figure and
+        under-counting a duplicate, only one of those errors inflates.
+
+    Currency needs no place in the key: a claim in another currency is
+    excluded outright, so everything reaching deduplication is one currency
+    by construction.
+
+    The cost is real and worth naming: one account that genuinely signs two
+    separate contracts for the identical amount is counted once. That is an
+    undercount of an unknowable, and this sum's job is to be a floor a reader
+    can trust, not a maximum.
+    """
+    attributed: dict[tuple[str, float], GroundedFigure] = {}
+    anonymous: dict[float, GroundedFigure] = {}
+    for c in group:
+        if c.magnitude is None:
+            continue
+        raw = c.raw or {}
+        if raw.get("currency") not in (None, "", "USD"):
+            continue
+        accounts = tuple(sorted(c.population.segments.get("accounts", ())))
+        key = _account_key(accounts)
+        derived = raw.get("certainty") == BACKFILL_CERTAINTY_MARKER
+        figure = GroundedFigure(
+            account_key=key, amount=float(c.magnitude), derived=derived,
+            committed=_figure_is_committed(
+                c, float(c.magnitude), list_price_amounts,
+            ),
+            list_price=_figure_is_list_price(
+                c, float(c.magnitude), list_price_amounts,
+            ),
+        )
+        if accounts:
+            existing = attributed.get((key, figure.amount))
+            # A figure seen both ways keeps the STRONGER provenance: if any
+            # claim carried it against a verified quote, the money is quoted
+            # money, and hedging it as derived would understate what we know.
+            if existing is None or (existing.derived and not derived):
+                attributed[(key, figure.amount)] = figure
+            elif existing.committed and not figure.committed:
+                # Same money seen both ways: the rate-card reading wins, for
+                # the same reason ties do. Calling it committed would put it
+                # in a sum on the strength of the weaker evidence.
+                attributed[(key, figure.amount)] = existing._replace(
+                    committed=False,
+                )
+        else:
+            existing = anonymous.get(figure.amount)
+            if existing is None or (existing.derived and not derived):
+                anonymous[figure.amount] = figure
+            elif existing.committed and not figure.committed:
+                anonymous[figure.amount] = existing._replace(committed=False)
+
+    attributed_amounts = {amount for _key, amount in attributed}
+    out = list(attributed.values()) + [
+        f for amount, f in anonymous.items() if amount not in attributed_amounts
+    ]
+    # Sorted so the tuple is stable regardless of claim iteration order —
+    # these end up on a frozen, hashed, repr-compared object.
+    return tuple(sorted(out, key=lambda f: (-f.amount, f.account_key)))
+
+
+def _grounded_commercial_native_units(
+    group: Sequence[Claim],
+    list_price_amounts: frozenset[float] = frozenset(),
+) -> dict[str, float]:
+    """Real, transcript-stated dollar figures among THIS finding's claims —
+    additive evidence carried alongside Impact on `native_units`, never
+    folded into `value` (never `affected_population`, `movable_gap` or
+    `value_per_unit`, all left exactly as `_refute`/the caller already set
+    them). Reporting the sum as if it applied to every account in the
+    cluster would be exactly the extrapolation forbidden alongside this: an
+    account that never stated a figure is not assumed to be worth the mean
+    of the ones that did. So this only ever answers "customers named $X
+    across N accounts" — the accounts that actually named one, nothing
+    wider — for the report to render distinctly from any projection.
+
+    Currency-conservative: only claims with no stated currency or an
+    explicit "USD" are summed. A claim naming a different currency is
+    counted (`commercial_grounded_claims`) but excluded from the dollar sum
+    rather than risk silently mixing currencies into one number.
+
+    DEDUPLICATED BEFORE SUMMING, AND THAT IS THE WHOLE POINT OF THE SUM —
+    the rule and the reasoning live on `deduped_grounded_figures`, which is
+    the single source of truth. This sum is literally those figures added up,
+    so the two can never disagree about what the money is.
+    """
+    grounded = [c for c in group if c.magnitude is not None]
+    if not grounded:
+        return {}
+
+    accounts_named: set[str] = set()
+    for c in grounded:
+        accounts_named.update(c.population.segments.get("accounts", ()))
+
+    figures = deduped_grounded_figures(group, list_price_amounts)
+
+    # STILL THE RAW CLAIM COUNT, deliberately. This is a statement about the
+    # evidence ("N claims carried a figure"), not about the money, and it is
+    # the one number here a reader should be able to reconcile against the
+    # claim list. It is also why nothing downstream may size a finding from
+    # it: it counts agreement, and agreement is confidence's business.
+    units: dict[str, float] = {"commercial_grounded_claims": float(len(grounded))}
+    list_prices = [f for f in figures if f.list_price]
+    if list_prices:
+        # A RANGE AND ITS SHAPE, WITH NO TOTAL ANYWHERE. The parts are chosen
+        # so they cannot be recombined into a sum: two ends, a count of
+        # distinct prices, and a count of accounts. Multiplying any of them
+        # together would be meaningless and looks it, which is the point.
+        amounts = sorted({f.amount for f in list_prices})
+        units[LIST_PRICE_MIN_UNIT] = amounts[0]
+        units[LIST_PRICE_MAX_UNIT] = amounts[-1]
+        units[LIST_PRICE_DISTINCT_UNIT] = float(len(amounts))
+        accounts = {f.account_key for f in list_prices if f.account_key}
+        if accounts:
+            units[LIST_PRICE_ACCOUNTS_UNIT] = float(len(accounts))
+
+    committed = [f for f in figures if f.committed]
+    if committed:
+        units[COMMITTED_USD_UNIT] = float(sum(f.amount for f in committed))
+        derived_total = sum(f.amount for f in committed if f.derived)
+        if derived_total:
+            # The portion of the sum that came off a written summary rather
+            # than a verified quote. Carried as a NUMBER rather than a flag
+            # so a renderer can hedge in proportion — "$X of that" reads very
+            # differently from a blanket disclaimer over the whole figure.
+            units[COMMITTED_USD_DERIVED_UNIT] = float(derived_total)
+    if accounts_named:
+        units["commercial_grounded_accounts"] = float(len(accounts_named))
+    return units
+
+
+def _rank_fractions(values: Sequence[float]) -> dict[float, float]:
+    """value -> where it sits within `values`, from just above 0 to 1.0 for
+    the largest.
+
+    FULL RESOLUTION, NOT THE QUARTILE. The quartile is what gets reported
+    (`types.SIZE_BANDS`); this is what gets sorted on. Quantising first and
+    then breaking the ties would mean falling through to the raw `value`,
+    which is denominated differently for different findings in the same run —
+    the exact cross-currency comparison the whole ordinal design exists to
+    avoid. Sorting on the fraction and reporting the quartile gets both: a
+    total order that never compares dollars to accounts, and an output number
+    that never implies more precision than the evidence carries.
+
+    Ties always share a fraction — the rank used is the count of the
+    population AT OR BELOW each value, so two findings of identical size can
+    never be separated by an accident of iteration order. That matters more
+    than it sounds: ordering has to be reproducible run over run, which is
+    the claim this engine makes against asking a general model the same
+    question.
+
+    The largest member of any population sits at 1.0, which is also true of a
+    population of one. That is deliberate rather than a degenerate case: a
+    lone quoted figure IS the largest quoted figure in the run. It does mean
+    a small figure ranks top when it is the only one, which is a property of
+    the DATA rather than of this function — `_log_size_bands` publishes the
+    population sizes and the figures behind them so that condition is visible
+    rather than inferred.
+    """
+    if not values:
+        return {}
+    ordered = sorted(values)
+    n = len(ordered)
+    return {
+        value: bisect_right(ordered, value) / n
+        for value in set(ordered)
+    }
+
+
+def _size_ranks(
+    findings: Sequence[Finding], provisional: Sequence[Impact],
+) -> list[Optional[float]]:
+    """The one cross-finding comparison in this pipeline, and the reason it
+    lives HERE rather than inside `score_impact`.
+
+    THE PROBLEM. A finding carrying a real quoted dollar figure but no named
+    account scores `value=None` — we know what a customer said and nothing
+    about how many accounts it touches — so it sorted below every finding we
+    could size, however trivially. Findings holding actual money ranked last,
+    which is the opposite of what a stated figure is worth. And the obvious
+    repair, adding the dollars to `value`, is worse than the disease: `value`
+    is denominated in accounts here, so dollars would win by six orders of
+    magnitude and naming any figure at all would beat every reach-based
+    finding in the corpus.
+
+    THE ANSWER IS ORDINAL, AND EACH FINDING COMPETES IN ITS OWN CURRENCY.
+    Dollar findings are ranked against the other dollar findings; reach
+    findings against the other reach findings. The top of the quoted figures
+    and the top of the reaches are both "the biggest of their kind", which IS
+    comparable, where their raw numbers are not. A finding that has both
+    takes the higher of its two ranks, so carrying more evidence can lift a
+    finding and can never demote one.
+
+    WHAT THIS DELIBERATELY DOES NOT DO. It does not guarantee a dollar
+    finding reaches the top of the list. If the quoted figures in a corpus
+    span a wide range, the smallest of them ranks low and stays there.
+    Guaranteeing the dollar line renders would mean a $5,000 one-off
+    outranking a forty-account finding, which is the loudest-problem failure
+    rebuilt with a currency symbol on it. The figure earns its place or it
+    does not.
+
+    I10 IS SATISFIED, and the direction matters. I10 forbids Stage 10 writing
+    BACKWARD into frozen scores; this reads forward, before the freeze:
+    inputs are compared, the answer is written into `ImpactInputs`, and only
+    then is anything scored. Ordering afterwards reads the frozen `Impact` and
+    mutates nothing, exactly as before.
+    """
+    dollar_values: list[float] = []
+    reach_values: list[float] = []
+    per_finding: list[tuple[Optional[float], Optional[float]]] = []
+    for finding, impact in zip(findings, provisional):
+        usd = finding.impact_inputs.native_units.get(COMMITTED_USD_UNIT)
+        usd = float(usd) if isinstance(usd, (int, float)) else None
+        reach = impact.value
+        if usd is not None:
+            dollar_values.append(usd)
+        if reach is not None:
+            reach_values.append(reach)
+        per_finding.append((usd, reach))
+
+    dollar_ranks = _rank_fractions(dollar_values)
+    reach_ranks = _rank_fractions(reach_values)
+
+    ranks: list[Optional[float]] = []
+    for usd, reach in per_finding:
+        candidates = [
+            rank for rank in (
+                dollar_ranks.get(usd) if usd is not None else None,
+                reach_ranks.get(reach) if reach is not None else None,
+            )
+            if rank is not None
+        ]
+        ranks.append(max(candidates) if candidates else None)
+    return ranks
+
+
+def _log_size_bands(
+    findings: Sequence[Finding], ranks: Sequence[Optional[float]]
+) -> None:
+    """The figures behind each dollar band, and how many findings each
+    population holds, so a reader can check whether the ranking is doing
+    something sensible on a real corpus.
+
+    Without this the band is an unfalsifiable integer. The specific thing it
+    exists to expose: a position is only as meaningful as the population it
+    was taken against, so in a corpus with two quoted figures BOTH sit near
+    the top of "the quoted figures" and rank accordingly. That is correct by
+    the ordinal design and may still be wrong for a reader, and the only way
+    to tell is to see the amounts and the population sizes together — which
+    is why `dollar_population` is on this line and not left to be inferred
+    from the band histogram. Magnitudes and counts only; never a paraphrase,
+    an account name, or anything a customer said.
+    """
+    dollars_by_band: defaultdict[int, list[float]] = defaultdict(list)
+    reach_by_band: defaultdict[int, int] = defaultdict(int)
+    for finding, rank in zip(findings, ranks):
+        band = _band_for_rank(rank)
+        if band is None:
+            continue
+        usd = finding.impact_inputs.native_units.get(COMMITTED_USD_UNIT)
+        if isinstance(usd, (int, float)):
+            dollars_by_band[band].append(float(usd))
+        else:
+            reach_by_band[band] += 1
+    if not dollars_by_band and not reach_by_band:
+        return
+    dollar_population = sum(len(v) for v in dollars_by_band.values())
+    reach_population = sum(reach_by_band.values())
+    logger.info(
+        "crucible_size_bands dollar_population=%s dollar_figures_by_band=%s "
+        "reach_population=%s reach_findings_by_band=%s unbanded=%s",
+        dollar_population,
+        {b: sorted(v, reverse=True) for b, v in sorted(dollars_by_band.items())},
+        reach_population,
+        dict(sorted(reach_by_band.items())),
+        sum(1 for r in ranks if r is None),
+    )
+
+
 @dataclass(frozen=True)
 class Rejection:
     """A candidate that did not survive, and why. Never silently dropped —
@@ -172,6 +682,113 @@ def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
             if name not in seen:
                 seen.append(name)
     return tuple(seen)
+
+
+#: The verbs worth putting in a SENTENCE, and the words to use for them.
+#:
+#: `SUPPORTS` and `AFFECTS` are deliberately absent, for two different reasons.
+#: `SUPPORTS` is the majority verb and means "this claim agrees with the
+#: theme" — which is corroboration, the one quantity that must stay out of how
+#: big a finding is, and putting a count of it in the headline sentence invites
+#: precisely the reading I1 exists to prevent. `AFFECTS` is the extractor's
+#: catch-all: it lands on more claim kinds than any other verb and reduces in
+#: prose to "is about", which the statement already says. Both still travel in
+#: `Finding.graph_relations` for a renderer that wants the full breakdown; they
+#: just do not earn a clause.
+#:
+#: The three that remain are the DIRECTED ones — each asserts something about
+#: the theme that no single claim's type carries on its own.
+_RELATION_PHRASE: dict[str, str] = {
+    "BLOCKED_BY": "blocked on it",
+    "REQUESTS": "asking for it",
+    "PRESSURES": "naming competitive pressure on it",
+}
+
+#: Rendered in this order regardless of counts, so two findings never describe
+#: the same mix in a different order. Blockers first: they are the scarcest
+#: verb in the graph and the one a reader can act on soonest.
+_RELATION_PROSE_ORDER: tuple[str, ...] = ("BLOCKED_BY", "REQUESTS", "PRESSURES")
+
+
+def _graph_relations(
+    claims: Sequence[Claim], accounts: Sequence[str],
+) -> Optional[tuple[GraphRelation, ...]]:
+    """What the knowledge graph asserts about this group, counted.
+
+    THIS IS THE WHOLE CROSS-CLAIM STEP, and it is deliberately arithmetic. The
+    graph holds no signal-to-signal edge — every edge it writes runs from a
+    signal to an entity — so there is no path between two claims to walk and no
+    general graph reasoning to do. What there IS: a finding is a group of
+    claims that all point at ONE theme, so the verbs on those edges are already
+    directly comparable, and their composition is a fact about the group that
+    no member states alone. Four claims blocked on a theme six others are
+    asking for is a sentence only visible from here.
+
+    `accounts` is the goal-scoped population from the caller, so a name that
+    scored out of the goal cannot walk back in through this door.
+
+    Returns `None`, never `()`, when the graph themed none of these claims —
+    I3. An empty tuple would render as "no blockers", which the graph did not
+    say.
+    """
+    by_relation: dict[str, list[Claim]] = {}
+    for c in claims:
+        relation = getattr(c, "graph_relation", None)
+        if relation:
+            by_relation.setdefault(relation, []).append(c)
+    if not by_relation:
+        return None
+
+    scope = set(accounts)
+    rows: list[GraphRelation] = []
+    for relation, members in by_relation.items():
+        named: list[str] = []
+        for c in members:
+            for name in c.population.segments.get("customer_side", ()):
+                if name in scope and name not in named:
+                    named.append(name)
+        rows.append(GraphRelation(relation, len(members), tuple(named)))
+    # MOST CLAIMS FIRST, TIES ON THE NAME. The tie-break is what makes the
+    # order a function of the evidence rather than of dict insertion order —
+    # same discipline the theme fold uses for picking a representative.
+    rows.sort(key=lambda r: (-r.claims, r.relation))
+    return tuple(rows)
+
+
+def _relation_clause(relations: Optional[Sequence[GraphRelation]]) -> str:
+    """The graph's verbs as a clause, or "" when there is nothing to say.
+
+    Phrased as REPORTED STRUCTURE — "the graph links 4 of them to this as
+    blocked on it" — rather than as our own assertion, for the same reason the
+    topic is quoted: this is an edge somebody's extractor wrote and a user can
+    already see elsewhere in the product, not a conclusion this engine reached.
+
+    Says nothing causal by construction: it counts claims and names the verb.
+    The caller lints the assembled sentence anyway and falls back if it fails.
+    """
+    if not relations:
+        return ""
+    by_relation = {r.relation: r for r in relations}
+    parts: list[str] = []
+    for relation in _RELATION_PROSE_ORDER:
+        row = by_relation.get(relation)
+        if row is None or row.claims < 1:
+            continue
+        phrase = _RELATION_PHRASE[relation]
+        # THE ACCOUNTS ONLY WHEN THERE ARE ANY. "(0 accounts)" states that
+        # nobody is affected, when the truth is that no claim in this group
+        # named a customer — I3 in a sentence.
+        if row.accounts:
+            n = len(row.accounts)
+            phrase += f" ({n} account{'' if n == 1 else 's'})"
+        parts.append(f"{row.claims} {phrase}")
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        joined = parts[0]
+    else:
+        joined = ", ".join(parts[:-1]) + " and " + parts[-1]
+    return f" The graph links {joined}."
 
 
 class Refutation(NamedTuple):
@@ -299,6 +916,10 @@ def build_findings(
     way would render a number that carries no information.
     """
     claims = list(claims)
+    # CORPUS-WIDE, BEFORE CLUSTERING. A rate card quoted to sixteen accounts
+    # scatters across whatever clusters those calls' subjects produce, so the
+    # repetition is only visible from here.
+    list_price_amounts = repeated_amounts(claims)
     clusters = _cluster(claims)
 
     findings: list[Finding] = []
@@ -376,7 +997,11 @@ def build_findings(
         # wants the theme in the corpus's own words. Rendering the key is how
         # the first version put "c490" in front of a user.
         label = _label(group, key)
-        statement, example = _statement_parts(label, group, accounts)
+        # COMPUTED BEFORE THE STATEMENT, because the statement reads it. Scoped
+        # to `accounts` — the goal-intersected set — so the population filter
+        # applies to the graph's verbs exactly as it applies to sizing.
+        relations = _graph_relations(group, accounts)
+        statement, example = _statement_parts(label, group, accounts, relations)
         strongest = max(group, key=lambda c: c.strength_score)
         if not lint_claim(statement, strongest.strength).ok:
             drops["uncausal"] += 1
@@ -411,6 +1036,14 @@ def build_findings(
                 movable_gap=1.0 if accounts else None,
                 value_per_unit=None,
                 assumed_params=assumed,
+                native_units=_grounded_commercial_native_units(
+                    group, list_price_amounts,
+                ),
+                # The identities behind that sum, so anything summing ACROSS
+                # findings can deduplicate the same money one more time.
+                grounded_figures=deduped_grounded_figures(
+                    group, list_price_amounts,
+                ),
             ),
             confidence_inputs=ConfidenceInputs(
                 strengths=tuple(c.strength for c in group),
@@ -430,10 +1063,38 @@ def build_findings(
                 solution_evidence_absent=solution_evidence_absent,
             ),
             adjudication=_adjudicate(group),
+            # ON THE FINDING, NEVER ON `impact_inputs`. That placement is the
+            # I1 boundary in this change: `ImpactInputs` is the only thing
+            # `score_impact` is meant to read, and a per-relation claim count
+            # sitting inside it would be a corroboration quantity one line away
+            # from becoming a size bonus.
+            graph_relations=relations,
         )
         findings.append(finding)
-        impacts.append(score_impact(finding))
-        confidences.append(score_confidence(finding, now=now))
+
+    # ── The ordinal size band: the ONE cross-finding comparison ─────────────
+    #
+    # SCORED TWICE, ON PURPOSE, and only the second result ever escapes. The
+    # reach half of the band is `score_impact`'s own arithmetic, so the
+    # alternative was to re-derive `affected_population * movable_gap *
+    # value_per_unit` here — a second copy of the sizing formula, free to
+    # drift from the real one and wrong in a way no test would catch, because
+    # both copies would agree until someone changed one. Calling the real
+    # scorer for a throwaway pass costs nothing (it is pure arithmetic over a
+    # frozen dataclass) and there is then exactly one definition of size.
+    #
+    # The provisional impacts are discarded here and never reach a caller.
+    provisional = [score_impact(f) for f in findings]
+    ranks = _size_ranks(findings, provisional)
+    _log_size_bands(findings, ranks)
+    findings = [
+        f if rank is None else replace(
+            f, impact_inputs=replace(f.impact_inputs, size_rank=rank)
+        )
+        for f, rank in zip(findings, ranks)
+    ]
+    impacts = [score_impact(f) for f in findings]
+    confidences = [score_confidence(f, now=now) for f in findings]
 
     if len(rejected) > MAX_LISTED_REJECTIONS:
         rejected.sort(key=lambda r: (-len(r.claim_ids), r.label))
@@ -485,6 +1146,15 @@ def build_findings(
             # rather than derived at the call site, so the subtraction cannot
             # drift from how the clustering actually keyed.
             "ungroupable_groups": ungroupable_groups,
+            # HOW MANY FINDINGS THE GRAPH ACTUALLY SAID SOMETHING ABOUT. Worth
+            # publishing rather than inferring: if the verbs stop arriving —
+            # an extractor change, a tenant backfilled before the edge existed
+            # — the findings do not break, they quietly go back to naming a
+            # topic and a count, which is the failure this was built to fix and
+            # is invisible in the output itself.
+            "findings_with_graph_relations": sum(
+                1 for f in findings if f.graph_relations
+            ),
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
         },
@@ -498,19 +1168,79 @@ def _rank(
     *,
     deep_cap: int,
 ) -> list[int]:
-    """Order by size, then by how sure — reading FROZEN scores (I10).
+    """Order by what KIND of claim it is, then by size, then by how sure —
+    reading FROZEN scores (I10).
 
-    An unsizeable finding sorts last but is never dropped and never treated as
-    zero: "we could not size this" and "this is worth nothing" lead to opposite
-    decisions. An authoritative conflict outranks everything, because two
-    sources that may both speak disagreeing is worth more than either claim.
+    THE CLAIM-TYPE BUCKET COMES BEFORE SIZE, and that is the whole reason
+    this key has four terms rather than three. Without it a stated
+    PREFERENCE with more reach outranked a stated BLOCKER with less, and
+    since the single recommendation binds to rank 1 (`recommend.
+    build_synthesized_recommendation`), the memo recommended the preference
+    while the table three sections below labelled the blocker `MUST` — one
+    document saying two different things about the same run. The bucket is
+    `moscow.type_bucket`, the same "strongest claim type wins" rule that
+    NAMES the bucket, imported rather than restated so the label and the
+    position cannot drift.
+
+    WHAT IS NOT IN THE KEY: the `?` on `MUST?`. That flag comes from
+    `moscow.document_count(surfaced_by)`, and `surfaced_by` is one of
+    `types.CORROBORATION_FIELDS` — sorting on it would let a two-account
+    blocker heard in three calls outrank a twenty-account blocker heard in
+    one. Corroboration keeps the place it already has, at the TAIL of this
+    key via `confidences[i].score`, where it can break a tie without ever
+    deciding one. See `moscow.type_bucket` for the same argument at the
+    other end.
+
+    Size is read as `size_rank` — the finding's position among its OWN
+    currency's peers — and never as the raw `value`. That is the whole
+    change, and it is a change of unit rather than of policy. `value` is
+    denominated differently for different findings on the same run: accounts
+    for a reach-based finding, and nothing at all for one whose only evidence
+    is a quoted dollar figure. Sorting the whole list on it compared
+    incommensurable things, and put every finding we could not size in
+    accounts last by construction — including the ones holding real money.
+    `size_rank` is the same question asked in a unit every finding shares:
+    how big is this, relative to the things it can be compared to.
+
+    WHY NOT SORT ON THE QUARTILE AND BREAK TIES ON `value`. Because the tie
+    would be broken by exactly the comparison the quartile exists to avoid.
+    Measured on a probe corpus of 201 findings, a figure-only finding banded
+    top-quartile and then landed 51st, behind every reach finding in its own
+    band, because `value` was asked to rank "fifty accounts" against "no
+    account measure" and `None` loses that every time. The quartile is what
+    gets REPORTED (`types.SIZE_BANDS`); the underlying position is what
+    sorts.
+
+    This preserves reach-only ordering exactly, and provably: within one
+    currency `size_rank` is monotone in `value`, so reach findings come out
+    in precisely the order sorting on `value` alone produced. A finding with
+    no figure is exactly where it always was, relative to the others with no
+    figure.
+
+    An unranked finding — no grounded figure and no measured reach — sorts
+    last but is never dropped and never treated as zero: "we could not size
+    this" and "this is worth nothing" lead to opposite decisions. An
+    authoritative conflict still outranks everything, because two sources
+    that may both speak disagreeing is worth more than either claim.
     """
     def key(i: int):
         conflict = findings[i].adjudication == "conflict"
-        value = impacts[i].value
+        size_rank = impacts[i].size_rank
         return (
             0 if conflict else 1,
-            -(value if value is not None else -1),
+            # 0 blocker, 1 preference, 2 neither — see `moscow.type_bucket`.
+            # Read off `confidence_inputs` only because that is where the
+            # pipeline already records the claim types (line ~937); the value
+            # is a property of what was SAID, not of how many said it, and
+            # `claim_types` is deliberately not a corroboration field.
+            type_bucket(findings[i].confidence_inputs.claim_types),
+            # A real rank is always > 0, so an unranked finding sorting at 0
+            # lands behind every ranked one without a sentinel.
+            -(size_rank if size_rank is not None else 0.0),
+            # Cross-currency ties (the top of the figures and the top of the
+            # reaches both sit at 1.0) fall through to how SURE we are —
+            # the only remaining discriminator that means the same thing for
+            # both kinds of finding.
             -confidences[i].score,
         )
 
@@ -524,24 +1254,71 @@ MAX_NAMED_SOURCES = 4
 
 #: `kg_ingest.runner.sync_provider`'s doc_name shape: `<provider>-sync-batch-<n>`.
 #:
-#: THE NUMBER IS AN INGEST CHUNK, NOT A DOCUMENT. A connector sync slices its
-#: pull into arbitrary batches and stamps each with its index, so a finding read
-#: back as
+#: THE NUMBER MEANS TWO DIFFERENT THINGS, AND WHICH ONE DEPENDS ON THE
+#: PROVIDER. `kg_ingest.runner._extraction_units` branches on
+#: `_CALL_PROVIDERS`:
 #:
-#:   fireflies-sync-batch-0 (9) · fireflies-sync-batch-4 (7) ·
-#:   fireflies-sync-batch-10 (4) · fireflies-sync-batch-5 (3) · +1 more documents
+#:   * For every OTHER provider it is an INGEST CHUNK — a char-budget slice of
+#:     the pull, stamped with its index. A finding read back as
 #:
-#: looks like evidence spread across five documents and is one source chopped
-#: five ways. That is worse than unhelpful: breadth across documents is exactly
-#: what a reader uses to judge whether a finding is well-supported, and this
-#: inflates it.
+#:       slack-sync-batch-0 (9) · slack-sync-batch-4 (7) ·
+#:       slack-sync-batch-10 (4) · slack-sync-batch-5 (3) · +1 more documents
 #:
-#: There is no call title to put here instead, and that is a property of the
-#: data rather than of this function: `call_digest` records that KG extraction
-#: is per-BATCH, so `extract_document` stamps only `{"doc": <batch name>}` and
-#: an extracted signal carries no call id to resolve. The provider is the ONLY
-#: real attribution in the string, so the provider is what gets rendered.
+#:     looks like evidence spread across five documents and is one source
+#:     chopped five ways. Breadth across documents is exactly what a reader
+#:     uses to judge whether a finding is well-supported, and this inflates
+#:     it — so these collapse to the provider label and are counted once.
+#:
+#:   * For a CALL provider it is a CALL. `_extraction_units` runs
+#:     `for i, rec in enumerate(fresh)` — one extraction pass per call — so
+#:     `fireflies-sync-batch-7` is one transcript, not a slice of several.
+#:     Collapsing these before counting threw away the only real breadth
+#:     measure a call tenant has (see `_sources_of`).
+#:
+#: There is still no call TITLE to put here, and that is a property of the
+#: data rather than of this function: `extract_document` stamps only
+#: `{"doc": <batch name>}`, so an extracted signal carries no resolvable
+#: title. The provider is the only real attribution in the string, so the
+#: provider is what gets rendered — with the call COUNT beside it.
 _SYNC_BATCH = re.compile(r"^([a-z0-9_]+)-sync-batch-\d+$")
+
+#: THE OTHER MACHINE-MINTED DOCUMENT NAME, and it reached a client's screen.
+#: `scripts/backfill_fireflies_kg.py` stamps `f"{provider}-backfill-
+#: {rec.external_id}"`, so a backfilled transcript arrives named
+#: `fireflies-backfill-<26-character provider id>`. That is not the
+#: `-sync-batch-<n>` shape, so it passed `_document_label` untouched and one
+#: staging run rendered FIFTY of them, each presented to the reader as the
+#: name of a document they might go and look up. It is an opaque provider id;
+#: there is nothing to look up.
+#:
+#: NOT ONLY A DISPLAY BUG. Each one also counted as its own document in
+#: `moscow.document_count`, which decides `MUST` vs `MUST?` — so the raw ids
+#: were a ranking input as well as an eyesore.
+#:
+#: ONE RECORD, ONE CALL. The backfill script loops per Fireflies record, so
+#: unlike a sync batch there is no ambiguity: a `-backfill-<id>` document IS
+#: one transcript, and `_sources_of` counts it as one call.
+#:
+#: GATED ON A KNOWN PROVIDER, unlike `_SYNC_BATCH`, and the asymmetry is
+#: deliberate. `-sync-batch-<n>` ends in a bare integer and is a shape no
+#: human names a file, so an unknown prefix there is safely assumed to be a
+#: new connector. `-backfill-<anything>` is not: `2026-backfill-plan.docx` is
+#: a document somebody could genuinely have written, and collapsing it would
+#: hide a real source behind a provider label. Requiring the prefix to be a
+#: provider this engine actually knows costs a one-line edit when a backfill
+#: script is written for a new connector, and the failure mode of forgetting
+#: is the harmless one — a raw name renders, rather than a real document
+#: disappearing.
+_BACKFILL_DOC = re.compile(r"^([a-z0-9_]+)-backfill-[A-Za-z0-9][A-Za-z0-9_.:-]*$")
+
+#: Providers whose `-sync-batch-<n>` is one CALL rather than one chunk. Kept
+#: in step with `kg_ingest.runner._CALL_PROVIDERS`, which is the set that
+#: actually decides per-call extraction, and duplicated rather than imported
+#: because importing the ingest runner drags its connector stack into every
+#: Crucible run for a three-element frozenset. If that set gains a provider,
+#: this needs the same entry or that provider silently reverts to being
+#: counted as one document.
+_CALL_PROVIDERS = frozenset({"fireflies", "zoom", "google_meet"})
 
 #: What to call a provider's batches once they are collapsed. Anything not
 #: listed falls back to its own name, title-cased — a new connector reads
@@ -553,19 +1330,57 @@ _PROVIDER_LABELS = {
     "gong": "Gong call transcripts",
 }
 
+#: Every provider this engine can name. `_BACKFILL_DOC` is only trusted for
+#: one of these — see the note on that pattern.
+_KNOWN_PROVIDERS = frozenset(_PROVIDER_LABELS) | _CALL_PROVIDERS
+
+
+def _batch_provider(doc: str) -> Optional[str]:
+    """The provider that minted this document name, when the name is one this
+    engine generated rather than one a human would recognise.
+
+    Both machine-minted shapes in one place, because the two callers below
+    have to agree about which names collapse: a name `_document_label`
+    rewrites but `_sources_of` does not recognise would be counted as a
+    separate document under a shared label, which is the double-count the
+    collapsing exists to prevent.
+    """
+    m = _SYNC_BATCH.match(doc)
+    if m:
+        return m.group(1)
+    m = _BACKFILL_DOC.match(doc)
+    if m and m.group(1) in _KNOWN_PROVIDERS:
+        return m.group(1)
+    return None
+
 
 def _document_label(doc: str) -> str:
     """The name to show for one source document.
 
     Real document names — `slack/#mvp-product (part 2/3)`, a Drive filename —
-    pass through untouched. Only the sync-batch shape is rewritten, and only
-    because its number identifies nothing a reader could look up.
+    pass through untouched. Only the machine-minted shapes are rewritten
+    (`_batch_provider`), and only because the number or opaque id in them
+    identifies nothing a reader could look up.
+
+    THE STORED NAME IS NOT TOUCHED, here or anywhere upstream.
+    `call_digest._SYNC_BATCH_DOC` matches the `-sync-batch-<n>` shape on the
+    stored value as a double-counting filter, so renaming at the source would
+    break that filter silently. This is a display decision and stays one.
     """
-    m = _SYNC_BATCH.match(doc)
-    if not m:
+    provider = _batch_provider(doc)
+    if provider is None:
         return doc
-    provider = m.group(1)
     return _PROVIDER_LABELS.get(provider, provider.replace("_", " ").title())
+
+
+#: How a collapsed CALL-provider entry reads. `moscow._CALL_ENTRY_RE` parses
+#: this exact shape back out to grade corroboration on, so the two must be
+#: changed together.
+def _call_source_entry(label: str, calls: int, claims: int) -> str:
+    return (
+        f"{label} (≥ {calls} call{'' if calls == 1 else 's'}, "
+        f"{claims} claim{'' if claims == 1 else 's'})"
+    )
 
 
 def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
@@ -573,21 +1388,57 @@ def _sources_of(claims: Sequence[Claim]) -> tuple[str, ...]:
 
     Deterministic: ties break on the document name, so a re-run names the same
     sources in the same order.
+
+    COLLAPSED FOR DISPLAY, COUNTED BEFORE COLLAPSING. Everything a provider
+    contributed still reads as ONE entry — five `slack-sync-batch-*` chunks
+    are one source chopped five ways and must not read as five documents. But
+    the count that entry carries is taken from the RAW `artifact_id`s, not
+    from the label, and for a call provider that distinction is the whole
+    point: `kg_ingest.runner._extraction_units` runs one extraction pass per
+    call, so `fireflies-sync-batch-7` IS one transcript. Labelling first and
+    counting second returned `1` for every finding on a call tenant, which
+    pinned all of them at `MUST?` (`moscow.THIN_EVIDENCE_DOCS` is 2) and made
+    `MUST` unreachable there — document count carried no signal at all.
+
+    BACKFILLED TRANSCRIPTS COLLAPSE THE SAME WAY (`_BACKFILL_DOC`). They are
+    the same thing under a different minted name, and leaving them out meant
+    a run rendered fifty raw provider ids as fifty document names AND fed
+    fifty into the count.
+
+    THE CALL COUNT IS A FLOOR, AND SAYS SO IN THE OUTPUT (`≥ N calls`).
+    Per-call extraction is recent; anything ingested before it genuinely
+    batched several calls under one `-sync-batch-<n>` name, so a corpus that
+    spans the change under-counts and cannot tell by how much. A floor is the
+    only honest form: it can understate how well-corroborated a finding is,
+    never overstate it, and understating is the direction that costs a reader
+    nothing they were relying on.
+
+    THE DOC NAME ITSELF IS NOT TOUCHED. `call_digest._SYNC_BATCH_DOC` matches
+    on the `-sync-batch-<n>` shape as a double-counting filter; renaming it
+    upstream would break that filter silently. This changes only what gets
+    rendered.
     """
     counts: dict[str, int] = {}
+    # Distinct raw `artifact_id`s behind a CALL-provider label — one per call.
+    # Absent for every other label, which is how the two are told apart below.
+    call_docs: dict[str, set[str]] = {}
     for c in claims:
         doc = (c.artifact_id or "").strip()
-        if doc:
-            # COLLAPSED BEFORE COUNTING, so the count is per SOURCE rather than
-            # per ingest chunk: five batches of one provider become one entry
-            # carrying all five counts, which is the true number of claims that
-            # source contributed.
-            label = _document_label(doc)
-            counts[label] = counts.get(label, 0) + 1
+        if not doc:
+            continue
+        label = _document_label(doc)
+        counts[label] = counts.get(label, 0) + 1
+        provider = _batch_provider(doc)
+        if provider in _CALL_PROVIDERS:
+            call_docs.setdefault(label, set()).add(doc)
     if not counts:
         return ()
     ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
-    named = tuple(f"{doc} ({n})" for doc, n in ranked[:MAX_NAMED_SOURCES])
+    named = tuple(
+        _call_source_entry(doc, len(call_docs[doc]), n) if doc in call_docs
+        else f"{doc} ({n})"
+        for doc, n in ranked[:MAX_NAMED_SOURCES]
+    )
     if len(ranked) > MAX_NAMED_SOURCES:
         named += (f"+{len(ranked) - MAX_NAMED_SOURCES} more documents",)
     return named
@@ -615,13 +1466,47 @@ def _label(claims: Sequence[Claim], key: str) -> str:
     return max(counts, key=lambda k: (counts[k], -order[k]))
 
 
-def _statement(label: str, claims: Sequence[Claim], accounts: Sequence[str]) -> str:
+#: How a theme label is introduced in a finding's sentence.
+#:
+#: THIS IS THE REPLACEMENT FOR A PAIR OF QUOTATION MARKS, and it has the same
+#: job: to say that the words after it are the sources' framing of the topic
+#: and not the engine's own assertion. What it does NOT do is claim anyone
+#: said them in that order — which the quotes did, falsely, because a stored
+#: assertion is an extractor paraphrase (the verbatim quote is validated
+#: against the transcript and then discarded by design) and `label_for` cuts
+#: it at the first causal connective on top of that.
+#:
+#: `report._restate_statement` rewrites the old quoted shape into this one at
+#: render time, so a row written before this change reads correctly too.
+THEME_LEAD_IN = "a reported theme:"
+
+#: How the supporting example is introduced. Same reasoning as `THEME_LEAD_IN`
+#: and, if anything, a stronger case: `cluster.example_for` paraphrase-cuts
+#: AND ellipsises, so the text is at three removes from anything spoken.
+EXAMPLE_LEAD_IN = "— summarising one source:"
+
+
+def _stopped(text: str) -> str:
+    """`text` with exactly one closing full stop.
+
+    Unconditional appending is what produced "….", because `example_for` ends
+    a truncated example in an ellipsis of its own.
+    """
+    t = (text or "").rstrip()
+    return t if (not t or t[-1] in ".!?…") else t + "."
+
+
+def _statement(
+    label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
+) -> str:
     """The sentence alone. See `_statement_parts` for why there are two."""
-    return _statement_parts(label, claims, accounts)[0]
+    return _statement_parts(label, claims, accounts, relations)[0]
 
 
 def _statement_parts(
     label: str, claims: Sequence[Claim], accounts: Sequence[str],
+    relations: Optional[Sequence[GraphRelation]] = None,
 ) -> tuple[str, str]:
     """The statement, AND the example quote it used — or "" when it used none.
 
@@ -642,11 +1527,23 @@ def _statement_parts(
     "drives" — those need causal evidence, and a corpus of tickets and calls
     does not have any.
 
-    The topic is QUOTED. It comes from a signal's own words, so presenting it
-    unquoted would read as our description of the business; quoted, it is
-    plainly reported speech, which is what it is. `cluster.label_for` has
-    already cut it at the first causal connective, so a source's own "because"
-    cannot arrive here and be attributed to us.
+    THE TOPIC IS ATTRIBUTED, NOT QUOTED, and the difference is the whole
+    reason this changed. It used to sit in curly quotes, as a device to mark
+    it as reported speech rather than our description of the business — the
+    marking is right and is kept, but quotation marks were the wrong way to
+    do it. `graph.extractor` validates a verbatim quote against the transcript
+    and then discards it by design (no raw dumps), so a stored assertion is
+    ALWAYS a paraphrase; `cluster.label_for` then cuts it at the first causal
+    connective. Curly quotes around that promised the reader the words are the
+    speaker's when they are the extractor's, trimmed. A cleaned-up quote is a
+    fabrication wearing quotation marks.
+
+    SO THE DEVICE IS REPLACED, NOT DROPPED. "a reported theme:" does the same
+    job the quotes did — it says these words come from the sources rather than
+    from the engine — and the colon delimits the label just as unambiguously,
+    without claiming anyone said them in that order. Same for the example
+    below: labelled as a summary of what a source said, which is exactly what
+    it is.
     """
     n = len(claims)
     where = (
@@ -661,20 +1558,24 @@ def _statement_parts(
     # which is the same defect one word to the right.
     claims_word = "claim" if n == 1 else "claims"
     concern = "concerns" if n == 1 else "concern"
-    plain = f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d."
+    plain = f"{n} {claims_word}{where} {concern} {THEME_LEAD_IN} {topic}."
 
-    # AND ONE OF THEM, IN THE SOURCE'S OWN WORDS.
+    # AND ONE OF THEM, AS A SOURCE'S POINT WAS SUMMARISED.
     #
-    # "4 claims concern 'Mobile editor keystroke loss'" is a table-of-contents
-    # entry, not a finding: it names a topic and says how many times it came
-    # up. A reader cannot judge it, argue with it, or take it to anyone —
-    # which is the whole job. Read against the same corpus, the chat surface
-    # answers with account counts and quotes; the report answered with a label.
+    # "4 claims concern a reported theme: Mobile editor keystroke loss" is a
+    # table-of-contents entry, not a finding: it names a topic and says how
+    # many times it came up. A reader cannot judge it, argue with it, or take
+    # it to anyone — which is the whole job. Read against the same corpus, the
+    # chat surface answers with account counts and evidence; the report
+    # answered with a label.
     #
-    # SO: quote the strongest claim beside the count. Reported speech, exactly
-    # like the topic — this asserts nothing we have not been told, and adds no
-    # causation, because the example goes through `label_for`, the same cut at
-    # the first causal connective the label already gets.
+    # SO: the strongest claim goes beside the count, LABELLED AS A SUMMARY.
+    # Reported speech, exactly like the topic — this asserts nothing we have
+    # not been told, and adds no causation, because the example goes through
+    # `example_for`, the same cut at the first causal connective the label
+    # already gets. It is NOT presented as a quotation, because it is not one:
+    # `example_for` takes an extractor paraphrase, cuts it at a connective,
+    # and may ellipsise it.
     #
     # AND IT CAN ONLY EVER ADD. The example is linted before it is used, and a
     # failure falls back to `plain` rather than dropping the finding — the
@@ -683,8 +1584,9 @@ def _statement_parts(
     strongest = max(claims, key=lambda c: c.strength_score, default=None)
     said = (getattr(strongest, "assertion", "") or "").strip()
     # `label_for("")` returns the literal string "unlabelled", so an empty
-    # assertion rendered `for example, "unlabelled"` — a quotation mark around
-    # a word no source ever said, which is worse than no example at all.
+    # assertion rendered `for example, "unlabelled"` — the engine's own filler
+    # presented as something a source said, which is worse than no example at
+    # all.
     # `example_for`, not `label_for`: same causal cut, its own length budget,
     # and it ends where a reader can tell it ended.
     example = example_for(said) if said else ""
@@ -692,13 +1594,40 @@ def _statement_parts(
         strongest is not None
         and example
         and example.lower() != topic.lower()
-        # A quote that only repeats the label teaches nothing and costs a line.
+        # An example that only repeats the label teaches nothing, costs a line.
         and example.lower() not in topic.lower()
     ):
         candidate = (
-            f"{n} {claims_word}{where} {concern} \u201c{topic}\u201d "
-            f"\u2014 for example, \u201c{example}\u201d."
+            f"{n} {claims_word}{where} {concern} {THEME_LEAD_IN} {topic} "
+            f"{EXAMPLE_LEAD_IN} {_stopped(example)}"
         )
         if lint_claim(candidate, strongest.strength).ok:
-            return candidate, example
-    return plain, ""
+            return _with_relations(candidate, strongest, relations), example
+
+    # THE CLAUSE STILL APPLIES WHEN THERE IS NO EXAMPLE. A group whose quote
+    # was unusable \u2014 or identical to its own label \u2014 is exactly the
+    # table-of-contents entry the example was added to fix, so it is the last
+    # place to withhold the one other thing there is to say about it.
+    return _with_relations(plain, strongest, relations), ""
+
+
+def _with_relations(
+    statement: str,
+    strongest: Optional[Claim],
+    relations: Optional[Sequence[GraphRelation]],
+) -> str:
+    """`statement` plus what the graph asserts, IF that survives the lint.
+
+    IT CAN ONLY EVER ADD \u2014 the same contract the example clause holds itself
+    to, and for the same reason: the caller treats an unlintable statement as a
+    DROP, so a clause that failed I5 would silently delete findings rather than
+    render them plainly. Anything unlintable falls back to the statement it was
+    handed, untouched.
+    """
+    if strongest is None or not relations:
+        return statement
+    clause = _relation_clause(relations)
+    if not clause:
+        return statement
+    enriched = statement + clause
+    return enriched if lint_claim(enriched, strongest.strength).ok else statement

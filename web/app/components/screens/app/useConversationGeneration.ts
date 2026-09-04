@@ -21,7 +21,7 @@
 
 import { useCallback } from "react"
 import { runListArtifactsAction } from "../../shared/chat-shell/conversation/actions"
-import { clearPrdDrafts } from "../../shared/PrdInputQuestions"
+import { clearPrdDrafts } from "../../../lib/prd-adapter"
 import { followTicketSetSwitch, loadTicketSet, runTicketSetGeneration } from "../../../lib/runTicketSetGeneration"
 import { customArtifactsApi, type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type OpenArtifactResult } from "../../../lib/api"
 import type { ChatPersistence } from "../../../lib/chatPersistence"
@@ -106,6 +106,19 @@ export interface UseConversationGenerationDeps {
   // ── The shared content-panel seam (a single app-global panel) ──────────────
   setContent: (patch: Partial<AppContentState>) => void
   openContentPanel: (tab: ContentPanelTab) => void
+  /** Open a panel FOR A NAMED CONVERSATION — now if it is the one on screen,
+   *  else held until the reader returns to it.
+   *
+   *  Every panel that becomes ready after an await belongs to the thread that
+   *  started the work, not to whatever the reader wandered to while it ran. A
+   *  doc-to-tickets import takes ~80 seconds; opening its Tickets panel over
+   *  another thread shows that thread an artifact it never asked for, and the
+   *  thread that did ask gets nothing.
+   *
+   *  Optional: a single-conversation surface (the project chat) has nowhere
+   *  else to be, so it omits this and the flows fall back to
+   *  `openContentPanel`. */
+  openPanelForTab?: (tabId: string, tab: ContentPanelTab) => void
   /** The live content-panel state (read for the open ticket-set slice). */
   content: AppContentState
   showToast: (title: string, sub: string, link?: string, opts?: { onAction?: () => void; persist?: boolean }) => void
@@ -127,6 +140,7 @@ export function useConversationGeneration({
   finalizeConversationTurn,
   setContent,
   openContentPanel,
+  openPanelForTab,
   content,
   showToast,
   openArtifactInPanel,
@@ -451,7 +465,13 @@ export function useConversationGeneration({
           // then land the panel on Tickets.
           if (opts.openTickets) {
             void storiesApi.generate(result.prd.prd_id).catch(() => {})
-            openContentPanel("tickets")
+            // FOR THIS TAB, not for wherever the reader is now. The import
+            // above is the longest wait in the product (~80s), so switching
+            // tabs while it runs is ordinary rather than exotic — and landing
+            // Tickets over another thread showed that thread an artifact it
+            // never asked for.
+            if (openPanelForTab) openPanelForTab(tabId, "tickets")
+            else openContentPanel("tickets")
           }
           // The thread's record of what got built — the agent-only summary turn
           // (a no-op on a surface with no poster).

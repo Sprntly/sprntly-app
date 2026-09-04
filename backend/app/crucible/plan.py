@@ -85,10 +85,35 @@ class Gap:
 
 
 @dataclass(frozen=True)
+class PlanQuestion:
+    """Something the CHOSEN framework needs and cannot derive — asked once,
+    batched, before generation begins (AC-5). Replaces the old fixed set of
+    three questions asked unconditionally regardless of what would actually
+    use the answer; see `app.crucible.framework.questions_for`.
+
+    Skipping one is not the same as answering it with nothing: the gate
+    never invents a value for a blank field, and the gap it would have
+    closed is carried into the output instead (I3/I8's discipline, applied
+    to an input rather than a finding).
+    """
+    id: str
+    prompt: str
+    why: str
+
+
+@dataclass(frozen=True)
 class RunPlan:
     goal_text: str
     definition_text: str
     currency: str
+    #: THE READER'S OWN SENTENCE, when the caller has one distinct from
+    #: `goal_text` — chat dispatches the planner's EXTRACTED goal as
+    #: `goal_text` (right for this class's own fields below: the metric and
+    #: the definition genuinely want the normalised words) and this alongside
+    #: it, so the gate can show what was actually typed rather than only its
+    #: normalisation. Empty when there is no literal text to carry — the
+    #: direct API, the `+` menu, or a plan built before this field existed.
+    asked_text: str = ""
     sources: tuple[SourceInventory, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
@@ -119,10 +144,58 @@ class RunPlan:
     definition_source: str = ""
     definition_note: str = ""
     definition_adopted: bool = False
+    #: HOW THE SURVIVORS GET ORDERED, said before the run rather than
+    #: discovered in the output.
+    #:
+    #: RICE by default, on Apurva's call. The `prioritize` skill's own checklist
+    #: says a framework should be "chosen with a reason, not defaulted to RICE"
+    #: — the reason here is that it is the one the reader asked for, and naming
+    #: it in the plan is what makes it a choice they can override rather than a
+    #: convention they discover afterwards.
+    framework: str = "RICE"
+    #: WHY THIS FRAMEWORK, said as a sentence rather than left for the reader
+    #: to infer from the table underneath it. Chosen by code over the source
+    #: inventory (`app.crucible.framework.select_framework`), never by a
+    #: model (I2) — reasoning over what is connected, not a choice an LLM
+    #: made. Empty only on a plan built before this field existed.
+    framework_reason: str = ""
+    #: WHAT THE CHOSEN FRAMEWORK NEEDS AND CANNOT DERIVE, batched (AC-5).
+    #: Replaces the old fixed three (account value / decision owner /
+    #: needed-by) asked unconditionally regardless of which framework would
+    #: use the answer — see `app.crucible.framework.questions_for`.
+    questions: tuple[PlanQuestion, ...] = ()
+    #: ── THINGS THIS RUN CANNOT KNOW, AND NOW ASKS FOR. ──────────────────
+    #:
+    #: Apurva: "the plan gate can start asking questions it doesn't know
+    #: answers to." Until now the gate asked exactly one thing — what the
+    #: metric means — and everything else it lacked was reported as a limit.
+    #: Four of the reference memo's sections are unreachable for want of three
+    #: numbers, none of which are in any corpus and all of which a PM knows.
+    #:
+    #: EACH IS OPTIONAL AND EACH IS AN ASSUMPTION WHEN GIVEN. A value typed
+    #: into a box is not evidence: it ships as an `AssumedParam` with the range
+    #: it plausibly spans, so the document can say what the headline becomes at
+    #: the pessimistic end rather than presenting an estimate as a measurement.
+    #: That is I8, and it is the difference between asking for input and
+    #: laundering a guess into a number.
+    #:
+    #: WHAT IS DELIBERATELY NOT ASKED HERE: effort. It is per-finding, the
+    #: findings do not exist at plan time, and one value applied to every row
+    #: is a common divisor that cannot change a ranking.
+    #:
+    #: What one account is worth per year, in the reader's own currency. Turns
+    #: reach-in-accounts into money, which is the spine of the reference memo.
+    account_value: Optional[float] = None
+    #: Who signs off. The memo's decision box names one.
+    decision_owner: str = ""
+    #: When the decision is needed. Free text on purpose — "before the Q3 QBR"
+    #: is a real answer and a date picker would refuse it.
+    needed_by: str = ""
 
     def to_json(self) -> dict:
         return {
             "goal_text": self.goal_text,
+            "asked_text": self.asked_text,
             "definition_text": self.definition_text,
             "currency": self.currency,
             "total_signals": self.total_signals,
@@ -134,6 +207,12 @@ class RunPlan:
             "definition_source": self.definition_source,
             "definition_note": self.definition_note,
             "definition_adopted": self.definition_adopted,
+            "framework": self.framework,
+            "framework_reason": self.framework_reason,
+            "questions": [asdict(q) for q in self.questions],
+            "account_value": self.account_value,
+            "decision_owner": self.decision_owner,
+            "needed_by": self.needed_by,
         }
 
 
@@ -173,6 +252,8 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
 def derive_gaps_and_promises(
     kept: "tuple[SourceInventory, ...] | list[SourceInventory]",
     hypotheses: tuple[str, ...] = (),
+    *,
+    framework_choice: "Optional[object]" = None,
 ) -> tuple[tuple["Gap", ...], tuple[str, ...]]:
     """What this run will NOT be able to answer, and what it WILL produce,
     derived from the sources it will actually read.
@@ -186,12 +267,37 @@ def derive_gaps_and_promises(
     carries numbers") along with its actionable remedy, and were handed "no
     action needed from you" instead.
 
-    Pure: it reads only the kept inventory, so the plan gate and the approve
-    path cannot drift.
+    Pure: it reads only the kept inventory (plus the framework choice already
+    derived from it), so the plan gate and the approve path cannot drift.
+
+    `framework_choice` is an `app.crucible.framework.FrameworkChoice` — typed
+    loosely (`object`) here rather than imported at module level, because
+    `framework.py` imports FROM this module (`NUMERIC_SOURCES`,
+    `SourceInventory`, `PlanQuestion`) and a top-level import back would be
+    circular. Duck-typed on `.declared` / `.honoured_declared` / `.reason` /
+    `.remedy`.
     """
 
     present = {s.source_type for s in kept}
     gaps: list[Gap] = []
+
+    # THE FRAMEWORK THE COMPANY ASKED FOR, SAID PLAINLY WHEN IT COULD NOT BE
+    # HONOURED (AC-2/AC-3). A gap the reader did not expect — "why isn't this
+    # ranked by the thing I set at onboarding?" — is exactly the kind this
+    # step exists to surface rather than let a reader discover in the output.
+    declared = getattr(framework_choice, "declared", None)
+    honoured = getattr(framework_choice, "honoured_declared", True)
+    if framework_choice is not None and declared and not honoured:
+        from app.crucible.framework import display_name
+
+        gaps.append(Gap(
+            question=f"Why isn't this ranked by {display_name(declared)}?",
+            because=getattr(framework_choice, "reason", "") or
+                    f"{display_name(declared)} needs data this run does not "
+                    f"have connected",
+            remedy=getattr(framework_choice, "remedy", "") or
+                   "connect the source this framework needs",
+        ))
 
     if not present & set(NUMERIC_SOURCES):
         gaps.append(Gap(
@@ -268,20 +374,57 @@ def build_plan(
     company_id: str,
     goal_text: str,
     definition_text: str,
+    #: The reader's own sentence, carried alongside `goal_text` — see
+    #: `RunPlan.asked_text`. Empty by default so every existing caller (and
+    #: every stored plan built before this shipped) is unaffected.
+    asked_text: str = "",
     currency: str = "accounts",
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
     definition_source: str = "",
     definition_note: str = "",
     definition_adopted: bool = False,
+    #: `None` means "choose it" — the normal path. A caller that passes a
+    #: string is asking for that framework explicitly (used by tests and by
+    #: the approve path's re-derivation, which already has a `FrameworkChoice`
+    #: from `select_framework` and does not need this function to pick again).
+    framework: Optional[str] = None,
+    account_value: Optional[float] = None,
+    decision_owner: str = "",
+    needed_by: str = "",
 ) -> RunPlan:
     """What this run will try to establish, where it will look, and what it
     will not be able to tell you."""
     sources, total = source_inventory(company_id)
     kept = tuple(s for s in sources if s.source_type not in excluded_sources)
-    gaps, produce = derive_gaps_and_promises(kept, hypotheses)
+
+    # ── WHICH FRAMEWORK, CHOSEN BY CODE OVER THE INVENTORY (AC-2). ──────────
+    # Local imports: `app.crucible.framework` imports `NUMERIC_SOURCES` /
+    # `SourceInventory` / `PlanQuestion` FROM this module, so a top-level
+    # import back here would be circular.
+    from app.crucible.framework import FrameworkChoice, questions_for, select_framework
+
+    if framework:
+        choice = FrameworkChoice(framework=framework, reason="", declared=None,
+                                 honoured_declared=True)
+    else:
+        declared = None
+        try:
+            from app.db.companies import declared_prioritization_framework
+
+            declared = declared_prioritization_framework(company_id)
+        except Exception:  # noqa: BLE001 — an unreadable company row must
+            # never block a plan; fall back to choosing from data alone.
+            logger.warning(
+                "crucible plan: could not read declared framework for %s",
+                company_id,
+            )
+        choice = select_framework(kept, declared)
+
+    gaps, produce = derive_gaps_and_promises(kept, hypotheses, framework_choice=choice)
     return RunPlan(
         goal_text=goal_text,
+        asked_text=asked_text,
         definition_text=definition_text,
         currency=currency,
         sources=tuple(kept),
@@ -293,4 +436,10 @@ def build_plan(
         definition_source=definition_source,
         definition_note=definition_note,
         definition_adopted=definition_adopted,
+        framework=choice.framework,
+        framework_reason=choice.reason,
+        questions=questions_for(choice.framework),
+        account_value=account_value,
+        decision_owner=decision_owner,
+        needed_by=needed_by,
     )

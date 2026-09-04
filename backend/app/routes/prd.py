@@ -42,11 +42,6 @@ from app.project_from_prd import maybe_auto_create_project_for_prd
 from app.evidence_kg import generate_task_evidence
 from app.ingest import convert
 from app.db.companies import slug_for_company_id
-from app.db.prd_input_questions import (
-    answer_question,
-    get_question,
-    list_questions,
-)
 from app.db.prds import (
     find_existing_prd_for_theme,
     get_prd,
@@ -60,10 +55,11 @@ from app.db.prds import (
     save_prd_version,
     update_prd_content,
 )
+from app.billing import enforce
 from app.deps.ownership import require_owned_brief, require_owned_dataset, require_owned_prd
 from app.prd_command import classify_prd_command
 from app.prd_runner import (
-    PRD_VARIANT, ensure_impl_spec, extract_input_questions_task, generate_prd,
+    PRD_VARIANT, ensure_impl_spec, generate_prd,
     generate_prd_and_warm, regenerate_prd_into_template,
 )
 from app.prompts import (
@@ -151,6 +147,10 @@ async def generate(
                 "variant": PRD_VARIANT,
                 "project_id": existing_project_id,
             }
+
+    # Billable action — charged here, AFTER the reuse check above, so
+    # returning an existing document costs nothing.
+    enforce.bill(company.company_id, "prd", actor_user_id=company.user_id)
 
     insight = insights[body.insight_index]
     title = insight.get("title") or f"Insight #{body.insight_index + 1}"
@@ -1041,191 +1041,6 @@ def restore_version(
 _INPUT_SECTION_MARKER = "User input needed"
 
 
-@router.get("/{prd_id}/input-questions")
-async def get_input_questions(
-    prd_id: int,
-    company: WorkspaceContext = Depends(require_workspace),
-):
-    """List the PRD's structured "User input needed" questions.
-
-    These are extracted from the PRD at generation time (best-effort) and
-    surfaced in the PRD's chat as messages with answer buttons. Returns every
-    question (pending + answered) so a reopened chat stays consistent; the client
-    renders pending ones as actionable and answered ones as resolved.
-
-    Lazy backfill: PRDs generated before extraction existed (most of what the
-    Artifacts screen opens) have a "User input needed" section in the document
-    but no stored questions. When such a PRD is opened, schedule the SAME
-    best-effort extraction in the background and answer `extracting: true`; the
-    client polls until the rows land. The single-flight registry in
-    app.prd_questions makes concurrent opens (and the generation-time run for a
-    just-finished PRD, whose first fetch can race the pipeline's extraction)
-    schedule exactly one run.
-    """
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-    questions = list_questions(prd_id)
-    if questions:
-        return {"questions": questions, "extracting": False}
-
-    from app.prd_questions import is_extracting, mark_extracting
-
-    if is_extracting(prd_id):
-        return {"questions": [], "extracting": True}
-    if (
-        row.get("status") == "ready"
-        and _INPUT_SECTION_MARKER in (row.get("payload_md") or "")
-        and mark_extracting(prd_id)
-    ):
-        task = asyncio.create_task(extract_input_questions_task(prd_id, reserved=True))
-        _inflight_tasks.add(task)
-        task.add_done_callback(_inflight_tasks.discard)
-        return {"questions": [], "extracting": True}
-    return {"questions": [], "extracting": False}
-
-
-class InputAnswerIn(BaseModel):
-    answer: str = Field(..., min_length=1)
-
-
-@router.post("/{prd_id}/input-questions/{question_id}/answer")
-def answer_input_question(
-    prd_id: int,
-    question_id: int,
-    body: InputAnswerIn,
-    company: WorkspaceContext = Depends(require_workspace),
-):
-    """Answer one "User input needed" question and fold the answer into the PRD.
-
-    Runs the SCOPED editor (app.prd_questions.apply_answer) — NOT a full
-    prd-author re-run — over the PRD's current HTML, rewriting only the sections
-    the answer affects and self-clearing the answered item from the "User input
-    needed" list. The edit is saved through the normal version-snapshot path (so
-    it is undoable), the question is marked answered, and the rendered PRD +
-    changed-section list are returned so the chat can confirm and the panel can
-    refresh live.
-    """
-    # Import here to keep the module import graph lean (the editor pulls the LLM
-    # gateway) and mirror the lazy-import discipline used elsewhere in this file.
-    from app.prd_questions import apply_answer
-
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-    question = get_question(question_id)
-    if not question or question.get("prd_id") != prd_id:
-        raise HTTPException(404, "Question not found")
-
-    # Edit the RAW payload_md (the pure PRD HTML). Design-agent 'applied' patches
-    # are appended on read by get_prd_rendered; editing the raw doc and storing it
-    # back keeps those patches folding once (no double-fold).
-    prd_html = (row.get("payload_md") or "").strip()
-    if not prd_html:
-        raise HTTPException(409, "PRD has no content to edit")
-
-    try:
-        edit = apply_answer(
-            prd_html, question["prompt"], body.answer, enterprise_id=company.company_id
-        )
-    except RuntimeError as exc:
-        # The scoped edit produced nothing usable — leave the PRD untouched and
-        # surface it rather than storing an empty document.
-        raise HTTPException(502, f"Could not apply the answer: {exc}")
-
-    # Snapshot the pre-edit content so the change is undoable (mirrors PUT /{id}).
-    try:
-        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
-    except Exception:
-        logger.warning(
-            "auto-version snapshot failed for prd_id=%s before input-answer edit "
-            "(undo point not captured)", prd_id, exc_info=True,
-        )
-
-    update_prd_content(prd_id, row.get("title", ""), edit["html"])
-    answered = answer_question(question_id, body.answer, answered_by=company.user_name)
-
-    return {
-        "prd": get_prd_rendered(prd_id),
-        "question": answered,
-        "sections_changed": edit["sections_changed"],
-        "summary": edit["summary"],
-    }
-
-
-class InputAnswerItem(BaseModel):
-    question_id: int
-    answer: str = Field(..., min_length=1)
-
-
-class InputAnswersBatchIn(BaseModel):
-    answers: list[InputAnswerItem] = Field(..., min_length=1)
-
-
-@router.post("/{prd_id}/input-questions/answer-batch")
-def answer_input_questions_batch(
-    prd_id: int,
-    body: InputAnswersBatchIn,
-    company: WorkspaceContext = Depends(require_workspace),
-):
-    """Answer SEVERAL "User input needed" questions in one scoped edit.
-
-    The chat's question popup collects the whole batch before submitting
-    (owner directive: answer everything first, send once) — so the answers
-    arrive together, and folding them together is strictly better than N
-    sequential calls to the single-answer route: one scoped-editor pass over
-    the document instead of N (each of which re-reads and re-writes the whole
-    HTML), one undoable version snapshot instead of N stacked ones, and no
-    window where the PRD reflects half a batch.
-
-    Same contract as the single-answer route otherwise: every question must
-    belong to this PRD and the edit is all-or-nothing — a failed edit leaves
-    the document untouched and NO question marked answered.
-    """
-    from app.prd_questions import apply_answers
-
-    row = require_owned_prd(prd_id, company.company_id, company.workspace_id)
-
-    # Resolve every target up front — a batch naming a foreign or unknown
-    # question dies before any LLM work, not after.
-    pairs: list[tuple[dict, str]] = []
-    for item in body.answers:
-        question = get_question(item.question_id)
-        if not question or question.get("prd_id") != prd_id:
-            raise HTTPException(404, f"Question {item.question_id} not found")
-        pairs.append((question, item.answer))
-
-    prd_html = (row.get("payload_md") or "").strip()
-    if not prd_html:
-        raise HTTPException(409, "PRD has no content to edit")
-
-    try:
-        edit = apply_answers(
-            prd_html,
-            [(q["prompt"], a) for q, a in pairs],
-            enterprise_id=company.company_id,
-        )
-    except RuntimeError as exc:
-        raise HTTPException(502, f"Could not apply the answers: {exc}")
-
-    # ONE snapshot for the whole batch — undo restores the pre-batch document.
-    try:
-        save_prd_version(prd_id, row.get("title", ""), prd_html, saved_by=_actor(company))
-    except Exception:
-        logger.warning(
-            "auto-version snapshot failed for prd_id=%s before input-answer batch "
-            "(undo point not captured)", prd_id, exc_info=True,
-        )
-
-    update_prd_content(prd_id, row.get("title", ""), edit["html"])
-    answered = [
-        answer_question(q["id"], a, answered_by=company.user_name) for q, a in pairs
-    ]
-
-    return {
-        "prd": get_prd_rendered(prd_id),
-        "questions": answered,
-        "sections_changed": edit["sections_changed"],
-        "summary": edit["summary"],
-    }
-
-
 class ChatEditIn(BaseModel):
     instruction: str = Field(..., min_length=3, max_length=4000)
 
@@ -1239,8 +1054,7 @@ def chat_edit(
     """Apply a free-form chat edit instruction to the PRD ("make this PRD
     shorter", "add a rollout section").
 
-    The chat-driven counterpart of answer_input_question: the SAME scoped
-    editor discipline (app.prd_questions.apply_chat_edit — targeted rewrite of
+    The scoped editor (app.prd_edit.apply_chat_edit — a targeted rewrite of
     only the affected sections, never a full prd-author re-run), the SAME
     undoable version-snapshot persistence, and the same response shape minus
     the question — so the chat can confirm which sections changed and the

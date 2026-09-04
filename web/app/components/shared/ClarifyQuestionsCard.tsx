@@ -30,6 +30,12 @@ export type ClarifyQuestion = {
   prompt: string
   options: string[]
   skip_default?: string | null
+  /** No defensible default exists — the material this asks for is absent, so
+   *  proceeding would invent it. Set by the clarify gate, never by the user.
+   *  While one of these is unanswered the card refuses to generate: the bug
+   *  this exists to stop was a PRD written about a call whose transcript never
+   *  arrived, from a `skip_default` that literally read "cannot proceed". */
+  blocking?: boolean
   /** 2–3 word category label ("Target users") — worn as the chip when the
    *  batch renders in the QuestionPopup stepper. Optional: older backends and
    *  persisted threads predate it. */
@@ -81,17 +87,25 @@ export function clarifyQuestionsText(questions: ClarifyQuestion[]): string {
     const opts = q.options.length ? ` (e.g. ${q.options.join(" / ")})` : ""
     // Skips are informed, not silent: each question states the assumption the
     // author proceeds with when it goes unanswered.
-    const skip = q.skip_default ? ` — if skipped, I'll assume: ${q.skip_default}` : ""
+    const skip = q.blocking
+      ? " — I can't assume this one; without it there is nothing to write from"
+      : q.skip_default
+        ? ` — if skipped, I'll assume: ${q.skip_default}`
+        : ""
     // Blank-line separated: single newlines are soft-wrapped away by the
     // markdown renderer, which ran the whole list together on one line.
     return `${i + 1}. ${q.prompt}${opts}${skip}`
   })
-  return (
-    "Before I write this PRD, a few details would make it much stronger. " +
-    "Answer what you can in one message — or say \"generate now\" and I'll " +
-    "proceed with what I have:\n\n" +
-    lines.join("\n\n")
-  )
+  // The invitation to say "generate now" is DROPPED when anything is blocking.
+  // The durable turn is what a reloaded thread reads and what the user acts on,
+  // so offering an escape that the card refuses would just move the confusion.
+  const anyBlocking = questions.some((q) => q.blocking)
+  const opener = anyBlocking
+    ? "Before I write this PRD I need the following — I can't fill these in myself:"
+    : "Before I write this PRD, a few details would make it much stronger. " +
+      'Answer what you can in one message — or say "generate now" and I\'ll ' +
+      "proceed with what I have:"
+  return `${opener}\n\n${lines.join("\n\n")}`
 }
 
 // The user's card answers, rendered as the message they'd otherwise have typed.
@@ -200,12 +214,22 @@ export function ClarifyQuestionsCard({
   )
   const answeredCount = answers.length
 
+  const anyBlockingUnanswered = questions.some(
+    (q, i) => q.blocking && !resolveAnswer(picked[i], typed[i]),
+  )
+
+  // Generating with NOTHING answered asks first — the same rule the
+  // QuestionPopup applies, because this card is the surface the popup falls
+  // back to when it is dismissed, and an escape hatch that skips the question
+  // the other surface asks is not a fallback, it is a hole.
+  const [confirmingSkip, setConfirmingSkip] = useState(false)
+
   const submit = () => {
     if (busy) return
     // Nothing answered is a skip in everything but name — route it to the same
     // place so the generator gets the original task rather than an empty
     // "Additional details" block that reads as deliberate emptiness.
-    if (answeredCount === 0) onSkip()
+    if (answeredCount === 0) setConfirmingSkip(true)
     else onSubmit(answers)
   }
 
@@ -298,7 +322,12 @@ export function ClarifyQuestionsCard({
 
               {/* Skips stay informed: the assumption this question proceeds with
                   when it goes unanswered, stated up front. */}
-              {q.skip_default ? (
+              {q.blocking ? (
+                <div className="cqc-skip-hint" data-testid="clarify-blocking-hint">
+                  I can&apos;t assume this one — without it there is nothing to
+                  write from.
+                </div>
+              ) : q.skip_default ? (
                 <div className="cqc-skip-hint">
                   if skipped, I&apos;ll assume: {q.skip_default}
                 </div>
@@ -308,29 +337,59 @@ export function ClarifyQuestionsCard({
         })}
       </ol>
 
-      <div className="cqc-actions">
-        <button
-          type="button"
-          className="bc-action-btn bc-action-btn--primary"
-          data-testid="clarify-submit"
-          disabled={busy}
-          onClick={submit}
-        >
-          {busy ? "Generating PRD…" : "Generate PRD"}
-        </button>
-        <button
-          type="button"
-          className="bc-action-btn"
-          data-testid="clarify-skip"
-          disabled={busy}
-          onClick={() => !busy && onSkip()}
-        >
-          Generate now
-        </button>
-        <span className="cqc-count" data-testid="clarify-count">
-          {answeredCount} of {questions.length} answered
-        </span>
-      </div>
+      {confirmingSkip ? (
+        <div className="cqc-actions" data-testid="clarify-skip-confirm">
+          <span className="cqc-count">
+            {anyBlockingUnanswered
+              ? "Nothing was answered, and the material this needs never arrived — the PRD would be written from your request alone. Generate anyway?"
+              : `You didn't answer ${questions.length === 1 ? "the question" : `any of the ${questions.length} questions`}. Generate anyway?`}
+          </span>
+          <button
+            type="button"
+            className="bc-action-btn"
+            data-testid="clarify-skip-yes"
+            disabled={busy}
+            onClick={() => !busy && onSkip()}
+          >
+            Yes, generate
+          </button>
+          <button
+            type="button"
+            className="bc-action-btn bc-action-btn--primary"
+            data-testid="clarify-skip-no"
+            disabled={busy}
+            onClick={() => setConfirmingSkip(false)}
+          >
+            No, let me answer
+          </button>
+        </div>
+      ) : (
+        <div className="cqc-actions">
+          <button
+            type="button"
+            className="bc-action-btn bc-action-btn--primary"
+            data-testid="clarify-submit"
+            disabled={busy}
+            onClick={submit}
+          >
+            {busy ? "Generating PRD…" : "Generate PRD"}
+          </button>
+          <button
+            type="button"
+            className="bc-action-btn"
+            data-testid="clarify-skip"
+            disabled={busy}
+            // Routed through the confirmation rather than straight to onSkip:
+            // this button IS the "skip everything" gesture the rule is about.
+            onClick={() => !busy && setConfirmingSkip(true)}
+          >
+            Generate now
+          </button>
+          <span className="cqc-count" data-testid="clarify-count">
+            {answeredCount} of {questions.length} answered
+          </span>
+        </div>
+      )}
     </div>
   )
 }

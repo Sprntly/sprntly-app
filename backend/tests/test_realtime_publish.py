@@ -140,7 +140,7 @@ def test_brief_publish_payload_is_shaped_dto(isolated_settings, monkeypatch):
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     assert len(calls) == 1
     payload = calls[0]["json"]["messages"][0]["payload"]
@@ -216,7 +216,7 @@ def test_publish_failure_does_not_fail_brief_delivery(isolated_settings, monkeyp
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result  # normal string, NOT the decline path
+    assert "Assigned to" in result  # normal string, NOT the decline path
 
     assert (
         len(require_client().table("project_delegations").select("id").execute().data) == 1
@@ -278,7 +278,7 @@ def test_publish_failure_when_brief_reread_raises_does_not_fail_delivery(
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result  # normal string, NOT the decline path
+    assert "Assigned to" in result  # normal string, NOT the decline path
 
     assert (
         len(require_client().table("project_delegations").select("id").execute().data) == 1
@@ -328,7 +328,7 @@ def test_delivered_brief_publishes_on_per_user_topic(isolated_settings, monkeypa
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     assert len(calls) == 1
     msg = calls[0]["json"]["messages"][0]

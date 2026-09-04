@@ -1,7 +1,6 @@
 """Tests for the directed-checklist second pass (app.graph.extractor.
 run_checklist_pass) and its wiring into app.kg_ingest.runner.sync_provider
-for call-shaped providers (fireflies/zoom/google_meet), plus the gated-rollout
-allowlist that scopes that pipeline's rollout.
+for call-shaped providers (fireflies/zoom/google_meet).
 """
 from __future__ import annotations
 
@@ -195,9 +194,129 @@ def test_source_call_id_and_provenance_stamped_via_source_ref(facade):
     assert sig.provenance["external_id"] == "FF-9"
 
 
+def test_valid_at_stamps_a_checklist_minted_signal(facade):
+    """A caller-supplied `valid_at` reaches a checklist-minted Signal exactly
+    like the main pass's — same `_write_items` path, same contract. The
+    runner threads the SAME call date to both passes for one call, so this
+    keeps the two passes' signals dating (and staling) identically."""
+    from datetime import datetime, timezone
+
+    entries = [_entry("commercial", content="priced at $50k/yr",
+                      quote="we're paying fifty thousand a year")]
+    text = "Buyer: we're paying fifty thousand a year for this."
+    call_date = datetime(2025, 6, 1, tzinfo=timezone.utc)
+    _run_checklist(facade, entries, text, valid_at=call_date)
+    sig = _csig(facade, "priced at $50k/yr")
+    assert sig.valid_at == call_date
+
+
 def test_empty_checklist_output_writes_nothing(facade):
     result = _run_checklist(facade, [], "anything")
     assert result == {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+
+
+# ── malformed batch-result shape: skip gracefully, never a bare AttributeError ─
+#
+# Live-verify (2026-08-27): a batched result's structured output can have a
+# field come back the wrong TYPE (e.g. `checklist` as a bare string rather
+# than a list of entry dicts) even though the tool call itself is a dict
+# envelope. `_finish_checklist` guards this explicitly now — see
+# `MalformedLLMResultError`.
+
+
+def test_malformed_checklist_value_is_a_string_raises_named_error_with_a_log(facade, caplog):
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ex.MalformedLLMResultError):
+            ex._finish_checklist(
+                facade, "ent-c", {"checklist": "oops a bare string"},
+                doc_name="call.md", text="anything", origin=None,
+                provenance_extra=None, source_ref=None,
+            )
+    assert any("non-list" in r.message for r in caplog.records)
+
+
+def test_malformed_checklist_output_not_a_dict_raises_named_error(facade):
+    with pytest.raises(ex.MalformedLLMResultError):
+        ex._finish_checklist(
+            facade, "ent-c", "not-a-dict-output", doc_name="call.md",
+            text="anything", origin=None, provenance_extra=None,
+            source_ref=None,
+        )
+
+
+def test_one_malformed_checklist_entry_is_dropped_other_entries_still_process(facade, caplog):
+    """A `checklist` list that is itself well-formed but mixes a real entry
+    with a stray non-dict element must not lose the good entry."""
+    entries = [
+        "a stray malformed string, not an entry dict",
+        _entry("sentiment", content="real sentiment fact",
+               quote="customers seem happy"),
+    ]
+    text = "Rep: customers seem happy with the rollout."
+    with caplog.at_level("WARNING"):
+        result = _run_checklist(facade, entries, text)
+    assert result["signals"] == 1
+    assert _csig(facade, "real sentiment fact") is not None
+    assert any("malformed" in r.message for r in caplog.records)
+
+
+# ── build_checklist_request / parse_checklist_response: batch-authoring seam ─
+#
+# Same proof as the main pass (see test_kg_extractor.py): the standalone
+# build/parse pair — used by a caller assembling a BULK batch rather than
+# calling run_checklist_pass live — composes to the EXACT SAME facade outcome
+# as the live/sync inline path for identical model output.
+
+
+def test_build_and_parse_checklist_compose_to_the_same_result_as_the_live_path(facade):
+    quote = "we're paying fifty thousand a year for this platform"
+    text = f"Buyer: {quote}."
+    entries = [_entry("commercial", content="priced at $50k/yr", quote=quote)]
+
+    with patch.object(ex, "llm_call", return_value=_checklist_llm_result(entries)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        live_result = ex.run_checklist_pass(facade, "ent-c-live", doc_name="call.md",
+                                            text=text)
+
+    kwargs = ex.build_checklist_request(doc_name="call.md", text=text)
+    assert kwargs["model"] == ex.DEFAULT_MODEL
+    assert kwargs["tools"][0]["input_schema"] == ex._CHECKLIST_SCHEMA
+
+    from types import SimpleNamespace
+
+    fake_message = SimpleNamespace(content=[
+        SimpleNamespace(type="tool_use", name="submit_response",
+                        input={"checklist": entries}),
+    ])
+    with patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        batch_result = ex.parse_checklist_response(
+            facade, "ent-c-batch", fake_message, doc_name="call.md", text=text,
+        )
+
+    # signal_ids are content-keyed by enterprise_id (uuid5), so the two runs'
+    # ids legitimately differ (different enterprise_id) — compare everything
+    # else, then verify each run's own signal independently below.
+    assert {k: v for k, v in batch_result.items() if k != "signal_ids"} == \
+           {k: v for k, v in live_result.items() if k != "signal_ids"}
+
+    live_sig = facade.get_signal(
+        "ent-c-live", str(uuid.uuid5(ex._NS, "ent-c-live|priced at $50k/yr")))
+    batch_sig = facade.get_signal(
+        "ent-c-batch", str(uuid.uuid5(ex._NS, "ent-c-batch|priced at $50k/yr")))
+    assert live_sig is not None and batch_sig is not None
+    assert live_sig.kind == batch_sig.kind == "commercial_term"
+
+
+def test_build_checklist_request_renders_the_full_text_given(facade):
+    """The batch build path is handed the FULL transcript text (the checklist
+    pass's caller-supplied `text`, same contract as the live call) — never a
+    condensed one."""
+    kwargs = ex.build_checklist_request(doc_name="call.md", text="the full transcript body")
+    user_content = kwargs["messages"][0]["content"]
+    assert "<document name='call.md'>" in user_content
+    assert "the full transcript body" in user_content
 
 
 def test_quote_grounded_helper_normalizes_whitespace_and_case():
@@ -406,82 +525,335 @@ def test_checklist_schema_requires_category_discussed_content_quote():
     assert "properties" not in required, "properties (owner/due/etc) is optional"
 
 
-# ── runner wiring: gated rollout (KG_CALL_REEXTRACT_ALLOWLIST) ──────────────────
+# ── a stated commercial figure survives extraction as structure ──────────────
+# (not as a paraphrase, and never as the sentence itself).
 
 
-def test_gated_rollout_env_absent_allows_every_tenant(monkeypatch):
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
-    assert runner._call_provider_reextraction_allowed("ent-anything-at-all") is True
+def test_commercial_category_carries_grounded_amount_properties(facade):
+    """A figure a speaker actually states on the call — David's own example,
+    "[Sprntly] is $100,000" — is captured as structure, not just prose."""
+    entries = [_entry(
+        "commercial", content="Sprntly is worth $100,000 to this account",
+        quote="if we had this feature, we can unblock 100,000 dollars",
+        properties={"amount": 100000, "currency": "USD", "basis": "total-contract",
+                    "certainty": "quoted"},
+    )]
+    text = "Buyer: if we had this feature, we can unblock 100,000 dollars in revenue."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "Sprntly is worth $100,000 to this account")
+    assert sig is not None
+    assert sig.kind == "commercial_term"
+    assert sig.properties["amount"] == 100000.0
+    assert sig.properties["currency"] == "USD"
+    assert sig.properties["basis"] == "total-contract"
+    assert sig.properties["certainty"] == "quoted"
 
 
-def test_gated_rollout_empty_env_string_allows_every_tenant(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "")
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
+def test_partnership_commercial_also_carries_grounded_amount(facade):
+    """The partnership/ecosystem sibling category gets the same shape —
+    both 'commercial' and 'partnership_commercial' carry it."""
+    entries = [_entry(
+        "partnership_commercial", content="Meridian referral worth $20k/yr",
+        quote="the Meridian partnership brings in about twenty thousand a year",
+        properties={"amount": 20000, "currency": "USD", "basis": "per-year",
+                    "certainty": "estimated-by-speaker"},
+    )]
+    text = "Rep: the Meridian partnership brings in about twenty thousand a year."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "Meridian referral worth $20k/yr")
+    assert sig is not None
+    assert sig.properties["amount"] == 20000.0
+    assert sig.properties["basis"] == "per-year"
 
 
-def test_gated_rollout_env_set_restricts_to_listed_tenants(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-A, ent-B")
-    assert runner._call_provider_reextraction_allowed("ent-A") is True
-    assert runner._call_provider_reextraction_allowed("ent-B") is True
-    assert runner._call_provider_reextraction_allowed("ent-C") is False
+def test_commercial_amount_omitted_when_no_figure_was_stated(facade):
+    """I2/I3: no figure named -> no `amount` key at all — never a defaulted
+    0, and no `currency`/`basis`/`certainty` written with no number behind
+    them."""
+    entries = [_entry(
+        "commercial", content="pricing came up but no number was named",
+        quote="pricing came up but we didn't get into specifics",
+        properties={"currency": "USD", "basis": "one-off"},
+    )]
+    text = "Rep: pricing came up but we didn't get into specifics."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "pricing came up but no number was named")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
 
 
-def test_sync_provider_skips_non_allowlisted_call_provider(monkeypatch):
-    """A gated tenant's fireflies sync is a NO-OP for this tick — the puller
-    is never even called — not an error, and the scheduler simply retries it
-    on its next pass once the allowlist widens."""
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
-    pulled: list[str] = []
-
-    def fake_pull(token, **kw):
-        pulled.append(token)
-        return iter([])
-
-    monkeypatch.setitem(runner.PULLERS, "fireflies",
-                        (fake_pull, "api_key", "hint"))
-    out = runner.sync_provider(None, "ent-blocked", "fireflies", token="t")
-    assert out["gated"] is True
-    assert out["records"] == 0
-    assert pulled == [], "the puller must never be called for a gated tenant"
+def test_commercial_amount_never_defaults_to_zero_when_absent(facade):
+    """Same contract, stated as its own assertion: I3 says unmeasured is
+    `None` and never `0` — an omitted `amount` key must never read as a
+    written `0`."""
+    entries = [_entry(
+        "commercial", content="budget was discussed",
+        quote="we did talk about budget a little",
+    )]
+    text = "Rep: we did talk about budget a little."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "budget was discussed")
+    assert sig is not None
+    assert sig.properties.get("amount", "not zero") != 0
+    assert "amount" not in sig.properties
 
 
-def test_sync_provider_proceeds_for_allowlisted_call_provider(monkeypatch):
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
+def test_commercial_amount_of_literal_zero_is_treated_as_absent(facade):
+    """A model emitting `amount: 0` — a plausible JSON-schema-constrained
+    failure mode for "no figure here" even though the prompt says never to
+    — must not read as a customer having quoted zero dollars. Same
+    exclusion as an invented string/bool/NaN, stated as its own case
+    because zero is a real, valid Python number and easy to let slip past
+    a numeric-type check that isn't also checking for it."""
+    entries = [_entry(
+        "commercial", content="zero amount from the model",
+        quote="we discussed pricing on the call",
+        properties={"amount": 0, "currency": "USD", "basis": "one-off"},
+    )]
+    text = "Rep: we discussed pricing on the call today."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "zero amount from the model")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+
+
+def test_commercial_amount_ignored_when_not_a_real_number(facade):
+    """A model that writes a string, bool or NaN into `amount` gets the
+    property dropped rather than a garbage value persisted."""
+    for bad_amount in ("a lot", True, float("nan"), float("inf")):
+        entries = [_entry(
+            "commercial", content=f"bad amount case {bad_amount!r}",
+            quote="we discussed pricing on the call",
+            properties={"amount": bad_amount, "currency": "USD"},
+        )]
+        text = "Rep: we discussed pricing on the call today."
+        _run_checklist(facade, entries, text)
+        sig = _csig(facade, f"bad amount case {bad_amount!r}")
+        assert sig is not None
+        assert "amount" not in sig.properties, f"should reject amount={bad_amount!r}"
+
+
+def test_commercial_basis_and_certainty_outside_the_closed_vocabulary_are_dropped(facade):
+    """`basis`/`certainty` are closed vocabularies — a value the model
+    invents outside them is dropped, not persisted verbatim; `amount` (a
+    real number) is kept regardless, since it is independently validated."""
+    entries = [_entry(
+        "commercial", content="an odd basis and certainty",
+        quote="they said it would be about fifty thousand a year, roughly",
+        properties={"amount": 50000, "basis": "roughly-guessed",
+                    "certainty": "pretty-sure"},
+    )]
+    text = "Rep: they said it would be about fifty thousand a year, roughly."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "an odd basis and certainty")
+    assert sig is not None
+    assert sig.properties["amount"] == 50000.0
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
+def test_commercial_figure_still_requires_the_grounding_gate(facade):
+    """A structured figure does not loosen the precision contract: a
+    `commercial` entry with a fabricated (ungrounded) quote is dropped
+    ENTIRELY — including its `amount` — exactly like every other category."""
+    entries = [_entry(
+        "commercial", content="invented a $2M deal that was never discussed",
+        quote="this sentence about two million dollars never appears anywhere",
+        properties={"amount": 2000000, "currency": "USD"},
+    )]
+    result = _run_checklist(facade, entries, "Rep: nothing commercial came up on this call.")
+    assert result["signals"] == 0
+    assert _csig(facade, "invented a $2M deal that was never discussed") is None
+
+
+# ── buying-intent band: same mechanism, same pass, never the phrasing ────────
+
+
+def test_objection_category_carries_a_high_intent_band(facade):
+    """David's own example: 'if I have this, then I'll buy tomorrow' reads
+    as high buying intent — captured as a band + a short basis, not the
+    sentence itself."""
+    entries = [_entry(
+        "objection", content="pricing was the last blocker before signing",
+        quote="if I have this feature, I'll buy tomorrow",
+        properties={"intent_band": "high",
+                    "intent_basis": "explicit readiness to buy immediately"},
+    )]
+    text = "Buyer: if I have this feature, I'll buy tomorrow."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "pricing was the last blocker before signing")
+    assert sig is not None
+    assert sig.properties["intent_band"] == "high"
+    assert sig.properties["intent_basis"] == "explicit readiness to buy immediately"
+
+
+def test_sentiment_and_commitment_categories_also_carry_intent_band(facade):
+    """Three categories carry an intent band — 'objection' is covered above;
+    'sentiment' and 'commitment' get the identical shape."""
+    entries = [
+        _entry("sentiment", content="lukewarm interest in the new tier",
+               quote="this would be nice to have I suppose",
+               properties={"intent_band": "low",
+                           "intent_basis": "hedged, non-committal interest"}),
+        _entry("commitment", content="Jane will review pricing by Friday",
+               quote="Jane will look at pricing again by Friday",
+               properties={"owner": "Jane Doe", "due": "Friday",
+                           "intent_band": "medium",
+                           "intent_basis": "engaged but no buy signal yet"}),
+    ]
+    text = (
+        "Buyer: this would be nice to have I suppose.\n"
+        "PM: Jane will look at pricing again by Friday."
+    )
+    _run_checklist(facade, entries, text)
+    sentiment_sig = _csig(facade, "lukewarm interest in the new tier")
+    assert sentiment_sig.properties["intent_band"] == "low"
+    commitment_sig = _csig(facade, "Jane will review pricing by Friday")
+    # commitment keeps ITS existing owner/due shape AND gains intent —
+    # additive, not a replacement of the pre-existing contract.
+    assert commitment_sig.properties["owner"] == "Jane Doe"
+    assert commitment_sig.properties["due"] == "Friday"
+    assert commitment_sig.properties["intent_band"] == "medium"
+
+
+def test_intent_band_outside_high_medium_low_is_dropped(facade):
+    entries = [_entry(
+        "objection", content="ambiguous intent case",
+        quote="we might consider it at some point maybe",
+        properties={"intent_band": "very high indeed", "intent_basis": "unsure"},
+    )]
+    text = "Buyer: we might consider it at some point maybe."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "ambiguous intent case")
+    assert sig is not None
+    assert "intent_band" not in sig.properties
+    assert "intent_basis" not in sig.properties
+
+
+def test_intent_basis_that_is_the_verbatim_quote_is_dropped_not_persisted(facade):
+    """The never-persist-the-speech discipline applied a second time: if a
+    model tries to smuggle the transcript sentence into `intent_basis`
+    instead of `verbatim_quote`, the sanitizer must still catch it.
+    `intent_band` survives (it is a closed-vocabulary classification, not
+    text); `intent_basis` does not."""
+    quote = "if I have this feature working end to end I will buy tomorrow morning"
+    entries = [_entry(
+        "objection", content="strong buy signal on the call",
+        quote=quote,
+        properties={"intent_band": "high", "intent_basis": quote},
+    )]
+    text = f"Buyer: {quote}."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "strong buy signal on the call")
+    assert sig is not None
+    assert sig.properties["intent_band"] == "high"
+    assert "intent_basis" not in sig.properties
+
+
+def test_intent_band_is_not_carried_on_categories_outside_the_named_three(facade):
+    """The intent-band shape is scoped to 'objection'/'sentiment'/
+    'commitment' — a model writing `intent_band` on an unrelated category
+    (e.g. 'timeline') must not have it persisted; that category keeps only
+    its own documented shape."""
+    entries = [_entry(
+        "timeline", content="renewal is tied to fiscal year",
+        quote="we need this before our fiscal year renewal",
+        properties={"urgency": "high", "intent_band": "high"},
+    )]
+    text = "Buyer: we need this before our fiscal year renewal."
+    _run_checklist(facade, entries, text)
+    sig = _csig(facade, "renewal is tied to fiscal year")
+    assert sig is not None
+    assert sig.properties["urgency"] == "high"
+    assert "intent_band" not in sig.properties
+
+
+# ── Proven directly: no transcript text reaches a written Signal ────────────
+
+
+def test_no_property_value_reproduces_the_verbatim_quote(facade):
+    """The precision contract stated as a property test, not just an
+    assertion in prose: for every category shape this ticket adds, sweep
+    every STRING value written into `properties` and confirm none of them
+    is the verbatim quote (or a near-verbatim copy of it) — the exact leak
+    the never-persist-the-speech rule forbids taking a second path through
+    `properties` instead of the already-guarded `verbatim_quote` field."""
+    quote = "if we had this feature we could unblock one hundred thousand dollars"
+    entries = [
+        _entry("commercial", content="value framed at $100k",
+               quote=quote,
+               properties={"amount": 100000, "currency": "USD",
+                           "basis": "total-contract", "certainty": "quoted"}),
+        _entry("objection", content="strong buying signal",
+               quote="if I have this then I will buy tomorrow for sure",
+               properties={"intent_band": "high", "intent_basis": quote}),
+    ]
+    text = (
+        f"Buyer: {quote}.\n"
+        "Buyer: if I have this then I will buy tomorrow for sure."
+    )
+    _run_checklist(facade, entries, text)
+    for content in ("value framed at $100k", "strong buying signal"):
+        sig = _csig(facade, content)
+        assert sig is not None
+        for key, value in sig.properties.items():
+            if isinstance(value, str):
+                assert value.strip().lower() != quote.strip().lower(), (
+                    f"property {key!r} on signal {content!r} reproduced the "
+                    f"verbatim quote"
+                )
+                assert quote.lower() not in value.lower(), (
+                    f"property {key!r} on signal {content!r} contains the "
+                    f"verbatim quote as a substring"
+                )
+
+
+def test_checklist_properties_description_documents_grounded_boundaries():
+    """Content property test on the LLM-facing schema description (the
+    prompt surface a model actually reads): the commercial and buying-intent
+    shapes are documented, and the never-invent / never-extrapolate / never-
+    verbatim boundaries are stated in words, not just enforced in code."""
+    desc = ex._CHECKLIST_SCHEMA["properties"]["checklist"]["items"]["properties"][
+        "properties"]["description"]
+    for token in ("amount", "currency", "basis", "certainty",
+                  "intent_band", "intent_basis",
+                  "one-off", "per-year", "per-seat", "total-contract",
+                  "quoted", "asked", "estimated-by-speaker",
+                  "high", "medium", "low"):
+        assert token in desc, f"properties description should mention {token!r}"
+    assert "never" in desc.lower()
+    assert "extrapolat" in desc.lower()
+    assert "verbatim" in desc.lower() or "own words" in desc.lower()
+    assert len(desc) > 400
+
+
+# ── runner wiring: call providers always process (no per-tenant gate) ─────────
+
+
+def test_sync_provider_processes_call_provider_for_any_tenant(monkeypatch):
+    """No allowlist gates `_CALL_PROVIDERS` — every tenant's call-provider
+    sync proceeds through the full pipeline (puller + main pass + checklist
+    pass) unconditionally."""
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     monkeypatch.setattr(
         runner, "extract_document",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0},
+        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0},
     )
     monkeypatch.setattr(
         runner, "run_checklist_pass",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []},
+        lambda *a, **k: {"signals": 1, "themes": 0, "skipped": 0, "signal_ids": []},
     )
     rec = RawRecord(provider="fireflies", kind="meeting", external_id="FF1",
                     title="t", text="body")
-    out = runner.sync_provider(None, "ent-allowed", "fireflies", token="t",
-                               records=[rec])
-    assert out.get("gated") is None
+    out = runner.sync_provider(None, "ent-any-tenant-at-all", "fireflies",
+                               token="t", records=[rec])
     assert out["records"] == 1
-
-
-def test_gating_does_not_restrict_non_call_providers(monkeypatch):
-    """The allowlist only scopes `_CALL_PROVIDERS` — every other connector
-    keeps syncing for every tenant regardless of the allowlist."""
-    monkeypatch.setenv(runner.REEXTRACT_ALLOWLIST_ENV, "ent-allowed")
-    monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
-    monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
-    monkeypatch.setattr(
-        runner, "extract_document",
-        lambda *a, **k: {"signals": 0, "themes": 0, "skipped": 0},
-    )
-    rec = RawRecord(provider="clickup", kind="task", external_id="C1",
-                    title="t", text="body")
-    out = runner.sync_provider(None, "ent-blocked", "clickup", token="t",
-                               records=[rec])
-    assert out.get("gated") is None
-    assert out["records"] == 1
+    assert out["signals"] == 2
 
 
 # ── runner wiring: checklist pass invocation ──────────────────────────────────
@@ -493,7 +865,6 @@ def test_fireflies_checklist_pass_reads_full_transcript_not_the_digest(monkeypat
     transcript (`RawRecord.checklist_text`) — same call (doc_name/source_ref
     match), DIFFERENT text. The checklist is now the sole full-transcript
     reader; known-fact recall flows through it, not the main pass."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []
@@ -539,7 +910,6 @@ def test_zoom_main_pass_gets_haiku_summary_checklist_gets_full_transcript(monkey
     checklist pass still reads the untouched full transcript (Zoom/Meet have
     no separate `checklist_text` — `RawRecord.text` already IS the full
     transcript)."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []
@@ -579,7 +949,6 @@ def test_zoom_summarization_failure_falls_back_to_full_transcript_for_main_pass(
     """A Haiku summarization failure must degrade to feeding the main pass
     the full transcript — never fail the sync or leave the main pass with
     nothing. Uses google_meet to also prove Meet shares this path with Zoom."""
-    monkeypatch.delenv(runner.REEXTRACT_ALLOWLIST_ENV, raising=False)
     monkeypatch.setattr(runner, "seen_hashes", lambda *a, **k: set())
     monkeypatch.setattr(runner, "record_hashes", lambda *a, **k: None)
     extract_calls: list[tuple] = []

@@ -31,13 +31,14 @@ import { createElement, Fragment, useCallback, useEffect, useMemo, useRef, useSt
 // its own composer. Reused (not duplicated) so the two surfaces stay verbatim.
 import { BUSY_ENTER_HINT_LEAD, BUSY_ENTER_HINT_TAIL } from "../ChatScreen"
 import { profileDisplayName, useWorkspace } from "../../../../context/WorkspaceContext"
+import { crucibleOn } from "../../../../lib/onboarding/types"
 import { useCompany } from "../../../../context/CompanyContext"
 import { useContent } from "../../../../context/ContentContext"
 import { useNavigation } from "../../../../context/NavigationContext"
 import { createChatPersistence, replyToText } from "../../../../lib/chatPersistence"
 import {
   conversationsApi, prdApi, chatIntentApi, askApi, chatSuggestionsApi, projectsApi,
-  type AskResponse, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
+  type AskResponse, type BacklogPlanQuestion, type ChatIntentEnvelope, type OpenArtifactCandidate, type TicketAssignQuestion,
   type ChatArtifactItem, type SlackShareTargetRef,
 } from "../../../../lib/api"
 import { type PopupAnswer } from "../../../shared/QuestionPopup"
@@ -48,6 +49,7 @@ import {
   type PendingShareState,
 } from "../../../shared/chat-shell/conversation/useSlackShareCardHandlers"
 import { useAssignCompletion } from "../../../shared/chat-shell/conversation/useAssignCompletion"
+import { useBacklogCompletion } from "../../../shared/chat-shell/conversation/useBacklogCompletion"
 import { askAgain } from "../../../shared/chat-shell/conversation/askAgain"
 import { runClarifiedGeneration } from "../../../shared/chat-shell/conversation/clarifiedGeneration"
 import { getPendingAsk, resumeAskGeneration, AskCancelledError, AskStoppedError, AskTimeoutError } from "../../../../lib/runAskGeneration"
@@ -55,7 +57,7 @@ import { GROUNDED_PROGRESS_ENABLED } from "../../../../lib/friendlyPhase"
 import { resolveAttachmentRefs } from "../../../shared/chatComposerController"
 import { dispatchChatIntent } from "../../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../../shared/chat-shell/useChatIntentExecutors"
-import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction } from "../../../shared/chat-shell/conversation/actions"
+import { runEditPrdAction, runShareToSlackAction, runAssignTicketsAction, runBacklogAction } from "../../../shared/chat-shell/conversation/actions"
 import { resolveShareRef } from "../../../shared/chat-shell/conversation/resolveShareRef"
 import { useDocumentReopenProbe } from "../../../shared/chat-shell/conversation/useDocumentReopenProbe"
 import { matchReportByTitle } from "../../../shared/chat-shell/conversation/matchReportByTitle"
@@ -64,9 +66,11 @@ import { DEFAULT_HOME_CHIPS } from "../../../../lib/homeChips"
 import { type ClarifyAnswer, clarifyQuestionsText } from "../../../shared/ClarifyQuestionsCard"
 import { useComposer } from "../useComposer"
 import { GreetingTurnBody } from "./GreetingTurnBody"
+import { useProjectGoalAnalysis } from "./useProjectGoalAnalysis"
 import { useThreadScroll } from "../useThreadScroll"
 import { useMainConversation } from "../useMainConversation"
 import { useConversationGeneration } from "../useConversationGeneration"
+import { useRealtimeChannel } from "./useRealtimeChannel"
 import type { ConversationHandle, AskGrounding } from "../conversationCore"
 import type { ThreadTurn, ChatTab } from "../ChatScreen"
 import type { ConversationViewProps } from "../ConversationView"
@@ -89,6 +93,7 @@ export type ProjectConversationProps = ConversationViewProps & {
 
 type PendingClarify = { task: string; sourceDocs?: { name: string; content: string }[]; turnId: string }
 type PendingAssign = { questions: TicketAssignQuestion[]; applied: string[]; turnId: string }
+type PendingBacklog = { questions: BacklogPlanQuestion[]; applied: string[]; turnId: string }
 type PendingShare = { turnId: string; kind: "channel" | "target"; header: string; prompt: string; options: { label: string; description?: string | null; value: string }[] }
 
 /** Answers → the same prose the clarify card records (the popup pre-filters
@@ -119,13 +124,134 @@ const PROJECT_LANDING_CHIPS = DEFAULT_HOME_CHIPS.filter((c) => c.kind === "start
 const newId = () =>
   (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`)
 
+/** The whitelisted DTO shape the server publishes on `turn.created` /
+ *  `brief.delivered` (mirrors `IndividualTurn` / `_TURN_CREATED_DTO_KEYS`,
+ *  backend/app/routes/projects.py). */
+export type RealtimeTurnPayload = {
+  id: number
+  role: "user" | "assistant"
+  content: string
+  created_at?: string
+}
+
+/** Narrow an unknown broadcast payload to `RealtimeTurnPayload`, or `null`
+ *  when it doesn't carry the fields this surface renders on — a malformed/
+ *  future-shaped payload is dropped rather than crashing the append.
+ *  Exported (alongside the two helpers below) for direct unit-testing of the
+ *  dedupe contract, independent of the DOM/React harness. */
+export function parseRealtimeTurnPayload(payload: unknown): RealtimeTurnPayload | null {
+  const p = payload as Partial<RealtimeTurnPayload> | null | undefined
+  if (!p || typeof p.id !== "number" || typeof p.content !== "string") return null
+  if (p.role !== "user" && p.role !== "assistant") return null
+  // Blank content never renders anything real — mirrors hydrate's own
+  // `content.trim()` guard on a standalone assistant row (below) — and a
+  // blank body is exactly what an empty-tool-loop / interrupted write can
+  // persist server-side. Dropping it here, at the parse boundary, keeps
+  // both `shouldAppendRealtimeTurn` and the merge/append logic below from
+  // ever having to reason about an empty-string turn at all.
+  if (p.content.trim() === "") return null
+  return { id: p.id, role: p.role, content: p.content, created_at: p.created_at }
+}
+
+/** Whether an incoming realtime turn is safe to apply to `existing` at all
+ *  (id-dedupe + no double-render on a local-echo race). False in three
+ *  cases:
+ *   - the exact DB row is ALREADY on the thread (a rehydrated turn, or a
+ *     prior delivery of the SAME broadcast/reconcile) — matched by
+ *     `dbTurnId`, the durable row id every rendered turn eventually carries.
+ *   - the client's OWN optimistic echo of this same turn is still showing,
+ *     not yet reconciled with its row id (`dbTurnId == null`) — matched by
+ *     role + exact content over a short recent window (broadcasts are
+ *     at-most-once and typically land within moments of the local send, so
+ *     only the tail of the thread is worth checking; a genuine repeat
+ *     message further back in history is never suppressed).
+ *   - this exact assistant row was already MERGED into a paired user turn
+ *     by a previous call (`mergedReplyIds`, optional — passed only by
+ *     `applyRealtimeTurn`'s caller below). A merge sets the paired turn's
+ *     `reply` but deliberately leaves `dbTurnId` pointing at the USER row
+ *     (rewind needs the user row's id, not the assistant's — see
+ *     `realtimeTurnToThreadTurn`), so the plain `dbTurnId` check above
+ *     cannot by itself catch a redelivery of that same assistant row; this
+ *     is the second, independent guard that closes it. */
+export function shouldAppendRealtimeTurn(
+  existing: ThreadTurn[],
+  payload: RealtimeTurnPayload,
+  mergedReplyIds?: ReadonlySet<number>,
+): boolean {
+  if (existing.some((t) => t.dbTurnId === payload.id)) return false
+  if (mergedReplyIds?.has(payload.id)) return false
+  const recentUnreconciled = existing.slice(-6).filter((t) => t.dbTurnId == null)
+  if (payload.role === "user") {
+    return !recentUnreconciled.some((t) => t.query === payload.content)
+  }
+  return !recentUnreconciled.some((t) => t.reply?.answer === payload.content)
+}
+
+/** Shape a whitelisted realtime DTO into the same bare, query-or-reply-only
+ *  `ThreadTurn` the hydrate restore already builds for a standalone
+ *  user/assistant row (see the hydrate effect below) — used when
+ *  `applyRealtimeTurn` has nothing to pair an assistant turn with (or for a
+ *  user turn.created, which always arrives before its reply exists). */
+export function realtimeTurnToThreadTurn(payload: RealtimeTurnPayload): ThreadTurn {
+  if (payload.role === "user") {
+    return { id: newId(), dbTurnId: payload.id, query: payload.content }
+  }
+  return {
+    id: newId(), dbTurnId: payload.id, query: "",
+    reply: {
+      answer: payload.content, sources: [], follow_ups: [], key_points: [],
+      citations: [], confidence: 1, unanswered: "",
+    } as AskResponse,
+  }
+}
+
+/** Apply one incoming realtime turn to `existing`, mirroring hydrate's own
+ *  query+reply PAIRING (~hydrate effect below: a `user` row is paired with
+ *  the row immediately after it) instead of appending every `turn.created`
+ *  event as its own separate `ThreadTurn`. Previously every assistant
+ *  turn.created became a headless `{query:"", reply}` turn beside a
+ *  reply-less `{query}` turn from the user's own turn.created — on an
+ *  observer tab (no optimistic echo) the reply-less user turn rendered the
+ *  "No response was generated for this message." fallback
+ *  (`ChatBubble.tsx`'s no-reply ladder) directly above its own real answer.
+ *
+ *  Gated first by `shouldAppendRealtimeTurn` (id/local-echo dedupe,
+ *  unchanged) — a duplicate or optimistic-echo delivery is dropped exactly
+ *  as before. An assistant turn.created that passes the gate MERGES into
+ *  the thread's LAST turn when that turn is a reply-less user turn (the
+ *  adjacent pairing hydrate itself relies on: the assistant row is always
+ *  written immediately after its user row) — setting `reply` in place
+ *  rather than appending a second, headless turn. It only appends a
+ *  standalone assistant turn when the last turn is NOT an unpaired user
+ *  turn — e.g. a `brief.delivered` notice, which has no matching ask in
+ *  this thread at all. A user turn.created always appends bare: its pairing
+ *  partner (the reply) hasn't arrived yet. */
+export function applyRealtimeTurn(
+  existing: ThreadTurn[],
+  payload: RealtimeTurnPayload,
+  mergedReplyIds?: ReadonlySet<number>,
+): ThreadTurn[] {
+  if (!shouldAppendRealtimeTurn(existing, payload, mergedReplyIds)) return existing
+  const last = existing[existing.length - 1]
+  if (payload.role === "assistant" && last && last.query && !last.reply) {
+    const shaped = realtimeTurnToThreadTurn(payload)
+    return [...existing.slice(0, -1), { ...last, reply: shaped.reply }]
+  }
+  return [...existing, realtimeTurnToThreadTurn(payload)]
+}
+
 export function useProjectConversation(
   projectId: number | string,
+  /** The caller's own uid — needed to subscribe to this chat's PER-USER
+   *  realtime topic (`project:{id}:user:{uid}`). `null`/omitted (unresolved
+   *  auth) leaves this surface realtime-blind, same as before this ticket:
+   *  no crash, just no live turn.created/brief.delivered updates. */
+  currentUserId?: string | null,
   onOpenArtifact?: (candidate: OpenArtifactCandidate) => void,
 ): ProjectConversationProps {
   const convKey = useMemo(() => surfaceKey(projectId), [projectId])
   const { activeCompany } = useCompany()
-  const { profile } = useWorkspace()
+  const { profile, workspace } = useWorkspace()
   const { content, setContent } = useContent()
   const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   const name = profileDisplayName(profile) || "You"
@@ -141,6 +267,7 @@ export function useProjectConversation(
   const [meta, setMeta] = useState<Partial<ChatTab>>({})
   const [pendingClarify, setPendingClarify] = useState<PendingClarify | null>(null)
   const [pendingAssign, setPendingAssign] = useState<PendingAssign | undefined>(undefined)
+  const [pendingBacklog, setPendingBacklog] = useState<PendingBacklog | undefined>(undefined)
   const [pendingShare, setPendingShare] = useState<PendingShare | undefined>(undefined)
   // The attachment overlay's own state — the project surface's copy of the
   // state main keeps on ChatScreen. The click handler (mapDeps.setViewerAttachment)
@@ -153,6 +280,9 @@ export function useProjectConversation(
   const [editingTurnId, setEditingTurnId] = useState<string | null>(null)
   const [copiedTurnId, setCopiedTurnId] = useState<string | null>(null)
   const copiedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // The composer's Goal Analysis MODE — the `+`-menu affordance, present only
+  // while the company is enrolled. Host-owned exactly as main keeps it.
+  const [goalMode, setGoalMode] = useState(false)
   const [clarifyPopupDismissed, setClarifyPopupDismissed] = useState<Record<string, boolean>>({})
   const [questionDockEl, setQuestionDockEl] = useState<HTMLDivElement | null>(null)
   const threadRef = useRef<ThreadTurn[]>(thread)
@@ -172,12 +302,29 @@ export function useProjectConversation(
   pendingShareRef.current = pendingShare
   const pendingAssignRef = useRef(pendingAssign)
   pendingAssignRef.current = pendingAssign
+  const pendingBacklogRef = useRef(pendingBacklog)
+  pendingBacklogRef.current = pendingBacklog
   const stoppedRef = useRef(false)
   const askingRef = useRef<Set<string>>(new Set())
   const busySetRef = useRef<Set<string>>(new Set())
   const animatedTurnIds = useRef<Set<string>>(new Set())
   const askStartRef = useRef<Map<string, number>>(new Map())
   const resumedTurnsRef = useRef<Set<string>>(new Set())
+  // The highest `conversation_turns.id` this surface has SEEN (hydrated,
+  // realtime-delivered, or reconciled) — the since-cursor the realtime
+  // reconcile reads after every (re)subscribe (AD-P22). Seeded from
+  // hydrate's own restored turns below.
+  const lastKnownTurnIdRef = useRef<number>(0)
+  // Every assistant DB row id whose reply is ALREADY present on the thread but
+  // whose `dbTurnId` slot is NOT the assistant's own — either merged into a
+  // paired user turn by a live realtime event (`applyIncomingTurn` below) or
+  // folded into a paired turn by the hydrate restore (which keeps the USER
+  // row's id on the merged turn, for rewind). A live re-broadcast of such a
+  // row bypasses the reconcile since-cursor, so the plain `dbTurnId` dedupe
+  // can't catch it; `shouldAppendRealtimeTurn` consults this set as the
+  // second, id-precise guard. Seeded by hydrate (paired assistant rows) and
+  // grown by `applyIncomingTurn` (realtime merges).
+  const mergedReplyIdsRef = useRef<Set<number>>(new Set())
   const mountedRef = useRef(true)
   // Reset true on SETUP (not only false on cleanup) — StrictMode's dev
   // mount→cleanup→remount would otherwise leave it false and cancel every ask.
@@ -198,6 +345,12 @@ export function useProjectConversation(
         const { turns } = await conversationsApi.listTurns(conv.id)
         if (cancelled) return
         const restored: ThreadTurn[] = []
+        // Assistant DB row ids that hydrate FOLDED into a paired user turn: the
+        // merged turn keeps the USER row's id on `dbTurnId` (rewind needs it),
+        // so the assistant row's own id lives nowhere on the thread. Recorded
+        // into `mergedReplyIdsRef` below so a realtime re-broadcast of that same
+        // assistant row is deduped by id instead of re-rendered as a duplicate.
+        const pairedReplyIds: number[] = []
         for (let i = 0; i < (turns ?? []).length; i++) {
           const t = turns[i]
           if (t.role === "user") {
@@ -215,12 +368,41 @@ export function useProjectConversation(
               query: t.content,
               reply,
             })
-            if (reply) i++
+            if (reply) {
+              if (typeof next!.id === "number") pairedReplyIds.push(next!.id)
+              i++
+            }
           } else if (t.role === "assistant" && t.content.trim()) {
-            restored.push({ id: `resumed-${conv.id}-${i}`, query: "", reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse })
+            restored.push({
+              id: `resumed-${conv.id}-${i}`,
+              // A standalone assistant row (a delegated brief/notice with no
+              // adjacent user ask) DOES carry its own id here — nothing else
+              // holds it — so a realtime re-broadcast of that exact row is
+              // caught by the plain `dbTurnId` dedupe rather than appended twice.
+              ...(typeof t.id === "number" ? { dbTurnId: t.id } : {}),
+              query: "",
+              reply: { answer: t.content, sources: [], follow_ups: [], key_points: [], citations: [], confidence: 1, unanswered: "" } as AskResponse,
+            })
           }
         }
         restored.forEach((r) => resumedTurnsRef.current.add(r.id))
+        // Seed the realtime reconcile's since-cursor PAST EVERY row hydrate just
+        // read — the first reconcile (fired the instant the channel below
+        // subscribes) then only fetches genuinely NEW turns. Seeding from the
+        // restored turns' `dbTurnId`s alone left the cursor at the last USER
+        // row's id: a paired assistant row (written right after its user row,
+        // so a HIGHER id) sits above that cursor but off the thread's dbTurnIds,
+        // so the reconcile refetched it and re-appended it as a duplicate
+        // standalone bubble. Reading the raw `turns` ids (which include the
+        // paired assistant rows) closes that gap.
+        for (const t of (turns ?? [])) {
+          if (typeof t.id === "number") lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, t.id)
+        }
+        // A live re-broadcast bypasses the since-cursor, so also remember every
+        // paired assistant row id for `shouldAppendRealtimeTurn`'s id-precise
+        // second guard (the merged turn's `dbTurnId` is the user row's, not the
+        // assistant's, so the plain dbTurnId dedupe can't catch these on its own).
+        for (const id of pairedReplyIds) mergedReplyIdsRef.current.add(id)
         // Only fill a still-empty thread — never clobber one a send already started.
         if (restored.length) setThread((prev) => (prev.length === 0 ? restored : prev))
       } catch {
@@ -232,6 +414,67 @@ export function useProjectConversation(
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectId])
+
+  // ── Realtime: this chat's own per-user topic ────────────────────────────────
+  // `turn.created` (a fresh individual-chat write — the generate/clarify/
+  // terminal-outcome branches and the PRD-edit path) and `brief.delivered` (a
+  // delegated brief/notice; the server already publishes it) both apply live
+  // via `applyRealtimeTurn` — id/local-echo deduped exactly as before, but
+  // PAIRED the way hydrate pairs a restored user+assistant row (see that
+  // function's own doc). `onReconcile` (fired once on every (re)subscribe,
+  // AD-P22) refetches anything landed since `lastKnownTurnIdRef` — the gap a
+  // dropped broadcast or a reconnect would otherwise leave.
+  //
+  // `mergedReplyIdsRef` (declared above, beside `lastKnownTurnIdRef`, so the
+  // hydrate effect can seed it too): an assistant turn.created that MERGES into
+  // a paired user turn deliberately never gets its own `dbTurnId` slot (the
+  // merged turn keeps the user row's id — see `applyRealtimeTurn`), so a later
+  // redelivery of that exact assistant row wouldn't be caught by the
+  // dbTurnId-dedupe alone. The ref remembers every payload id that WAS merged
+  // (never a standalone-appended one, which is already covered by its own
+  // `dbTurnId`) so `shouldAppendRealtimeTurn` can still catch it.
+  const applyIncomingTurn = useCallback((payload: RealtimeTurnPayload) => {
+    lastKnownTurnIdRef.current = Math.max(lastKnownTurnIdRef.current, payload.id)
+    setThread((prev) => {
+      const next = applyRealtimeTurn(prev, payload, mergedReplyIdsRef.current)
+      // A merge replaces the thread with a same-LENGTH array (one turn's
+      // `reply` set in place); an append or a no-op (deduped) never does —
+      // append grows the array, and a no-op returns the identical `prev`
+      // reference. Length-equality plus a changed reference is therefore an
+      // unambiguous "this call merged" signal, without `applyRealtimeTurn`
+      // needing to hand back anything beyond the new array.
+      if (next !== prev && next.length === prev.length) mergedReplyIdsRef.current.add(payload.id)
+      return next
+    })
+  }, [])
+
+  const handleRealtimeEvent = useCallback((event: string, payload: unknown) => {
+    if (event !== "turn.created" && event !== "brief.delivered") return
+    const parsed = parseRealtimeTurnPayload(payload)
+    if (parsed) applyIncomingTurn(parsed)
+  }, [applyIncomingTurn])
+
+  const handleRealtimeReconcile = useCallback(() => {
+    void projectsApi.individualTurns(projectId, lastKnownTurnIdRef.current)
+      .then((turns) => {
+        for (const t of turns) applyIncomingTurn({ id: t.id, role: t.role, content: t.content, created_at: t.created_at })
+      })
+      .catch(() => { /* best-effort — the NEXT reconnect/reconcile closes it */ })
+  }, [projectId, applyIncomingTurn])
+
+  // Gated on `!hydrating`: the channel's first reconcile fires the instant it
+  // subscribes, and a reconcile-driven append landing BEFORE hydrate's own
+  // `setThread` would make hydrate's `prev.length === 0 ? restored : prev`
+  // guard a silent no-op (losing the ordered, paired restore for the bare
+  // reconcile shape). Waiting for hydrate to settle first — regardless of
+  // whether it restored anything — makes the ordering safe either way.
+  const conversationRealtimeTopic = !hydrating && currentUserId
+    ? `project:${projectId}:user:${currentUserId}`
+    : null
+  useRealtimeChannel(conversationRealtimeTopic, {
+    onEvent: handleRealtimeEvent,
+    onReconcile: handleRealtimeReconcile,
+  })
 
   // ── Mirror this conversation into the shared content store (main parity) ────
   // Main's ChatScreen stamps `content.conversationId` with the active tab's
@@ -391,9 +634,24 @@ export function useProjectConversation(
   }, [persistence])
 
   const finalizeConversationTurn = useCallback((
-    turnId: string, updates: { reply?: AskResponse; error?: string }, key: string,
+    turnId: string,
+    updates: { reply?: AskResponse; error?: string; clientMessageId?: string },
+    key: string,
   ): Promise<void> => {
-    if (updates.reply) return persistence.pushAssistantTurn(key, replyToText(updates.reply))
+    // `clientMessageId` (an ask's reply-persist dedup key, when the caller
+    // has one — see `runAskGeneration`'s `replyClientMessageId` doc)
+    // threads straight to the write: THIS surface is exactly the one
+    // `client_message_id` exists for. Its ask-scope (`askScope(convKey)`,
+    // `surfaceKey(projectId)`) is the SAME across every tab/mount on this
+    // project — unlike main chat's per-tab uuid scope — so a second
+    // mount/tab can independently resume and persist the SAME completed ask.
+    // Stamping the identical key on both persists lets the server's
+    // idempotent upsert collapse a same-key double-submit to one row.
+    if (updates.reply) {
+      return persistence.pushAssistantTurn(
+        key, replyToText(updates.reply), undefined, updates.clientMessageId,
+      )
+    }
     return Promise.resolve()
   }, [persistence])
 
@@ -408,6 +666,33 @@ export function useProjectConversation(
 
   // ── The shared unit ────────────────────────────────────────────────────────
   const composer = useComposer({ showToast })
+
+  // ── Composer draft hand-off (client decision D1, 2026-09-02) ──────────────
+  // A PRD generated in main chat auto-forks/attaches THIS project server-side
+  // (`maybe_auto_create_project_for_prd` binds the very conversation row this
+  // hook resolves below via `individualChat` — every chat conversation is
+  // `kind='individual'` by column default, so the bind is enough to make the
+  // get-or-create resolve back to the SAME row; see `ChatScreen`'s
+  // `bindActiveProject` for the full trace). The main-chat conversation IS
+  // this project's private chat going forward, so whatever the user had
+  // half-typed there travels with them instead of vanishing on the page
+  // transition: `ChatScreen` stashes it on `content.pendingComposerDraft`
+  // right before navigating and clears its own composer. Consumed exactly
+  // once — guarded by the ref, not the deps array, so a mount that observes
+  // the field arrive a render late (nothing guarantees the seeding write and
+  // this mount land in the same commit) still picks it up — then cleared
+  // back to null so it never leaks into a later visit to this or any other
+  // project's chat (this surface remounts per distinct project — see
+  // `ProjectMainThread`'s `key={projectId}`).
+  const draftHandoffConsumedRef = useRef(false)
+  useEffect(() => {
+    if (draftHandoffConsumedRef.current) return
+    if (!content.pendingComposerDraft) return
+    draftHandoffConsumedRef.current = true
+    composer.setDraft(content.pendingComposerDraft)
+    setContent({ pendingComposerDraft: null })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [content.pendingComposerDraft])
 
   const scroll = useThreadScroll({ thread, activeTabId: convKey, pendingSend: composer.pendingSend })
   const engine = useMainConversation({
@@ -492,6 +777,15 @@ export function useProjectConversation(
     if (!pending) return
     const askId = Number(pending.id)
     if (!Number.isFinite(askId)) return
+    // Captured HERE, before this resume's own poll runs — not re-read once it
+    // settles. This conversation's ask-scope (`askScope(convKey)`) is the
+    // SAME across every tab/mount on this project, so the ORIGINATING send
+    // may have minted a reply dedup key under this SAME pending-job record
+    // (`runAskGeneration`'s `replyClientMessageId`); by the time this poll
+    // resolves it has already cleared that record itself
+    // (`_pollAskLoop`'s clear-on-terminal-exit), so the key must travel with
+    // this closure, exactly like `askId`/`turnId` already do.
+    const replyClientMessageId = pending.clientMessageId
     // Re-attach only when the last turn is still awaiting a reply — the marker
     // that survives in the persisted (hydrated) thread.
     const last = threadRef.current[threadRef.current.length - 1]
@@ -529,7 +823,7 @@ export function useProjectConversation(
         const streamed = threadRef.current.find((t) => t.id === turnId)
         if (streamed?.partial) animatedTurnIds.current.add(turnId)
         patchTurn((t) => ({ ...t, reply: res, partial: undefined, streamDropped: undefined, timedOut: undefined, livePhase: undefined }))
-        void finalizeConversationTurn(turnId, { reply: res }, convKey)
+        void finalizeConversationTurn(turnId, { reply: res, clientMessageId: replyClientMessageId }, convKey)
       } catch (e) {
         // Unmounted again mid-resume: leave the persisted ask so the NEXT mount
         // re-attaches; don't write an error.
@@ -641,6 +935,62 @@ export function useProjectConversation(
     runProjectClarifiedGeneration(combined, pc.sourceDocs, detail || "Generate now")
   }, [pendingClarify, runProjectClarifiedGeneration])
 
+  // ── Goal Analysis, in this project's thread ────────────────────────────────
+  //
+  // The planner already resolves a goal typed here to `analyse_goal` and the
+  // shared switch already has the case — what was missing was the EXECUTOR, so
+  // `dispatchChatIntent` fell through to `onAnswer` and a goal came back as an
+  // ordinary answer with nothing to say it had been understood as one.
+  //
+  // A gate turn with NO `query` is a card, not something the user said.
+  // Persisting one writes an empty user row that replays as a blank message on
+  // every later restore — so the plan turn appends to the thread only, while
+  // the opening turn (which carries the reader's sentence) persists through the
+  // ordinary path. This is why the gates do not reuse `emitTurn`, which
+  // persists unconditionally.
+  const emitGoalTurn = useCallback((turn: ThreadTurn) => {
+    setThread((prev) => [...prev, turn])
+    if (turn.query) pushPendingConversation(turn.id, turn.query, convKey)
+  }, [convKey, pushPendingConversation])
+  const patchGoalTurn = useCallback(
+    (turnId: string, update: (t: ThreadTurn) => ThreadTurn) => {
+      setThread((prev) => prev.map((t) => (t.id === turnId ? update(t) : t)))
+    }, [])
+  // The SAME global side panel every other artifact on this surface opens into
+  // — `ContentPanel` already renders a Goal Analysis tab off `content.goalRunId`
+  // and this surface already drives it for PRDs, tickets, reports, evidence and
+  // documents. Not the project artifact drawer and not a modal: a run opening
+  // somewhere else would be a third pattern for no reason.
+  const openGoalPanel = useCallback((runId: number) => {
+    setContent({ goalRunId: runId })
+    openContentPanel("goal")
+  }, [setContent, openContentPanel])
+
+  // The ENTITLEMENT is read once, here, and spent in exactly one place: the
+  // composer's `+`-menu entry (`goalModeAvailable`, in the host bag below), so
+  // an unenrolled company is never offered the feature.
+  //
+  // The EXECUTOR is mounted unconditionally, exactly as main mounts its own,
+  // and deliberately not gated on this flag. The entitlement is already
+  // enforced twice server-side — the planner drops `analyse_goal` to `answer`
+  // when `crucible` is off (`ask_planner`, fail-closed) and the route refuses
+  // with 403 — whereas gating the client slot on a flag that is `undefined`
+  // until `workspace` resolves would reintroduce, for that window, the exact
+  // silent fall-through to `onAnswer` this change exists to remove.
+  const goalAnalysisOn = crucibleOn(workspace?.feature_flags)
+  const goal = useProjectGoalAnalysis({
+    mountedRef,
+    // Get-or-create THIS project's durable conversation. On every send but the
+    // very first this is already on the ref and returns synchronously, which is
+    // why this surface needs none of main's polling for a row a freshly spawned
+    // tab does not have yet.
+    resolveConversationId: ensureProjectConv,
+    emitGoalTurn,
+    patchGoalTurn,
+    openGoalPanel,
+    showToast,
+  })
+
   // ── The single-conversation submit (intent dispatch → shared flows/actions) ─
   const submitAsk = useCallback(async (rawQuery: string) => {
     const trimmed = rawQuery.trim()
@@ -734,6 +1084,35 @@ export function useProjectConversation(
           envelope,
           { hasEditTarget: targetPrdId != null, editTargetPrdId: targetPrdId, ticketsTarget },
           useChatIntentExecutors({
+            // A GOAL TYPED INTO A PROJECT CHAT REACHES GOAL ANALYSIS. Without
+            // this slot the planner routed `analyse_goal` correctly and this
+            // client dropped it to `onAnswer` — a goal answered as an ordinary
+            // question, with no definition confirmed and nothing approved,
+            // which is precisely the behaviour the feature exists to replace.
+            //
+            // The slot must be PRESENT and must ACT: `dispatchChatIntent`
+            // decides `handled` from the executor's presence, never its return
+            // value, so an omitted slot is indistinguishable from the bug.
+            //
+            // `trimmed` is what the reader typed; `goalText` is what the
+            // planner extracted from it. Both travel: the run works from the
+            // goal, the thread shows the sentence.
+            //
+            // AND IT SETTLES, unlike main's otherwise-identical slot. Main
+            // settles its pending send unconditionally BEFORE the classify
+            // await, so its Goal Analysis executor deliberately does not — but
+            // this surface settles per-executor (every sibling below ends with
+            // the same call, and so does the grounded-ask fallthrough). Copying
+            // main's omission here would strand the composer's placeholder
+            // bubble on screen for the life of the run.
+            //
+            // Settled AFTER the start call, not before: `startGoalAnalysis`
+            // puts its turn on the thread synchronously, ahead of its first
+            // await, so the placeholder is replaced rather than blanked.
+            onAnalyseGoal: (goalText: string) => {
+              void goal.startGoalAnalysis(goalText, trimmed)
+              settlePendingSend()
+            },
             onGenerateTickets: (env) => {
               if (docFile) {
                 // Doc + "make tickets": import the doc as a PRD, then break it
@@ -843,6 +1222,18 @@ export function useProjectConversation(
               })
               settlePendingSend()
             },
+            onBacklogAction: (instruction) => {
+              void runBacklogAction(trimmed, instruction, {
+                emitTurn,
+                runActionTurn: (q, w) => engine.runActionTurnInTab(convKey, q, w),
+                canAskInDock: true,
+                onDockQuestion: (turnId, question) => {
+                  if (question.kind !== "backlog") return
+                  setPendingBacklog({ questions: question.questions, applied: question.applied, turnId })
+                },
+              })
+              settlePendingSend()
+            },
             onAnswer: () => {},
           }),
         )
@@ -892,7 +1283,30 @@ export function useProjectConversation(
     composer.setDraft(""); composer.setPinnedSkill(null); composer.setPlusMenuOpen(false)
     void submitAsk(q)
   }, [composer, submitAsk, convKey])
+  // Goal mode intercepts the submit BEFORE the ask path: a run takes the goal
+  // in the reader's own words, so the slash trigger the ordinary submit can
+  // splice in front of it must never happen. A normal send falls straight
+  // through. Guards mirror `handleComposerSubmit` above so goal mode behaves
+  // identically under an empty draft or an in-flight ask.
+  const handleGoalOrComposerSubmit = useCallback(() => {
+    if (!goalMode) { handleComposerSubmit(); return }
+    const q = composer.draft.trim()
+    if (q.length < 1) return
+    if (askingRef.current.has(convKey)) { composer.showComposerHint("busy"); return }
+    if (composer.voice.listening) composer.voice.cancel()
+    composer.setDraft(""); composer.setPlusMenuOpen(false)
+    setGoalMode(false)
+    // ONE argument: in goal mode the sentence the reader typed IS the goal, so
+    // there is no planner extraction to show alongside it.
+    void goal.startGoalAnalysis(q)
+  }, [goalMode, handleComposerSubmit, composer, convKey, goal])
+
+  // Enter-to-send has to respect the mode too. Only the plain Enter is
+  // overridden — the slash palette keeps its own navigation below.
   const handleComposerKeyDown = useCallback((e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (goalMode && e.key === "Enter" && !e.shiftKey && !composer.slashOpen) {
+      e.preventDefault(); handleGoalOrComposerSubmit(); return
+    }
     if (composer.slashOpen) {
       if (e.key === "ArrowDown") { e.preventDefault(); composer.setSlashActive((i) => (i + 1) % composer.filteredSkills.length); return }
       if (e.key === "ArrowUp") { e.preventDefault(); composer.setSlashActive((i) => (i - 1 + composer.filteredSkills.length) % composer.filteredSkills.length); return }
@@ -900,7 +1314,20 @@ export function useProjectConversation(
       if (e.key === "Escape") { e.preventDefault(); composer.setShowSlash(false); composer.setSlashFromMenu(false); return }
     }
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleComposerSubmit() }
-  }, [composer, handleComposerSubmit])
+  }, [composer, handleComposerSubmit, goalMode, handleGoalOrComposerSubmit])
+
+  // The `+` menu's THIRD item, which `ChatComposer` appends only when
+  // `goalModeAvailable` — so indices 0 and 1 keep meaning what they always
+  // meant, and an unenrolled company has no index 2 to select.
+  const handleGoalOrPlusMenuSelect = useCallback((index: number) => {
+    if (index === 2) {
+      composer.setPlusMenuOpen(false)
+      setGoalMode(true)
+      composer.composerRef.current?.focus()
+      return
+    }
+    composer.handlePlusMenuSelect(index)
+  }, [composer])
 
   const handleComposerInput = useCallback((e: React.ChangeEvent<HTMLTextAreaElement>) => {
     composer.handleComposerInput(e)
@@ -1106,6 +1533,24 @@ export function useProjectConversation(
     finalizeTurn: assignFinalizeTurn,
   })
 
+  // ── Backlog: the same landing, one surface over ────────────────────────────
+  // The backlog is COMPANY-scoped, not project-scoped, so a change asked for
+  // in a project chat is the same change asked for in the main chat — which is
+  // exactly why this surface wires the action rather than falling through:
+  // declining here would tell someone in a project that the product cannot do
+  // something it does. Three seams are the assign ones verbatim (they are
+  // about this conversation, not about what was asked); only the pending pair
+  // differs.
+  const backlogGetPending = useCallback(() => pendingBacklogRef.current, [])
+  const backlogClearPending = useCallback(() => setPendingBacklog(undefined), [])
+  const { completeBacklog, cancelBacklog } = useBacklogCompletion({
+    getPendingBacklog: backlogGetPending,
+    clearPendingBacklog: backlogClearPending,
+    setBusy: assignSetBusy,
+    appendReplyTurn: assignAppendReplyTurn,
+    finalizeTurn: assignFinalizeTurn,
+  })
+
   // ── Host-bag assembly ──────────────────────────────────────────────────────
   const activeTab = useMemo(() => ({
     id: convKey, hydrating: hydrating && thread.length === 0,
@@ -1152,12 +1597,15 @@ export function useProjectConversation(
   const mapDeps: MapMainTurnsDeps = useMemo(() => ({
     animatedTurnIds, askStartRef, resumedTurnsRef, lastLiveTurnIdx,
     busy,
-    // The project GROUP surface has no Goal Analysis. Named explicitly rather
-    // than omitted: `MapMainTurnsDeps` requires these so a surface cannot drop
-    // them with a clean `tsc`, which is how the in-thread gates shipped inert.
-    goalGateBusyTurnId: undefined,
-    confirmGoalDefinition: undefined,
-    approveGoalPlan: undefined,
+    // Both Goal Analysis gates are answered IN THE THREAD, here as on main:
+    // the run asks what the goal means and the reader answers; it states what
+    // it will read and the reader approves, drops a source, or says what they
+    // already expect. Only the finished report — a document, not a question —
+    // goes to the panel. `MapMainTurnsDeps` requires all three, so dropping
+    // one is a build error rather than a silently inert feature.
+    goalGateBusyTurnId: goal.goalGateBusyTurnId,
+    confirmGoalDefinition: goal.confirmGoalDefinition,
+    approveGoalPlan: goal.approveGoalPlan,
     activeTab: { id: convKey, prdId: meta.prdId ?? null, prd: meta.prd ?? null, prdGenerating: !!meta.prdGenerating, pendingClarify: meta.pendingClarify },
     name, userInitials, skillForQuery: composer.skillForQuery,
     ticketSetActionState: (meta.ticketSetStatus === "generating" ? "running" : meta.ticketSetStatus === "ready" ? "ready" : meta.ticketSetStatus === "failed" ? "failed" : null),
@@ -1184,7 +1632,7 @@ export function useProjectConversation(
       turn.reply?.answer?.includes(MORE_MARKER)
         ? createElement(GreetingTurnBody, { answer: turn.reply.answer })
         : null,
-  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit])
+  }), [lastLiveTurnIdx, busy, convKey, meta, name, userInitials, composer.skillForQuery, engine.handleStopAsk, clarifyPopupOpen, pendingClarifyTurn, submitClarifyAnswers, gen.handleTicketSetAction, onOpenArtifact, handleAskAgain, handleOpenPrd, openChatArtifactItem, openReportByTitle, setViewerAttachment, sendSlackShare, cancelSlackShareCard, repreviewSlackShare, editingTurnId, copiedTurnId, handleCopyTurn, handleRetryTurn, handleEditTurn, handleSubmitTurnEdit, handleCancelTurnEdit, goal])
 
   const showThreadView = thread.length > 0 || !!activeTab.hydrating || (!!composer.pendingSend && composer.pendingSend.tabId === convKey)
 
@@ -1198,9 +1646,16 @@ export function useProjectConversation(
     slashOpen: composer.slashOpen, filteredSkills: composer.filteredSkills, slashActive: composer.slashActive,
     composerRef: composer.composerRef, fileInputRef: composer.fileInputRef, voice: composer.voice,
     handleSlashSelect: composer.handleSlashSelect, setSlashActive: composer.setSlashActive,
-    handleComposerInput, handleComposerKeyDown, handleComposerSubmit,
+    handleComposerInput, handleComposerKeyDown,
+    handleComposerSubmit: handleGoalOrComposerSubmit,
     setPlusMenuActive: composer.setPlusMenuActive, setPlusMenuOpen: composer.setPlusMenuOpen,
-    handlePlusMenuSelect: composer.handlePlusMenuSelect, setAttachments: composer.setAttachments,
+    handlePlusMenuSelect: handleGoalOrPlusMenuSelect, setAttachments: composer.setAttachments,
+    // Goal Analysis mode. `goalModeAvailable` is the ONE place the entitlement
+    // shows: off → `ChatComposer` never appends the `+`-menu entry, so the
+    // project surface neither offers nor implies a feature the company does
+    // not have (and the planner would drop to `answer` anyway).
+    goalMode, goalModeAvailable: goalAnalysisOn,
+    onExitGoalMode: () => setGoalMode(false),
     setPinnedSkill: composer.setPinnedSkill, handleFileSelect: composer.handleFileSelect,
     handleToggleVoice: composer.handleToggleVoice,
     // Empty-state greeting: unset → `ConversationView` renders its default
@@ -1217,6 +1672,10 @@ export function useProjectConversation(
     // the chosen channel/document, both mirroring main over this conversation.
     assignPopupOpen: !!pendingAssign,
     pendingAssignState: pendingAssign,
+    backlogPopupOpen: !pendingAssign && !!pendingBacklog,
+    pendingBacklogState: pendingBacklog,
+    completeBacklog,
+    cancelBacklog,
     activeTabId: convKey,
     completeAssign,
     cancelAssign,

@@ -683,29 +683,92 @@ _CLIENT_INTENTS: frozenset[str] = frozenset(INTENTS) | {
     # falls through to `answer` — where the chat, knowing the product has
     # projects, replies that it made one and nothing exists.
     "create_project",
+    # CHANGE the backlog — add an idea, move one to done / in progress /
+    # dismissed, or re-sequence it. The client resolves the sentence against
+    # the live backlog (POST /v1/ideation/chat-plan) and asks through the
+    # question popup when a phrase fits several ideas or a new idea's type is
+    # unstated; the envelope's `instruction` is the whole argument.
+    #
+    # Listed here for exactly the reason create_artifact's comment records:
+    # THIS SET IS THE WIRE. An action missing from it falls through to
+    # `answer` — and the answer path now CARRIES THE BACKLOG BLOCK, which
+    # tells the model the product can add and complete ideas, so the reply
+    # would confidently describe a change nothing had made.
+    "backlog_action",
 }
+#: `delegate` is DELIBERATELY ABSENT from the set above, unlike every other
+#: action this module's comments warn about. It is not a missed wire — see
+#: `_plan_to_envelope`'s `intent in ("update_ticket", "delegate")` rewrite:
+#: both actions execute entirely server-side off the plain `answer` path, so
+#: adding `delegate` here would only let a stale `intent == "delegate"` reach
+#: a client that has never had — and does not need — a case for it.
 
 
-def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
+def _is_report_pipeline(
+    pipeline_id: Optional[str],
+    question: str = "",
+    wants_report: Optional[bool] = None,
+) -> bool:
     """Does this plan's pipeline WRITE A REPORT DOCUMENT?
+
+    THE PLANNER ANSWERS THIS NOW, and `wants_report` is its answer: a document
+    is written when the user ASKED for one, in so many words. Pass it and the
+    two rules below are not consulted at all — they are what this decision was
+    before the planner had a field for it, and they are kept for the callers
+    that have no plan (this module's own pre-planner path, and every test that
+    predates the field).
+
+    Why it moved: the old verdict read the question's surface words, so every
+    phrasing that meant "answer me in the chat" had to be discovered and added
+    one at a time. Two were added on 2026-09-03 alone — a summary ask, then a
+    table ask — and the failure each time was the same, a reader who asked a
+    question watching a Reports panel fill with a document they never wanted.
+    The model reading the whole sentence can tell "look at all customer
+    conversations and show me what features they want" from "give me a
+    voice-of-customer report" without a rule per phrasing.
 
     `qa_agent._REPORT_PIPELINE_IDS` is the set the answer path itself dispatches
     on, so it is the one read here — a second list would drift and the drift
     would be invisible until a report printed itself into a chat thread.
 
-    ONE carve-out: `call-digest` is the machinery id BOTH the full
-    voice-of-customer pass AND the map-reduce count engine
-    (`app.corpus_mapreduce` via `call_digest.VOC_CALLS_SPEC`) resolve to — the
-    planner classifies by question SHAPE ("is this about the calls?"), before
-    the answer path has decided which of the two it will actually run, so one
-    pipeline id has to cover both. A count-shaped question
-    (`call_digest.is_mapreducible_count`, the SAME eligibility check the
-    answer path itself gates the engine on) answers INLINE, never a report —
-    see `app.corpus_mapreduce`'s module docstring — so it must not open the
-    Reports drawer or show report-generation copy just because it shares a
-    pipeline id with the report it is not writing. Every other
-    `_REPORT_PIPELINE_IDS` member names exactly one shape and needs no such
-    carve-out.
+    ONE carve-out, over `call_digest.VOC_PIPELINE_IDS`: the voice-of-customer
+    machinery is reached by TWO pipeline ids — "call-digest" (the calls-shaped
+    pick) and "voice-of-customer-report" (the skill id the planner picks for a
+    VoC question that never says "calls") — and both run the same `answer`,
+    which serves the full report, the pointed query and the map-reduce count
+    from one entry point. The planner classifies by question SHAPE before that
+    function has decided which of the three it will run, so the ids have to
+    cover all of them.
+
+    KEYED ON THE SET, NEVER THE STRING. Testing `pipeline_id == "call-digest"`
+    is what let this fire for half the traffic it was written for: a table ask
+    ("a list of the features clients asked for … in a form of a table") plans
+    as "voice-of-customer-report", so the carve-out was skipped, the client
+    opened a Reports panel, and the answer path returned a query answer to the
+    thread — the reported bug, one pipeline id over from the one it was
+    supposed to be fixed in.
+
+    `call_digest.is_voc_query` IS that decision — the same function
+    `call_digest.answer` forks on (`query_mode`), so this cannot drift from what
+    actually happens — and everything it claims answers INLINE with
+    `_report: False`. Such a turn must not open the Reports drawer or show
+    report-generation copy just because it shares a pipeline id with the report
+    it is not writing.
+
+    THE COMMONEST CASE IS A SUMMARY (owner's rule, 2026-09-03). "Give me
+    summary on last week's customer conversations" now answers in the thread —
+    see `call_digest.is_voc_query` — so the panel must not open for it. Before
+    this, the endpoint promised a report, the answer path wrote none, and the
+    reader watched a Reports panel that never filled.
+
+    This supersedes the narrower count-shaped carve-out that stood here:
+    `is_mapreducible_count` requires `is_voc_query`, so the wider check
+    subsumes it, needs no feature-flag read, and closes the same mismatch for
+    every other query shape ("which accounts complained about latency") that
+    was already answering inline under a `report: true` envelope.
+
+    Every other `_REPORT_PIPELINE_IDS` member names exactly one shape and needs
+    no such carve-out.
 
     Imported lazily: `qa_agent` is a heavy module and this endpoint is on the
     send path, which imports `ask_planner` the same way one function below.
@@ -717,12 +780,15 @@ def _is_report_pipeline(pipeline_id: Optional[str], question: str = "") -> bool:
 
         if pipeline_id not in _REPORT_PIPELINE_IDS:
             return False
-        if pipeline_id == "call-digest":
-            from app.call_digest import is_mapreducible_count
-            from app.config import settings
+        # The planner's own verdict, when there is one. `apply_gates` has
+        # already clamped it to a report pipeline, so this needs no second
+        # membership test — the check above is for the no-plan callers.
+        if wants_report is not None:
+            return bool(wants_report)
+        from app.call_digest import VOC_PIPELINE_IDS, is_voc_query
 
-            if settings.voc_count_engine_enabled and is_mapreducible_count(question):
-                return False
+        if pipeline_id in VOC_PIPELINE_IDS and is_voc_query(question):
+            return False
         return True
     except Exception:  # noqa: BLE001 — never break the verdict over a hint
         logger.exception("report-pipeline check failed for %s", pipeline_id)
@@ -760,6 +826,21 @@ def _plan_to_envelope(
     ticket-update executor runs server-side off the answer path — so the client
     has nothing to do with it beyond showing the reply.
 
+    `delegate` maps to `answer` for the same reason, and deliberately, not as
+    an oversight: the actual hand-off is server-side too — the project chat's
+    scoped tool loop (`skill_router.is_project_tool_request` → `delegate_task`
+    → `project_delegation.handle_delegate_task`), reached off the SAME
+    grounded-ask path every plain answer already takes once the client falls
+    through to it. Rewriting `delegate` to `answer` here is what MAKES that
+    reuse work: the client resends the user's ORIGINAL message unparaphrased,
+    which is exactly what the tool loop's own regex gate and the delegating
+    model read — a client-side executor synthesizing a second call from
+    `instruction` would risk drifting from the sentence the tool loop actually
+    sees, and would duplicate `handle_delegate_task`'s resolve/gate/deliver
+    path for no reason. See `ask_planner`'s `delegate` entry in `_ACTIONS` for
+    why the action exists as its own explicit, gated planner decision even
+    though it is invisible to the client.
+
     Every OTHER action passes straight through, including ones only some
     surfaces can act on. `multi_agent` is the case that makes this the right
     shape: the AI bar runs it, ChatScreen does not, and a surface that cannot
@@ -768,7 +849,7 @@ def _plan_to_envelope(
     protect one that never asked.
     """
     intent = plan.action
-    if intent == "update_ticket":
+    if intent in ("update_ticket", "delegate"):
         intent = "answer"
     # A document with no brief is a blank page with a title on it. The planner
     # already degrades this (`_NEEDS_TASK`), and it is re-applied here for the
@@ -850,7 +931,13 @@ def _plan_to_envelope(
         # Read from the SAME set `qa_agent` dispatches on, never a second list:
         # a name that fell out of one and not the other would open a panel for
         # an answer, or print a report into the chat.
-        "report": _is_report_pipeline(plan.pipeline_id, question),
+        "report": _is_report_pipeline(
+            plan.pipeline_id, question,
+            # Present on every planned turn; `getattr` only so a Plan-shaped
+            # stub from an older test still resolves to the pre-field rules
+            # rather than raising on the send path.
+            wants_report=getattr(plan, "wants_report", None),
+        ),
         # `edit_artifact` only: WHICH document the edit targets — the report or
         # team document the tab has open, re-read server-side. The client
         # already knows what its own panel is showing; this is echoed so the

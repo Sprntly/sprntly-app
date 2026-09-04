@@ -76,6 +76,36 @@ describe("the plan is shown before anything is spent", () => {
     expect(panel.textContent).toContain("what customers asked for and reported")
   })
 
+  it("shows the reader's own sentence beside the goal it was taken to mean", () => {
+    // What was asked AND what the metric was taken to mean, both on screen —
+    // a count phrased in the sentence, not only in `goal_text`.
+    render(
+      <GoalGateCard
+        gate={{
+          kind: "plan",
+          runId: 7,
+          plan: {
+            ...PLAN,
+            asked_text: "What are three things I can do to raise net revenue retention?",
+          } as unknown as GoalRunPlan,
+        }}
+        onApprovePlan={vi.fn()}
+      />,
+    )
+    const panel = screen.getByTestId("goal-plan")
+    expect(panel.textContent).toContain(
+      "What are three things I can do to raise net revenue retention?",
+    )
+  })
+
+  it("says nothing extra when there is no literal sentence to show", () => {
+    // A run with no `asked_text` (the direct API, an older run) renders
+    // exactly as it did before this field existed.
+    renderPlan()
+    const panel = screen.getByTestId("goal-plan")
+    expect(panel.querySelector("[data-testid='goal-plan-asked-text']")).toBeNull()
+  })
+
   it("states what the run will NOT be able to answer, with the fix", () => {
     // Said BEFORE the run, this is a decision — connect the source, or accept
     // a qualitative answer knowingly. Said after, it is an apology.
@@ -464,9 +494,11 @@ describe("the plan leads with the approach, not the form", () => {
     expect(approach.textContent).toMatch(/This is the approach I am going to use/i)
     const steps = approach.querySelectorAll("li")
     expect(steps.length).toBeGreaterThanOrEqual(4)
-    // Step one is what gets read, in the reader's words and with the total.
-    expect(steps[0].textContent).toContain("calls and customer tickets")
-    expect(steps[0].textContent).toContain("412")
+    // The plan carries a definition, so step one confirms it; the "what gets
+    // read" step — in the reader's words, with the total — follows it.
+    const sourcesStep = [...steps].find((s) => (s.textContent ?? "").startsWith("Read "))!
+    expect(sourcesStep.textContent).toContain("calls and customer tickets")
+    expect(sourcesStep.textContent).toContain("412")
   })
 
   it("sits above the controls, so the account is read before the form", () => {
@@ -612,5 +644,123 @@ describe("the definition is confirmed in the plan, not one screen earlier", () =
     expect(screen.queryByLabelText("What this goal means")).toBeNull()
     expect(screen.getByTestId("goal-plan-definition").textContent)
       .toContain(PLAN.definition_text)
+  })
+})
+
+describe("the gate asks what it cannot know", () => {
+  // Apurva: "the plan gate can start asking questions it doesn't know answers
+  // to." Until now it asked one thing — what the metric means — and everything
+  // else it lacked was reported afterwards as a limit.
+  it("asks for the three, and says they are optional", () => {
+    renderPlan()
+    const box = screen.getByTestId("goal-plan-unknowns").textContent ?? ""
+    expect(box).toMatch(/what I cannot know/i)
+    expect(box).toMatch(/will not guess/i)
+    expect(box).toMatch(/stays stated as missing/i)
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
+  })
+
+  it("carries the answers on approve", () => {
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.change(screen.getByLabelText(/one account worth/i),
+      { target: { value: "12000" } })
+    fireEvent.change(screen.getByLabelText(/who decides/i),
+      { target: { value: "VP Product" } })
+    fireEvent.change(screen.getByLabelText(/when do you need/i),
+      { target: { value: "before the Q3 review" } })
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+
+    const d = onApprove.mock.calls[0][0]
+    expect(d.account_value).toBe(12000)
+    expect(d.decision_owner).toBe("VP Product")
+    expect(d.needed_by).toBe("before the Q3 review")
+  })
+
+  it("sends nothing for a field left blank", () => {
+    // EMPTY MEANS UNANSWERED, never zero. A blank account value reaching the
+    // arithmetic as 0 would render a stake of nothing and read as a
+    // measurement.
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    const d = onApprove.mock.calls[0][0]
+    expect(d.account_value).toBeUndefined()
+    expect(d.decision_owner).toBeUndefined()
+    expect(d.needed_by).toBeUndefined()
+  })
+
+  it("ignores a zero or unparseable account value rather than sending it", () => {
+    const onApprove = vi.fn()
+    renderPlan(onApprove)
+    fireEvent.change(screen.getByLabelText(/one account worth/i),
+      { target: { value: "0" } })
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    expect(onApprove.mock.calls[0][0].account_value).toBeUndefined()
+  })
+})
+
+describe("the gate asks only what the CHOSEN framework needs", () => {
+  // Replaces the fixed three above with the batch `plan.questions` carries —
+  // derived server-side from which framework this run actually picked.
+  const withQuestions = (questions: GoalRunPlan["questions"]) =>
+    ({ ...PLAN, framework: "moscow", questions } as unknown as GoalRunPlan)
+
+  it("does not ask for a dollar value when MoSCoW ranked the findings", () => {
+    // MoSCoW's ranking has no arithmetic that reads account_value — asking
+    // for it collects an input nothing downstream uses.
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 8,
+        plan: withQuestions([
+          { id: "decision_owner", prompt: "Who decides this?", why: "" },
+          { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.queryByLabelText(/one account worth/i)).toBeNull()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
+  })
+
+  it("shows the framework's own reason for asking, when the plan carries one", () => {
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 9,
+        plan: withQuestions([
+          {
+            id: "decision_owner", prompt: "Who decides this?",
+            why: "Named on the decision box so the ranking has an owner.",
+          },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.getByTestId("goal-plan-unknowns").textContent)
+      .toContain("Named on the decision box so the ranking has an owner.")
+  })
+
+  it("still asks for a dollar value when RICE ranked the findings", () => {
+    render(
+      <GoalGateCard gate={{
+        kind: "plan", runId: 10,
+        plan: withQuestions([
+          { id: "account_value", prompt: "What is one account worth to you, per year?", why: "" },
+          { id: "decision_owner", prompt: "Who decides this?", why: "" },
+          { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+        ]),
+      }} onApprovePlan={vi.fn()} />,
+    )
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+  })
+
+  it("falls back to the old fixed three for a plan stored before this field existed", () => {
+    // `PLAN` (used everywhere else in this file) carries no `questions` at
+    // all — a run left `awaiting_approval` from before this shipped.
+    renderPlan()
+    expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
+    expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
+    expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
   })
 })

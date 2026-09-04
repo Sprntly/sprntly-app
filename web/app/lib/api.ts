@@ -39,6 +39,15 @@ export function apiErrorMessage(status: number, body: unknown): string {
         .filter(Boolean)
       if (parts.length) return parts.join(" · ")
     }
+    // A structured detail: `{error: "...", message: "..."}`. The billing routes
+    // return these so the client can BRANCH on `error` (insufficient_credits vs
+    // subscription_inactive) while still having something readable to show.
+    // Without this branch every one of them rendered as "Request failed (502)",
+    // which is exactly the actionable half thrown away.
+    if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+      const message = (detail as { message?: unknown }).message
+      if (typeof message === "string" && message.trim()) return message
+    }
   }
   if (typeof body === "string" && body.trim()) return body
   return `Request failed (${status})`
@@ -103,9 +112,61 @@ async function request<T>(
     }
   }
   if (!res.ok) {
+    // A 402 is announced GLOBALLY before it is thrown.
+    //
+    // The backend has always returned a structured, actionable body here —
+    // `{error: "insufficient_credits" | "subscription_inactive", message, needed,
+    // balance}` — and nothing on the client ever read it. So a customer whose
+    // subscription had lapsed clicked Generate and got whatever generic failure
+    // that particular surface happens to render, with no mention of billing and
+    // no way to find out.
+    //
+    // Announcing it here rather than handling it in each surface is the whole
+    // point: there are eight billable routes and every one of them would
+    // otherwise need its own copy of the same branch, and the ninth would be
+    // added without one.
+    if (res.status === 402) notifyPaymentRequired(parsed)
     throw new ApiError(res.status, parsed)
   }
   return parsed as T
+}
+
+/** What a 402 actually said, once the envelope is unwrapped. */
+export type PaymentRequired = {
+  /** "insufficient_credits" | "subscription_inactive", or "" if unrecognised. */
+  reason: string
+  message: string
+  /** Present on insufficient_credits. */
+  needed?: number
+  balance?: number
+  feature?: string
+}
+
+const PAYMENT_REQUIRED_EVENT = "sprntly:payment-required"
+
+function notifyPaymentRequired(body: unknown): void {
+  if (typeof window === "undefined") return
+  const detail = (body as { detail?: unknown } | null)?.detail
+  const d = (detail && typeof detail === "object" ? detail : {}) as Record<string, unknown>
+  const payload: PaymentRequired = {
+    reason: typeof d.error === "string" ? d.error : "",
+    message:
+      typeof d.message === "string" && d.message.trim()
+        ? d.message
+        : "Your subscription is not active. Choose a plan to keep generating.",
+    needed: typeof d.needed === "number" ? d.needed : undefined,
+    balance: typeof d.balance === "number" ? d.balance : undefined,
+    feature: typeof d.feature === "string" ? d.feature : undefined,
+  }
+  window.dispatchEvent(new CustomEvent(PAYMENT_REQUIRED_EVENT, { detail: payload }))
+}
+
+/** Subscribe to 402s from anywhere in the app. Returns an unsubscribe. */
+export function onPaymentRequired(fn: (p: PaymentRequired) => void): () => void {
+  if (typeof window === "undefined") return () => {}
+  const handler = (e: Event) => fn((e as CustomEvent<PaymentRequired>).detail)
+  window.addEventListener(PAYMENT_REQUIRED_EVENT, handler)
+  return () => window.removeEventListener(PAYMENT_REQUIRED_EVENT, handler)
 }
 
 export const api = {
@@ -452,6 +513,43 @@ export const ideationApi = {
    *  the full visible order; each item's rank becomes its position. */
   reorder: (orderedIds: string[]) =>
     api.post<IdeationList>("/v1/ideation/reorder", { ordered_ids: orderedIds }),
+  /** The chat's `backlog_action`: resolve a sentence about the backlog into
+   *  operations to apply plus the questions it left open. PLAN ONLY — nothing
+   *  is written until the caller runs the ops through create/setStatus/reorder
+   *  above, which is what keeps one write path for the screen and the chat. */
+  chatPlan: (instruction: string) =>
+    api.post<BacklogPlan>("/v1/ideation/chat-plan", { instruction }),
+}
+
+/** One change the backlog plan resolved unambiguously. `add` carries the idea
+ *  (and its type when the request made it plain), `status` the item and where
+ *  it moves, `reorder` the FULL new ranking — a partial one is rejected server
+ *  side, since ranks are written by position. */
+export type BacklogPlanOp =
+  | { op: "add"; title: string; tag: IdeationTag | null }
+  | { op: "status"; item_id: string; status: "in_progress" | "done" | "dismissed"; title?: string }
+  | { op: "reorder"; ordered_ids: string[] }
+
+/** One thing the request left open, shaped for the chat's QuestionPopup — the
+ *  same contract `TicketAssignQuestion` uses, so both render through one
+ *  component. `fills` says which field the answer supplies: "item_id" asks
+ *  WHICH idea (and the question carries the `status` to apply once picked),
+ *  "tag" asks what TYPE a new idea is (and carries its `title`). */
+export type BacklogPlanQuestion = {
+  header: string
+  prompt: string
+  fills: "item_id" | "tag"
+  op: "add" | "status"
+  status: "in_progress" | "done" | "dismissed" | null
+  title: string | null
+  multi: boolean
+  options: { value: string; label: string; description: string | null }[]
+}
+
+export type BacklogPlan = {
+  operations: BacklogPlanOp[]
+  questions: BacklogPlanQuestion[]
+  note: string
 }
 
 export type AskCitation = { source: string; evidence: string }
@@ -640,6 +738,30 @@ export type GoalFinding = {
    *  that quoted a figure, promised an outcome or failed the lint was dropped
    *  rather than repaired. */
   recommendation?: { action: string; because: string }
+  /** The deep pass's output for the top of the ranking, sized by the goal —
+   *  what to build, change or fix, not an execution schedule. Takes
+   *  precedence over `recommendation` when both are present: the same
+   *  findings feed both LLM calls, and a reader is shown the deeper one
+   *  rather than both. `comparison` is non-empty only on the higher-ranked
+   *  of the top two that both kept a deep recommendation, and is COMPUTED —
+   *  never generated by a model (I2). */
+  deep_recommendation?: {
+    action: string
+    because: string
+    changes: { text: string; claim_id: string; cited_claim: string }[]
+    open_questions: string[]
+    what_would_falsify: string
+    comparison: string
+  }
+  /** True only when this finding was a candidate for a full write-up (in the
+   *  top N a count named or defaulted to) but did not get one — the citation
+   *  gate dropped it, or the deep pass failed outright. Lets the renderer
+   *  connect the plain `recommendation` below to the shortfall already
+   *  disclosed in `GoalRunDetail["prioritisation"]["recommendation_basis"]`,
+   *  instead of leaving it looking like an unexplained absence. Never true on
+   *  a finding that was simply ranked past N, which never had a full
+   *  write-up coming. */
+  deep_attempted?: boolean
   claim_ids: string[]
   adjudication: string | null
   /** NULL means WE COULD NOT SIZE THIS — never zero. The two lead to opposite
@@ -695,11 +817,29 @@ export type GoalPlanGap = {
   remedy: string
 }
 
+/** Something the CHOSEN framework needs and cannot derive — asked once,
+ *  batched, before generation begins. Replaces the old fixed set of three
+ *  questions asked unconditionally regardless of which framework would use
+ *  the answer. Skipping one carries the gap into the output rather than
+ *  inventing a value for it. */
+export type GoalPlanQuestion = {
+  id: string
+  prompt: string
+  why: string
+}
+
 /** What the run will do, said BEFORE it does it. This is what the user
  *  approves, and it stays on the run afterwards as the record of what was
  *  read. */
 export type GoalRunPlan = {
   goal_text: string
+  /** THE READER'S OWN SENTENCE, when the run has one distinct from
+   *  `goal_text` — chat sends the planner's EXTRACTED goal as `goal_text`
+   *  and this alongside it, so the gate can show what was actually typed,
+   *  not only its normalisation. Empty on a run started with no literal
+   *  text to carry (the direct API, the `+` menu) or on a plan built before
+   *  this field existed. */
+  asked_text?: string
   definition_text: string
   currency: string
   total_signals: number
@@ -718,6 +858,24 @@ export type GoalRunPlan = {
   definition_note?: string
   /** False until a person has said yes to `definition_text`. */
   definition_adopted?: boolean
+  /** How the surviving findings get ordered. RICE by default; named in the
+   *  plan so it is a choice the reader can override rather than a convention
+   *  they discover in the output. */
+  framework?: string
+  /** Why this framework, not another — shown beside its name in the plan and
+   *  in the finished report, chosen by reasoning over the source inventory
+   *  rather than by a model (I2). Empty only on a plan built before this
+   *  field existed. */
+  framework_reason?: string
+  /** What the chosen framework needs and cannot derive, batched — replaces
+   *  the old fixed three questions asked regardless of framework. */
+  questions?: GoalPlanQuestion[]
+  /** Answers the reader gave at the gate to things the run cannot know. Each
+   *  is an ASSUMPTION when present, and the document labels it as one where it
+   *  is used. */
+  account_value?: number
+  decision_owner?: string
+  needed_by?: string
 }
 
 /** What the run has decided so far, written as it goes.
@@ -728,6 +886,16 @@ export type GoalRunPlan = {
  *  renders whatever is present and says nothing about what is not. */
 export type GoalRunProgress = {
   step?: "grouping" | "analysing" | "done"
+  /** Which of the three ENRICHMENT model calls is in flight, once the
+   *  deterministic pipeline (`step`) has already reached `"done"`. A
+   *  SEPARATE field from `step`, deliberately: `step === "done"` gates the
+   *  "How this was narrowed" recap (`GoalAnalysisTab`), and enrichment can
+   *  run for up to another ~3.5 minutes after that — overloading `step` with
+   *  these values would make the recap panel vanish the moment enrichment
+   *  started, then never come back. Absent once enrichment clears
+   *  (`enrichment_pending: false`); a reader who wants "is anything still
+   *  happening" reads that flag, not this one. */
+  enrichment_step?: "judging_relevance" | "recommending" | "deep_recommending"
   signals_read?: number
   claims?: number
   /** Signals dropped before projection, by REASON — they are two different
@@ -775,6 +943,21 @@ export type GoalRunProgress = {
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
+  /** The finished report as a SELF-CONTAINED HTML DOCUMENT, rendered by the
+   *  server (`backend/app/crucible/report.render_report_document`) and shown
+   *  in a sandboxed iframe, the same way the PRD, the evidence brief and
+   *  chat's report replies are.
+   *
+   *  THIS IS WHY `findings` IS NO LONGER THE PANEL'S RENDERING INPUT. The
+   *  panel used to rebuild the whole document from the rows above, which made
+   *  it a second renderer of one report: it drifted, it was missing sections
+   *  the exported document had, and every ordering and honesty rule had to be
+   *  written twice. `findings` and `considered` stay in the payload because
+   *  other surfaces read them as DATA — this is the report as a DOCUMENT.
+   *
+   *  Optional so a client that predates it, or a run rendered before the
+   *  field existed, degrades to "no report yet" rather than crashing. */
+  report_html?: string
   /** Stage 0's question and its prefilled proposal, when the run is waiting —
    *  and, once a definition is locked, the plan the user is asked to approve.
    *  The plan SURVIVES into `ready`: it is the only record of what was read,
@@ -794,11 +977,68 @@ export type GoalRunDetail = GoalRun & {
      *  `crucible_findings`, which would need a migration against the shared
      *  Supabase. Merged into the findings positionally by the renderer, and
      *  only when the lengths agree. */
+    /** Per-finding relevance verdicts in RANK ORDER: the reason a finding does
+     *  NOT bear on the goal, or null. Split at render, so a finding judged
+     *  irrelevant MOVES to an appendix with its reason rather than being
+     *  dropped — a wrong verdict has to stay recoverable. */
+    set_aside_by_rank?: (string | null)[]
     findings_extra_by_rank?: {
       label?: string
       example?: string
       recommendation?: { action: string; because: string }
+      deep_recommendation?: GoalFinding["deep_recommendation"]
+      deep_attempted?: boolean
     }[]
+    /** THE HANDSHAKE for the top-of-ranking suggestions. Goes up BEFORE
+     *  `status` reaches `ready` and comes down in the same write that
+     *  publishes the recommendations — so a client that sees `ready` with
+     *  this still true knows more analysis is coming, and stops the moment
+     *  it lands. Read by `GoalAnalysisTab`'s poll cadence AND rendered as a
+     *  "still generating" banner — before this it only drove polling, and
+     *  a reader who opened the report while it was true saw a finished-
+     *  looking document with no sign anything else was coming. */
+    enrichment_pending?: boolean
+    /** AC-2: how many findings got a full recommendation, and why — a
+     *  sentence, not a bare number, computed from the goal's own ask. Empty
+     *  on a run stored before the deep pass shipped. */
+    recommendation_basis?: string
+    /** Corpus-wide list pricing, in the same words the exported document's
+     *  own list-pricing paragraph already uses — computed UNCONDITIONALLY
+     *  (unlike `recommendation_basis` above, which only exists to answer a
+     *  named money target), so it renders on every run that has any pricing
+     *  units at all. Absent on a run stored before this shipped. */
+    list_pricing_basis?: string
+    /** The single, top-line recommendation for the whole report — narrated
+     *  across the per-finding deep recommendations already shown, never a
+     *  replacement for them. Mirrors `report.py`'s
+     *  `_synthesized_recommendation_section`. Absent (or `action`/`because`
+     *  empty) exactly when there was nothing to synthesize — a run with
+     *  fewer than two kept deep recommendations, or a run stored before this
+     *  shipped. */
+    synthesized_recommendation?: {
+      action: string
+      because: string
+      citations: { claim_id: string; evidence: string; cited_claim: string }[]
+    }
+    /** True only when `judge_relevance` completed without raising on THIS
+     *  run — never guessed from whether anything ended up set aside, so a
+     *  gate that judged everything `true` still reads as having run. Absent
+     *  on a run stored before the gate shipped, or one whose gate call
+     *  failed and kept everything. Turns `report.py`'s relevance-disclosure
+     *  sentences. */
+    relevance_gate_ran?: boolean
+    /** The relevance gate's disclosure half: how many of the found themes it
+     *  gate actually judged before its time/cost budget ran out, out of how
+     *  many were found. Absent (or `judged >= considered`) means nothing was
+     *  left unjudged. */
+    relevance_judged?: { judged: number; considered: number }
+    /** How an enrichment reached its terminal state: `"completed"` for the
+     *  ordinary live path, `"completed_by_sweep"` when the stalled-
+     *  enrichment sweep re-ran it after the original worker died,
+     *  `"no_findings_to_enrich"` / `"gave_up_after_sweep"` when the sweep
+     *  could not produce recommendations but still closed the run out
+     *  honestly. Absent on a run that predates the sweep. */
+    enrichment_outcome?: string
   }
 }
 
@@ -844,10 +1084,24 @@ export type GoalReportFork = {
 export const goalAnalysisApi = {
   /** Start a run. Returns immediately — the row is durable before any work,
    *  so this id is safe to poll even if the worker dies. */
-  start: (goal_text: string, opts?: { conversation_id?: number }) =>
+  start: (
+    goal_text: string,
+    opts?: {
+      conversation_id?: number
+      /** THE READER'S OWN SENTENCE, verbatim, when the caller has one
+       *  distinct from `goal_text` — carried alongside the planner's
+       *  EXTRACTED goal so a count or target the reader phrased in their own
+       *  words ("what are three things…") is not silently dropped by that
+       *  extraction. Omitted (not sent empty) when the caller has no raw
+       *  text — the `+` menu, where the two are the same thing — and the
+       *  server falls back to `goal_text`, exactly as before this existed. */
+      asked_text?: string
+    },
+  ) =>
     api.post<GoalRun>("/v1/crucible", {
       goal_text,
       ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
+      ...(opts?.asked_text ? { asked_text: opts.asked_text } : {}),
     }),
   list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
   get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),
@@ -927,7 +1181,7 @@ export const askApi = {
        *  `openArtifactForPanel`. It does not fetch anything: the backend
        *  grounds on every artifact of `conversation_id` and uses this only to
        *  put the one on screen FIRST. Omit and the thread's newest leads. */
-      open_artifact?: { kind: "report" | "document"; id: number } | null
+      open_artifact?: { kind: "report" | "document" | "evidence"; id: number } | null
       /** Individual-project-chat send identity (project branch only): the
        *  idempotency key the server persists the user turn under, and links
        *  the answer to via ask_job_id. Ignored server-side on every other
@@ -1367,6 +1621,18 @@ export type ChatIntentEnvelope = {
      *  untitled container is worse than a question back. The client confirms
      *  in the thread and opens the new project. */
     | "create_project"
+    /** "Add dark mode to the backlog", "mark the export bug as done",
+     *  "re-sequence by impact" — CHANGE the company's backlog. `instruction`
+     *  carries the request in the user's own words and is the whole argument;
+     *  an instruction-less change is downgraded to `answer` server-side, which
+     *  can ask which idea they meant (that answer now carries the backlog).
+     *
+     *  The client resolves the sentence against the live backlog
+     *  (`ideationApi.chatPlan`) and applies the result through the ordinary
+     *  ideation routes, asking through the question popup for whatever the
+     *  request left open. READING the backlog is not this intent — that is a
+     *  plain `answer` whose grounding includes the backlog block. */
+    | "backlog_action"
     /** The private project chat's classify route ONLY (`POST /{project_id}/
      *  chat/intent`) — never emitted by the shared `/v1/chat/intent` route
      *  main chat runs, so a `switch (envelope.intent)` consumer that never
@@ -1610,7 +1876,7 @@ export const chatIntentApi = {
        *  it under the caller's company — the title that reaches the planner's
        *  prompt and the id an edit acts on both come from the stored row, never
        *  from here. Omitted when the panel is closed or on a PRD. */
-      openArtifact?: { kind: "report" | "document"; id: number } | null
+      openArtifact?: { kind: "report" | "document" | "evidence"; id: number } | null
     },
   ) => {
     const envelope = await api.post<ChatIntentEnvelope>("/v1/chat/intent", {
@@ -1765,6 +2031,28 @@ export const evidenceApi = {
       force,
     }),
   get: (id: number) => api.get<EvidenceRecord>(`/v1/evidence/${id}`),
+
+  /** Apply a chat instruction to this evidence page and return the new body.
+   *
+   *  The TARGET IS THE URL, never a body field: the caller names the page the
+   *  user has open, and nothing in the request can redirect the write. Same
+   *  rule as the PRD's and the report's chat-edit, same reason — see backend
+   *  `app/artifact_chat_edit.py`.
+   *
+   *  `sections_changed: []` means the editor judged the instruction was not an
+   *  edit — a question about the page, or a chart whose numbers are not in it —
+   *  and NOTHING was written. The caller says so rather than claiming a change.
+   */
+  chatEdit: (evidenceId: number, instruction: string) =>
+    api.post<{
+      id: number
+      title: string
+      payload_md: string
+      variant: string
+      status: string
+      sections_changed: string[]
+      summary: string
+    }>(`/v1/evidence/${evidenceId}/chat-edit`, { instruction }),
   /** SSE URL to token-stream an evidence doc's generation as it's written.
    *  Mirrors prdApi.streamUrl: the bearer rides as ?token= (EventSource can't
    *  set headers). Frames: {kind:'delta',text} then a terminal
@@ -2001,9 +2289,15 @@ export const workspacesApi = {
   // workspace creation is org-admin gated, unlike the per-workspace `role`
   // each summary row carries.
   list: () =>
-    api.get<{ workspaces: WorkspaceSummary[]; org_role?: string | null }>(
-      "/v1/workspaces",
-    ),
+    api.get<{
+      workspaces: WorkspaceSummary[]
+      org_role?: string | null
+      /** "off" | "read_only" | "hard" — what a lapsed customer sees. Served
+       *  here rather than as a NEXT_PUBLIC_ var because `web/` is a static
+       *  export: those inline at BUILD time, so changing the mode would mean a
+       *  rebuild and redeploy instead of a restart. */
+      subscription_lock_mode?: string | null
+    }>("/v1/workspaces"),
   create: (name: string) =>
     api.post<WorkspaceSummary>("/v1/workspaces", { name }),
   /** PATCH any subset of the name + the five workspace-owned fields. */
@@ -3388,7 +3682,16 @@ export const prdApi = {
   clarifyTask: (task: string, sourceDocs?: TurnAttachment[]) =>
     api.post<{
       sufficient: boolean
-      questions: { prompt: string; header?: string | null; options: string[]; skip_default?: string | null }[]
+      // `blocking`: no defensible default exists, so the card refuses to
+      // generate until it is answered. Optional on the wire so a response from
+      // a backend that predates it still parses.
+      questions: {
+        prompt: string
+        header?: string | null
+        options: string[]
+        skip_default?: string | null
+        blocking?: boolean
+      }[]
       missing: string[]
     }>("/v1/prd/clarify-task", {
       task,
@@ -3481,32 +3784,9 @@ export const prdApi = {
    *  scheduled the extraction for this PRD (a pre-feature PRD opened from
    *  Artifacts, or a just-generated one whose extraction is still running) —
    *  poll until it flips false and the questions arrive. */
-  listInputQuestions: (id: number) =>
-    api.get<PrdInputQuestionsList>(`/v1/prd/${id}/input-questions`),
-  /** Answer one "User input needed" question. The backend folds the answer into
-   *  only the affected PRD sections (a scoped edit — NOT a full regeneration),
-   *  saves an undoable version, and returns the updated PRD + which sections
-   *  changed so the panel can refresh live and the chat can confirm. */
-  answerInputQuestion: (prdId: number, questionId: number, answer: string) =>
-    api.post<PrdInputAnswerResponse>(
-      `/v1/prd/${prdId}/input-questions/${questionId}/answer`,
-      { answer },
-    ),
-  /** Answer SEVERAL input questions in ONE scoped edit — the question popup
-   *  collects its whole batch before submitting. All-or-nothing: a failed
-   *  edit leaves the PRD untouched and no question marked answered. */
-  answerInputQuestionsBatch: (
-    prdId: number,
-    answers: { question_id: number; answer: string }[],
-  ) =>
-    api.post<PrdInputAnswersBatchResponse>(
-      `/v1/prd/${prdId}/input-questions/answer-batch`,
-      { answers },
-    ),
   /** Apply a free-form chat edit instruction to the PRD ("make this PRD
-   *  shorter"). Same scoped-editor contract as answerInputQuestion — only the
-   *  affected sections change, saved as an undoable version — driven by the
-   *  user's own instruction. Empty `sections_changed` means the editor judged
+   *  shorter"). A scoped edit: only the affected sections change, saved as an
+   *  undoable version, driven by the user's own instruction. Empty `sections_changed` means the editor judged
    *  the message wasn't an edit and left the document untouched. */
   chatEdit: (prdId: number, instruction: string) =>
     api.post<{ prd: PrdRecord; sections_changed: string[]; summary: string }>(
@@ -3531,48 +3811,6 @@ export const prdApi = {
       artifact_template_id: string | null
       title?: string
     }>(`/v1/prd/${prdId}/change-template`, { artifact_template_id: artifactTemplateId }),
-}
-
-/** One structured "User input needed" item lifted out of the PRD document.
- *  `tag` is 'escalate' (a product decision → answered by picking an `options`
- *  button) or 'need' (missing data → answered as free text, `options` empty).
- *  `status` walks pending → answered (or dismissed). */
-export type PrdInputQuestion = {
-  id: number
-  prd_id: number
-  ordinal: number
-  tag: "escalate" | "need"
-  prompt: string
-  owner?: string | null
-  options: PendingQuestionChoice[]
-  status: "pending" | "answered" | "dismissed"
-  answer?: string | null
-}
-
-/** Response from GET /v1/prd/{id}/input-questions — the stored questions plus
- *  whether a background extraction is currently producing them (poll while
- *  true). */
-export type PrdInputQuestionsList = {
-  questions: PrdInputQuestion[]
-  extracting?: boolean
-}
-
-/** Response from POST /v1/prd/{id}/input-questions/{qid}/answer — the updated PRD
- *  (with the scoped edit folded in), the now-answered question, and the
- *  human-readable section names the edit touched (for the chat confirmation). */
-export type PrdInputAnswerResponse = {
-  prd: PrdRecord
-  question: PrdInputQuestion
-  sections_changed: string[]
-  summary: string
-}
-
-/** Response from the batch answer route — same contract, N answered rows. */
-export type PrdInputAnswersBatchResponse = {
-  prd: PrdRecord
-  questions: PrdInputQuestion[]
-  sections_changed: string[]
-  summary: string
 }
 
 // ---- Design Agent ---------------------------------------------------
@@ -5160,6 +5398,167 @@ export const usageApi = {
     ),
 }
 
+// ── Billing: plan, credits, top-ups, referrals ──
+// Every figure here is COMPANY-level. A Team plan's credits are described as
+// "pooled" and a company-level balance is exactly that, so nothing on this
+// surface is per-user or per-workspace.
+//
+// Owner/admin only (the backend 403s otherwise) — what the company pays is
+// commercially sensitive, same posture as the Claude-key and usage panes.
+
+export type BillingInvoice = {
+  id: number
+  stripe_invoice_id: string
+  plan: string | null
+  /** MINOR UNITS. The display layer divides — a float here is how money
+   *  quietly goes missing. */
+  amount_paid_cents: number
+  currency: string
+  status: string | null
+  period_start: string | null
+  period_end: string | null
+  paid_at: string | null
+  invoice_number: string | null
+  hosted_invoice_url: string | null
+  invoice_pdf_url: string | null
+}
+
+export type BillingPlanChange = {
+  id: number
+  plan: string
+  status: string | null
+  previous_plan: string | null
+  previous_status: string | null
+  source: string | null
+  created_at: string
+}
+
+export type BillingLedgerEntry = {
+  id: number
+  /** Negative on a spend, positive on a grant. */
+  delta: number
+  reason: "monthly_grant" | "spend" | "referral" | "topup" | "refund" | "adjustment"
+  /** Which surface a spend went to; null on grants. */
+  feature: string | null
+  balance_after: number
+  actor_user_id: string | null
+  created_at: string
+}
+
+export type BillingReferral = {
+  id: string
+  /** No `invitee_email` and no per-row `code`: nobody types an address any
+   *  more, and every arrival shares the referrer's one permanent code. What a
+   *  row carries is when they arrived and whether it converted. */
+  status: "pending" | "signed_up" | "rewarded" | "void"
+  reward_credits: number | null
+  created_at: string
+  signed_up_at?: string | null
+  rewarded_at?: string | null
+}
+
+export type BillingSummary = {
+  plan: string
+  plan_label: string
+  /** Legacy and Enterprise have no ceiling. */
+  unlimited: boolean
+  /** Null when `unlimited` — the backend never sends the internal -1 sentinel,
+   *  which would otherwise render as "-1 credits". */
+  credit_balance: number | null
+  monthly_credits: number | null
+  subscription_status: string | null
+  /** False when the subscription is canceled/unpaid. `past_due` stays true —
+   *  Stripe is still retrying the card. */
+  has_access: boolean
+  current_period_end: string | null
+  /** A cancellation is scheduled: access continues until `cancels_at`. Stripe
+   *  keeps `subscription_status` at "active" throughout, which is why the
+   *  access rule needs no special case. */
+  cancel_at_period_end: boolean
+  /** When access actually stops — the end of the period already paid for.
+   *  Null unless a cancellation is pending. */
+  cancels_at: string | null
+  first_paid_at: string | null
+  refund_window_days: number
+  /** False in any environment without Stripe credentials (local dev, CI).
+   *  The pane renders read-only rather than offering buttons that 503. */
+  billing_configured: boolean
+  has_subscription: boolean
+  /** Credit price per action, keyed by the backend's feature slug. */
+  topup_presets: number[]
+  topup_min_usd: number
+  topup_max_usd: number
+  credits_per_topup_usd: number
+  history: BillingLedgerEntry[]
+  /** One row per payment, newest first — the money record. */
+  invoices?: BillingInvoice[]
+  /** Plan changes. Served for support questions; deliberately NOT rendered —
+   *  the customer-facing history is payments and credits, not tier moves. */
+  subscription_history?: BillingPlanChange[]
+  referrals: BillingReferral[]
+  /** Your one permanent link, and its code. Shared with anyone; whoever
+   *  signs up through it is attributed. */
+  referral_code?: string | null
+  referral_url?: string | null
+  /** Null when uncapped, which it now is. */
+  referral_invites_remaining: number | null
+  referral_reward_credits: number
+}
+
+export type BillingInterval = "monthly" | "annual"
+
+export const billingApi = {
+  summary: () => api.get<BillingSummary>("/v1/billing/summary"),
+  /** Returns a hosted Stripe Checkout URL to redirect to. `web/` is a static
+   *  export with no server, so the redirect is a plain `location.assign`. */
+  /** `returnPath` is a PATH on this app, never a URL — the backend validates
+   *  it as an open-redirect boundary and falls back to Settings → Billing if it
+   *  is anything else. Onboarding passes its own step so someone mid-signup
+   *  comes back to the gate rather than being dropped into Settings. */
+  checkout: (
+    plan: string,
+    interval: BillingInterval = "monthly",
+    returnPath?: string,
+  ) =>
+    api.post<{ url: string }>("/v1/billing/checkout", {
+      plan,
+      interval,
+      ...(returnPath ? { return_path: returnPath } : {}),
+    }),
+  /** The hosted customer portal: card, invoices and receipts. Cancellation is
+   *  in-app (below) so the user never leaves the pane to leave. */
+  portal: () => api.post<{ url: string }>("/v1/billing/portal"),
+  /** Cancel at the END of the paid period — the plan, credits and access all
+   *  continue until then. Reversible with `resume` up to that moment. */
+  cancel: () =>
+    api.post<{ cancel_at_period_end: boolean; cancels_at: string | null }>(
+      "/v1/billing/cancel",
+    ),
+  resume: () =>
+    api.post<{ cancel_at_period_end: boolean }>("/v1/billing/resume"),
+  /** Move a LIVE subscription onto a different plan. NOT a checkout: checkout
+   *  always creates a new subscription, so sending an existing customer
+   *  through it leaves them paying for two. */
+  changePlan: (plan: string, interval: BillingInterval = "monthly") =>
+    api.post<{ plan: string; subscription_status: string | null }>(
+      "/v1/billing/change-plan",
+      { plan, interval },
+    ),
+  topup: (amountUsd: number) =>
+    api.post<{ url: string; credits: number }>("/v1/billing/topup", {
+      amount_usd: amountUsd,
+    }),
+  /** Attach a newly created company to the referral that brought it. Called
+   *  once during onboarding, right after the company row is created — the same
+   *  moment `orgInviteApi.claim()` runs, and for the same reason: companies are
+   *  created client-side through Supabase, so this is the backend's only
+   *  chance to learn a new tenant exists. Grants nothing; the reward fires on
+   *  the company's first paid invoice. */
+  claimReferral: (code: string) =>
+    api.post<{ claimed: boolean }>("/v1/billing/referrals/claim", { code }),
+}
+
+
 // ── Staff admin panel (dedicated owner-only credential) ──
 // Org invites + per-company entitlements. Auth is fully separate from the
 // normal app session: POST /v1/staff/login (id + password from env on the
@@ -5584,19 +5983,27 @@ export const conversationsApi = {
    *  `reply` is the assistant turn's STRUCTURED payload — everything the turn
    *  showed beyond its prose, which `content` alone cannot hold (see
    *  `PersistedTurnReply`). Omitted on user turns, and the backend drops it on
-   *  one regardless. */
+   *  one regardless.
+   *
+   *  `clientMessageId`: an assistant turn's reply-persist dedup key (project
+   *  individual chat only — the server ignores it everywhere else). A
+   *  same-key retry collapses to the SAME row via the backend's idempotent
+   *  upsert instead of inserting a second one. Omitted by every other
+   *  caller (main chat, a user turn), byte-identical to before. */
   addTurn: (
     conversationId: number,
     role: "user" | "assistant",
     content: string,
     attachments?: TurnAttachment[],
     reply?: PersistedTurnReply | null,
+    clientMessageId?: string,
   ) =>
     api.post<ConversationTurn>(`/v1/conversations/${conversationId}/turns`, {
       role,
       content,
       ...(attachments && attachments.length ? { attachments } : {}),
       ...(reply ? { reply } : {}),
+      ...(clientMessageId ? { client_message_id: clientMessageId } : {}),
     }),
   /** REWIND the conversation to just before `turnId` — deletes that turn and
    *  every turn after it. `turnId` must be a USER turn: you rewind to a
@@ -6530,20 +6937,24 @@ export const projectsApi = {
    *  project plus in-tenant non-members (workspace, then company), each
    *  tagged `kind`, filtered by `q` (casefold-contains on name/email) and
    *  capped at 20 — never anyone outside the project's company. A non-member
-   *  caller gets 403. */
+   *  caller gets 403.
+   *
+   *  `pending_invites` (lower-cased emails) is the single source the picker
+   *  uses to render "Invited" for a not-yet-accepted invite — including a
+   *  brand-new email typed into the by-email row, which never appears in
+   *  `candidates`. Company-wide by construction (`workspace_invites`'
+   *  `(company_id, email)` uniqueness) and already excludes expired-by-age
+   *  rows — see `db/team.py::list_pending_invite_emails`. */
   candidateSearch: (id: number | string, q: string) =>
-    api
-      .get<{
-        candidates: {
-          kind: "member" | "workspace" | "company"
-          user_id: string
-          name: string | null
-          email: string | null
-        }[]
-      }>(
-        `/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`,
-      )
-      .then((r) => r.candidates),
+    api.get<{
+      candidates: {
+        kind: "member" | "workspace" | "company"
+        user_id: string
+        name: string | null
+        email: string | null
+      }[]
+      pending_invites: string[]
+    }>(`/v1/projects/${encodeURIComponent(String(id))}/candidates?q=${encodeURIComponent(q)}`),
   /** Add an artifact ref to the project
    *  (`POST /v1/projects/{id}/artifacts`, AD-P1/AD-P12). Write-time
    *  ownership validation happens server-side; a foreign/absent artifact

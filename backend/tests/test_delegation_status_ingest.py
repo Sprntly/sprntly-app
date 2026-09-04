@@ -24,6 +24,7 @@ import pytest
 
 from app import ask_job_runner as ajr
 from app import delegation_status_ingest as ingest
+from app import project_delegation
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import delegation_followups as delegation_followups_db
@@ -197,7 +198,10 @@ def test_ingest_no_open_delegation_skips_llm(isolated_settings, monkeypatch):
 
 def test_ingest_no_open_delegation_wrong_conversation_skips_llm(isolated_settings, monkeypatch):
     """An open delegation exists, but was delivered into a DIFFERENT
-    conversation than the one the reply arrived in — still zero LLM calls."""
+    conversation than the one the reply arrived in — still zero LLM calls.
+    (Regression: this is the strict match a real, non-null
+    `delivered_conversation_id` must still enforce — the NULL-linkage
+    relaxation below must never widen THIS case.)"""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
     assignee_id = _seed_assignee(project["id"])
@@ -208,6 +212,106 @@ def test_ingest_no_open_delegation_wrong_conversation_skips_llm(isolated_setting
 
     ingest.maybe_ingest_status(project["id"], conv_id + 999, assignee_id, "working on it")
     assert state["calls"] == []
+
+
+# ── Link-less delegations (`delivered_conversation_id IS NULL`) ──────────
+#
+# Pre-existing gap (found in a later ticket's live-verify, this feature's
+# own scope): a delegation whose delivered conversation row was deleted
+# (FK `on delete set null`) and recreated goes link-less forever under a
+# strict `== conversation_id` match — a real "done" reply then produces
+# ZERO classifier activity, silently. See the module docstring's "Linkage
+# gap" note for the mechanism and why relaxing this one case is safe.
+
+
+def _seed_open_delegation_no_linkage(
+    ctx, project_id, assignee_id, *, task_summary: str = "Draft the pricing page"
+) -> tuple[int, int]:
+    """Same as `_seed_open_delegation`, except the row's
+    `delivered_conversation_id` is NULL — simulating the FK `on delete set
+    null` firing after the originally-delivered-into conversation was
+    deleted. Still returns the assignee's CURRENT individual project chat
+    id, since that is what `ask_job_runner.py` always passes as
+    `conversation_id` for a project-scoped ask."""
+    conv = conversations_db.create_individual_project_chat(project_id, assignee_id)
+    deleg = record_delegation(
+        project_id=project_id,
+        assigner_user_id=ctx.user_id,
+        assignee_user_id=assignee_id,
+        task_summary=task_summary,
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=None,
+        delivered_turn_id=None,
+    )
+    return deleg["id"], conv["id"]
+
+
+def test_ingest_done_explicit_classifies_when_delivered_conversation_id_is_null(
+    isolated_settings, monkeypatch,
+):
+    """The bug this ticket fixes: a real 'done' reply on an open delegation
+    with a link-less `delivered_conversation_id` must still classify and
+    record completion — mirrors `test_ingest_done_explicit_emits_completed`
+    exactly, except the seeded row has no linkage."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation_no_linkage(ctx, project["id"], assignee_id)
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "yes, I've finished it")
+
+    assert len(state["calls"]) == 1, "a link-less open delegation must still reach the classifier"
+    events = delegation_events_db.list_events(deleg_id)
+    assert [e["event"] for e in events] == ["completed"]
+
+
+def test_ingest_fast_path_still_zero_llm_calls_with_no_open_delegation(
+    isolated_settings, monkeypatch,
+):
+    """AC10 regression: the NULL-linkage relaxation must never widen the
+    pre-filter beyond THIS assignee's OPEN rows in THIS project — an
+    assignee with no open delegation at all in this project still short-
+    circuits before any LLM call, exactly like the pre-existing fast path."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    state = _stub_classify_llm(monkeypatch)
+
+    conv = conversations_db.create_individual_project_chat(project["id"], assignee_id)
+    ingest.maybe_ingest_status(project["id"], conv["id"], assignee_id, "yes, I've finished it")
+
+    assert state["calls"] == [], "no open delegation for this assignee -> zero LLM calls"
+
+
+def test_ingest_requester_own_reply_does_not_complete_their_outbound_delegation(
+    isolated_settings, monkeypatch,
+):
+    """No cross-user broadening: a link-less delegation is scoped to the
+    ASSIGNEE by `list_status_for_assignee` (`assignee_user_id == user_id`)
+    — the REQUESTER replying in their own individual project chat must
+    never match it, even though the row has no `delivered_conversation_id`
+    to strictly rule it out by conversation."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, _assignee_conv_id = _seed_open_delegation_no_linkage(ctx, project["id"], assignee_id)
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    requester_conv = conversations_db.create_individual_project_chat(project["id"], ctx.user_id)
+    ingest.maybe_ingest_status(
+        project["id"], requester_conv["id"], ctx.user_id, "yes, I've finished it"
+    )
+
+    assert state["calls"] == [], (
+        "the requester is not the assignee of any open delegation -> zero LLM calls, "
+        "regardless of the assignee's row having a null delivered_conversation_id"
+    )
+    assert delegation_events_db.list_events(deleg_id) == []
 
 
 # ── Application — in_progress (AC11) ─────────────────────────────────────
@@ -248,6 +352,31 @@ def test_ingest_done_explicit_emits_completed(isolated_settings, monkeypatch):
 
     events = delegation_events_db.list_events(deleg_id)
     assert [e["event"] for e in events] == ["completed"]
+
+
+def test_ingest_skips_already_completed_row_no_double_fire(isolated_settings, monkeypatch):
+    """No-double-completion guarantee. Once the deterministic `complete_task`
+    tool path has written `completed`, the row is no longer in `OPEN_STATES`,
+    so this background classifier's pre-filter drops it and NEVER reaches the
+    LLM — the two completion paths can't both fire on the same message (which
+    would double-complete and double-email)."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    # Simulate the `complete_task` tool path having already completed it.
+    delegation_events_db.record_event(
+        delegation_id=deleg_id, event="completed", actor_user_id=assignee_id
+    )
+    state = _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "yep, all done")
+
+    assert state["calls"] == []  # pre-filter dropped the completed row; zero LLM calls
+    # And no SECOND completed event was recorded by this path.
+    events = [e["event"] for e in delegation_events_db.list_events(deleg_id)]
+    assert events == ["completed"]
 
 
 def test_ingest_done_inferred_is_soft(isolated_settings, monkeypatch):
@@ -349,6 +478,210 @@ def test_ingest_cant_do_routes_to_requester(isolated_settings, monkeypatch):
     turns = conversations_db.list_individual_turns(requester_conv["id"], ctx.user_id)
     assert len(turns) == 1
     assert "can't take this on" in turns[0]["content"]
+
+
+# ── Realtime publish on lifecycle change (part 2, spec 3a) ────────────────
+#
+# The creation path already publishes `delegation.event` + `brief.delivered`
+# (`project_delegation.handle_delegate_task`, proven in
+# `test_project_delegation.py::test_delegation_create_publishes_event_to_both_parties`).
+# This module's own writes — a reply moving the derived status, or routing a
+# note back to the requester — published NOTHING before this change, so the
+# Task ledger and the requester's own chat only ever moved on their next
+# reconcile/refetch. These tests prove the SAME wiring now fires here,
+# reusing the exact `project_delegation.publish_broadcast` interception
+# point the creation-path tests already use — no new channel, no new event
+# name.
+
+
+def _capture_broadcasts(monkeypatch) -> list[tuple[str, str, dict]]:
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+    return published
+
+
+def test_ingest_in_progress_publishes_delegation_event_to_both_parties(
+    isolated_settings, monkeypatch,
+):
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="in_progress")
+    # `v_delegation_status` is a real Postgres view `FakeSupabaseClient` cannot
+    # evaluate (module docstring) — shape the DTO deterministically, the same
+    # way `test_project_delegation.py`'s own create-publish test does.
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "in_progress",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "started on it")
+
+    events = [p for p in published if p[1] == "delegation.event"]
+    assert len(events) == 2, published
+    topics = {t for t, _e, _p in events}
+    assert f"project:{project['id']}:user:{ctx.user_id}" in topics    # assigner
+    assert f"project:{project['id']}:user:{assignee_id}" in topics    # assignee
+    assert f"project:{project['id']}" not in topics                  # never the group channel
+    for _t, _e, payload in events:
+        assert payload["status"] == "in_progress"
+
+
+def test_ingest_done_explicit_publishes_delegation_event_and_brief_delivered(
+    isolated_settings, monkeypatch,
+):
+    """Completion is BOTH a status change (the ledger DTO) AND a completion
+    notice (the "✓ … finished" turn posted into the requester's own chat) —
+    both must go out live."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(
+        ctx, project["id"], assignee_id, task_summary="Draft the pricing page",
+    )
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "completed",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "all done")
+
+    status_events = [p for p in published if p[1] == "delegation.event"]
+    assert len(status_events) == 2, published
+    assert all(p[2]["status"] == "completed" for p in status_events)
+
+    # The completion NOTICEs live-append too, reusing the exact
+    # `brief.delivered` mechanic a fresh brief delivery already uses: ONE into
+    # the requester's own chat (`notify_requester_task_completed`) AND ONE into
+    # the ASSIGNEE's own chat (the safety-net confirmation — so a completion
+    # the deterministic `complete_task` gate misses still confirms back to the
+    # person who reported it done).
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 2, published
+    by_topic = {p[0]: p[2]["content"] for p in notices}
+    assert "finished" in by_topic[f"project:{project['id']}:user:{ctx.user_id}"]
+    assignee_notice = by_topic[f"project:{project['id']}:user:{assignee_id}"]
+    assert "Marked done" in assignee_notice
+
+
+def test_ingest_done_explicit_confirms_to_the_assignee(isolated_settings, monkeypatch):
+    """Safety net: the background `done_explicit` path (which catches the
+    completion phrasings the deterministic `complete_task` gate misses) posts a
+    confirmation into the ASSIGNEE's OWN chat, carrying the task summary — so
+    the person who reported the task done always sees it registered, not just
+    the requester."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(
+        ctx, project["id"], assignee_id, task_summary="Draft the pricing page",
+    )
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_explicit")
+    monkeypatch.setattr(
+        delegation_events_db, "status_dto",
+        lambda did: {
+            "delegation_id": did, "status": "completed",
+            "status_at": "2026-08-21T00:00:00Z", "task_summary": "Draft the pricing page",
+        },
+    )
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "wrapped that up")
+
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assignee_notices = [
+        p for p in notices if p[0] == f"project:{project['id']}:user:{assignee_id}"
+    ]
+    assert len(assignee_notices) == 1, published
+    content = assignee_notices[0][2]["content"]
+    assert "Marked done" in content
+    assert "Draft the pricing page" in content  # carries the task summary
+
+
+def test_ingest_blocked_publishes_brief_delivered_to_requester(isolated_settings, monkeypatch):
+    """No status transition on `blocked` (the row stays `assigned`/
+    `in_progress`) — only the route-back TURN needs to go out live, reusing
+    the same `brief.delivered` mechanic a fresh brief delivery uses."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="blocked")
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "I'm stuck on this")
+
+    assert [p[1] for p in published if p[1] == "delegation.event"] == []
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "blocked" in notices[0][2]["content"]
+
+
+def test_ingest_done_inferred_soft_confirm_publishes_to_the_replier(
+    isolated_settings, monkeypatch,
+):
+    """The soft-confirm turn lands in the REPLIER's own chat (not the
+    requester's) — the live-append must follow the same party."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="done_inferred")
+    published = _capture_broadcasts(monkeypatch)
+
+    ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "shipped that")
+
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{assignee_id}"
+    assert notices[0][2]["content"] == ingest._SOFT_CONFIRM_TEXT
+
+
+def test_status_publish_failure_never_breaks_the_write(isolated_settings, monkeypatch, caplog):
+    """Best-effort (AD-P22), same posture as the creation path's own
+    `test_delegation_create_publish_failure_does_not_rollback`: a raising
+    `status_dto` must not stop the `delegation_events` write or the
+    `delegation_followups` upsert that follows it."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    _install_fake_assignee_view(monkeypatch)
+    deleg_id, conv_id = _seed_open_delegation(ctx, project["id"], assignee_id)
+    _stub_classify_llm(monkeypatch, delegation_id=deleg_id, intent="in_progress")
+
+    def _boom(_did):
+        raise RuntimeError("simulated status_dto failure")
+
+    monkeypatch.setattr(delegation_events_db, "status_dto", _boom)
+
+    with caplog.at_level(logging.WARNING):
+        ingest.maybe_ingest_status(project["id"], conv_id, assignee_id, "started on it")
+
+    events = delegation_events_db.list_events(deleg_id)
+    assert [e["event"] for e in events] == ["in_progress"], (
+        "a publish hiccup must never roll back the already-committed event write"
+    )
+    followup = delegation_followups_db.get_followup(deleg_id)
+    assert followup is not None and followup["next_check_in"] is not None
 
 
 # ── none / unknown delegation_id (AC15) ──────────────────────────────────

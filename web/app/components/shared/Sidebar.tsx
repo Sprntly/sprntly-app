@@ -4,7 +4,9 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react"
 import { useNavigation } from "../../context/NavigationContext"
 import { useContent } from "../../context/ContentContext"
 import { useAuth } from "../../lib/auth"
+import { useRouter } from "next/navigation"
 import { profileDisplayName, useWorkspace } from "../../context/WorkspaceContext"
+import { BILLING_ENABLED, trialDaysLeft, trialLabel } from "../../lib/billingAccess"
 import type { ScreenId } from "../../types"
 import { IconSources } from "./sidebar-icons"
 import {
@@ -23,26 +25,19 @@ import {
   resumeConversation,
   useChatsList,
 } from "../../lib/recentChats"
-import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBook2, IconBrowser, IconFolder, IconRefresh, IconCheck } from "@tabler/icons-react"
+import { IconLayoutKanban, IconMessageCircle, IconPrompt, IconBulb, IconSettings, IconHistory, IconMessagePlus, IconBookmark, IconFiles, IconWand, IconSearch, IconSparkles, IconBrowser, IconFolder, IconRefresh, IconCheck, IconArrowUpRight } from "@tabler/icons-react"
 import { usePipelineStatus } from "../../lib/usePipelineStatus"
-import { FeedbackModal } from "./FeedbackModal"
 import { CreateWorkspaceModal } from "./CreateWorkspaceModal"
-import { publicPath } from "../../lib/public-path"
 
 interface SidebarProps {
   activeCompany?: string
   onSwitchCompany?: (slug: string) => void
 }
 
-// The rail's Search button is HIDDEN for now (product call, 2026-07-31) — the
-// search itself is untouched: AppShell still renders <CommandPalette/> and owns
-// the ⌘K/Ctrl+K hotkey, so the palette and every result it can reach still work.
-// Only this one trigger is withheld. Flip to true to put the button back.
-const SHOW_SIDEBAR_SEARCH = false
-
 export function Sidebar({ activeCompany }: SidebarProps = {}) {
-  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette } = useNavigation()
+  const { currentScreen, goTo, goToNewChat, goToWorkbench, sidebarCollapsed, toggleSidebar, openPalette, openFeedback } = useNavigation()
   const { content } = useContent()
+  const router = useRouter()
   const auth = useAuth()
   const {
     profile,
@@ -52,7 +47,10 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
     orgRole,
     setActiveWorkspace,
   } = useWorkspace()
-  const [feedbackOpen, setFeedbackOpen] = useState(false)
+  // PAYMENTS HIDDEN: no pill. A countdown to a charge that will not happen is
+  // the last thing in the app that would mention money, and the tour step
+  // anchored to it goes with it (see ProductTour).
+  const trialDays = BILLING_ENABLED ? trialDaysLeft(workspace) : null
   // Sync-your-data (2026-08-13): one click runs the FULL pipeline for the
   // active dataset — the same run the scheduler triggers, not a bespoke
   // sync-all. The backend collapses repeat clicks onto the in-flight run
@@ -100,6 +98,10 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
       title={label}
       onClick={() => goTo(screen)}
       aria-label={label}
+      /* Anchor for the first-run product tour (components/tour). Derived from
+         the screen id rather than listed separately, so a new rail item is
+         spotlightable without touching the tour. */
+      data-tour={`nav-${screen === "ideation" ? "backlog" : screen}`}
     >
       {icon}
       <span className="sb-rail-label">{label}</span>
@@ -161,6 +163,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
             aria-expanded={wsMenuOpen}
             title={brandName}
             data-testid="workspace-switcher"
+            data-tour="workspace-switcher"
           >
             <span className="sb-ws-name">{brandName}</span>
             {wsInteractive && (
@@ -219,25 +222,6 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
         </button>
       </div>
 
-      {/* Global search (⌘K) — the modal itself is rendered by AppShell so the
-          hotkey works even when the sidebar is collapsed or hidden, which is why
-          hiding this trigger (SHOW_SIDEBAR_SEARCH) costs no functionality. */}
-      {SHOW_SIDEBAR_SEARCH && (
-        <button
-          type="button"
-          className="sb-rail-search"
-          title="Search"
-          aria-label="Search (Ctrl+K)"
-          onClick={openPalette}
-          data-testid="palette-trigger"
-        >
-          <IconSearch size={18} />
-          <span className="sb-rail-label">Search</span>
-          <kbd className="sb-rail-search-kbd">⌘K</kbd>
-          <span className="nav-tooltip">Search</span>
-        </button>
-      )}
-
       {/* New chat */}
       <button
         type="button"
@@ -287,7 +271,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
             palette entry are all untouched. */}
         <RailItem screen="artifacts" icon={<IconFiles size={18} />} label="Artifacts" />
         <RailItem screen="projects" icon={<IconFolder size={18} />} label="Projects" />
-        <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Ideation" />
+        <RailItem screen="ideation" icon={<IconBulb size={18} />} label="Backlog" />
         {/* NO Templates or Skills ITEMS. Both moved into Settings (see
             `SETTINGS_NAV`'s "How Sprntly writes" group): they are things a
             workspace sets up once and returns to, which is what Settings is
@@ -306,55 +290,65 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
 
       <div className="sb-rail-spacer" />
 
-      {/* Bottom icons — Guide + Settings + Feedback (Sign out lives in Settings → Account). */}
-      <div className="sb-rail-bottom">
-        {/* Guide links out to the public docs site (/docs), which lives outside
-            the authenticated SPA — so it's a real anchor, not a goTo() screen.
-            Opens in a new tab to preserve the user's in-app session. */}
-        <a
-          href={publicPath("/docs")}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="sb-rail-item"
-          title="Guide"
-          aria-label="Guide"
-          data-testid="sidebar-guide-link"
-        >
-          <IconBook2 size={18} />
-          <span className="sb-rail-label">Guide</span>
-          <span className="nav-tooltip">Guide</span>
-        </a>
-        <RailItem screen="settings" icon={<IconSettings size={18} />} label="Settings" />
+      {/* NO BOTTOM NAV BLOCK. Guide, Settings and Feedback used to be three
+          full rows here, above the divider. Settings and Feedback are icons in
+          the identity row below now, beside Sync — three actions on one line
+          instead of three lines — and Guide moved into Settings itself, where
+          the rest of the read-about-it surfaces already live. */}
+      {/* ON TRIAL, EVERYWHERE. A countdown that lives only on the billing
+          screen is a countdown nobody sees: you visit that screen once, at
+          signup, and then not again until something goes wrong. This sits
+          above the identity row so the fact travels with you, and it is a
+          button rather than a label because the one question it raises —
+          "what happens when it ends?" — is answered one click away.
+
+          It renders ONLY while trialling, so it costs a fully-paid workspace
+          no rail space at all. */}
+      {trialDays != null && (
         <button
           type="button"
-          className="sb-rail-item"
-          title="Feedback"
-          aria-label="Feedback"
-          onClick={() => setFeedbackOpen(true)}
+          className="sb-trial"
+          data-testid="sidebar-trial"
+          data-tour="sidebar-trial"
+          title={`Free trial — ${trialLabel(trialDays)}`}
+          aria-label={`Free trial, ${trialLabel(trialDays)}. Open billing.`}
+          onClick={() => router.push("/settings?section=billing")}
         >
-          <IconMessagePlus size={18} />
-          <span className="sb-rail-label">Feedback</span>
-          <span className="nav-tooltip">Feedback</span>
+          {/* Collapsed, the rail hides the words and keeps the number — the
+              one part that still means something at 56px wide. */}
+          <span className="sb-trial-num">{trialDays}</span>
+          <span className="sb-trial-copy">
+            <span className="sb-trial-label">Free trial</span>
+            <span className="sb-trial-days">{trialLabel(trialDays)}</span>
+          </span>
         </button>
-      </div>
+      )}
+
       <div className="divider-nav" />
 
       {/* User identity row — the avatar/name are display only (signing out
           moved to Settings → Account; no sign-out affordance on icon or
           avatar click). The sync button is the one interactive element. */}
+      {/* ONE ROW: avatar, name, then sync / feedback / search / settings.
+
+          WHAT GIVES WAY IS THE NAME. The initials chip is a fixed 32px circle
+          (`flex: none` — without it the row squashed it into an oval when
+          space ran out), and the four actions keep their size too. The name
+          takes whatever is left and ellipsizes into it, so dragging the rail
+          wider reveals more of it and narrower reveals less. Its full value is
+          on the hover title of both the chip and the name. */}
       <div className="sb-rail-user">
         <span className="sb-rail-avatar" title={displayName}>
           {initials}
         </span>
-        <span className="sb-rail-username">{displayName}</span>
-        {/* Sync-your-data lives here so it's reachable from EVERY screen in
-            both rail modes: expanded, the username's ellipsis truncation
-            (min-width: 0) keeps this pinned visible on the right however long
-            the name is; collapsed, the avatar and name are CSS-hidden and this
-            is the user row's ONLY visible element (product call 2026-08-13 —
-            identity chrome earns no rail slot, an action does). The row around
-            it stays a display-only identity chip — this button is the only
-            interactive element in it. */}
+        <span className="sb-rail-username" title={displayName}>{displayName}</span>
+        <div className="sb-rail-actions">
+        {/* Sync, feedback, search, settings — reachable from EVERY screen in
+            both rail modes, which is why they live here rather than in the
+            scrolling nav above (product call 2026-08-13: identity chrome earns
+            no rail slot, an action does). Collapsed, the avatar and name are
+            CSS-hidden and these four are the whole footer. The row's identity
+            half stays display-only: none of these is the avatar or the name. */}
         <button
           type="button"
           className={`sb-sync-btn${syncRunning ? " sb-sync-btn--running" : ""}${showCompleted ? " sb-sync-btn--done" : ""}${syncFailed ? " sb-sync-btn--failed" : ""}`}
@@ -363,6 +357,7 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           aria-busy={syncRunning || undefined}
           disabled={!activeCompany}
           data-testid="sidebar-sync"
+          data-tour="rail-sync"
           onClick={() => {
             if (!syncRunning) void triggerRun()
           }}
@@ -370,9 +365,58 @@ export function Sidebar({ activeCompany }: SidebarProps = {}) {
           {showCompleted ? <IconCheck size={15} /> : <IconRefresh size={15} />}
           <span className="nav-tooltip">{syncTitle}</span>
         </button>
+        {/* Feedback, then Search, then Settings — left to right: sync,
+            feedback, search, settings. Settings sits last because it is the one
+            you reach for on purpose; sync leads because it is the one that
+            reports a state you might need to act on. */}
+        <button
+          type="button"
+          className="sb-rail-action"
+          title="Feedback"
+          aria-label="Feedback"
+          data-testid="sidebar-feedback"
+          data-tour="rail-feedback"
+          onClick={openFeedback}
+        >
+          <IconMessagePlus size={15} />
+          <span className="nav-tooltip">Feedback</span>
+        </button>
+        {/* Search (⌘K) — the palette itself is rendered by AppShell, which also
+            owns the hotkey, so this is purely the visible door to it: the one
+            thing a user who doesn't know the shortcut had no way to find. It
+            sits here rather than up in the nav because it is an action, not a
+            screen, and the actions row is the part of the rail that survives
+            both collapsed and expanded. */}
+        <button
+          type="button"
+          className="sb-rail-action"
+          title="Search (⌘K)"
+          aria-label="Search (Ctrl+K)"
+          data-testid="palette-trigger"
+          data-tour="rail-search"
+          onClick={openPalette}
+        >
+          <IconSearch size={15} />
+          <span className="nav-tooltip">Search</span>
+        </button>
+        <button
+          type="button"
+          className={`sb-rail-action${currentScreen === "settings" ? " active" : ""}`}
+          title="Settings"
+          aria-label="Settings"
+          data-testid="sidebar-settings"
+          data-tour="rail-settings"
+          onClick={() => goTo("settings")}
+        >
+          <IconSettings size={15} />
+          <span className="nav-tooltip">Settings</span>
+        </button>
+        </div>
       </div>
 
-      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
+      {/* NO <FeedbackModal/> HERE. It moved to AppShell when the palette gained
+          a "Send feedback" action: two triggers, one modal, and the palette
+          cannot reach this component's state. */}
       <CreateWorkspaceModal open={createWsOpen} onClose={() => setCreateWsOpen(false)} />
     </aside>
   )
@@ -505,7 +549,8 @@ function SidebarResizer() {
  *
  * Twenty is the cap because the list has to end somewhere above the fold on a
  * laptop and below the point where the nav stops being useful. Past that,
- * "View all chats" is the same screen it always was.
+ * "Chat history" — in the header, beside the label — is the same screen it
+ * always was.
  */
 function RecentChats({ activeCompany }: { activeCompany: string | null }) {
   const { goTo } = useNavigation()
@@ -525,7 +570,29 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
 
   return (
     <div className="sb-chats" data-testid="sidebar-recent-chats">
-      <div className="sb-chats-head">Chats</div>
+      {/* The label, and the door to the rest, on one line. The door used to
+          sit UNDER the twenty rows, which put the way to older threads behind
+          a scroll past every recent one — the list is capped at twenty
+          precisely because that is where it stops being scannable, so the
+          control for "the ones that are not here" cannot live at the end of
+          it. In the header it is on screen whatever the list is doing. */}
+      <div className="sb-chats-head">
+        <span className="sb-chats-head-label">Chats</span>
+        <button
+          type="button"
+          className="sb-chats-all"
+          data-testid="sidebar-view-all-chats"
+          // THE WORDS CARRY THE MEANING, the arrow carries the affordance
+          // (owner's call, both halves). An arrow alone in this corner is a
+          // guess — expand? collapse? new? — so the label says where it goes;
+          // the outward arrow is what makes a line of small grey text read as
+          // something you can click. Same convention as the docs topbar.
+          onClick={() => goTo("chats")}
+        >
+          <span className="sb-chats-all-label">Chat history</span>
+          <IconArrowUpRight size={13} stroke={2} aria-hidden />
+        </button>
+      </div>
       <div className="sb-chats-list">
         {rows.map((chat) => (
           <button
@@ -549,14 +616,6 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
           </button>
         ))}
       </div>
-      <button
-        type="button"
-        className="sb-chats-all"
-        data-testid="sidebar-view-all-chats"
-        onClick={() => goTo("chats")}
-      >
-        View all chats
-      </button>
     </div>
   )
 }

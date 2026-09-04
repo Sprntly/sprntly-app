@@ -1,0 +1,304 @@
+// @vitest-environment jsdom
+//
+// The onboarding payment gate. Three things here are load-bearing and none of
+// them are visual:
+//
+//  1. Stripe redirects to success_url the moment payment is ACCEPTED, but
+//     `subscription_status` is written by the WEBHOOK. Forwarding on the
+//     redirect alone bounces the user straight back to the gate, which would
+//     read to them as "my payment didn't work" seconds after it did.
+//  2. A company that already pays must never be shown a buy-it-again screen —
+//     that is what makes an invited teammate free, since the gate is
+//     company-level.
+//  3. Only an owner or admin can buy. Everyone else gets told who can, not a
+//     button that 403s.
+import * as React from "react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
+
+;(globalThis as typeof globalThis & { React?: typeof React }).React = React
+
+const push = vi.fn()
+let search = ""
+
+// A STABLE router object. Next's own useRouter is stable across renders, and a
+// mock that returns a fresh one each time makes any effect keyed on it re-run
+// forever — which is how this file first OOM'd rather than failed.
+const router = { push, replace: vi.fn(), refresh: vi.fn() }
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => router,
+  useSearchParams: () => new URLSearchParams(search),
+}))
+
+const checkout = vi.fn()
+const summary = vi.fn()
+vi.mock("../../../../lib/api", async () => {
+  const actual = await vi.importActual<Record<string, unknown>>("../../../../lib/api")
+  return {
+    ...actual,
+    billingApi: {
+      checkout: (...a: unknown[]) => checkout(...a),
+      summary: () => summary(),
+    },
+  }
+})
+
+const refresh = vi.fn().mockResolvedValue(undefined)
+let orgRole: string | null = "owner"
+
+// Deliberately its OWN state, not an alias of `onboardingWorkspace`. The bug
+// this file now guards is the two contexts DISAGREEING, so a shared object
+// would make it unreproducible.
+let workspaceCtxWorkspace: Record<string, unknown> | null = null
+
+vi.mock("../../../../context/WorkspaceContext", () => ({
+  useWorkspace: () => ({ workspace: workspaceCtxWorkspace, orgRole, refresh }),
+}))
+
+// TWO CONTEXTS, ONE COMPANY. `OnboardingPaymentGuard` reads the onboarding
+// context; this step must read the same one, or the two disagree about
+// `companyHasPaid` and bounce the user between /onboarding/plan and the next
+// slug forever. `refreshOnboarding` is tracked separately from `refresh` so a
+// test can assert the guard's copy is the one that gets re-read after payment.
+const refreshOnboarding = vi.fn().mockResolvedValue(undefined)
+let onboardingWorkspace: Record<string, unknown> | null = null
+
+vi.mock("../../../../context/OnboardingContext", () => ({
+  useOnboarding: () => ({ workspace: onboardingWorkspace, refresh: refreshOnboarding }),
+}))
+
+import { TRIAL_CREDITS } from "../../../../lib/billingPlans"
+import { PlanStep } from "../PlanStep"
+import { BILLING_ENABLED } from "../../../../lib/billingAccess"
+
+beforeEach(() => {
+  search = ""
+  orgRole = "owner"
+  onboardingWorkspace = { id: "ws-1", display_name: "Acme", plan: "starter", subscription_status: null }
+  workspaceCtxWorkspace = { ...onboardingWorkspace }
+  push.mockClear()
+  refresh.mockClear()
+  refreshOnboarding.mockClear()
+  checkout.mockReset()
+  summary.mockReset()
+})
+afterEach(() => cleanup())
+
+describe("payments hidden", () => {
+  it("moves straight on instead of asking anyone to pick a plan", () => {
+    // The guards never route here any more, so this only covers a typed URL or
+    // a stale bookmark. It must not be a dead end: a picker whose only exit is
+    // a checkout would strand someone in the middle of onboarding.
+    onboardingWorkspace = { id: "ws-1", display_name: "Acme", plan: "starter", subscription_status: null }
+    workspaceCtxWorkspace = { ...onboardingWorkspace }
+    render(<PlanStep />)
+    expect(push).toHaveBeenCalledTimes(1)
+    expect(String(push.mock.calls[0]![0])).toMatch(/^\/onboarding\//)
+    expect(checkout).not.toHaveBeenCalled()
+  })
+})
+
+// DORMANT WHILE PAYMENTS ARE HIDDEN. `companyHasPaid` answers true for
+// everyone, so this component advances the moment it mounts and never paints
+// a picker to assert against. The expectations are the ones the plan step had
+// and will have again — skipped rather than rewritten so flipping
+// `BILLING_ENABLED` back to true restores the whole file's coverage.
+describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
+  it("offers only the plans the backend will actually sell", () => {
+    // `plans.SELF_SERVE_PLANS` excludes Team and Enterprise, and a checkout
+    // naming either is rejected — so a button for one would be a 400 waiting
+    // to happen.
+    render(<PlanStep />)
+    expect(screen.getByTestId("plan-starter")).toBeTruthy()
+    expect(screen.getByTestId("plan-product_builder")).toBeTruthy()
+    expect(screen.queryByTestId("plan-team")).toBeNull()
+    expect(screen.queryByTestId("plan-enterprise")).toBeNull()
+  })
+
+  it("points Team and Enterprise at a conversation instead of a dead button", () => {
+    render(<PlanStep />)
+    const link = screen.getByText("Talk to us").closest("a")!
+    expect(link.getAttribute("href")).toBe("mailto:sales@sprntly.ai")
+  })
+
+  it("promises the trial in the words the backend will honour", () => {
+    render(<PlanStep />)
+    expect(screen.getByText(/nothing is charged/i).textContent).toContain("7 days")
+  })
+
+  it("says what the TRIAL grants, not just what the plan grants", () => {
+    // The cards quote each plan's monthly credits, which is what a customer
+    // gets from day eight. The trial itself is a flat, much smaller figure, so
+    // a card reading "756 credits a month" beside "nothing is charged for 7
+    // days" is a promise about the free week that we do not keep.
+    render(<PlanStep />)
+    expect(screen.getByText(/nothing is charged/i).textContent).toContain(
+      `${TRIAL_CREDITS} credits`,
+    )
+  })
+
+  it("sends the chosen plan, interval and its own return path to checkout", async () => {
+    checkout.mockResolvedValue({ url: "https://checkout.stripe.test/x" })
+    render(<PlanStep />)
+
+    fireEvent.click(screen.getByTestId("plan-product_builder"))
+    fireEvent.click(screen.getByText("Annual"))
+    fireEvent.click(screen.getByTestId("plan-continue"))
+
+    await waitFor(() =>
+      expect(checkout).toHaveBeenCalledWith("product_builder", "annual", "/onboarding/plan"),
+    )
+  })
+
+  it("recovers to the picker when checkout will not open", async () => {
+    checkout.mockRejectedValue(new Error("stripe down"))
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-continue"))
+
+    await waitFor(() => expect(screen.getByText(/Couldn.t open checkout/i)).toBeTruthy())
+    // Still usable — not a dead end.
+    expect((screen.getByTestId("plan-continue") as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it("says nothing was charged when Checkout was cancelled", () => {
+    search = "checkout=cancelled"
+    render(<PlanStep />)
+    expect(screen.getByText(/nothing was charged/i)).toBeTruthy()
+  })
+})
+
+describe.skipIf(!BILLING_ENABLED)("a company that already pays", () => {
+  it("is forwarded straight through rather than asked to buy again", async () => {
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
+  })
+
+  it("includes a trialling one — the card is already on file", async () => {
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "trialing" }
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalled())
+  })
+
+  it("includes a plan that was never sold through Stripe", async () => {
+    onboardingWorkspace = { id: "ws-1", plan: "legacy", subscription_status: null }
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalled())
+  })
+})
+
+describe.skipIf(!BILLING_ENABLED)("the two contexts disagreeing", () => {
+  it("does not advance on the workspace context alone", async () => {
+    // THE INFINITE REDIRECT LOOP. `OnboardingPaymentGuard` reads the ONBOARDING
+    // context; this step used to read the workspace one. After checkout the
+    // step's poll refreshed only the workspace copy, so the step saw paid and
+    // pushed to the next slug while the guard still saw unpaid and replaced
+    // back to /onboarding/plan — for as long as the tab stayed open. Observed
+    // live: `GET /onboarding/plan` and `GET /onboarding/import-context`
+    // alternating a few dozen times a second.
+    //
+    // Nothing stopped it because the guard's provider wraps the whole
+    // /onboarding subtree and never remounts between steps (so its copy stayed
+    // stale), while this component DID remount on every bounce, resetting the
+    // `alreadyPaid` latch that would otherwise have fired only once.
+    workspaceCtxWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: null }
+
+    render(<PlanStep />)
+
+    // A push here is the loop: the guard would immediately replace back.
+    await new Promise((r) => setTimeout(r, 50))
+    expect(push).not.toHaveBeenCalled()
+  })
+
+  it("advances on the onboarding context — the one the guard reads", async () => {
+    workspaceCtxWorkspace = { id: "ws-1", plan: "starter", subscription_status: null }
+    onboardingWorkspace = { id: "ws-1", plan: "starter", subscription_status: "active" }
+
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalledWith("/onboarding/import-context"))
+  })
+})
+
+describe.skipIf(!BILLING_ENABLED)("coming back from a successful Checkout", () => {
+  it("waits for the webhook rather than trusting the redirect", async () => {
+    // THE BUG THIS PREVENTS: Stripe redirects on payment acceptance, but the
+    // company row is written by the webhook. Forwarding immediately would let
+    // the gate re-read an unpaid company and bounce the user back here.
+    search = "checkout=success"
+    summary
+      .mockResolvedValueOnce({ plan: "starter", subscription_status: null })
+      .mockResolvedValueOnce({ plan: "starter", subscription_status: null })
+      .mockResolvedValue({ plan: "starter", subscription_status: "trialing" })
+
+    render(<PlanStep />)
+
+    // Reads as progress, never as a failure — the money has already moved.
+    expect(screen.getByRole("status").textContent).toMatch(/Confirming/i)
+    expect(push).not.toHaveBeenCalled()
+
+    await waitFor(
+      () => expect(push).toHaveBeenCalledWith("/onboarding/import-context"),
+      { timeout: 10_000 },
+    )
+    expect(summary.mock.calls.length).toBeGreaterThan(1)
+    // The workspace context is refreshed BEFORE forwarding, so the next screen
+    // does not re-read a stale unpaid company and bounce them back.
+    expect(refresh).toHaveBeenCalled()
+  }, 15_000)
+
+  it("keeps waiting through a transient summary failure", async () => {
+    search = "checkout=success"
+    summary
+      .mockRejectedValueOnce(new Error("network"))
+      .mockResolvedValue({ plan: "starter", subscription_status: "active" })
+
+    render(<PlanStep />)
+    await waitFor(() => expect(push).toHaveBeenCalled(), { timeout: 10_000 })
+  }, 15_000)
+
+  it("does not show the buy screen while confirming", () => {
+    search = "checkout=success"
+    summary.mockResolvedValue({ plan: "starter", subscription_status: null })
+    render(<PlanStep />)
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+  })
+
+  it("NEVER opens the gate on a timeout — `?checkout=success` is not proof", async () => {
+    // The bypass this closes: `?checkout=success` is a string in a URL. Anyone
+    // could type this route with it, wait out the timer, and walk into the
+    // product. The backend reconciles against Stripe directly now, so
+    // exhausting the wait means Stripe itself has no subscription for this
+    // company — the one case where stopping is right.
+    search = "checkout=success"
+    summary.mockResolvedValue({ plan: "starter", subscription_status: null })
+
+    render(<PlanStep />)
+    await waitFor(
+      () => expect(screen.getByText(/couldn.t confirm your subscription/i)).toBeTruthy(),
+      { timeout: 40_000 },
+    )
+
+    expect(push).not.toHaveBeenCalled()
+    // …and they are handed the picker back rather than a dead end.
+    expect(screen.getByTestId("plan-continue")).toBeTruthy()
+  }, 45_000)
+})
+
+describe.skipIf(!BILLING_ENABLED)("someone who cannot buy", () => {
+  it("is told who can, instead of given a button that 403s", () => {
+    // /v1/billing/checkout is owner-or-admin only. A plain member reaches this
+    // screen the same way an admin does, because the gate is company-level.
+    orgRole = "member"
+    render(<PlanStep />)
+    expect(screen.getByText(/Waiting on/i)).toBeTruthy()
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+  })
+
+  it("still lets an admin buy", () => {
+    orgRole = "admin"
+    render(<PlanStep />)
+    expect(screen.getByTestId("plan-continue")).toBeTruthy()
+  })
+})

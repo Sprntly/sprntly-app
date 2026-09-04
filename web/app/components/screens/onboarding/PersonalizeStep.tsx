@@ -17,6 +17,7 @@ import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
 import { hasDataSourceConnection } from "../../../lib/connectorsCatalog"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
+import { stepForSlug } from "../../../lib/onboarding/types"
 import {
   POST_ONBOARDING_PATH,
   finishOnboardingAndEnterApp,
@@ -37,6 +38,8 @@ import {
   tzOptionLabel,
 } from "../../../lib/briefSchedule"
 import { SlackChannelPicker } from "../../connectors/SlackChannelPicker"
+import { ConnectorConnectModal } from "../../connectors/ConnectorConnectModal"
+import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedSignal"
 import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "personalize-step"
@@ -48,10 +51,11 @@ const DRAFT_KEY = "personalize-step"
 // companies.notification_settings.brief_insight_types — so the whole
 // workspace's brief is filtered to what the admin picks here.
 
-/** Where the brief lands. Teams has no backend delivery path yet. */
-const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
+/** Where the brief lands. Teams has no backend delivery path yet, so it is
+ *  left out entirely (2026-09-03) rather than shown disabled — a "coming
+ *  soon" chip nobody can act on is still a chip taking up a decision. */
+const DESTINATIONS: { value: string; label: string }[] = [
   { value: "slack", label: "Slack" },
-  { value: "teams", label: "Microsoft Teams", disabled: true },
   { value: "email", label: "Email" },
 ]
 
@@ -63,10 +67,20 @@ const DESTINATIONS: { value: string; label: string; disabled?: boolean }[] = [
  *     notification_settings.brief_insight_types, NOT a new table — every other
  *     brief-delivery preference already lives in that blob and the schedule
  *     migration explicitly argues for keeping it that way.
- *   - Delivery, behind a disclosure: frequency / destination / day / time /
- *     timezone. These are the SAME keys Settings → Comms & Brief writes, and
- *     the option vocabularies come from the shared briefSchedule module, so the
- *     two surfaces cannot drift.
+ *   - Delivery: frequency / destination / day / time / timezone, OPEN by
+ *     default (2026-09-03 — a PM should not have to click to discover there is
+ *     a schedule to set) rather than hidden behind the disclosure it still
+ *     visually is (still collapsible, just not collapsed on arrival). These
+ *     are the SAME keys Settings → Comms & Brief writes, and the option
+ *     vocabularies come from the shared briefSchedule module, so the two
+ *     surfaces cannot drift.
+ *
+ * SLACK IS NEVER PRE-SELECTED (2026-09-03). A chip showing "selected" the
+ * moment the screen loads reads as "already connected" — it isn't, for a
+ * brand-new signup. Destination starts unset; picking Slack while it isn't
+ * connected opens the SAME connect modal Connectors uses (OAuth, provider
+ * "slack"), so choosing it and connecting it are one motion instead of a
+ * chip that quietly does nothing until a trip to Settings.
  *
  * This is also where the define-metrics gate now lives. It used to sit on
  * ReviewStep, but personalize was inserted between review and the sub-flow, so
@@ -86,7 +100,11 @@ export function PersonalizeStep() {
   )
 
   const [frequency, setFrequency] = useState<BriefFrequency>("weekly")
-  const [destination, setDestination] = useState("slack")
+  // Unset until the PM actually picks one — see the module doc for why Slack
+  // must never be the pre-selected chip. `save()` below falls back to email
+  // only at the point of persisting, never as something shown selected here.
+  const [destination, setDestination] = useState<string | null>(null)
+  const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [weekday, setWeekday] = useState(0)
   const [hour, setHour] = useState(9)
   const [timezone, setTimezone] = useState(browserTimezone())
@@ -131,25 +149,40 @@ export function PersonalizeStep() {
     return () => document.removeEventListener("visibilitychange", onHide)
   }, [surfaces])
 
-  // Same fail-open rule as the old ReviewStep gate: a connector list we can't
-  // confirm counts as "no analytics", because stranding the PM on a spinner at
-  // the last step is worse than finishing one screen early.
-  useEffect(() => {
-    let cancelled = false
-    connectorsApi
-      .list()
-      .then((r) => {
-        if (cancelled) return
+  function reloadConnections() {
+    return connectorsApi.list().then(
+      (r) => {
         setConnections(r.connections)
         setHasAnalytics(hasLiveAnalyticsConnection(r.connections))
-      })
-      .catch(() => {
-        if (!cancelled) setHasAnalytics(false)
-      })
-    return () => {
-      cancelled = true
-    }
+      },
+      // Same fail-open rule as the old ReviewStep gate: a connector list we
+      // can't confirm counts as "no analytics", because stranding the PM on a
+      // spinner at the last step is worse than finishing one screen early.
+      () => setHasAnalytics(false),
+    )
+  }
+
+  useEffect(() => {
+    void reloadConnections()
   }, [])
+
+  // The OAuth tab signals back via BroadcastChannel / localStorage the moment
+  // Slack connects (see /connectors/return) — refresh so the picker replaces
+  // the "connect it" hint without a manual reload. Mirrors Connectors.tsx.
+  useConnectorConnectedSignal(() => void reloadConnections())
+
+  // Belt-and-suspenders: OAuth opens Slack in a sibling tab. If the
+  // return-page signal is missed (e.g. that tab closed before posting), a
+  // refresh on tab focus still picks up the new connection while the modal
+  // is open.
+  useEffect(() => {
+    if (modalProvider == null) return
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void reloadConnections()
+    }
+    document.addEventListener("visibilitychange", onVisible)
+    return () => document.removeEventListener("visibilitychange", onVisible)
+  }, [modalProvider])
 
   // Warm the metric-definition drafts while they pick chips, so define-metrics
   // opens pre-filled rather than spinning. Skipped without analytics.
@@ -209,8 +242,11 @@ export function PersonalizeStep() {
           // free-text override was removed from both pickers; any value already
           // stored survives in `existing`.
           brief_insight_types: selectableInsightTypes(surfaces),
-          brief_channel: destination,
-          email_enabled: destination === "email",
+          // Unset in the UI reads as "email" here — the same graceful
+          // fallback already promised by the unconnected-Slack hint below,
+          // just applied whether or not a chip was ever clicked.
+          brief_channel: destination ?? "email",
+          email_enabled: destination == null || destination === "email",
           brief_frequency: frequency,
           brief_anchor_date: anchorForSave(new Date(), timezone, { weekday, hour }),
           brief_weekday: weekday,
@@ -222,7 +258,13 @@ export function PersonalizeStep() {
       setWorkspace({ ...updated, product: workspace.product })
       clearDraft(DRAFT_KEY)
 
-      if (hasAnalytics) {
+      // ANALYTICS **AND** METRICS. define-metrics confirms a definition and an
+      // analytics mapping for each metric already picked, and the step that
+      // picked them was removed on 2026-09-03 — so for a fresh signup the list
+      // is empty and the sub-flow would open on nothing to confirm. Metrics are
+      // chosen in Settings → KPI Settings now; someone who has picked some and
+      // has analytics connected still gets the mapping screen.
+      if (hasAnalytics && workspace.kpi_tree.metrics.length > 0) {
         router.push("/onboarding/define-metrics")
         return
       }
@@ -248,7 +290,7 @@ export function PersonalizeStep() {
 
   return (
     <OnboardingChrome
-      step={10}
+      step={stepForSlug("personalize") ?? 4}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -296,7 +338,10 @@ export function PersonalizeStep() {
         })}
       </div>
 
-      <OptionalDisclosure label="Delivery — when & where your brief lands (optional)">
+      <OptionalDisclosure
+        label="Delivery — when & where your brief lands (optional)"
+        defaultOpen
+      >
         <div className="onb-section">
           <div className="onb-section-h">Frequency</div>
         </div>
@@ -322,7 +367,10 @@ export function PersonalizeStep() {
           })}
         </div>
 
-        <div className="onb-section">
+        {/* `.onb-section` only spaces itself BELOW (margin-bottom: 20px), so a
+            heading straight after a chip row sits flush against it. Match that
+            same 20px above so the two delivery sections read as one rhythm. */}
+        <div className="onb-section" style={{ marginTop: 20 }}>
           <div className="onb-section-h">Where should we send it?</div>
         </div>
         <div className="metric-chips" data-field="destination">
@@ -334,9 +382,14 @@ export function PersonalizeStep() {
                 key={opt.value}
                 className={`metric ${isSel ? "sel" : ""}`}
                 aria-pressed={isSel}
-                disabled={opt.disabled}
-                title={opt.disabled ? "Coming soon" : undefined}
-                onClick={() => setDestination(opt.value)}
+                onClick={() => {
+                  setDestination(opt.value)
+                  // Picking Slack while it isn't connected asks for it right
+                  // here — the SAME modal Connectors uses — instead of
+                  // selecting a chip that quietly does nothing until a trip to
+                  // Settings. Already connected: just select, as normal.
+                  if (opt.value === "slack" && !slack) setModalProvider("slack")
+                }}
               >
                 {isSel && (
                   <span className="mt-ic" aria-hidden>
@@ -344,15 +397,15 @@ export function PersonalizeStep() {
                   </span>
                 )}
                 {opt.label}
-                {opt.disabled && <span className="opt"> — soon</span>}
               </button>
             )
           })}
         </div>
 
         {/* Only a real, connected Slack can be targeted — the picker writes the
-            channel id the backend needs. Without one, say so rather than
-            accepting a channel name that would route nowhere. */}
+            channel id the backend needs. Without one, offer the SAME connect
+            flow rather than only describing it — "click it, we ask you to
+            connect" is the point, not a paragraph pointing at Settings. */}
         {destination === "slack" &&
           (slack ? (
             <div style={{ marginTop: 12 }}>
@@ -366,11 +419,19 @@ export function PersonalizeStep() {
               />
             </div>
           ) : (
-            <p className="onb-field-hint" style={{ marginTop: 10 }}>
-              Slack isn&apos;t connected yet — we&apos;ll email your brief until
-              you connect it in Settings → Connectors, where you can also pick
-              the channel.
-            </p>
+            <div className="onb-field-hint" style={{ marginTop: 10 }}>
+              <p style={{ margin: "0 0 8px" }}>
+                Slack isn&apos;t connected yet — we&apos;ll email your brief
+                until you do.
+              </p>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setModalProvider("slack")}
+              >
+                Connect Slack
+              </button>
+            </div>
           ))}
 
         <div className="form-grid" style={{ marginTop: 14 }}>
@@ -429,6 +490,19 @@ export function PersonalizeStep() {
           </p>
         )}
       </OptionalDisclosure>
+
+      <ConnectorConnectModal
+        providerId={modalProvider}
+        activeCompany={workspace.slug}
+        connection={connections.find((c) => c.provider === modalProvider) ?? null}
+        returnTo="/onboarding/personalize"
+        onClose={() => setModalProvider(null)}
+        onConnected={() => {
+          setModalProvider(null)
+          void reloadConnections()
+        }}
+        onSkipForLater={() => setModalProvider(null)}
+      />
     </OnboardingChrome>
   )
 }

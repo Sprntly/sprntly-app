@@ -1,0 +1,33 @@
+-- kg_signal content full-text search index (Leg C keyword sub-leg).
+--
+-- Retrieval today only reaches a kg_signal row via a topic-theme kNN (Leg A)
+-- or the recent-signals window (Leg B) — `kg_signal.content` itself is never
+-- text-searched, so a question that names an entity/account by name ("what's
+-- the latest on AIG") cannot reach a freshly-dated, correctly theme-wired
+-- signal whose theme doesn't happen to match the question. The keyword
+-- sub-leg this index backs closes that gap.
+--
+-- EXPRESSION index, not a stored generated column: `kg_signal` is a live,
+-- shared-across-tenants table on a Supabase project staging AND prod both run
+-- against right now, and `ALTER TABLE ... ADD COLUMN ... GENERATED ALWAYS AS
+-- (...) STORED` rewrites the whole table under an ACCESS EXCLUSIVE lock
+-- regardless of CONCURRENTLY (that only applies to index builds, not column
+-- adds). An expression index needs no new column and no table rewrite at
+-- all — Postgres matches a query's `to_tsvector('english', content)` against
+-- this index by expression equality, so the query side
+-- (`kg_signal_content_search`, next migration) must spell the SAME
+-- expression verbatim for the planner to use it.
+--
+-- CONCURRENTLY + a standalone file: `CREATE INDEX CONCURRENTLY` cannot run
+-- inside a transaction block, and a migration file with more than this one
+-- statement risks the runner wrapping it in one — see
+-- 20260816130000_ask_jobs_active_attempt_unique.sql's module note on the same
+-- tradeoff. A concurrent build takes longer and briefly needs two table scans,
+-- but never blocks concurrent reads/writes on `kg_signal` — the sync/backfill
+-- ingest paths and every live Ask keep working while this builds.
+--
+-- 'english' is the SAME config used by document_catalog's existing tsvector
+-- (20260803120000_document_catalog.sql) — one text-search config for the
+-- whole app, not a second one invented here.
+create index concurrently if not exists kg_signal_content_gin
+    on kg_signal using gin (to_tsvector('english', content));

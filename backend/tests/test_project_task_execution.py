@@ -250,7 +250,6 @@ def test_execute_prd_does_not_define_a_new_generation_function():
     thin async wrapper (a call site), not a generator."""
     src = inspect.getsource(project_task_execution)
     assert "_generate_human_prd" in src
-    assert "extract_input_questions_task" in src
     # Negative-space: no local def looks like an LLM call site (`call_md`/
     # `call_json`/`llm_call` are never IMPORTED here — every LLM call is
     # reached only through the imported prd_runner functions; the string
@@ -431,7 +430,7 @@ def test_delegate_task_unchanged_alongside_execute(isolated_settings, monkeypatc
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     delegations = (
         require_client()

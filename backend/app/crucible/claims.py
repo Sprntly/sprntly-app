@@ -72,6 +72,81 @@ KIND_TO_CLAIM_TYPE: Mapping[str, ClaimType] = {
 }
 DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 
+# ── a grounded commercial figure reclassifies its OWN claim, not its kind ────
+# `commercial_term` is left OUT of `KIND_TO_CLAIM_TYPE` on purpose: most
+# commercial-term signals are a paraphrase ("pricing came up") with no real
+# number behind them, and defaulting the whole kind to `magnitude` would let
+# every one of those vote on size. A signal that DOES carry a grounded figure
+# — the checklist pass's `properties.amount`, a real number a customer stated
+# on the call (see app/graph/extractor.py's checklist 'commercial' shape) —
+# is a different, stronger kind of evidence, and is reclassified per-CLAIM
+# below rather than per-kind.
+#
+# BOTH KINDS ARE ADMITTED, AND THEY FEED DIFFERENT LINES. They are not
+# better and worse; they hold different things, and the report needs both.
+#
+#   * `commercial_term` carries COMMITTED money — an issued quote, a
+#     contract value, a named deal. Summable, and the only population a
+#     money target may be answered from. Measured at 55% precision on a real
+#     sample, and the junk is refused by the phrase families in
+#     `app.crucible.backfill` rather than by excluding the kind, because the
+#     genuine rows here are exactly the ones a reader most needs.
+#   * `pricing` carries LIST PRICES — a rate card. Measured at 93%
+#     precision, but its rows are the same handful of values repeated: one
+#     "$30,000 for 50 users" tier appeared across sixteen different
+#     accounts. Reported as a range, never summed, because the total of a
+#     rate card is meaningless.
+#
+# NO BASIS GATE ANY MORE, and the reason it existed is the reason it can go.
+# It was admitting a `pricing` amount only with a sum-eligible basis
+# (`total-contract`/`one-off`), because "a per-seat rate without a stated
+# seat count is not a sum". That is still true — and nothing sums a list
+# price now. `pipeline._figure_is_committed` keeps priced figures out of the
+# committed total by construction, so the arithmetic the gate was protecting
+# against can no longer happen, while the gate itself was excluding almost
+# every priced row on a historical corpus (the backfill never writes
+# `basis`, so those rows have none) and emptying the pricing line it now
+# feeds.
+_GROUNDED_MAGNITUDE_KINDS: frozenset[str] = frozenset({"commercial_term", "pricing"})
+
+
+def _grounded_commercial_amount(kind: str, props: Mapping[str, Any]) -> Optional[float]:
+    """The real, transcript-stated dollar figure on this claim, or `None`.
+
+    Reads `properties["amount"]` — written ONLY by the checklist pass's
+    'commercial'/'partnership_commercial' shape, and only when a speaker
+    actually stated a figure (`_sanitize_checklist_properties` in the
+    extractor never writes `amount` on an invention or a 0 stand-in for
+    "not stated" — I2/I3). Gated on `kind` too: a `commercial_term` signal
+    from the OPEN extraction pass (`_EXTRACT_SCHEMA`) can carry an
+    unrelated numeric `properties` value under the same key by coincidence,
+    so this only trusts the checklist-shaped kind the amount contract
+    actually applies to.
+
+    Re-checks the SAME numeric/zero/NaN/inf exclusions the extractor's own
+    writer applies, rather than trusting an upstream write path to have
+    enforced them — this module reads `kg_signal` generically, not only rows
+    this repo's own extractor produced, and I2/I3 ("unmeasured is never
+    zero") has to hold here even if some other writer ever puts a literal
+    `0` in `properties["amount"]`.
+
+    Both eligible kinds are admitted here; whether a figure may be ADDED UP
+    is a separate question answered downstream by
+    `pipeline._figure_is_committed`, not by refusing to read it.
+    """
+    if kind not in _GROUNDED_MAGNITUDE_KINDS:
+        return None
+    amount = props.get("amount")
+    if isinstance(amount, bool) or not isinstance(amount, (int, float)):
+        return None
+    if amount != amount or amount in (float("inf"), float("-inf")):  # NaN/inf
+        return None
+    if amount == 0:
+        # A stated figure of zero is not a real quoted amount — treat it as
+        # absent, the same as any other missing figure.
+        return None
+    return float(amount)
+
 # ── source_type → what it may vote on (I4) ───────────────────────────────────
 # SPEC §4.3 and §4.5. A source contributes ZERO confidence outside these, and
 # the claim is retained rather than dropped (Stage 4) because non-authoritative
@@ -288,6 +363,14 @@ def _artifact_id(signal: Mapping) -> str:
     return str(signal.get("source_id") or "")
 
 
+def _stored_figure_class(props: Mapping[str, Any]) -> Optional[str]:
+    """The class a previous run drew for this row, if any and if valid."""
+    from app.crucible.figure_class import FIGURE_CLASSES, PROPERTY_KEY
+
+    value = props.get(PROPERTY_KEY)
+    return value if value in FIGURE_CLASSES else None
+
+
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
@@ -305,7 +388,17 @@ def project_signal(
 
     source_type = str(signal.get("source_type") or "")
     kind = str(signal.get("kind") or "")
+    props = signal.get("properties") if isinstance(signal.get("properties"), dict) else {}
+    grounded_amount = _grounded_commercial_amount(kind, props)
     claim_type: ClaimType = KIND_TO_CLAIM_TYPE.get(kind, DEFAULT_CLAIM_TYPE)
+    if grounded_amount is not None:
+        # A real, transcript-stated dollar figure IS a magnitude claim —
+        # see `_grounded_commercial_amount`'s docstring. This is what lets a
+        # `revenue`-source signal (already authoritative for `magnitude` —
+        # see `AUTHORITATIVE_FOR` below) actually vote on size, instead of
+        # every commercial-term claim defaulting to `mechanism` and being
+        # capped at `reported` strength regardless of what it carries.
+        claim_type = "magnitude"
 
     authoritative = claim_type in AUTHORITATIVE_FOR.get(source_type, frozenset())
     strength: EvidenceStrength = DEFAULT_STRENGTH.get(source_type, FALLBACK_STRENGTH)
@@ -317,8 +410,6 @@ def project_signal(
     # to prevent, wearing the strength of a structured field.
     if not authoritative and STRENGTH_SCORE[strength] > STRENGTH_SCORE["reported"]:
         strength = "reported"
-
-    props = signal.get("properties") if isinstance(signal.get("properties"), dict) else {}
 
     return Claim(
         id=str(signal.get("id") or ""),
@@ -332,10 +423,19 @@ def project_signal(
         observed_at=observed_at,
         authoritative=authoritative,
         population=_population(props, sides),
-        # Sizing comes from the substrate, not from a single signal. Left
-        # unmeasured here rather than guessed (I3).
+        # Sizing across a POPULATION still comes from the substrate, not
+        # from a single signal — left unmeasured here rather than guessed
+        # (I3). `magnitude` is different: it is this ONE claim's own
+        # grounded figure (a number a speaker actually stated), not a
+        # population size, so it is populated when one is present.
         population_value=None,
-        magnitude=None,
+        magnitude=grounded_amount,
+        # READ BACK, NEVER RE-DRAWN. A class stored on a previous run is a
+        # fact about that row; recomputing it would make the committed total
+        # a function of how many times the analysis was run. Validated
+        # against the closed vocabulary here rather than trusted, so a
+        # hand-edited or legacy value cannot reach the consequence table.
+        figure_class=_stored_figure_class(props),
         direction="neutral",
         raw=dict(signal.get("properties") or {}),
     )

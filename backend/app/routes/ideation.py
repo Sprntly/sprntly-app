@@ -232,6 +232,31 @@ def create_ideation_item(
     )
 
 
+class ChatPlanIn(BaseModel):
+    """The chat's `backlog_action`: the planner's `instruction`, verbatim."""
+    instruction: str = Field(..., min_length=1)
+
+
+@router.post("/chat-plan")
+def chat_plan(
+    body: ChatPlanIn,
+    company: CompanyContext = Depends(require_company),
+):
+    """Resolve a chat request about the backlog into explicit operations plus
+    the questions it left open (rendered by the chat's question popup).
+
+    PLAN ONLY — the writes happen through the routes above when the user's
+    clicks land, so chat gains no write path of its own and every change goes
+    through the same tenant check the Backlog screen uses. The plan is scoped
+    to the caller's company by construction: `plan_backlog_ops` reads the
+    backlog for THIS company and validates every id it returns against what it
+    read, so a model that invents or borrows an id produces a dropped
+    operation rather than a cross-tenant write."""
+    from app.backlog_action import plan_backlog_ops
+
+    return plan_backlog_ops(company.company_id, body.instruction.strip())
+
+
 @router.post("/reorder")
 def reorder_ideation(
     body: ReorderIn,

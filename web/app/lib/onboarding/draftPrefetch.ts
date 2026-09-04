@@ -3,9 +3,10 @@
  * display, so generation runs in the BACKGROUND while the user is still on
  * earlier steps instead of starting when the display screen mounts:
  *
- *   - business-context prose ("Here's what we learned", step 9) — kicked from
- *     the invite step's mount (every draft input — company, product, metrics,
- *     team, strategy, decisions — is saved by then; invites don't affect it),
+ *   - business-context prose ("Here's what we learned", the review step) —
+ *     the review step's own mount is now the only kick (it used to also fire
+ *     a step early, from the invite step, before that step was removed
+ *     2026-09-03; memoized either way, so nothing else changes),
  *   - per-metric definitions (define-metrics sub-flow) — kicked from the
  *     review step's mount, drafting while the user reads/edits the context.
  *

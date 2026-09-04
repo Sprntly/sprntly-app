@@ -29,6 +29,7 @@ from app.db import (
     find_latest_failed_evidence,
     start_evidence,
 )
+from app.billing import enforce
 from app.deps.ownership import require_owned_brief, require_owned_evidence
 from app.evidence_kg import generate_evidence_kg
 from app.prompts import EVIDENCE_TEMPLATE_VERSION, EVIDENCE_VARIANT
@@ -98,6 +99,10 @@ async def generate(
                 "variant": _VARIANT,
                 "error": failed.get("error"),
             }
+
+    # Billable action — charged here, AFTER the reuse checks above, so
+    # returning an existing document costs nothing.
+    enforce.bill(company.company_id, "evidence", actor_user_id=company.user_id)
 
     insight = insights[body.insight_index]
     title = insight.get("title") or f"Insight #{body.insight_index + 1}"
@@ -180,6 +185,50 @@ async def stream_evidence_generation(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+class EvidenceEdit(BaseModel):
+    instruction: str = Field(min_length=1, max_length=4000)
+
+
+@router.post("/{evidence_id}/chat-edit")
+async def chat_edit_evidence(
+    evidence_id: int,
+    body: EvidenceEdit,
+    company: WorkspaceContext = Depends(require_workspace),
+):
+    """Apply a free-form chat instruction to this evidence page.
+
+    THE TARGET IS THE URL'S EVIDENCE, NOT AN ARGUMENT — the same rule the PRD,
+    report and team-document editors carry, for the same reason: a model, or a
+    prompt-injected instruction sitting inside a customer's own document, must
+    not be able to edit a page the user is not looking at.
+
+    Reported (2026-09-03): "improve the evidence with an analytical chart of the
+    evidence" drew the chart into the chat thread. It had nowhere else to go —
+    evidence was the one artifact in that panel with no edit path.
+
+    An instruction the editor judges is NOT an edit — a question about the page,
+    or a chart whose numbers are not in it — writes nothing and comes back with
+    `sections_changed: []`, which is what lets the chat answer instead of
+    claiming a change it did not make.
+    """
+    from app.artifact_chat_edit import edit_evidence_scoped
+
+    result = await asyncio.to_thread(
+        edit_evidence_scoped, evidence_id, body.instruction, company,
+        workspace_id=company.workspace_id,
+    )
+    row = result["evidence"]
+    return {
+        "id": row["id"],
+        "title": row.get("title") or "",
+        "payload_md": row.get("payload_md") or "",
+        "variant": row.get("variant") or _VARIANT,
+        "status": row.get("status") or "ready",
+        "sections_changed": result["sections_changed"],
+        "summary": result["summary"],
+    }
 
 
 @router.get("/{evidence_id}")

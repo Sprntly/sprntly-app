@@ -1,16 +1,38 @@
 "use client"
 
+import { useEffect, useRef, useState } from "react"
+
 import type { PrdChartDatum, PrdChartKind } from "../../types/content"
 
+/**
+ * The categorical series colours, in FIXED ORDER — slot 1 is always blue, slot
+ * 2 always orange. Never cycled or reassigned by rank: colour follows the
+ * entity, so a filter that drops a series must not repaint the survivors.
+ *
+ * THESE WERE CHOSEN BY VALIDATOR, NOT BY EYE. The previous eight
+ * (#5B7FFF, #6FCF97, #F2994A…) failed two of the six checks a categorical
+ * palette has to clear: three sat outside the lightness band (#6FCF97 0.78,
+ * #56CCF2 0.79, #F2C94C 0.85 against a 0.43–0.77 band, so they washed out on
+ * white), and five fell under 3:1 contrast with the surface. This set clears
+ * the band, the chroma floor, colour-vision separation (worst adjacent pair
+ * ΔE 9.1 protan, target ≥ 8) and the normal-vision floor (worst 19.6, floor
+ * 15).
+ *
+ * Three of them — aqua, yellow, magenta — still sit under 3:1 on a light
+ * surface. That is allowed only with RELIEF: every chart here carries a
+ * visible value label beside its mark, so identity never rests on the colour
+ * alone. If a future chart form drops those labels, it needs a table view
+ * instead, not a darker palette.
+ */
 export const CHART_COLORS = [
-  "#5B7FFF",
-  "#6FCF97",
-  "#F2994A",
-  "#BB6BD9",
-  "#56CCF2",
-  "#EB5757",
-  "#F2C94C",
-  "#27AE60",
+  "#2a78d6", // 1 blue
+  "#eb6834", // 2 orange
+  "#1baf7a", // 3 aqua
+  "#eda100", // 4 yellow
+  "#e87ba4", // 5 magenta
+  "#008300", // 6 green
+  "#4a3aa7", // 7 violet
+  "#e34948", // 8 red
 ]
 
 export function toNum(v: number | string): number {
@@ -24,6 +46,61 @@ export function fmtVal(v: number | string): string {
   return typeof v === "string" ? v : String(v)
 }
 
+
+/**
+ * Has this chart been scrolled into view yet?
+ *
+ * WHY SCROLL AND NOT MOUNT. These render inside a streaming chat reply: the
+ * card exists before its numbers finish arriving, so animating on mount would
+ * play the reveal against half a dataset, in a card the reader is not looking
+ * at yet. Intersection is the moment it is actually seen.
+ *
+ * FIRES ONCE. A bar that re-grows every time it scrolls past is a distraction
+ * the second time and a fault the tenth; the observer disconnects on the first
+ * hit and the chart stays put.
+ *
+ * REDUCED MOTION SKIPS STRAIGHT TO THE END STATE — `true` on the first render,
+ * no observer, no transition. Someone who has asked their OS for less motion
+ * is not asking for a slower reveal; they are asking for none, and an animated
+ * chart is a common accessibility complaint.
+ */
+function useRevealed<T extends Element>() {
+  const ref = useRef<T | null>(null)
+  const [revealed, setRevealed] = useState(() => prefersReducedMotion())
+
+  useEffect(() => {
+    if (revealed) return
+    const el = ref.current
+    // No element, or a browser without the observer (jsdom included): show the
+    // finished chart rather than an empty one — the reveal is decoration, and
+    // decoration must never be load-bearing for reading the data.
+    if (!el || typeof IntersectionObserver === "undefined") {
+      setRevealed(true)
+      return
+    }
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) {
+          setRevealed(true)
+          io.disconnect()
+        }
+      },
+      // A little of the card is enough — waiting for half of a tall chart
+      // means the top has already been read by the time it moves.
+      { threshold: 0.15 },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [revealed])
+
+  return { ref, revealed }
+}
+
+function prefersReducedMotion(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false
+  return window.matchMedia("(prefers-reduced-motion: reduce)").matches
+}
+
 export function InlineChart({
   kind,
   title,
@@ -35,8 +112,16 @@ export function InlineChart({
   subtitle?: string
   data: PrdChartDatum[]
 }) {
+  // One observer per chart, on the figure — every mark inside reveals off the
+  // same `data-revealed`, so a bar, its value and the line beside it move
+  // together rather than racing.
+  const { ref, revealed } = useRevealed<HTMLElement>()
   return (
-    <figure className={`prd-chart prd-chart-${kind}`}>
+    <figure
+      ref={ref}
+      className={`prd-chart prd-chart-${kind}`}
+      data-revealed={revealed ? "true" : "false"}
+    >
       {title ? <figcaption className="prd-chart-title">{title}</figcaption> : null}
       {subtitle ? <div className="prd-chart-sub">{subtitle}</div> : null}
       <div className="prd-chart-body">
@@ -64,8 +149,13 @@ function BarChart({ data }: { data: PrdChartDatum[] }) {
               <div
                 className="prd-bar-fill"
                 style={{
+                  // The width IS the reveal: 0 until the card is seen, then
+                  // the CSS transition carries it out. Staggered a row at a
+                  // time so the eye reads the ranking in order rather than
+                  // watching five bars arrive at once.
                   width: `${pct.toFixed(1)}%`,
                   background: CHART_COLORS[i % CHART_COLORS.length],
+                  transitionDelay: `${Math.min(i, 8) * 60}ms`,
                 }}
               />
             </div>
@@ -135,6 +225,11 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
         )
       })}
       <polyline
+        // `pathLength=1` normalises the dash to a fraction of the line's own
+        // length, so the draw-on takes the same time whatever the data's shape
+        // — without it a jagged series animates slower than a flat one.
+        pathLength={1}
+        className="prd-line-path"
         points={points}
         fill="none"
         stroke={CHART_COLORS[0]}
@@ -145,7 +240,17 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
         const lines = wrapped[i]
         return (
           <g key={i}>
-            <circle cx={x(i)} cy={y(toNum(d.value))} r={3.5} fill={CHART_COLORS[0]} />
+            <circle
+              cx={x(i)}
+              cy={y(toNum(d.value))}
+              // >= 8px across, with a 2px ring in the surface colour so a dot
+              // sitting on the line, a gridline or another dot still reads as
+              // its own mark.
+              r={4}
+              fill={CHART_COLORS[0]}
+              className="prd-line-dot"
+              style={{ transitionDelay: `${420 + Math.min(i, 10) * 40}ms` }}
+            />
             <text
               x={x(i)}
               y={labelBaselineY}
@@ -166,12 +271,15 @@ function LineChart({ data }: { data: PrdChartDatum[] }) {
 }
 
 function PieChart({ data, donut = false }: { data: PrdChartDatum[]; donut?: boolean }) {
+  // WHICH SLICE IS BEING READ. Hover and keyboard focus both set it, from the
+  // ring or the legend, so the two halves of the chart are one control: point
+  // at "In Progress" in either place and the other lights up too.
+  const [active, setActive] = useState<number | null>(null)
+
   const total = data.reduce((sum, d) => sum + toNum(d.value), 0) || 1
   const cx = 90
   const cy = 90
   const r = 80
-  // Donut variant cuts a circular hole in the middle. The hole renders as
-  // an extra path with the page background color, layered above the slices.
   const innerR = donut ? r * 0.55 : 0
   let acc = 0
   const slices = data.map((d, i) => {
@@ -194,25 +302,79 @@ function PieChart({ data, donut = false }: { data: PrdChartDatum[]; donut?: bool
       value: d.value,
     }
   })
+
+  const shown = active == null ? null : slices[active]
+
   return (
     <div className="prd-pie">
-      <svg viewBox="0 0 180 180" width={180} height={180}>
-        {slices.map((s, i) => (
-          <path key={i} d={s.path} fill={s.color} />
-        ))}
+      <div className="prd-pie-ring">
+        <svg viewBox="0 0 180 180" width={180} height={180} role="presentation">
+          {slices.map((s, i) => (
+            <path
+              key={i}
+              className="prd-pie-slice"
+              d={s.path}
+              fill={s.color}
+              // A 2px separator in the SURFACE colour between touching slices —
+              // white doing the dividing, so two adjacent hues never read as
+              // one shape. Without it a donut is a solid ring with colour
+              // changes in it.
+              stroke="var(--surface-2)"
+              strokeWidth={2}
+              // Dimming uses fill-opacity, NOT opacity: the reveal animation
+              // already owns opacity, and two rules on one property fight
+              // whenever a reader hovers mid-reveal.
+              fillOpacity={active == null || active === i ? 1 : 0.28}
+              data-active={active === i ? "true" : undefined}
+              onMouseEnter={() => setActive(i)}
+              onMouseLeave={() => setActive(null)}
+              style={{ transitionDelay: `${Math.min(i, 8) * 70}ms` }}
+            />
+          ))}
+          {donut ? <circle cx={cx} cy={cy} r={innerR} fill="var(--surface-2)" /> : null}
+        </svg>
+
+        {/* THE HOLE IS THE READOUT. A donut's middle is the one place a value
+            can go that needs no tooltip positioning, never leaves the card, and
+            reads the same for a mouse and for a keyboard. Resting, it holds the
+            total — the number a share chart otherwise makes you add up. */}
         {donut ? (
-          <circle cx={cx} cy={cy} r={innerR} fill="var(--surface)" />
+          <div className="prd-pie-center" aria-hidden>
+            <span className="prd-pie-center-val">
+              {shown ? fmtVal(shown.value) : total}
+            </span>
+            <span className="prd-pie-center-lbl">
+              {shown ? `${shown.label} · ${shown.pct}%` : "total"}
+            </span>
+          </div>
         ) : null}
-      </svg>
+      </div>
+
+      {/* The legend is a list of BUTTONS, not text. It is the keyboard's way
+          into the ring — tab through it and each slice lights up with its
+          share — and the reason this chart needs no separate tooltip. */}
       <ul className="prd-pie-legend">
         {slices.map((s, i) => (
           <li key={i}>
-            <span className="prd-pie-swatch" style={{ background: s.color }} />
-            <span className="prd-pie-label">{s.label}</span>
-            <span className="prd-pie-val">
-              {fmtVal(s.value)}{" "}
-              <span style={{ color: "var(--muted)" }}>({s.pct}%)</span>
-            </span>
+            <button
+              type="button"
+              className="prd-pie-legend-row"
+              data-active={active === i ? "true" : undefined}
+              // Reading a chart is not an action; this is a hover/focus target
+              // that happens to be keyboard-reachable, so it announces the
+              // figures rather than a command.
+              aria-label={`${s.label}: ${fmtVal(s.value)}, ${s.pct}%`}
+              onMouseEnter={() => setActive(i)}
+              onMouseLeave={() => setActive(null)}
+              onFocus={() => setActive(i)}
+              onBlur={() => setActive(null)}
+            >
+              <span className="prd-pie-swatch" style={{ background: s.color }} />
+              <span className="prd-pie-label">{s.label}</span>
+              <span className="prd-pie-val">
+                {fmtVal(s.value)} <span className="prd-pie-pct">({s.pct}%)</span>
+              </span>
+            </button>
           </li>
         ))}
       </ul>
@@ -224,7 +386,15 @@ function StatChart({ data }: { data: PrdChartDatum[] }) {
   return (
     <div className="prd-stats">
       {data.map((d, i) => (
-        <div key={i} className="prd-stat">
+        <div
+          key={i}
+          className="prd-stat"
+          // A rise-and-fade, not a count-up. A number that spins to its value
+          // is unreadable while it does it, and these are the figures the
+          // sentence above the card just quoted — the reader is checking one,
+          // not watching it.
+          style={{ transitionDelay: `${Math.min(i, 6) * 70}ms` }}
+        >
           <div className="prd-stat-val">{fmtVal(d.value)}</div>
           <div className="prd-stat-lbl">{d.label}</div>
         </div>
@@ -313,6 +483,11 @@ function GaugeChart({ data }: { data: PrdChartDatum[] }) {
         {/* Filled arc (current) */}
         {currentPct > 0 ? (
           <path
+            // `pathLength=1` again: the sweep is a dash offset over the arc's
+            // own length, so a 10% gauge and a 90% one fill at the same rate
+            // rather than the short one snapping.
+            pathLength={1}
+            className="prd-gauge-value"
             d={arcPath(0, currentPct)}
             fill="none"
             stroke={`url(#${gradId})`}

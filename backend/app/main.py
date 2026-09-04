@@ -48,6 +48,7 @@ from app.routes import (
     artifact_templates as artifact_templates_routes,
     artifacts,
     ask,
+    billing as billing_routes,
     brief,
     business_context as business_context_routes,
     chat,
@@ -511,6 +512,7 @@ app.include_router(artifact_share.router)
 app.include_router(slack_share_routes.router)
 app.include_router(prd_access.router)
 app.include_router(projects.router)
+app.include_router(billing_routes.router)
 
 # Serve prototype bundles in dev (filesystem fallback when no Supabase Storage bucket).
 _proto_dir = Path(settings.storage_dir)

@@ -30,7 +30,18 @@
 import * as React from "react"
 import { useMemo, useState } from "react"
 import { planNarrative } from "../../lib/goalPlanNarrative"
-import type { GoalRunPlan } from "../../lib/api"
+import type { GoalPlanQuestion, GoalRunPlan } from "../../lib/api"
+
+/** The three questions asked before `plan.questions` existed, used only as a
+ *  fallback for a plan stored before this field landed — a run still sitting
+ *  `awaiting_approval` from before this shipped must not lose its "what I
+ *  cannot know" section outright. Every NEW plan carries its own
+ *  framework-derived list (AC-5); this is not the default going forward. */
+const LEGACY_QUESTIONS: GoalPlanQuestion[] = [
+  { id: "account_value", prompt: "What is one account worth to you, per year?", why: "" },
+  { id: "decision_owner", prompt: "Who decides this?", why: "" },
+  { id: "needed_by", prompt: "When do you need the decision?", why: "" },
+]
 
 export type PlanDecision = {
   excluded_sources: string[]
@@ -40,6 +51,14 @@ export type PlanDecision = {
    *  stored — so an untouched approve cannot round-trip the definition through
    *  the client, where a stale card could overwrite it with old words. */
   definition_text?: string
+  /** ── ANSWERS TO WHAT THE RUN CANNOT KNOW. ────────────────────────────
+   *  All optional. Skipping them yields exactly the document you got before,
+   *  with the affected sections stating what is missing rather than guessing.
+   *  A value given here is an ASSUMPTION, not evidence, and the document says
+   *  so where it uses it. */
+  account_value?: number
+  decision_owner?: string
+  needed_by?: string
 }
 
 /** Mirrors the API's per-hypothesis cap. One place it can drift, stated here
@@ -78,6 +97,9 @@ export function GoalAnalysisPlan({
   // approve body. A reader who selects the text, retypes it identically and
   // approves has still adopted it; they just have not changed it.
   const [definitionEdit, setDefinitionEdit] = useState<string | null>(null)
+  const [accountValue, setAccountValue] = useState("")
+  const [decisionOwner, setDecisionOwner] = useState("")
+  const [neededBy, setNeededBy] = useState("")
 
   // A settled record reads its exclusions from what was actually posted, not
   // from local state a re-mount would have thrown away.
@@ -115,7 +137,14 @@ export function GoalAnalysisPlan({
       definitionEdit.trim() !== (plan.definition_text || "").trim()
         ? definitionEdit.trim()
         : undefined
+    // EMPTY MEANS UNANSWERED, never zero. A blank account value must not
+    // reach the arithmetic as 0 — that would render a stake of nothing and
+    // read as a measurement.
+    const value = Number.parseFloat(accountValue.replace(/[^0-9.]/g, ""))
     onApprove({
+      ...(Number.isFinite(value) && value > 0 ? { account_value: value } : {}),
+      ...(decisionOwner.trim() ? { decision_owner: decisionOwner.trim() } : {}),
+      ...(neededBy.trim() ? { needed_by: neededBy.trim() } : {}),
       ...(editedDefinition ? { definition_text: editedDefinition } : {}),
       excluded_sources: [...excluded],
       // One per line. Blank lines are dropped rather than sent as empty
@@ -128,6 +157,34 @@ export function GoalAnalysisPlan({
     })
   }
 
+  // WHICH INPUT RENDERS FOR WHICH QUESTION ID — the prompt text and the "why"
+  // travel with the plan (AC-5: the reader sees why this is being asked), the
+  // input shape and where the answer lands stay client-side, keyed on the
+  // same three field names `ApprovePlan` has always accepted.
+  const questionInputs: Record<
+    string,
+    { inputMode?: "decimal"; placeholder: string; note?: string; value: string;
+      onChange: (v: string) => void }
+  > = {
+    account_value: {
+      inputMode: "decimal", placeholder: "e.g. 12000",
+      note: "Used as your estimate, and labelled as one.",
+      value: accountValue, onChange: setAccountValue,
+    },
+    decision_owner: {
+      placeholder: "e.g. VP Product",
+      value: decisionOwner, onChange: setDecisionOwner,
+    },
+    needed_by: {
+      placeholder: "e.g. before the Q3 review",
+      value: neededBy, onChange: setNeededBy,
+    },
+  }
+  // ONLY WHAT THE CHOSEN FRAMEWORK NEEDS. `plan.questions` is the framework-
+  // derived batch (AC-5); a plan stored before this field existed falls back
+  // to the old fixed three rather than losing the section outright.
+  const questions = plan.questions?.length ? plan.questions : LEGACY_QUESTIONS
+
   return (
     <div className="ga-plan" data-testid="goal-plan">
       <header className="ga-doc-header">
@@ -135,6 +192,15 @@ export function GoalAnalysisPlan({
           {settled ? "Plan approved" : "Before this runs"}
         </p>
         <h1 className="ga-doc-title">{plan.goal_text}</h1>
+        {/* THE READER'S OWN WORDS, beside what they were taken to mean.
+            Only when there is one to show and it actually differs — a run
+            with no literal text (the direct API, the `+` menu) shows just
+            the goal, exactly as before this existed. */}
+        {plan.asked_text && plan.asked_text.trim() !== plan.goal_text.trim() ? (
+          <p className="ga-doc-note" data-testid="goal-plan-asked-text">
+            You asked: “{plan.asked_text}”
+          </p>
+        ) : null}
       </header>
 
       {/* THE APPROACH, IN FIVE SENTENCES. Everything below this block was
@@ -319,6 +385,48 @@ export function GoalAnalysisPlan({
           The narrative is the summary AND the only statement of them now. The
           gap list below stays, because it carries `because` and `remedy` —
           detail the one-line summary of it genuinely does not have. */}
+
+
+      {/* ── WHAT I CANNOT KNOW. ─────────────────────────────────────────
+          Apurva: "the plan gate can start asking questions it doesn't know
+          answers to." Until now the gate asked one thing — what the metric
+          means — and everything else it lacked was reported afterwards as a
+          limit.
+          ONLY WHAT THE CHOSEN FRAMEWORK NEEDS (AC-5), not a fixed three asked
+          regardless of whether anything downstream reads the answer — MoSCoW
+          has no dollar arithmetic to feed, so a MoSCoW-ranked run does not ask
+          for one.
+          OPTIONAL, AND SAID TO BE. A reader who skips one gets the document
+          they got before, with the gap it would have closed stated rather
+          than filled in. */}
+      {questions.length ? (
+        <section className="ga-plan-section" data-testid="goal-plan-unknowns">
+          <h2 className="ga-doc-h3">What I cannot know</h2>
+          <p className="ga-doc-note">
+            None of this is in your connected sources, and I will not guess at
+            it. Answer what you can — anything you leave blank stays stated as
+            missing rather than filled in.
+          </p>
+          {questions.map((q) => {
+            const input = questionInputs[q.id]
+            if (!input) return null
+            return (
+              <label className="ga-plan-ask" key={q.id}>
+                <span>{q.prompt}</span>
+                <input
+                  type="text" inputMode={input.inputMode}
+                  placeholder={input.placeholder} aria-label={q.prompt}
+                  value={input.value}
+                  onChange={(e) => input.onChange(e.target.value)}
+                />
+                {q.why || input.note ? (
+                  <em>{q.why || input.note}</em>
+                ) : null}
+              </label>
+            )
+          })}
+        </section>
+      ) : null}
 
       {settled ? (
         settled.hypotheses.length ? (

@@ -116,8 +116,6 @@ export function OnboardingChrome({
           </button>
         )}
       </div>
-
-      <div className="onb-foot-meta">Progress auto-saves after every step.</div>
     </div>
   )
 }

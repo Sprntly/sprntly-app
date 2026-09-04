@@ -485,7 +485,7 @@ def test_answer_ok_runs_the_voc_pass_over_the_whole_corpus(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
     captured = _stub_voc_pass(monkeypatch)
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     # The answer is an ordinary chat answer — markdown, not a document. This is
     # the point of the change: "give me top 3 product requests from last week"
     # used to come back as a 29 KB HTML report with web fonts.
@@ -505,7 +505,7 @@ def test_report_path_phases_name_gather_then_write_in_order(monkeypatch):
     _stub_voc_pass(monkeypatch)
     phases: list[str] = []
     cd.answer(enterprise_id="co",
-              question="summarize customer calls last week",
+              question="give me a voice of customer report for last week",
               on_phase=phases.append)
     # GATHERING (the live corpus/KG/Slack fetch) then WRITING (the synthesis).
     assert phases == [
@@ -746,7 +746,7 @@ def test_answer_docs_only_runs_the_voc_pass(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
     monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [_doc(1), _doc(2)])
     captured = _stub_voc_pass(monkeypatch)
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     assert p["answer"].startswith("## Voice of customer")
     assert "UPLOADED VOICE DOCUMENTS" in captured["input"]
     assert "2 uploaded voice documents" in captured["input"]
@@ -851,13 +851,21 @@ def test_is_voc_query_shapes():
         "show me quotes about onboarding",
         "are export complaints getting worse compared to last week",
     ]
-    # Report-shaped language ALWAYS wins — the artifact stays one ask away.
-    negatives = [
+    # ASKING FOR A SUMMARY IS A QUESTION, NOT A DOCUMENT REQUEST (owner's
+    # rule, 2026-09-03). These five used to be negatives — "summarize" was read
+    # as naming the report — which is what put a Reports panel and
+    # report-generation copy in front of someone who asked for a few
+    # paragraphs. Only the phrasing that NAMES the artifact still does.
+    positives += [
         "give me the summary of customer feedback from today",
         "summarize the customer calls from last week",
-        "voice of customer report for last month",
         "what are the themes from this week's calls",
         "recap yesterday's customer meetings",
+    ]
+    negatives = [
+        "voice of customer report for last month",
+        "write up last week's calls as a one-pager",
+        "give me a VoC digest for this month",
     ]
     for q in positives:
         assert is_voc_query(q), f"query mode missed: {q!r}"
@@ -939,21 +947,35 @@ def test_query_mode_falls_back_to_report_on_failure(monkeypatch):
 
 
 def test_apurva_acceptance_phrases_mode_selection():
-    """The two acceptance phrases (Apurva, 2026-07-28): the summary ask
-    produces the REPORT; the number-1-complaint ask gets the pointed QUERY
-    answer — both on the VoC surface."""
+    """The two acceptance phrases (Apurva, 2026-07-28), with the summary half
+    REVERSED by the owner on 2026-09-03.
+
+    The 2026-07-28 acceptance read "give me the summary of customer feedback
+    from today" as a request for the report artifact. Live use said otherwise:
+    the reader got a Reports panel, report-generation copy and a multi-minute
+    wait for a question they expected answered in the thread — and reported it
+    as "I ask a question who is just supposed to be a summary, who's not
+    supposed to be a report". Both phrases are now QUERY mode; naming the
+    document ("a voice of customer report") is what asks for the artifact, and
+    that phrasing is pinned in `test_is_voc_query_shapes` above.
+
+    Kept under its original name because it is the same acceptance being
+    re-decided, not a new one — a reader chasing why summary mode changed
+    should land here."""
     from app.call_digest import is_voc_query
     from app.skill_router import is_voc_report_request
 
     summary_ask = "give me the summary of customer feedback from today"
     complaint_ask = "what is the number 1 user complaint from todays customer conversation"
 
-    # Both reach the VoC surface without the LLM router.
+    # Both still reach the VoC surface without the LLM router — unchanged.
     assert is_voc_report_request(summary_ask)
     assert is_voc_report_request(complaint_ask)
-    # Mode: summary → report artifact; pointed superlative → query answer.
-    assert not is_voc_query(summary_ask)
+    # Mode: BOTH answer in the thread now.
+    assert is_voc_query(summary_ask)
     assert is_voc_query(complaint_ask)
+    # And the artifact is still one unambiguous sentence away.
+    assert not is_voc_query("give me a voice of customer report for today")
 
 
 # ── Map-reduce count engine — eligibility ────────────────────────────────────
@@ -1717,7 +1739,7 @@ def test_answer_zoom_only_company_gets_a_real_digest(monkeypatch):
     )
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert p["answer"].startswith("## Voice of customer")
     assert p["_skill_source"] == "call-digest"
@@ -1768,7 +1790,7 @@ def test_answer_both_sources_discloses_the_split(monkeypatch):
     monkeypatch.setattr(cd, "fetch_zoom_calls", lambda ctx, w: [_zoom_transcript(9)])
     captured = _stub_voc_pass(monkeypatch)
 
-    cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert "2 Fireflies" in captured["input"] and "1 Zoom" in captured["input"]
 
@@ -1792,7 +1814,7 @@ def test_one_source_failing_does_not_cost_the_other_its_calls(monkeypatch):
     assert out.status == "ok" and out.count == 1
     assert out.failed_sources == ["Zoom"] and "zoom 500" in out.error
 
-    cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     assert "Zoom could not be reached" in captured["input"]
 
 
@@ -1807,7 +1829,7 @@ def test_answer_zoom_only_error_names_zoom_not_fireflies(monkeypatch):
         raise RuntimeError("zoom 500")
 
     monkeypatch.setattr(cd, "fetch_zoom_calls", _boom)
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     assert "couldn't reach Zoom" in p["answer"]
     assert "Fireflies" not in p["answer"]
 
@@ -1826,7 +1848,7 @@ def test_not_connected_message_offers_both_sources(monkeypatch):
     monkeypatch.setattr(cd, "_load_api_key", lambda cid: None)
     monkeypatch.setattr(cd, "_voice_docs", lambda cid, w: [])
     monkeypatch.setattr(cd, "_zoom_context", lambda cid: None)
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     assert "Fireflies" in p["answer"] and "Zoom" in p["answer"]
 
 
@@ -2044,7 +2066,7 @@ def test_fireflies_only_answer_omits_the_source_split(monkeypatch):
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
     captured = _stub_voc_pass(monkeypatch)
 
-    cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert "=== CUSTOMER CALLS — last week" in captured["input"]
     assert "Fireflies)" not in captured["input"]   # no split disclosure
@@ -2132,7 +2154,7 @@ def test_calls_and_kg_both_reach_the_corpus(monkeypatch):
     ])
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     prompt = captured["input"]
     # The live Zoom call is still there — the calls half is not traded away.
@@ -2180,7 +2202,7 @@ def test_calls_only_company_is_unchanged_when_the_graph_is_empty(monkeypatch):
     _stub_no_kg(monkeypatch)
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     label = cd.parse_window("summarize customer calls last week").label
     assert f"=== CUSTOMER CALLS — {label} (2 calls) ===" in captured["input"]
@@ -2199,7 +2221,7 @@ def test_kg_only_company_gets_a_real_answer_not_a_dead_end(monkeypatch):
     _stub_kg(monkeypatch, [_kg_signal("Billing confusion reported in #cs")])
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert p["answer"].startswith("## Voice of customer")
     assert "no call source is connected" not in p["answer"]
@@ -2218,7 +2240,7 @@ def test_neither_source_keeps_the_what_to_connect_message(monkeypatch):
     _stub_no_kg(monkeypatch)
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert "no call source is connected" in p["answer"]
     assert "Fireflies" in p["answer"] and "Zoom" in p["answer"]
@@ -2241,7 +2263,7 @@ def test_unreachable_call_source_still_answers_from_the_graph_and_says_so(monkey
     _stub_kg(monkeypatch, [_kg_signal("Support backlog is growing")])
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert p["answer"].startswith("## Voice of customer")   # answered, not refused
     assert "Support backlog is growing" in captured["input"]
@@ -2283,7 +2305,7 @@ def test_a_call_synced_into_the_graph_is_not_counted_twice(monkeypatch):
     ])
     captured = _stub_voc_pass(monkeypatch)
 
-    cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     prompt = captured["input"]
     # The live transcript is the richer copy and it is the one that survives.
@@ -2361,7 +2383,7 @@ def test_coverage_line_names_the_graph_sources_it_read(monkeypatch):
     ])
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     banner = captured["input"]
     assert "3 stored signals from your other connected sources" in banner
@@ -2470,7 +2492,7 @@ def test_a_broken_graph_read_never_costs_the_calls(monkeypatch):
     monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
     captured = _stub_voc_pass(monkeypatch)
 
-    p = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    p = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
 
     assert p["answer"].startswith("## Voice of customer")
     assert "Call 1" in captured["input"]
@@ -2867,3 +2889,244 @@ def test_mixed_batch_only_the_two_genuine_fixtures_hit(monkeypatch):
     )
     assert eng.count == 2
     assert set(eng.hit_ids) == {"feature-request-1", "issue-1"}
+
+
+# ── "summary" is not "report" (owner's rule, 2026-09-03) ─────────────────────
+# Reported as: "I ask a question who is just supposed to be a summary, who's
+# not supposed to be a report, but instead generating a report." The rule the
+# owner gave is one sentence — asking for a summary is not asking for a
+# document — and it is enforced in two places that must agree, or the reader
+# sees a Reports panel over an answer that arrives as chat text.
+
+
+def test_a_summary_ask_answers_in_the_thread():
+    """The reported sentence, verbatim."""
+    from app.call_digest import is_voc_query
+
+    assert is_voc_query("Give me summary on last week's customer conversations")
+
+
+def test_every_summary_word_answers_in_the_thread():
+    from app.call_digest import is_voc_query
+
+    for q in (
+        "summarize the calls from last week",
+        "summarise our customer conversations this month",
+        "give me a summary of what customers said",
+        "recap the customer calls",
+        "what were the main themes last week",
+        "top takeaways from this week's calls",
+        "catch me up on customer feedback",
+        "brief me on last week's conversations",
+        "give me an overview of the calls",
+        "a quick rundown of customer feedback",
+    ):
+        assert is_voc_query(q), f"summary ask still routed to the report: {q!r}"
+
+
+def test_naming_the_document_still_asks_for_the_document():
+    """The artifact must stay reachable — and unambiguously so, since the whole
+    point of the rule is that the two asks are different."""
+    from app.call_digest import is_voc_query
+
+    for q in (
+        "give me a voice of customer report for last month",
+        "produce the VoC digest for this week",
+        "write last week's calls up as a one-pager",
+        "i want the voice-of-customer write-up",
+    ):
+        assert not is_voc_query(q), f"artifact ask misread as a question: {q!r}"
+
+
+def test_a_summary_ask_never_opens_the_reports_drawer():
+    """The other half of the rule. `chat_intent` decides what the CLIENT does
+    before the answer path runs, and the two must agree: a report promised here
+    and never written is a panel that sits generating over an answer already in
+    the thread — which is exactly what was reported."""
+    import app.chat_intent as ci
+
+    assert ci._is_report_pipeline(
+        "call-digest", "Give me summary on last week's customer conversations"
+    ) is False
+    assert ci._is_report_pipeline(
+        "call-digest", "give me a voice of customer report for last month"
+    ) is True
+
+
+# ── …and neither is asking for a table (same rule, same day) ─────────────────
+# Reported second, against a question that named its own columns and still came
+# back as a document. It is the sharpest case for the rule: the asker said
+# exactly what shape they wanted, and a report was not it.
+
+_TABLE_ASK = (
+    "Be a list of the product features that clients have asked for in the last "
+    "one month show me the name of the company the feature they asked for and "
+    "the problem that they are trying to solve and also how much revenue will "
+    "be unlocked if this was done and give me the final output in a form of a "
+    "table"
+)
+
+
+def test_the_reported_table_ask_answers_in_the_thread():
+    """The reported sentence. It names no artifact, no summary word, and none
+    of the pointed query shapes fit it — so before this rule it fell through to
+    the report path, which is how a request for four columns became a
+    multi-minute VoC document."""
+    from app.call_digest import is_voc_query
+
+    assert is_voc_query(_TABLE_ASK)
+
+
+def test_the_reported_table_ask_never_opens_the_reports_drawer():
+    import app.chat_intent as ci
+
+    assert ci._is_report_pipeline("call-digest", _TABLE_ASK) is False
+
+
+def test_every_output_shape_answers_in_the_thread():
+    from app.call_digest import is_voc_query
+
+    for q in (
+        "give me a list of feature requests from last month",
+        "show me customer asks as a table",
+        "break down what customers asked for into a spreadsheet",
+        "what features did clients ask for, in a table with company and problem",
+        "put the top complaints in a table",
+        "output the requests as csv",
+    ):
+        assert is_voc_query(q), f"output-shape ask still routed to the report: {q!r}"
+
+
+def test_naming_the_document_still_wins_over_a_shape():
+    """Order matters and is load-bearing: a report asked for AS a table is
+    still the report. The artifact check runs first precisely so that adding
+    shape words could not take the artifact away."""
+    from app.call_digest import is_voc_query
+
+    assert not is_voc_query("produce the VoC digest as a table")
+    assert not is_voc_query("give me a voice of customer report, in a table")
+
+
+def test_a_customer_talking_about_a_table_is_not_a_formatting_instruction():
+    """The bound on the rule. Products have tables in them, and a complaint
+    about one must not be read as "put your answer in a table" — which is why
+    this matches an output DIRECTIVE rather than the bare noun."""
+    from app.call_digest import is_voc_query
+
+    assert not is_voc_query("customers complained the table view is slow")
+
+
+# ── both VoC pipeline ids, or the fix only works half the time ───────────────
+# The table ask above was STILL generating a report after the shape rule landed,
+# and the logs said why: it plans as `voice-of-customer-report`, not
+# `call-digest`. The carve-out tested the literal string, so it never fired —
+# the answer path ran its query pass (llm:voc_query in the log) while the client
+# opened a Reports panel and kept it.
+
+
+def test_both_ids_that_reach_this_module_are_named():
+    """`VOC_PIPELINE_IDS` is the whole guard against that class of bug: one
+    place says which ids run this code, and everything reasoning about the VoC
+    verdict reads it instead of hard-coding a string."""
+    from app.call_digest import VOC_PIPELINE_IDS
+
+    assert VOC_PIPELINE_IDS == {"call-digest", "voice-of-customer-report"}
+
+
+def test_the_skill_id_gets_the_same_verdict_as_the_machinery_id():
+    """The reported turn, by its REAL pipeline id."""
+    import app.chat_intent as ci
+
+    for pipeline_id in ("call-digest", "voice-of-customer-report"):
+        assert ci._is_report_pipeline(pipeline_id, _TABLE_ASK) is False, pipeline_id
+        assert ci._is_report_pipeline(
+            pipeline_id, "Give me summary on last week's customer conversations"
+        ) is False, pipeline_id
+        # …and the artifact is still the artifact under either id.
+        assert ci._is_report_pipeline(
+            pipeline_id, "give me a voice of customer report for last month"
+        ) is True, pipeline_id
+
+
+def test_a_report_pipeline_that_is_not_voc_is_untouched():
+    """The carve-out is scoped to the two VoC ids. A competitive-intelligence
+    review is a report whatever shape the question takes — it has no query mode
+    to fall back to, so silencing its panel would leave a real document with
+    nothing on screen."""
+    import app.chat_intent as ci
+
+    assert ci._is_report_pipeline(
+        "competitive-intelligence-review", "summarize what Acme shipped as a table"
+    ) is True
+
+
+# ── the planner decides where the answer goes (v18) ──────────────────────────
+# `is_voc_query` reads the question's surface words, so every phrasing that
+# meant "answer me in the chat" had to be found and added one at a time — two
+# were added on 2026-09-03 alone, each after a reader watched a Reports panel
+# fill with a document they never asked for. `wants_report` is the planner's
+# own verdict, taken from the whole sentence, and when it is supplied it is
+# what forks this module. Callers with no plan (the regex ladder, the
+# scheduled runs, every test above) pass nothing and keep the old rules.
+
+
+def test_the_plan_can_send_a_report_worded_ask_to_the_thread(monkeypatch):
+    """The direction that matters. This question NAMES the document, so the
+    regex would build one; the planner read the sentence and said otherwise."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    captured = _stub_voc_pass(monkeypatch)
+    question = "give me a voice of customer report for last week"
+    assert cd.is_voc_query(question) is False  # …the regex says document
+    p = cd.answer(enterprise_id="co", question=question, wants_report=False)
+    assert not p.get("_report")
+    # …and it is the pointed answer, not the document-scale synthesis.
+    assert captured["max_tokens"] != 12000
+
+
+def test_the_plan_can_send_a_question_worded_ask_to_the_report(monkeypatch):
+    """And the other way, or it is a veto rather than a decision: a request for
+    the document phrased without any of the regex's words still writes one."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_voc_pass(monkeypatch)
+    # "summarize" makes the regex say thread; the sentence asks for a document
+    # to share, which is the half of the ask a word list cannot see.
+    question = "summarize last month's customer calls into a document I can share"
+    assert cd.is_voc_query(question) is True  # …the regex says thread
+    p = cd.answer(enterprise_id="co", question=question, wants_report=True)
+    assert p.get("_report") is True
+
+
+def test_no_plan_keeps_the_regex_exactly_as_it_was(monkeypatch):
+    """The no-plan callers are unchanged — that is what makes this additive."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1)])
+    _stub_voc_pass(monkeypatch)
+    assert cd.answer(
+        enterprise_id="co",
+        question="give me a voice of customer report for last week",
+    ).get("_report") is True
+    assert not cd.answer(
+        enterprise_id="co", question="summarize the calls from last week",
+    ).get("_report")
+
+
+def test_the_reported_question_answers_in_the_thread(monkeypatch):
+    """The owner's sentence, verbatim, with the plan the planner now returns
+    for it: the pipeline still fetches every call in the month, and the answer
+    lands in the chat."""
+    monkeypatch.setattr(cd, "_load_api_key", lambda cid: "key")
+    monkeypatch.setattr(cd, "fetch_calls", lambda *a, **k: [_call(1), _call(2)])
+    captured = _stub_voc_pass(monkeypatch)
+    p = cd.answer(
+        enterprise_id="co",
+        question=(
+            "look at all customer conversation in the last month and show me "
+            "what product features users are asking for"
+        ),
+        wants_report=False,
+    )
+    assert not p.get("_report")
+    # …and it read the calls. A thread answer is not a thinner answer.
+    assert "Call 1" in captured["input"]

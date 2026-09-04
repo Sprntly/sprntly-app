@@ -50,25 +50,18 @@ NAV: list[tuple[str, str, str]] = [
      "is found — click one to open it"),
     ("Projects", "/projects",
      "the projects this user belongs to, each with its own chat and tasks"),
-    ("Ideation", "/ideation",
+    ("Backlog", "/backlog",
      "the ranked idea list — proposed ideas and completed ones; a PRD can be "
      "generated straight from an idea"),
-    # BOTH MOVED INTO SETTINGS (2026-08-27) and are no longer on the left rail.
-    # Their own routes still work and the command palette still reaches them,
-    # so they stay here — but Settings is where a person now finds them, and
-    # the pane entries below are the link to hand over. Same shape as Team,
-    # which is a screen AND a pane.
-    ("Templates", "/templates",
-     "upload your own PRD, ticket or engineering-spec FORMAT and choose which "
-     "one is active (the active format is applied to every new document of "
-     "that kind), alongside the gold-standard examples. Found under "
-     "Settings -> Templates; no longer on the left rail"),
-    ("Skills", "/skills",
-     "the PM methods the chat can run, and where a team uploads its own "
-     "custom skill — invoke one in chat by typing / followed by its name. "
-     "Found under Settings -> Skills; no longer on the left rail"),
+    # NO "Templates" OR "Skills" ENTRIES HERE. Both moved into Settings
+    # (2026-08-27) and their standalone routes are redirect stubs now, not
+    # screens — handing a customer /templates or /skills sends them through a
+    # bounce to land on the same place the SETTINGS entries below name
+    # directly. Those pane links are the ONLY form to give out.
     ("Guide", "/docs",
-     "the written How-To Guide — long-form walkthroughs, outside the app shell"),
+     "the written How-To Guide — long-form walkthroughs, outside the app "
+     "shell. Reached from Settings -> Guide (it left the left rail with "
+     "Settings and Feedback); opens in a new tab"),
     ("Settings", "/settings",
      "everything about the account, workspace and integrations — the panes "
      "listed below"),
@@ -80,6 +73,31 @@ NAV: list[tuple[str, str, str]] = [
     ("Team", "/team",
      "the people in this workspace (reached from the Ctrl+K / Cmd+K command "
      "palette; Settings -> Team & roles is the pane that edits them)"),
+    ("Project Management", "/tickets",
+     "every ticket across this workspace's PRDs and their sync state with "
+     "Jira / Linear / ClickUp (reached from the Ctrl+K / Cmd+K command "
+     "palette, not the left rail)"),
+    ("Roadmap", "/roadmap",
+     "the roadmap document this workspace uploaded, rendered read-only. "
+     "Uploading a new one is Settings -> Business Context; this is the view "
+     "(command palette, not the left rail)"),
+    ("Shipped", "/shipped",
+     "work already delivered (command palette, not the left rail)"),
+    ("Past briefs", "/past",
+     "earlier weeks of Top Insights, for comparing a finding against how it "
+     "looked before (command palette, not the left rail)"),
+    # THE NEXT TWO NEED A SUBJECT, AND SAYING SO IS THE POINT. Both are real
+    # screens the palette lists, but each renders ONE thing and shows an empty
+    # state when opened bare. Handing a customer the naked path is handing
+    # them a blank pane, so the entry names what to open it FROM.
+    ("Evidence", "/evidence",
+     "the research behind ONE Top Insights finding — sources, quotes and "
+     "reasoning. Opened from the finding itself (or /artifacts -> Evidence); "
+     "the bare path has no finding to show and lands on an empty state"),
+    ("Prototype", "/prototype",
+     "the interactive design a PRD generated, at /prototype?prd=<id>. Opened "
+     "from that PRD (or /artifacts -> Prototypes); the bare path has no PRD "
+     "to render and asks you to pick one"),
 ]
 
 # Settings panes, addressed by their real `?section=` deep link. Every one of
@@ -97,8 +115,9 @@ SETTINGS: list[tuple[str, str, str]] = [
     ("Team & roles", "team",
      "invite people, and set each person's job and access level"),
     # The two panes Templates and Skills became when they left the left rail.
-    # They render INSIDE Settings, so this link — not /templates — is the one
-    # that lands somebody where they can also see the rest of their settings.
+    # They render INSIDE Settings, and since 2026-08-31 these are their ONLY
+    # addresses — /templates and /skills are redirect stubs kept alive for old
+    # links, never a URL to hand out.
     ("Templates", "templates",
      "the FORMAT every new PRD, ticket set or engineering spec is written in "
      "— upload your team's own and choose which one is active"),
@@ -135,8 +154,8 @@ DEEP_LINKS: list[tuple[str, str]] = [
     ("/settings?section=<pane>",
      "opens one Settings pane directly — every pane's own link is listed "
      "above, and /settings on its own only ever lands on Profile"),
-    ("/skills?q=<words>",
-     "opens Skills with the library already filtered to those words"),
+    ("/settings?section=skills&q=<words>",
+     "opens the Skills pane with the library already filtered to those words"),
     ("/artifacts?focus=<type>-<id>",
      "opens Artifacts with one document already open"),
     ("?prd=<id>",

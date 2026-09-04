@@ -396,7 +396,7 @@ def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
     vocabulary carries the new kinds, and the properties description shows the
     owner/due/status shape. PROMPT_VERSION is bumped so re-extraction cache-busts.
     """
-    assert ex.PROMPT_VERSION == "extract-doc-v3"
+    assert ex.PROMPT_VERSION == "extract-doc-v4"
 
     system = ex._SYSTEM.lower()
     for term in ("pricing", "commercial", "capabilit", "logistic",
@@ -493,6 +493,182 @@ def test_vendor_side_kinds_and_owner_properties_persist(facade):
     assert owner_sig.properties.get("status") == "open"
 
 
+# ── A stated commercial figure survives open extraction too — the same ──────
+# closed vocabularies and the same validator the checklist pass uses,
+# regardless of which connector the text came from.
+
+
+def test_open_pass_schema_documents_the_same_commercial_shape():
+    """Content property test on the LLM-facing schema: the properties field
+    for `commercial_term`/`pricing` documents the identical shape (and the
+    identical closed vocabularies) as the checklist pass's own — a figure
+    from Slack and a figure from a call must read the same downstream."""
+    props = ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"]
+    desc = props["properties"]["description"].lower()
+    for token in ("amount", "currency", "basis", "certainty",
+                  "one-off", "per-year", "per-seat", "total-contract",
+                  "quoted", "asked", "estimated-by-speaker", "commercial_term",
+                  "pricing"):
+        assert token in desc, f"properties description should mention {token!r}"
+    assert "never" in desc
+    assert "extrapolat" in desc
+
+
+def test_a_stated_figure_from_a_non_call_document_carries_the_grounded_shape(facade):
+    """The whole point of the extension: a `commercial_term` signal minted by
+    the OPEN pass — the only pass that ever reads Slack/email/Drive/Jira/
+    GitHub/HubSpot/Confluence text — gets the same amount/currency/basis/
+    certainty shape the checklist pass already gives calls."""
+    items = [_kind_item(
+        "the renewal is worth $80,000 for the year", "commercial_term",
+        properties={"amount": 80000, "currency": "USD", "basis": "per-year",
+                    "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "the renewal is worth $80,000 for the year")
+    assert sig is not None
+    assert sig.properties["amount"] == 80000.0
+    assert sig.properties["currency"] == "USD"
+    assert sig.properties["basis"] == "per-year"
+    assert sig.properties["certainty"] == "quoted"
+
+
+def test_pricing_kind_also_carries_the_grounded_shape(facade):
+    """`pricing` is the OTHER dollar-figure kind in the open taxonomy
+    (our own price, as opposed to `commercial_term`'s broader commercial
+    note) — same validator, same shape."""
+    items = [_kind_item(
+        "our enterprise tier is $50,000 total contract value", "pricing",
+        properties={"amount": 50000, "currency": "USD",
+                    "basis": "total-contract", "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "our enterprise tier is $50,000 total contract value")
+    assert sig is not None
+    assert sig.properties["amount"] == 50000.0
+    assert sig.properties["basis"] == "total-contract"
+
+
+def test_no_figure_stated_omits_amount_never_defaults_to_zero(facade):
+    """I2/I3, proven on the open pass exactly as it holds on the checklist
+    pass: no number in `properties` means no `amount` key at all."""
+    items = [_kind_item(
+        "pricing was discussed but no figure was named", "commercial_term",
+        properties={"currency": "USD", "basis": "one-off"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "pricing was discussed but no figure was named")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+
+
+def test_non_numeric_amount_is_dropped_not_persisted(facade):
+    for bad_amount in ("a lot", True, float("nan")):
+        items = [_kind_item(
+            f"bad amount case {bad_amount!r}", "commercial_term",
+            properties={"amount": bad_amount, "currency": "USD"},
+        )]
+        _extract(facade, items)
+        sig = _sig(facade, f"bad amount case {bad_amount!r}")
+        assert sig is not None
+        assert "amount" not in sig.properties, f"should reject amount={bad_amount!r}"
+
+
+def test_zero_amount_is_treated_as_absent_not_a_real_figure():
+    """Direct validator test, the shared function both extraction passes
+    call: I2/I3 says a missing figure is never a `0`, and the same rule
+    runs in the other direction too — a `0` a model emits is not treated as
+    a real, grounded figure either. Without this, a schema-constrained
+    model returning `amount: 0` as its failure mode for "no number here"
+    would read as a customer having quoted zero dollars."""
+    assert ex._grounded_amount_properties({"amount": 0, "currency": "USD"}) == {}
+    assert ex._grounded_amount_properties({"amount": 0.0}) == {}
+    assert not ex._is_number(0)
+    assert not ex._is_number(0.0)
+
+
+def test_zero_amount_is_dropped_end_to_end_through_extraction(facade):
+    items = [_kind_item(
+        "zero amount case", "commercial_term",
+        properties={"amount": 0, "currency": "USD", "basis": "one-off",
+                    "certainty": "quoted"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "zero amount case")
+    assert sig is not None
+    assert "amount" not in sig.properties
+    assert "currency" not in sig.properties
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
+def test_basis_and_certainty_outside_the_closed_vocabulary_are_dropped(facade):
+    items = [_kind_item(
+        "an odd basis and certainty", "commercial_term",
+        properties={"amount": 60000, "basis": "roughly-guessed",
+                    "certainty": "pretty-sure"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "an odd basis and certainty")
+    assert sig is not None
+    assert sig.properties["amount"] == 60000.0
+    assert "basis" not in sig.properties
+    assert "certainty" not in sig.properties
+
+
+def test_other_properties_on_a_commercial_signal_are_untouched(facade):
+    """The validator touches ONLY amount/currency/basis/certainty — every
+    other key the model wrote (the open pass's general-purpose properties
+    field, unchanged for everything else) survives exactly as before this
+    extension."""
+    items = [_kind_item(
+        "renewal deal with extra detail", "commercial_term",
+        properties={"amount": 90000, "currency": "USD", "basis": "per-year",
+                    "certainty": "quoted", "seats": 120,
+                    "revenue_at_risk_usd": 90000},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "renewal deal with extra detail")
+    assert sig is not None
+    assert sig.properties["amount"] == 90000.0
+    assert sig.properties["seats"] == 120
+    assert sig.properties["revenue_at_risk_usd"] == 90000
+
+
+def test_a_non_commercial_kind_carrying_an_amount_key_is_left_alone(facade):
+    """The gate is on `kind`, not on the mere presence of an `amount` key —
+    a coincidental numeric `properties["amount"]` on an unrelated kind (e.g.
+    a feature request that happens to mention a number in its own tracking
+    metadata) must not be validated away or reshaped; this kind never had
+    the commercial contract applied to it, before or after this change."""
+    items = [_kind_item(
+        "customers want a bulk export button", "feature_request",
+        properties={"amount": "not-a-real-figure", "votes": 12},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "customers want a bulk export button")
+    assert sig is not None
+    assert sig.properties["amount"] == "not-a-real-figure"
+    assert sig.properties["votes"] == 12
+
+
+def test_checklist_and_open_pass_validators_agree_on_the_same_raw_input():
+    """The parity the extension exists to guarantee: the checklist pass's
+    category-shape sanitizer and the open pass's kind-gated cleaner share
+    ONE validator (`_grounded_amount_properties`) — feeding both the exact
+    same raw properties dict must produce the exact same cleaned shape."""
+    raw = {"amount": 75000, "currency": "usd", "basis": "total-contract",
+           "certainty": "quoted", "extra": "ignored-by-checklist-shape"}
+    from_checklist = ex._sanitize_checklist_properties("commercial", raw, "any text")
+    from_open_pass = ex._grounded_amount_properties(raw)
+    assert from_checklist == from_open_pass == {
+        "amount": 75000.0, "currency": "USD", "basis": "total-contract",
+        "certainty": "quoted",
+    }
+
+
 # A REAL-LLM eval: it exercises the actual broadened prompt + schema against
 # Anthropic and asserts the vendor-side + owner-attributed signals are minted.
 # Skipped by default because it spends a real API call; run it with a live key:
@@ -579,6 +755,47 @@ def test_fireflies_transcript_only_fact_is_extracted_real_llm():
         f"got signals={signals}")
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_a_stated_figure_in_a_non_call_document_is_captured_real_llm():
+    """The extension this ticket adds, proven against the real model rather
+    than a stubbed response: a Slack-thread-shaped document — never a call,
+    never routed through the checklist pass — still yields a
+    `commercial_term`/`pricing` signal with the same grounded amount shape.
+    No call-specific formatting anywhere in the input."""
+    from app.graph.gateway import llm_call
+
+    slack_thread = (
+        "#renewals-acme\n"
+        "alex (account exec): quick update on Acme — they came back on the "
+        "renewal and agreed to $80,000 for the year, total contract value. "
+        "confirmed in writing this morning.\n"
+        "priya (cs lead): great, I'll get the paperwork moving.\n"
+    )
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='slack-sync-batch-0'>\n{slack_thread}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    commercial = [
+        s for s in signals
+        if s.get("kind") in ("commercial_term", "pricing")
+        and isinstance(s.get("properties"), dict)
+        and s["properties"].get("amount")
+    ]
+    assert commercial, f"expected a grounded commercial signal, got {signals}"
+    props = commercial[0]["properties"]
+    assert float(props["amount"]) == 80000.0
+    assert props.get("basis") in ex._COMMERCIAL_BASIS_VALUES
+    assert props.get("certainty") in ex._COMMERCIAL_CERTAINTY_VALUES
+
+
 # ── source_call_id / per-call traceability (source_ref) ──────────────────────
 #
 # When the caller names the single source record (call-shaped providers, via
@@ -626,6 +843,38 @@ def test_no_source_ref_leaves_source_call_id_null_and_provenance_clean(facade):
     assert sig.source_id is None
     assert "provider" not in sig.provenance
     assert "external_id" not in sig.provenance
+
+
+# ── valid_at: a real-world date, not ingest time (#Part 2) ────────────────────
+
+
+def test_valid_at_stamps_the_written_signal_and_derives_stale_after(facade):
+    """A caller-supplied `valid_at` (a historical call date) lands on the
+    written Signal verbatim, and `stale_after` derives from THAT date — not
+    from ingest time — exactly like `Signal.__post_init__` already does for
+    any explicit `valid_at` kwarg."""
+    from datetime import datetime, timedelta, timezone
+
+    call_date = datetime(2025, 3, 1, 12, 0, tzinfo=timezone.utc)
+    _extract(facade, [_item("historical fact", "customer_voice")],
+             valid_at=call_date)
+    sig = _sig(facade, "historical fact")
+    assert sig.valid_at == call_date
+    # customer_voice's staleness window (types.SOURCE_STALE_WINDOW_DAYS) is
+    # 30 days — derived from call_date, not from "now".
+    assert sig.stale_after == call_date + timedelta(days=30)
+
+
+def test_no_valid_at_keeps_the_ingest_time_default(facade):
+    """Every pre-existing caller passes no `valid_at` — a written Signal's
+    `valid_at` stays close to "now" (the dataclass's own default_factory),
+    unaffected by this parameter's addition."""
+    from datetime import datetime, timezone
+
+    before = datetime.now(timezone.utc)
+    _extract(facade, [_item("undated fact", "customer_voice")])
+    sig = _sig(facade, "undated fact")
+    assert sig.valid_at >= before
 
 
 # ── write-swallow narrowing (silent-drop hardening) ──────────────────────────
@@ -688,3 +937,151 @@ def test_true_duplicate_write_is_still_tolerated_as_a_skip(facade):
         out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
     assert out["skipped"] == 1
     assert out["signals"] == 0
+
+
+# ── malformed batch-result shape: skip gracefully, never a bare AttributeError ─
+#
+# Live-verify (2026-08-27): a bulk backfill's batched result had `signals`
+# come back as a bare string instead of a list of signal dicts. Iterating a
+# string yields its characters, and the OLD code hit
+# `AttributeError: 'str' object has no attribute 'get'` deep inside the
+# per-item write loop. `_finish_extract` now guards the shape explicitly and
+# raises a named `MalformedLLMResultError` (a `ValueError`, still caught by
+# every existing per-call `except Exception` isolation upstream) instead.
+
+
+def test_malformed_output_not_a_dict_raises_named_error_not_attribute_error(facade):
+    with pytest.raises(ex.MalformedLLMResultError):
+        ex._finish_extract(
+            facade, "ent-x", "not-a-dict-output", doc_name="d", origin=None,
+            source_type_default=None, force_source_type=None,
+            provenance_extra=None, resolved_skill_id=None,
+            triage_category=None, source_ref=None, tau_high=0.9, tau_low=0.6,
+        )
+
+
+def test_malformed_signals_value_is_a_string_raises_named_error(facade, caplog):
+    """The EXACT live-verify shape: `output["signals"]` is a bare string, not
+    a list. Must raise the named error (and log), never an unhandled
+    AttributeError from iterating the string's characters."""
+    with caplog.at_level("WARNING"):
+        with pytest.raises(ex.MalformedLLMResultError):
+            ex._finish_extract(
+                facade, "ent-x", {"signals": "oops a bare string"},
+                doc_name="d", origin=None, source_type_default=None,
+                force_source_type=None, provenance_extra=None,
+                resolved_skill_id=None, triage_category=None,
+                source_ref=None, tau_high=0.9, tau_low=0.6,
+            )
+    assert any("non-list" in r.message for r in caplog.records)
+
+
+def test_malformed_llm_result_error_is_caught_by_existing_broad_except(facade):
+    """`MalformedLLMResultError` is a `ValueError` — proves it is caught by
+    every pre-existing `except Exception` per-call isolation (the CLI's
+    `_run_batched`/`_run_sync_fallback`, `sync_provider`) without those call
+    sites needing to change."""
+    assert issubclass(ex.MalformedLLMResultError, Exception)
+    try:
+        ex._finish_extract(
+            facade, "ent-x", {"signals": "oops"}, doc_name="d", origin=None,
+            source_type_default=None, force_source_type=None,
+            provenance_extra=None, resolved_skill_id=None,
+            triage_category=None, source_ref=None, tau_high=0.9, tau_low=0.6,
+        )
+        assert False, "expected MalformedLLMResultError"
+    except Exception:  # noqa: BLE001 — proving the SAME catch-all upstream uses works
+        pass
+
+
+def test_one_malformed_item_in_an_otherwise_valid_signals_list_is_dropped_not_fatal(facade, caplog):
+    """A `signals` list that is itself well-formed but MIXES a real item with
+    a stray non-dict entry must not lose the good item — only the malformed
+    one is dropped (logged), the rest write normally."""
+    items = [_item("good fact", "customer_voice"), "a stray malformed string"]
+    with caplog.at_level("WARNING"), \
+         patch.object(ex, "llm_call", return_value=_llm_result(items)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        out = ex.extract_document(facade, "ent-x", doc_name="d", text="body")
+    assert out["signals"] == 1
+    import uuid
+    good_id = str(uuid.uuid5(ex._NS, "ent-x|good fact"))
+    assert facade.get_signal("ent-x", good_id) is not None
+    assert any("malformed" in r.message for r in caplog.records)
+
+
+# ── build_extract_request / parse_extract_response: the batch-authoring seam ─
+#
+# extract_document's live path is now build (input string + gateway.llm_call)
+# -> parse (_finish_extract). These prove the standalone
+# build_extract_request/parse_extract_response pair — used by a caller
+# assembling a BULK batch (e.g. the KG backfill CLI) rather than calling
+# extract_document live — composes to the EXACT SAME facade outcome as the
+# live/sync inline path, for the identical model output. This is the "cannot
+# drift" proof the refactor's docstrings claim.
+
+
+def test_build_and_parse_extract_compose_to_the_same_result_as_the_live_path(facade):
+    items = [
+        _item("build/parse parity fact", "customer_voice"),
+        _kind_item("Jane owns SOW by Friday", "finding", source_type="communication",
+                   theme="SOW", properties={"owner": "Jane Doe", "due": "Friday",
+                                            "status": "open"}),
+    ]
+
+    # 1) The LIVE path, unchanged: extract_document -> llm_call (mocked).
+    with patch.object(ex, "llm_call", return_value=_llm_result(items)), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        live_result = ex.extract_document(facade, "ent-live", doc_name="calls.md",
+                                          text="doc body")
+
+    # 2) The BATCH-authoring path: build the request kwargs, simulate the
+    # model returning the SAME items as a raw tool-use Message, then parse.
+    from types import SimpleNamespace
+
+    kwargs = ex.build_extract_request(doc_name="calls.md", text="doc body")
+    assert kwargs["model"] == ex.DEFAULT_MODEL
+    assert kwargs["tools"][0]["input_schema"] == ex._EXTRACT_SCHEMA
+    assert kwargs["tool_choice"] == {"type": "tool", "name": "submit_response"}
+
+    fake_message = SimpleNamespace(content=[
+        SimpleNamespace(type="tool_use", name="submit_response",
+                        input={"signals": items}),
+    ])
+    with patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        batch_result = ex.parse_extract_response(
+            facade, "ent-batch", fake_message, doc_name="calls.md",
+        )
+
+    # signal_ids are content-keyed by enterprise_id (uuid5), so the two runs'
+    # ids legitimately differ (different enterprise_id) — compare everything
+    # else, then verify the id SETS independently below via the facade.
+    assert {k: v for k, v in batch_result.items() if k != "signal_ids"} == \
+           {k: v for k, v in live_result.items() if k != "signal_ids"}
+
+    import uuid
+    live_ids = {str(uuid.uuid5(ex._NS, f"ent-live|{it['content']}")) for it in items}
+    batch_ids = {str(uuid.uuid5(ex._NS, f"ent-batch|{it['content']}")) for it in items}
+    live_signals = facade.get_signals("ent-live", list(live_ids))
+    batch_signals = facade.get_signals("ent-batch", list(batch_ids))
+    assert len(live_signals) == len(batch_signals) == len(items)
+    live_by_content = {s.content: s for s in live_signals.values()}
+    batch_by_content = {s.content: s for s in batch_signals.values()}
+    for content in live_by_content:
+        assert live_by_content[content].kind == batch_by_content[content].kind
+        assert live_by_content[content].source_type == batch_by_content[content].source_type
+        assert live_by_content[content].properties == batch_by_content[content].properties
+
+
+def test_build_extract_request_carries_source_hint_and_doc_name(facade):
+    """The batch build path renders the same `<document name=...>` envelope
+    (+ optional source_hint line) the live path's input string does."""
+    kwargs = ex.build_extract_request(doc_name="calls.md", text="hello world",
+                                      source_hint="fireflies transcripts")
+    user_content = kwargs["messages"][0]["content"]
+    assert "source system: fireflies transcripts" in user_content
+    assert "<document name='calls.md'>" in user_content
+    assert "hello world" in user_content

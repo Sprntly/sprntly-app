@@ -8,6 +8,7 @@ import { useOnboarding } from "../../../context/OnboardingContext"
 import { saveBusinessContextSummary } from "../../../lib/onboarding/store"
 import { prefetchBusinessContextDraft } from "../../../lib/onboarding/draftPrefetch"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
+import { stepForSlug } from "../../../lib/onboarding/types"
 
 const DRAFT_KEY = "review-step"
 
@@ -68,10 +69,11 @@ export function ReviewStep() {
     if (!loading && !workspace) router.replace("/onboarding/company")
   }, [loading, workspace, router])
 
-  // Resolve the draft: local draft → saved summary → the backend draft. The
-  // invite step already kicked the memoized prefetch in the background, so
-  // this usually resolves INSTANTLY (we join the in-flight/settled promise);
-  // when the user got here without passing invite, this call starts it.
+  // Resolve the draft: local draft → saved summary → the backend draft. This
+  // call is memoized (draftPrefetch.ts), so it starts the generation itself —
+  // the earlier kick from the invite step's mount that used to give it a
+  // head start is gone with that step (2026-09-03); the difference is a
+  // slightly longer shimmer here, never a stale or duplicate draft.
   useEffect(() => {
     if (!workspace || requested.current) return
     requested.current = true
@@ -114,7 +116,7 @@ export function ReviewStep() {
 
   return (
     <OnboardingChrome
-      step={9}
+      step={stepForSlug("review") ?? 3}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -123,7 +125,7 @@ export function ReviewStep() {
       }
       subtitle="Based on everything you shared — plus research across your website, reviews and connected data — here's the business context every agent will reason through. Read it, edit anything, and accept."
       footerMeta="Review business context"
-      onBack={() => router.push("/onboarding/invite")}
+      onBack={() => router.push("/onboarding/connectors")}
       onContinue={() => void accept()}
       continueLabel="Next · personalize"
       continueDisabled={saving || drafting || !summary.trim()}

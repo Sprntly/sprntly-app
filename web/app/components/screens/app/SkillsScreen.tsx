@@ -434,11 +434,13 @@ function SkillsScreenContent({ embedded = false }: { embedded?: boolean }) {
   const [syncingFolderId, setSyncingFolderId] = useState<string | null>(null)
   const [stoppingFolderId, setStoppingFolderId] = useState<string | null>(null)
   // `?q=` seeds the filter so the global search palette can deep-link a
-  // specific skill (`/skills?q=<label>`); after mount the input owns it.
+  // specific skill (`/settings?section=skills&q=<label>`); after mount the
+  // input owns it. Read off useSearchParams, not the pathname, which is why
+  // the move into Settings cost this deep link nothing.
   const qParam = searchParams.get("q")
   const [query, setQuery] = useState(() => qParam ?? "")
 
-  // Already on /skills when the palette pushes a new ?q= → no remount, so the
+  // Already on the Skills pane when the palette pushes a new ?q= → no remount, so the
   // initializer above won't re-run. Adopt the changed param; typing in the
   // input doesn't change the param, so this never fights the user.
   useEffect(() => {
@@ -804,11 +806,14 @@ function SkillsScreenContent({ embedded = false }: { embedded?: boolean }) {
 /**
  * The page chrome, or none.
  *
- * This screen has two homes: its own route (`/skills`, reached from the command
- * palette) and a pane inside Settings, where it moved when Skills and Templates
- * left the main nav. Embedded it must NOT bring an `AppLayout` — that would put
- * a second sidebar and a second chrome strip inside the one Settings already
- * draws, and the settings nav would disappear behind it.
+ * ONE home: the `skills` pane inside Settings, where this screen moved when
+ * Skills and Templates left the main nav. `/skills` is a redirect stub now, not a
+ * second route — so `embedded` is true at every real call site, and the
+ * standalone branch below is only the bare-render fallback.
+ *
+ * Embedded it must NOT bring an `AppLayout` — that would put a second sidebar
+ * and a second chrome strip inside the one Settings already draws, and the
+ * settings nav would disappear behind it.
  */
 function Shell({ embedded, children }: { embedded: boolean; children: ReactNode }) {
   if (embedded) return <div className="settings-embedded">{children}</div>

@@ -1,0 +1,14 @@
+-- The company's own website, separate from the product's.
+--
+-- Onboarding's first step collects four things now — company name, company
+-- website, product name, product website — and until this column existed the
+-- field labelled "Company website" wrote to `products.website`. The two were
+-- the same value wearing different labels, which was fine while only one was
+-- ever shown and wrong the moment both appear on one page: whichever saved
+-- last would have clobbered the other.
+--
+-- ADDITIVE AND NULLABLE. Every existing row keeps whatever it has, nothing is
+-- retyped, and nothing reads this column until a user fills it in. Companies
+-- onboarded before this ship carry NULL here with their site still recorded on
+-- the product, which is exactly what the website analysis falls back to.
+alter table companies add column if not exists website text;

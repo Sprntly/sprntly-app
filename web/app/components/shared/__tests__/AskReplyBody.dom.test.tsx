@@ -209,3 +209,62 @@ describe("AskReplyBody links", () => {
     expect(a?.getAttribute("href")).toBe("https://acme.atlassian.net/browse/AB-12")
   })
 })
+
+// ── charts render from what the block SAYS, not what the fence is called ─────
+// Reported (2026-09-03): a reader asked for an analytical chart and got a wall
+// of raw JSON. The spec was perfect — kind, title, subtitle, labelled values —
+// and the model had put it in a ```json fence instead of a ```chart one, so a
+// renderer keyed on the word printed it as source code.
+
+describe("AskReplyBody charts", () => {
+  const SPEC = JSON.stringify({
+    kind: "stat",
+    title: "173,500 exports silently failed — customers saw HTTP 200 every time",
+    subtitle: "Source: revenue | 8 Jun–20 Aug 2026",
+    data: [
+      { label: 'Jobs returned HTTP 200 ("success")', value: 168200 },
+      { label: "Files actually opened by recipient", value: 96300 },
+    ],
+  }, null, 2)
+
+  const bodied = (answer: string) =>
+    render(<AskReplyBody reply={{ ...REPLY, answer }} />).container
+
+  it.each(["chart", "json", ""])("draws the chart from a ```%s fence", (lang) => {
+    const c = bodied(`Here is the cut.\n\n\`\`\`${lang}\n${SPEC}\n\`\`\`\n`)
+    // The chart is drawn — a stat tile is numbers rather than an <svg>, so the
+    // figure the renderer emits is what says so.
+    expect(c.querySelector("figure.prd-chart-stat")).not.toBeNull()
+    expect(c.textContent).toContain("173,500 exports silently failed")
+    // …and the reader never sees the spec that produced it.
+    expect(c.textContent).not.toContain('"kind"')
+    expect(c.querySelector("code")).toBeNull()
+  })
+
+  it("still renders a real code block as code", () => {
+    // The guard that keeps this from swallowing everything: `parseChartBody`
+    // needs a known kind and labelled values, so ordinary JSON is untouched.
+    const c = bodied('```json\n{ "retries": 3, "timeout_ms": 500 }\n```\n')
+    expect(c.querySelector("code")).not.toBeNull()
+    expect(c.textContent).toContain('"retries"')
+    expect(c.querySelector(".prd-chart")).toBeNull()
+  })
+
+  it("leaves a code sample alone", () => {
+    const c = bodied("```python\nprint('kind', data)\n```\n")
+    expect(c.querySelector("code")?.textContent).toContain("print(")
+    expect(c.querySelector(".prd-chart")).toBeNull()
+  })
+
+  it("leaves inline code alone", () => {
+    const c = bodied("Set `kind` to `stat` in the payload.")
+    expect(c.textContent).toContain("Set kind to stat in the payload.")
+    expect(c.querySelector(".prd-chart")).toBeNull()
+  })
+
+  it("ignores a chart-shaped block with no data to plot", () => {
+    const c = bodied('```chart\n{ "kind": "bar", "title": "Nothing", "data": [] }\n```\n')
+    expect(c.querySelector(".prd-chart")).toBeNull()
+    expect(c.querySelector("code")).not.toBeNull()
+  })
+})

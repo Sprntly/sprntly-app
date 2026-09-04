@@ -41,6 +41,7 @@ import {
 import { GoalAnalysisReport } from "./GoalAnalysisReport"
 import { GoalRunNarration } from "./GoalRunNarration"
 import { GoalReportDocument } from "./GoalReportDocument"
+import { GeneratingBanner } from "./GenerationState"
 
 /** How often to poll a live run. A run is minutes long, so a tight poll buys
  *  nothing but load; the row is durable, so a missed tick costs nothing. */
@@ -60,6 +61,28 @@ const GATE_POLL_MS = 15_000
 //: tab asking about it all night; after this the panel stops and says so,
 //: which is honest about the fact that nothing is watching any more.
 const GATE_POLL_CEILING_MS = 30 * 60 * 1000
+
+//: How long to keep polling a READY run whose enrichment is still coming.
+//:
+//: THE REPORT IS PUBLISHED BEFORE THE GATE AND THE RECOMMENDATIONS RUN, so the
+//: reader is not held behind four model calls. That fix moved the enrichment to
+//: AFTER `status: "ready"` — and `ready` is terminal here, so the panel stopped
+//: listening before the results landed and wrote them to a row nobody read
+//: again. The analysis appeared; the suggestions never did.
+//:
+//: Bounded, because a backend that died mid-enrichment used to leave the flag
+//: up forever and an unbounded poll would spin for the life of the tab. That is
+//: no longer the failure mode this bounds: the server's `sweep_stalled_
+//: enrichment` now clears a genuinely dead run's flag on its own, on a
+//: 5-minute recurring sweep, after `STALLED_ENRICHMENT_AGE_MINUTES = 10` of no
+//: heartbeat — worst case ~15 minutes from the moment a worker actually dies.
+//: A 3-MINUTE CEILING GAVE UP BEFORE A REAL RUN EVEN FINISHED (measured:
+//: 159.5s on a 14,509-signal tenant, "barely" inside 3 minutes), let alone
+//: before the sweep could ever rescue a stranded one — an open tab watching a
+//: dead run would stop asking well before the honest terminal state existed to
+//: see. Set comfortably past the sweep's own worst case instead, so a tab left
+//: open long enough is still polling when the sweep finishes the job.
+const ENRICH_POLL_CEILING_MS = 20 * 60 * 1000
 
 //: Statuses where the run is waiting on a PERSON, not on work.
 const HUMAN_GATES = new Set(["awaiting_confirmation", "awaiting_approval"])
@@ -175,12 +198,17 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   const [docNote, setDocNote] = useState<string | null>(null)
   const autoOpened = useRef(false)
 
+  const enrichmentPending = useRef(false)
   const load = useCallback(async () => {
     try {
       const detail = await goalAnalysisApi.get(runId)
       failures.current = 0
       setError(null)              // a recovered poll clears the warning
       setRun(detail)
+      // Read off the row every tick rather than latched once: the server turns
+      // it off in the same write that publishes the results, so the tick that
+      // sees the results is the tick that stops.
+      enrichmentPending.current = Boolean(detail.prioritisation?.enrichment_pending)
       return detail.status
     } catch {
       failures.current += 1
@@ -218,9 +246,21 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     // silently reclassify a gated run as an ungated one; it keeps the cadence
     // and the clock the last KNOWN status established.
     let atGate = false
+    let enrichWaitedMs = 0
     const tick = async () => {
       const status = await load()
-      if (!live || TERMINAL.has(String(status))) return
+      if (!live) return
+      // A READY RUN IS NOT DONE WHILE ITS ENRICHMENT IS STILL COMING. Keep
+      // polling on the working cadence until the server clears the flag, or
+      // until the ceiling — a backend that died mid-enrichment must not leave
+      // this spinning for the life of the tab.
+      if (String(status) === "ready" && enrichmentPending.current
+          && enrichWaitedMs < ENRICH_POLL_CEILING_MS) {
+        enrichWaitedMs += POLL_MS
+        timer = setTimeout(tick, POLL_MS)
+        return
+      }
+      if (TERMINAL.has(String(status))) return
       if (status !== POLL_UNREACHABLE) atGate = HUMAN_GATES.has(String(status))
       if (atGate) {
         gateWaitedMs += GATE_POLL_MS
@@ -458,10 +498,44 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
     </p>
   ) : null
 
+  // AC-5: A REPORT THAT IS "READY" IS NOT NECESSARILY DONE. Findings publish
+  // the moment the ranking exists so the reader is not held behind four
+  // model calls (`enrichment_pending`'s own docstring in api.ts) — but until
+  // this clears, the deep recommendations for the top of the ranking are
+  // still coming. David: "this doesn't show something is happening… can
+  // this have some way of showing that it's thinking, which is more
+  // prominent." Apurva, live: "we need to have this something rendering
+  // here that still generating." Read from `run` (not the poll-cadence ref)
+  // so it re-renders the moment a fresh poll clears it.
+  const stillGenerating = Boolean(run.prioritisation?.enrichment_pending)
+  // An HONEST STAGE, when the run has published one, rather than a
+  // single static sentence for the whole ~2-3 minutes enrichment can take.
+  // `progress.enrichment_step` is written by `_run_enrichment` before each
+  // of the three model calls (`routes/crucible.py`) — the same write that
+  // refreshes the row's liveness signal for the stalled-enrichment sweep,
+  // so a reader who
+  // watches this advance is watching the same clock the server uses to tell
+  // a live run from a dead one.
+  const enrichmentStep = run.prioritisation?.progress?.enrichment_step
+  const enrichmentSub =
+    enrichmentStep === "recommending"
+      ? "The findings are ready; a suggestion for each of the top ones is still generating."
+      : enrichmentStep === "deep_recommending"
+        ? "The findings are ready; the full recommendation for the top of the ranking is still generating."
+        : "The findings are ready; checking which of them bear on your goal — a deeper recommendation is still generating."
+  const generatingBanner = stillGenerating ? (
+    <GeneratingBanner
+      title="Still working on this analysis"
+      sub={enrichmentSub}
+      testId="goal-recommendations-generating"
+    />
+  ) : null
+
   if (editing && doc) {
     return (
       <div className="ga" data-testid="goal-ready">
         {banner}
+        {generatingBanner}
         {note}
         <GoalReportDocument
           doc={doc}
@@ -476,6 +550,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
   return (
     <div className="ga" data-testid="goal-ready">
       {banner}
+      {generatingBanner}
       {note}
       {/* An edited version exists and the reader is looking at the original.
           Saying so is not optional: without it the panel shows the run's own

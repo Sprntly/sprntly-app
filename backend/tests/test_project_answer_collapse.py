@@ -208,12 +208,12 @@ def test_respond_individual_removed():
 # by hand-constructing an empty `extra_tools=()` scope — that bypass is
 # exactly what the ship-gate's live run caught as masking the un-gated bug
 # (a hand-built empty-tools scope "proved" streaming worked while the real
-# `_build_private_scope` path, always 6 tools, never reached the composer at
+# `_build_private_scope` path, always 7 tools, never reached the composer at
 # all). ─────────────────────────────────────────────────────────────────
 
 
 def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
-    """AC5: the REAL private scope (all 6 tools) + a plain-context question
+    """AC5: the REAL private scope (all 7 tools) + a plain-context question
     the gate DECLINES routes to the untouched composer path and streams —
     exactly like main chat."""
     monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
@@ -238,7 +238,7 @@ def test_private_realscope_plainqa_declines_gate_streams(monkeypatch):
 
     monkeypatch.setattr("app.llm.run_tool_loop", _tripwire)
     scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
-    assert len(scope.extra_tools) == 6  # real, declarative, unconditional — not hand-emptied
+    assert len(scope.extra_tools) == 7  # real, declarative, unconditional — not hand-emptied
     out = qa.answer(
         enterprise_id="c1", question="what's blocking the launch?", dataset="d",
         scope=scope, on_delta=lambda t: deltas.append(t),
@@ -458,7 +458,7 @@ def test_private_read_tools_registered_and_dispatched(monkeypatch):
 
 
 def test_project_read_question_routes_to_loop_and_dispatches_read_tool(monkeypatch):
-    """AC4: the REAL project scope (6 tools) + a natural read/summary
+    """AC4: the REAL project scope (7 tools) + a natural read/summary
     question ("summarize the PRD" — vetoed by `is_project_tool_request`,
     matched by `is_project_content_request`) enters `_try_scoped_tool_
     answer` and dispatches a read tool, with no streaming deltas."""
@@ -918,6 +918,177 @@ def test_delegate_forcing_removal_makes_private_delegation_red(monkeypatch):
     monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
     qa.answer(
         enterprise_id="c1", question="please delegate this to Assignee",
+        dataset="d", scope=scope,
+    )
+    assert len(recorded_green) == 1  # GREEN — the real forcing pass restores the write
+
+
+# ── complete_task re-wire: admission + forcing pass (re-armed orphaned path) ──
+
+
+def _patch_completion_seams(monkeypatch, recorded, *, task_summary="the export review"):
+    """Stub the DB/notify seams `handle_complete_task` touches so it writes a
+    `completed` event (captured in `recorded`) and returns its authoritative
+    'Got it — …' confirmation, without a real DB or network."""
+    import app.project_delegation as pd
+
+    monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+    monkeypatch.setattr(
+        pd, "list_status_for_assignee",
+        lambda pid, uid: [
+            {"delegation_id": 5, "status": "assigned", "task_summary": task_summary}
+        ],
+    )
+    monkeypatch.setattr(pd, "is_legal_transition", lambda a, b: True)
+    monkeypatch.setattr(
+        pd, "record_event",
+        lambda **kw: recorded.append(kw),
+    )
+    monkeypatch.setattr(pd, "_notify_assigner_task_completed_email", lambda *a, **kw: None)
+    monkeypatch.setattr(pd, "load_delegation_for_authz", lambda did: {})
+    monkeypatch.setattr(pd, "status_dto", lambda did: None)
+
+
+def test_private_completion_admitted_fires_complete_task_and_confirms(monkeypatch):
+    """A first-person completion claim is DETERMINISTICALLY admitted to the
+    project tool loop; when the model calls `complete_task`, the ledger records
+    a `completed` event and the reply is the handler's AUTHORITATIVE
+    confirmation (not the model's free text). This is the orphaned path
+    re-armed: the tool is now offered (extra_tools) and the turn is admitted by
+    `is_project_completion_request`."""
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        # The model itself calls complete_task on the first pass.
+        return dispatch("complete_task", {"task_summary": "the export review"})
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    result = qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
+        dataset="d", scope=scope,
+    )
+
+    assert len(recorded) == 1
+    assert recorded[0]["event"] == "completed"
+    # Authoritative override: the reply is the handler's confirmation string.
+    assert result["answer"].startswith("Got it")
+    assert "export review" in result["answer"]
+
+
+def test_private_completion_forcing_pass_fires_when_model_skips_tool(monkeypatch, caplog):
+    """The 'confirms without doing' failure, completion flavour: the turn is
+    admitted as a completion but the model narrates a promise ('noted, I'll
+    mark that done') WITHOUT calling `complete_task`. The forcing pass re-runs
+    the loop with `force_tool='complete_task'`, which DOES write the ledger."""
+    import logging
+
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        if force_tool == "complete_task":
+            return dispatch("complete_task", {"task_summary": "the export review"})
+        return "Noted — I'll mark that done for you."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    with caplog.at_level(logging.WARNING):
+        result = qa.answer(
+            enterprise_id="c1", question="I've finished the export review",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 2  # initial pass + one forced complete_task re-run
+    assert len(recorded) == 1 and recorded[0]["event"] == "completed"
+    assert result["answer"].startswith("Got it")  # authoritative override still wins
+    assert any(
+        "completion_admitted_without_tool_call" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_private_noncompletion_question_not_admitted_as_completion(monkeypatch, caplog):
+    """A non-completion project turn (a wh-question read) is NOT admitted as a
+    completion, so the completion forcing pass never fires and no ledger write
+    happens — the new gate does not hijack ordinary project traffic. The turn
+    still reaches the loop as a READ (its own predicate), returns the model's
+    text, and no `complete_task` is forced."""
+    import logging
+
+    recorded: list = []
+    _patch_completion_seams(monkeypatch, recorded)
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        assert force_tool != "complete_task", "must never force complete on a non-completion turn"
+        return "There are two open tasks on the ledger."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    with caplog.at_level(logging.WARNING):
+        result = qa.answer(
+            enterprise_id="c1", question="what tasks are in the ledger?",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 1  # no forced re-run
+    assert recorded == []  # no completion written
+    assert result["answer"] == "There are two open tasks on the ledger."
+    assert not any(
+        "completion_admitted_without_tool_call" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_completion_forcing_removal_makes_private_completion_red(monkeypatch):
+    """Mutation proof for the completion forcing seam. Simulating deletion of
+    the `admitted_completion` forcing `elif` (by forcing the completion
+    predicate off — the same observable effect: `admitted_completion` is False
+    so the turn is never admitted/forced) means a completion claim the model
+    narrates-without-calling NEVER writes the ledger — RED. Restoring the real
+    predicate re-arms the forcing pass and the row is written — GREEN."""
+    recorded_red: list = []
+    _patch_completion_seams(monkeypatch, recorded_red)
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        if force_tool == "complete_task":
+            return dispatch("complete_task", {"task_summary": "the export review"})
+        return "Noted — I'll mark that done for you."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    # Benign offline composer for the fall-through path (RED: turn not admitted).
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "", "key_points": [], "citations": [], "confidence": 0.0, "unanswered": ""},
+    )
+
+    # RED: predicate forced off — `admitted_completion` is False everywhere,
+    # so the turn is neither admitted nor force-completed (observably identical
+    # to deleting the forcing `elif`).
+    monkeypatch.setattr(qa, "is_project_completion_request", lambda *a, **k: False)
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assignee")
+    qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
+        dataset="d", scope=scope,
+    )
+    assert recorded_red == []  # RED — no forcing, no write
+
+    # GREEN: restore the real predicate — the forcing pass fires and writes.
+    monkeypatch.undo()
+    recorded_green: list = []
+    _patch_completion_seams(monkeypatch, recorded_green)
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+    qa.answer(
+        enterprise_id="c1", question="I've finished the export review",
         dataset="d", scope=scope,
     )
     assert len(recorded_green) == 1  # GREEN — the real forcing pass restores the write
@@ -1595,3 +1766,566 @@ def test_sixth_branch_still_claims_genuine_project_turns_with_plan_present(monke
     )
     assert calls["scoped"] == 1
     assert out["answer"] == "project agent turn"
+
+
+# ── Ticket-ownership-vs-delegation confabulation fix (F2) ──────────────────
+# "assign the auth ticket to David" in a project with NO tickets is lexically
+# an `is_project_tool_request` match — the delegate-verb regex is object-blind
+# between a ticket and a person — even though the planner already correctly
+# classifies it `assign_tickets` (ticket OWNERSHIP, not a task delegation).
+# The delegate tool loop has no ticket-assignment tool at all, so it
+# fabricated a delegation row instead of declining. When the planner has
+# ALREADY resolved this turn to a ticket-family action, the gate must defer,
+# mirroring the existing `_defers_to_report_pipeline` clause rather than
+# inventing a new mechanism.
+
+
+@pytest.mark.parametrize(
+    "action", ["assign_tickets", "update_ticket", "generate_tickets"],
+)
+def test_ticket_action_verdict_defers_the_sixth_branch(monkeypatch, action):
+    """MUTATION-shaped proof of the fix. With the deferral clause present the
+    turn falls through to the composer (GREEN, no fabricated delegation row);
+    forcing the predicate to always report "nothing to defer to" (the pre-fix
+    gate) reproduces the wrongful claim (RED) — the exact reported symptom."""
+    question = "assign the auth ticket to David"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action=action)
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "FABRICATED by the connector-blind project loop", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "There's no auth ticket in this project yet.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    # Sanity: the phrasing really does lexically satisfy the sixth-branch
+    # tool gate — this is what makes the deferral load-bearing rather than
+    # incidental (a phrasing the gate never matched would pass either way).
+    from app.skill_router import is_project_tool_request
+
+    assert is_project_tool_request(question) is True, question
+
+    # GREEN (fix present): the turn reaches the ordinary composer, never the
+    # tool loop that fabricated the delegation row.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "There's no auth ticket in this project yet."
+
+    # RED (mutation: force the predicate as if no plan ever deferred it) —
+    # reproduces the fabricated-delegation-row symptom the bug report named.
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "_defers_to_ticket_action", lambda *a, **kw: False)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"].startswith("FABRICATED")
+
+
+def test_delegate_verdict_is_not_deferred(monkeypatch):
+    """Must-not-regress: `delegate` is NOT in the ticket-family defer set —
+    it is the delegate tool loop's OWN action — so a genuine delegation
+    turn ("ask David to review the PRD") must still reach `delegate_task`
+    unchanged, never fall through to the composer."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="delegate")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    out = qa.answer(
+        enterprise_id="c1", question="ask David to review the PRD", dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+
+def test_ticket_action_deferral_is_a_noop_with_no_plan(monkeypatch):
+    """AC byte-identity for every caller that predates the planner threading:
+    `plan=None` (the sixth branch's own default) must behave exactly as it
+    did before this fix — the project tool loop still claims a genuine
+    delegation turn with no plan supplied at all."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    out = qa.answer(
+        enterprise_id="c1", question="ask David to review the PRD", dataset="d",
+        scope=scope,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+
+def test_sixth_branch_gate_and_ticket_action_defer_use_same_predicate():
+    """Symmetry proof (source-level), mirroring `test_sixth_branch_gate_and_
+    report_defer_use_same_predicate`: the gate's ticket-action-defer clause
+    reads `_defers_to_ticket_action(plan)` — one predicate, one call site, so
+    the mechanism cannot silently drift out of sync with itself. The clause is
+    now guarded by the admitted-completion exemption (a completion claim
+    overrides the deferral), so the exact source shape is the disjunction."""
+    src = inspect.getsource(qa.answer)
+    # The defer clause is now a disjunction: an admitted completion overrides
+    # the ticket-action deferral. Assert the code shape (whitespace-normalised
+    # so comments/indentation don't make it brittle).
+    normalised = " ".join(src.split())
+    assert (
+        "not _defers_to_ticket_action(plan) or is_project_completion_request(routing_text, history)"
+        in normalised
+    )
+
+
+def test_defers_to_ticket_action_predicate_unit():
+    """Pure-unit coverage of the predicate itself: every member of the
+    ticket-family action set defers; `delegate`, a non-ticket action, and no
+    plan at all do not."""
+    for ticket_action in sorted(qa._TICKET_ACTION_IDS):
+        assert qa._defers_to_ticket_action(
+            Plan(action=ticket_action)
+        ) is True, ticket_action
+
+    # The delegate loop's own action must never be read as ticket ownership.
+    assert qa._defers_to_ticket_action(Plan(action="delegate")) is False
+    # The ordinary default action.
+    assert qa._defers_to_ticket_action(Plan()) is False
+    # No plan at all.
+    assert qa._defers_to_ticket_action(None) is False
+
+
+def test_admitted_completion_overrides_update_ticket_deferral(monkeypatch):
+    """Live-found blocker fix. The ask-planner mislabels a first-person
+    completion CLAIM as `action=update_ticket`; without the exemption
+    `_defers_to_ticket_action(plan)` vetoes the completion branch and
+    `complete_task` never fires (completion falls to the non-deterministic
+    background classifier). With the exemption, an admitted completion
+    overrides the deferral and the sixth branch claims the turn.
+
+    Mutation-proof: neutralising `is_project_completion_request` (the observable
+    effect of deleting the exemption AND the admission disjunct) reproduces the
+    veto — the turn is deferred and the tool loop is never entered (RED)."""
+    question = "I'm done with the security review"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_delegation.COMPLETE_TASK_TOOL),
+    )
+    plan = Plan(action="update_ticket")  # the planner's live misclassification
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Got it — I've marked that task as done on the ledger.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "composer", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""},
+    )
+
+    # Sanity: the planner really does defer this action, so the exemption is
+    # load-bearing (not incidental).
+    assert qa._defers_to_ticket_action(plan) is True
+
+    # GREEN (exemption present): the admitted completion overrides the deferral
+    # → the sixth branch claims the turn and reaches complete_task.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"].startswith("Got it")
+
+    # RED (mutation: neutralise the completion predicate — both the exemption
+    # and the admission disjunct go False, reproducing the pre-fix veto).
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "is_project_completion_request", lambda *a, **k: False)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0  # deferred — the tool loop was never entered
+    assert out["answer"] == "composer"
+
+
+def test_genuine_update_ticket_edit_still_defers_not_hijacked(monkeypatch):
+    """The exemption must NOT hijack a genuine ticket-edit. "change the
+    acceptance criteria on the export ticket" is NOT a completion claim, so
+    `is_project_completion_request` is False and the exemption disjunct stays
+    False — the ticket-action deferral still governs and the turn falls through
+    to the composer/ticket path, never the completion tool loop."""
+    from app.skill_router import is_project_completion_request
+
+    question = "change the acceptance criteria on the export ticket"
+    # The guard that makes the exemption safe: a ticket edit is not a completion.
+    assert is_project_completion_request(question) is False
+
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL, project_delegation.COMPLETE_TASK_TOOL),
+    )
+    plan = Plan(action="update_ticket")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "SHOULD NOT REACH THE COMPLETION LOOP", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    monkeypatch.setattr(
+        qa, "compose_ask_answer",
+        lambda *a, **k: {"answer": "There's no export ticket to edit yet.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""},
+    )
+
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d", scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0  # the completion loop was NOT hijacked
+    assert out["answer"] == "There's no export ticket to edit yet."
+
+
+# ── Lexical-gate veto vs planner-approved delegation (fix part B) ──────────
+# `skill_router._PROJECT_TOOL_MENTION_VETO` runs FIRST inside
+# `is_project_tool_request` and its alternation includes "summarize" — so
+# "can you have David look into X and summarize the differences", which the
+# PLANNER already classified `delegate`, was vetoed and never reached the
+# tool loop. `_admits_on_delegate_plan` trusts the planner's verdict instead
+# of growing/loosening the regex.
+
+
+def test_admits_on_delegate_plan_predicate_unit():
+    """Pure-unit coverage: `plan.action == "delegate"` admits; a non-delegate
+    action and no plan at all do not."""
+    assert qa._admits_on_delegate_plan(Plan(action="delegate")) is True
+    assert qa._admits_on_delegate_plan(Plan(action="assign_tickets")) is False
+    assert qa._admits_on_delegate_plan(Plan()) is False
+    assert qa._admits_on_delegate_plan(None) is False
+
+
+def test_sixth_branch_gate_and_delegate_plan_admit_use_same_predicate():
+    """Symmetry proof (source-level): the gate's admit-on-delegate-plan
+    disjunct reads `_admits_on_delegate_plan(plan)` — one predicate, one call
+    site, so the mechanism cannot silently drift out of sync with itself."""
+    src = inspect.getsource(qa.answer)
+    assert "or _admits_on_delegate_plan(plan)" in src
+
+
+def test_veto_masked_delegation_admitted_via_planner_verdict(monkeypatch):
+    """MUTATION-shaped proof of the fix. The phrasing lexically fails
+    `is_project_tool_request` (its mention veto's alternation includes
+    "summarize"), so WITHOUT the new disjunct the turn falls through to the
+    composer even though the planner already resolved it `delegate` (RED —
+    the exact reported symptom). WITH the disjunct present the turn is
+    admitted into the tool loop (GREEN)."""
+    question = "can you have David look into the export bug and summarize the differences"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="delegate")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "Handed off to David.", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+
+    # Sanity: the phrasing really is lexically vetoed — this is what makes
+    # the new disjunct load-bearing rather than incidental (a phrasing the
+    # veto never caught would pass either way).
+    from app.skill_router import is_project_tool_request
+
+    assert is_project_tool_request(question) is False, question
+
+    # GREEN (fix present): the planner's `delegate` verdict admits the turn
+    # into the tool loop despite the lexical veto.
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 1
+    assert out["answer"] == "Handed off to David."
+
+    # RED (mutation: force the new predicate off, as if it never existed) —
+    # reproduces the reported symptom: a planner-approved delegation vetoed
+    # by the crude regex never reaches the tool loop.
+    calls["scoped"] = 0
+    monkeypatch.setattr(qa, "_admits_on_delegate_plan", lambda *a, **kw: False)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "I can't find that in the project.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "I can't find that in the project."
+
+
+def test_answer_first_summarize_not_admitted_via_delegate_disjunct(monkeypatch):
+    """Must-not-regress / narrow-scope proof: a pure summarize ask (planner
+    classifies it `answer`, never `delegate`) must NOT be admitted via the
+    new disjunct — the fix trusts the planner's verdict, it does not make
+    every "summarize"-containing turn a delegation. Phrased WITHOUT a
+    project-content noun ("PRD"/"report"/etc.) so this isolates the new
+    disjunct specifically — "summarize the PRD" independently satisfies the
+    pre-existing `is_project_content_request` gate regardless of this fix,
+    which would make the assertion below vacuous."""
+    question = "summarize the differences"
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        extra_tools=(project_delegation.DELEGATE_TASK_TOOL,),
+    )
+    plan = Plan(action="answer")
+
+    calls = {"scoped": 0}
+
+    def _spy_scoped(**kw):
+        calls["scoped"] += 1
+        return {"answer": "FABRICATED — should never be reached", "citations": []}
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _spy_scoped)
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "Here's the PRD summary.", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    out = qa.answer(
+        enterprise_id="c1", question=question, dataset="d",
+        scope=scope, plan=plan,
+    )
+    assert calls["scoped"] == 0
+    assert out["answer"] == "Here's the PRD summary."
+
+
+# ── Delegation-confabulation fix: composer split (fix part 2) ──────────────
+
+
+def test_composer_fold_addendum_omits_delegate_guidance_tool_addendum_keeps_it():
+    """The delegate_task-specific guidance — including the verbatim
+    handoff-confirmation template — must reach the tool-loop's system prompt
+    (`system_addendum`, where `delegate_task` is genuinely callable) but must
+    NOT reach the gate-decline / composer fall-through's own addendum
+    (`composer_fold_addendum`, where no tools exist). Both still carry the
+    accept-with-nudge sentence."""
+    from app.ask_job_runner import _PRIVATE_SCOPE_DELEGATE_GUIDANCE
+    from app.surface_scope import PROJECT_TOOL_NUDGE
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+
+    assert _PRIVATE_SCOPE_DELEGATE_GUIDANCE in scope.system_addendum
+    assert "I've asked <name> to <task>" in scope.system_addendum
+    assert PROJECT_TOOL_NUDGE in scope.system_addendum
+
+    assert _PRIVATE_SCOPE_DELEGATE_GUIDANCE not in scope.composer_fold_addendum
+    assert "I've asked <name> to <task>" not in scope.composer_fold_addendum
+    assert "delegate_task tool" not in scope.composer_fold_addendum
+    assert PROJECT_TOOL_NUDGE in scope.composer_fold_addendum
+
+
+def test_declined_turn_folds_composer_addendum_not_system_addendum(monkeypatch):
+    """AC: when the sixth-branch gate declines a turn (a plain-Q&A ask), the
+    composer receives `composer_fold_addendum` — never the tool-loop's
+    `system_addendum` with its delegate_task confirmation template. Proves
+    the confabulation fix end-to-end through `qa_agent.answer`'s real
+    fall-through seam, not just `_fold_project_context` in isolation."""
+    monkeypatch.setattr(qa, "llm_call", lambda **k: _route_out())
+    captured = {}
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        captured["history"] = history
+        return {"answer": "ok", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+
+    qa.answer(
+        enterprise_id="c1", question="what's blocking the launch?",
+        dataset="d", scope=scope,
+    )
+
+    history = captured["history"]
+    assert history and history[0]["role"] == "context"
+    content = history[0]["content"]
+    assert "I've asked <name> to <task>" not in content
+    assert "delegate_task tool" not in content
+    assert "If this message is asking you to hand off" in content  # PROJECT_TOOL_NUDGE
+
+
+def test_fold_prefers_composer_fold_addendum_over_system_addendum():
+    """Direct unit proof on `_fold_project_context`: when both fields are
+    set, the folded content comes from `composer_fold_addendum`, not
+    `system_addendum` — and falls back to `system_addendum` when
+    `composer_fold_addendum` is empty (byte-for-byte pre-existing behavior
+    for every caller that predates the new field, proven by the sibling
+    tests in the "Authoritative preamble single-source" section above)."""
+    scope = SurfaceScope(
+        surface=Surface.project_private, project_id=9,
+        system_addendum="TOOL-LOOP TEXT — must not leak to composer",
+        composer_fold_addendum="COMPOSER TEXT — the real fold",
+    )
+    folded = qa._fold_project_context(scope, [])
+    content = folded[0]["content"]
+    assert content == "COMPOSER TEXT — the real fold"
+    assert "TOOL-LOOP TEXT" not in content
+
+
+# ── Delegation-confabulation fix: get_task_ledger grounding (fix part 3) ───
+
+
+def test_ledger_reply_grounded_in_real_tool_return_not_model_free_text():
+    """The model calls `get_task_ledger`, gets the REAL ledger back, but then
+    composes its OWN free-text final turn that doesn't match it (the
+    fabricated-ledger defect). The real dispatch return must override the
+    model's free text — mirrors the `edit_prd`/`delegate_task` grounding
+    precedent, extended to this read tool."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("get_task_ledger", {})
+        # The model's own final turn — NOT what the tool actually returned.
+        return "You have 3 open tasks, all assigned to yourself."
+
+    import app.llm
+    from unittest.mock import patch
+
+    with patch.object(app.llm, "run_tool_loop", _fake_loop), \
+         patch(
+             "app.project_group_context.dispatch_read_tool",
+             lambda name, ti, **kw: (
+                 "- #1: Draft the export review — assigned to Fortune by Priya (open)"
+                 if name == "get_task_ledger" else None
+             ),
+         ):
+        scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+        out = qa.answer(
+            enterprise_id="c1", question="what's on the task ledger?",
+            dataset="d", scope=scope,
+        )
+
+    assert out["answer"] == "- #1: Draft the export review — assigned to Fortune by Priya (open)"
+    assert "3 open tasks" not in out["answer"]
+
+
+# ── Delegation-confabulation fix: forcing-pass past-tense backstop (fix 4) ─
+
+
+def test_forcing_pass_fires_on_past_tense_promise_without_call(monkeypatch, caplog):
+    """Backstop (b): a model turn that narrates the handoff as ALREADY DONE
+    ("I've asked David to review the prd…") without ever calling
+    `delegate_task` must still trigger the forcing pass (the pre-fix regex
+    deliberately excluded past tense) — proving the broadened regex closes
+    this gap on top of the composer-split fix (part 2)."""
+    import logging
+
+    import app.project_delegation as pd
+
+    recorded = []
+    monkeypatch.setattr(pd, "record_delegation", lambda **kw: recorded.append(kw) or {"id": 1})
+    monkeypatch.setattr(
+        pd, "resolve_member",
+        lambda pid, needle: {"status": "found", "member": {"user_id": "u-assignee", "name": "David"}},
+    )
+    monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+    monkeypatch.setattr(pd, "_build_brief", lambda *a, **kw: "Brief text")
+    monkeypatch.setattr(pd, "create_individual_project_chat", lambda pid, uid: {"id": 77})
+    monkeypatch.setattr(pd, "post_individual_turn", lambda conv_id, role, content: {"id": 1})
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        if force_tool == "delegate_task":
+            return dispatch("delegate_task", {"assignee": "David", "task_summary": "Review the PRD"})
+        # Past-tense promise — the exact shape the old composer's confirmation
+        # template used to reproduce with no tool ever called.
+        return "I've asked David to review the prd — I'll bring his answer back here once it's in."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
+    with caplog.at_level(logging.WARNING):
+        qa.answer(
+            enterprise_id="c1", question="tell David to review the prd",
+            dataset="d", scope=scope,
+        )
+
+    assert calls["n"] == 2  # initial pass + one forced delegate_task re-run
+    assert len(recorded) == 1  # the ledger write actually happened
+    assert any(
+        "delegation_promise_without_tool_call" in r.getMessage() for r in caplog.records
+    )
+
+
+def test_forcing_pass_does_not_refire_when_delegate_task_already_ran(monkeypatch):
+    """Guard proof: when `delegate_task` WAS called in the initial pass (so
+    `delegate_task_narrations` is non-empty), the forcing pass must NOT fire
+    a second time even if the model's raw text also happens to contain a
+    past-tense promise phrase — the broadened regex (fix part 4) only ever
+    matters when the tool provably did not run."""
+    import app.project_delegation as pd
+
+    monkeypatch.setattr(pd, "record_delegation", lambda **kw: {"id": 1})
+    monkeypatch.setattr(
+        pd, "resolve_member",
+        lambda pid, needle: {"status": "found", "member": {"user_id": "u-assignee", "name": "David"}},
+    )
+    monkeypatch.setattr(pd, "is_project_member", lambda pid, uid: True)
+    monkeypatch.setattr(pd, "_build_brief", lambda *a, **kw: "Brief text")
+    monkeypatch.setattr(pd, "create_individual_project_chat", lambda pid, uid: {"id": 77})
+    monkeypatch.setattr(pd, "post_individual_turn", lambda conv_id, role, content: {"id": 1})
+
+    calls = {"n": 0}
+
+    def _fake_loop(*, dispatch, force_tool=None, **kw):
+        calls["n"] += 1
+        # The tool loop actually calls delegate_task itself this pass, AND
+        # the model's raw text also contains a past-tense promise phrase.
+        dispatch("delegate_task", {"assignee": "David", "task_summary": "Review the PRD"})
+        return "I've asked David to review the prd — I'll bring his answer back here once it's in."
+
+    monkeypatch.setattr("app.llm.run_tool_loop", _fake_loop)
+
+    scope = _build_private_scope_via_assembler(project_id=9, conversation_id=5, user_id="u-assigner")
+    qa.answer(
+        enterprise_id="c1", question="tell David to review the prd",
+        dataset="d", scope=scope,
+    )
+
+    assert calls["n"] == 1  # no forced re-run — the guard held

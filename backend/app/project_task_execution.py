@@ -5,7 +5,7 @@ doesn't only chase people, it does the tasks it actually can, then hands
 off the rest. This module wires the LOCKED v1 agent-doable set — PRD
 draft ONLY — so a member can ask Sprntly, in the private project chat, to
 draft the PRD itself: the agent runs the EXISTING PRD generate pipeline
-(`app.prd_runner._generate_human_prd` + `extract_input_questions_task`)
+(`app.prd_runner._generate_human_prd`)
 and posts the draft plus its finalize/input questions, instead of routing
 the ask to a human.
 
@@ -155,12 +155,11 @@ async def _run_prd_generation(
     thread with no event loop of its own — see `ask_job_runner._run_sync`)
     can drive it via `asyncio.run`. Calls the EXISTING pipeline verbatim —
     no new generation function is defined here."""
-    from app.prd_runner import _generate_human_prd, extract_input_questions_task
+    from app.prd_runner import _generate_human_prd
 
     await _generate_human_prd(
         prd_id, brief_id, insight_index, insight_override=insight, author=author,
     )
-    await extract_input_questions_task(prd_id)
 
 
 def _execute_prd(

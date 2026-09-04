@@ -1,15 +1,33 @@
 // @vitest-environment jsdom
 //
-// The Goal Analysis panel. What is tested here is not layout — it is the four
-// places where a plausible-looking rendering would be a lie:
+// The Goal Analysis panel: the states it can be in, and what it does with the
+// report once there is one.
 //
-//   1. An unsized finding rendered as 0. "We could not size this" and "this is
-//      worth nothing" lead to OPPOSITE decisions (I3).
-//   2. The confirmation step rendered as a spinner. A run stops and asks what
-//      the goal means; that question is the product, not an interruption.
-//   3. Coverage notes buried under the findings they qualify.
-//   4. The considered list dropped, leaving a ranking to be taken on faith.
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+// THE PANEL STOPPED BEING A RENDERER. It used to rebuild the whole document in
+// React from `run.findings`, in parallel with the Python that renders the
+// exported copy — two renderers of one report, sharing no code, each holding
+// its own copy of every rule about how a finding is written out. It now
+// displays the bytes the server produced (`report_html`) inside a sandboxed
+// iframe, and `GoalAnalysisReport.tsx`'s own header records why.
+//
+// SO THE ASSERTIONS ABOUT WHAT THE DOCUMENT SAYS MOVED WITH THE CODE THAT SAYS
+// IT, to `backend/tests/test_crucible_report.py` and its siblings, which run
+// against the real renderer rather than a second implementation of it:
+//
+//   * an unsized finding rendered as 0 (I3)      -> test_crucible_report.py
+//     `test_an_unsized_finding_says_so_and_is_never_a_number`, and end to end
+//     in test_crucible_document_consistency.py's `_assert_null_is_never_zero_
+//     or_small`, which checks every place a size appears;
+//   * coverage notes qualifying what they qualify -> test_crucible_report.py
+//     `test_coverage_notes_sit_inside_what_was_read_not_in_a_footer`;
+//   * the considered list, with each reason      -> test_crucible_report.py
+//     `test_the_ruled_out_ledger_keeps_its_reasons`;
+//   * a run where nothing survived               -> test_crucible_report.py
+//     `test_a_run_with_no_findings_says_the_ledger_is_the_result`.
+//
+// What is left here is what this component still decides: which state to show,
+// and that the report it was given reaches the reader unaltered.
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -47,85 +65,46 @@ const FINDING = {
 beforeEach(() => { get.mockReset(); confirm.mockReset() })
 afterEach(cleanup)
 
-describe("sizing", () => {
-  it("renders an unsizeable finding as unsized, never as zero", async () => {
-    // THE ONE THAT MATTERS. A dash and a 0 look similar and mean opposites.
-    get.mockResolvedValue({
-      ...RUN,
-      findings: [{ ...FINDING, impact_value: null, impact: { value: null, affected_population: null } }],
-    })
+describe("the report the run produced", () => {
+  // A SHORT, RECOGNISABLE STAND-IN for what `render_report_document` emits.
+  // The panel's job is to pass it through, so the fixture only has to be
+  // distinguishable — what the real document SAYS is asserted against the real
+  // renderer, in the Python suite named in this file's header.
+  const REPORT =
+    "<!doctype html><html><body><h1>raise net revenue retention</h1>" +
+    "<p>Could not be sized</p></body></html>"
+
+  const frame = () => screen.getByTitle("Goal analysis") as HTMLIFrameElement
+
+  it("shows the document the run produced, unaltered", async () => {
+    get.mockResolvedValue({ ...RUN, report_html: REPORT, findings: [FINDING] })
     render(<GoalAnalysisTab runId={7} />)
-    const el = await screen.findByTestId("goal-unsized")
-    expect(el.textContent).toBe("Could not be sized")
-    expect(screen.queryByText("0")).toBeNull()
-    expect(screen.queryByText("0 accounts")).toBeNull()
+    await screen.findByTestId("goal-ready")
+    // Every character of it, so a panel that summarised, truncated or
+    // re-ordered the report would fail here rather than look tidy.
+    expect(frame().getAttribute("srcdoc")).toContain(
+      "<h1>raise net revenue retention</h1>")
+    expect(frame().getAttribute("srcdoc")).toContain("Could not be sized")
   })
 
-  it("renders a sized finding in the goal's own currency", async () => {
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
+  it("cannot execute anything the document carries", async () => {
+    // The report is server-generated but it quotes tenant text, and this is
+    // the boundary it crosses into the reader's session.
+    get.mockResolvedValue({ ...RUN, report_html: REPORT })
     render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-sized")).textContent).toBe("4 accounts")
+    await screen.findByTestId("goal-ready")
+    expect(frame().getAttribute("sandbox")).toBe("allow-same-origin")
   })
 
-  it("discloses every assumed parameter beside the number", async () => {
-    // I8. A methodology page nobody opens is not a disclosure.
-    get.mockResolvedValue({ ...RUN, findings: [FINDING] })
+  it("says so rather than going blank when there is no report yet", async () => {
+    // A run still generating, or one read by a client older than the field.
+    // An empty panel with two document buttons under it reads as "the
+    // analysis found nothing".
+    get.mockResolvedValue({ ...RUN, report_html: null, findings: [FINDING] })
     render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-ready")).textContent)
-      .toContain("no revenue data connected")
-  })
-})
-
-// THE CONFIRMATION GATE MOVED TO THE CHAT THREAD.
-//
-// It is a question, and questions belong in the conversation — a PM has to be
-// able to scroll back and see what was asked and what they answered. The four
-// guarantees that lived here (the question renders rather than a spinner, the
-// proposal prefills, the user's EDIT is what gets sent, an empty definition
-// cannot be confirmed) now live in `GoalGateCard.dom.test.tsx` against the card
-// that renders them.
-
-describe("nothing is quietly dropped", () => {
-  it("renders coverage notes above the findings they qualify", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      coverage_notes: [{ reason: "undated evidence", actual: "40 of 300 signals carried no date" }],
-      findings: [FINDING],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    const notes = screen.getByTestId("goal-coverage")
-    const findings = screen.getByTestId("goal-finding")
-    expect(notes.textContent).toContain("40 of 300 signals carried no date")
-    // Order is the point: a note that changes how a number reads cannot sit
-    // underneath it.
-    expect(ready.textContent!.indexOf("undated evidence"))
-      .toBeLessThan(ready.textContent!.indexOf(findings.textContent!.slice(0, 20)))
-  })
-
-  it("renders the considered list with each reason", async () => {
-    get.mockResolvedValue({
-      ...RUN,
-      considered: [{
-        id: 3, label: "onboarding friction",
-        reason: "all 4 supporting claims land within 6 days",
-        stopped_at_stage: "verification", claim_ids: ["c9"],
-      }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    expect((await screen.findByTestId("goal-considered")).textContent)
-      .toContain("all 4 supporting claims land within 6 days")
-  })
-
-  it("a run where nothing survived says so, and still shows why", async () => {
-    get.mockResolvedValue({
-      ...RUN, findings: [],
-      considered: [{ id: 1, label: "x", reason: "single account", stopped_at_stage: "verification", claim_ids: [] }],
-    })
-    render(<GoalAnalysisTab runId={7} />)
-    const ready = await screen.findByTestId("goal-ready")
-    expect(ready.textContent).toContain("Nothing survived verification")
-    expect(screen.getByTestId("goal-considered")).toBeTruthy()
+    await screen.findByTestId("goal-ready")
+    expect((await screen.findByTestId("goal-report-pending")).textContent)
+      .toContain("no rendered report yet")
   })
 })
 
@@ -158,6 +137,57 @@ describe("polling", () => {
     await screen.findByTestId("goal-ready")
     const calls = get.mock.calls.length
     await vi.advanceTimersByTimeAsync(12_000)
+    expect(get.mock.calls.length).toBe(calls)
+  })
+
+  it("keeps polling a READY run while its enrichment is still coming", async () => {
+    // THE REGRESSION THIS CLOSES. Publishing the report before the gate and the
+    // recommendations is what stops the reader waiting on four model calls —
+    // but `ready` is TERMINAL here, so that fix stopped the panel listening
+    // before the results landed. They were written to a row nobody read again:
+    // the analysis appeared and the suggestions never did.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(9_500)
+    expect(get.mock.calls.length).toBeGreaterThan(calls)
+  })
+
+  it("stops the moment the enrichment lands", async () => {
+    // The flag comes down in the same write that publishes the verdicts, so
+    // the tick that sees the results is the tick that stops.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: false },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(12_000)
+    expect(get.mock.calls.length).toBe(calls)
+  })
+
+  it("gives up on a pending enrichment rather than spinning forever", async () => {
+    // A backend that died mid-enrichment used to leave the flag up forever;
+    // the server-side sweep now clears a genuinely dead run's flag on
+    // its own, but a ceiling still exists here for the case nothing ever
+    // does — unbounded, this would poll for the life of the tab. Sized past
+    // the sweep's own worst case (see `ENRICH_POLL_CEILING_MS`'s comment), so
+    // 21 minutes — one minute past it — is where THIS test proves the panel
+    // stops, not the old 3-minute value.
+    get.mockResolvedValue({
+      ...RUN, status: "ready",
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    await vi.advanceTimersByTimeAsync(21 * 60 * 1000)
+    const calls = get.mock.calls.length
+    await vi.advanceTimersByTimeAsync(30_000)
     expect(get.mock.calls.length).toBe(calls)
   })
 
@@ -436,5 +466,66 @@ describe("the funnel survives the run", () => {
     render(<GoalAnalysisTab runId={7} />)
     await screen.findByTestId("goal-ready")
     expect(screen.queryByTestId("goal-narration-recap")).toBeNull()
+  })
+})
+
+describe("a visible generating state for the recommendations", () => {
+  // David: "this doesn't show something is happening… can this have some
+  // way of showing that it's thinking, which is more prominent." Apurva,
+  // live: "we need to have this something rendering here that still
+  // generating." `enrichment_pending` goes up before `status` reaches
+  // `ready` and comes down in the same write that publishes the deep
+  // recommendations — before this, a reader who opened the report while it
+  // was still true saw a finished-looking document with no sign anything
+  // else was coming.
+  it("shows a generating banner while the deep recommendations are still coming", async () => {
+    get.mockResolvedValue({
+      ...RUN, status: "ready", findings: [FINDING],
+      prioritisation: { enrichment_pending: true },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    const banner = await screen.findByTestId("goal-recommendations-generating")
+    expect(banner.textContent).toMatch(/generat/i)
+  })
+
+  it("shows no generating banner once the recommendations have landed", async () => {
+    get.mockResolvedValue({
+      ...RUN, status: "ready", findings: [FINDING],
+      prioritisation: { enrichment_pending: false },
+    })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-recommendations-generating")).toBeNull()
+  })
+
+  it("shows no generating banner on a run stored before the flag existed", async () => {
+    get.mockResolvedValue({ ...RUN, status: "ready", findings: [FINDING] })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-recommendations-generating")).toBeNull()
+  })
+
+  it("the banner text tracks the published enrichment stage", async () => {
+    // Three DIFFERENT sentences for three different stages, not one static
+    // line for the whole ~2-3 minutes enrichment can take. Each is written
+    // by `_run_enrichment` (routes/crucible.py) before its own model call.
+    const stages: [string | undefined, RegExp][] = [
+      [undefined, /checking which of them bear on your goal/i],
+      ["recommending", /a suggestion for each of the top ones/i],
+      ["deep_recommending", /the full recommendation for the top of the ranking/i],
+    ]
+    for (const [enrichment_step, expected] of stages) {
+      cleanup()
+      get.mockResolvedValue({
+        ...RUN, status: "ready", findings: [FINDING],
+        prioritisation: {
+          enrichment_pending: true,
+          ...(enrichment_step ? { progress: { enrichment_step } } : {}),
+        },
+      })
+      render(<GoalAnalysisTab runId={7} />)
+      const banner = await screen.findByTestId("goal-recommendations-generating")
+      expect(banner.textContent).toMatch(expected)
+    }
   })
 })

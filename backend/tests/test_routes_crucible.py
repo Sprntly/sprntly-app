@@ -394,6 +394,349 @@ def test_the_sweep_leaves_a_live_run_alone(ctx):
     assert runs_db.sweep_orphans() == 0
 
 
+def test_find_stalled_enrichment_sees_a_ready_run_stuck_pending(ctx):
+    """`sweep_orphans`'s own predicate (resolving_goal/planning/running)
+    cannot see this run — it is already `ready`, findings published, only the
+    enrichment flag left up by a worker that died. `find_stalled_enrichment`
+    is the sweep that CAN see it."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    stalled = runs_db.find_stalled_enrichment()
+    assert [r["id"] for r in stalled] == [run_id]
+
+
+def test_find_stalled_enrichment_ignores_a_recent_heartbeat(ctx):
+    """A run whose worker is genuinely still working (recent heartbeat) must
+    not be swept out from under it — that is the race `claim_stalled_
+    enrichment`'s compare-and-set exists to prevent, but a fresh heartbeat
+    should mean this sweep never even tries."""
+    from datetime import datetime, timezone
+
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at=datetime.now(timezone.utc).isoformat(),
+    )
+    assert runs_db.find_stalled_enrichment() == []
+
+
+def test_find_stalled_enrichment_ignores_a_run_whose_enrichment_finished(ctx):
+    """`enrichment_pending: False` (or absent) means the run is genuinely
+    done, not stalled — even with a stale heartbeat (an old, finished run)."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": False},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    assert runs_db.find_stalled_enrichment() == []
+
+
+def test_find_stalled_enrichment_is_not_crowded_out_past_the_old_limit(ctx):
+    """PROOF, not assertion. `status="ready"` is TERMINAL, so every normally-
+    completed run sits in it forever — a real tenant measured 32 of 34
+    `ready` rows already matching the `status`/`heartbeat_at` predicate with
+    NOTHING stalled. The superseded query (`.limit(100)`, no `.order()`, then
+    filtered on `enrichment_pending` client-side) truncated to that unordered
+    page BEFORE the filter ran, so once the harmless majority passed 100 rows
+    the genuine candidate could be excluded from the page it was being
+    filtered out of. Construct exactly that: 150 harmless completed rows
+    inserted FIRST (so an unordered scan without `.order()` — SQLite walks a
+    plain table scan in rowid/insertion order — returns them, and only them,
+    in its first 100), then the one genuinely stalled run LAST.
+    """
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    client = require_client()
+    stale_iso = "2020-01-01T00:00:00+00:00"
+    harmless = [
+        {
+            "company_id": ctx.company_id, "status": "ready",
+            "goal_text": f"completed run {i}", "heartbeat_at": stale_iso,
+            "prioritisation": {"enrichment_pending": False},
+        }
+        for i in range(150)
+    ]
+    client.table("crucible_runs").insert(harmless).execute()
+    stalled_row = client.table("crucible_runs").insert({
+        "company_id": ctx.company_id, "status": "ready",
+        "goal_text": "the one that actually stalled",
+        "heartbeat_at": stale_iso,
+        "prioritisation": {"enrichment_pending": True},
+    }).execute().data[0]
+    stalled_id = stalled_row["id"]
+
+    # THE SUPERSEDED SHAPE, reproduced exactly (unordered `.limit(100)`, then
+    # filtered client-side) — MISSED before the fix.
+    old_shape_page = (
+        client.table("crucible_runs").select("*")
+        .eq("status", "ready")
+        .lt("heartbeat_at", "2099-01-01T00:00:00+00:00")
+        .limit(100).execute()
+    ).data or []
+    old_shape_found = [
+        r for r in old_shape_page
+        if (r.get("prioritisation") or {}).get("enrichment_pending")
+    ]
+    assert old_shape_found == [], (
+        "the superseded shape was expected to miss the stalled run — if it "
+        "did not, the fixture no longer reproduces the bug"
+    )
+
+    # THE FIX — FOUND.
+    found = runs_db.find_stalled_enrichment()
+    assert [r["id"] for r in found] == [stalled_id]
+
+
+def test_claim_stalled_enrichment_is_a_compare_and_set(ctx):
+    """THE CLAIM IS ATOMIC. Two sweep ticks (or a sweep tick racing a worker
+    that was alive after all) reading the SAME stale `heartbeat_at` must not
+    both win — the second compare-and-set touches zero rows."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    row = runs_db.get(run_id, ctx.company_id)
+    first = runs_db.claim_stalled_enrichment(
+        run_id, ctx.company_id, expected_heartbeat_at=row["heartbeat_at"],
+    )
+    assert first is not None
+    # The SAME stale value again — the row has already moved on, so this
+    # compare-and-set must lose.
+    second = runs_db.claim_stalled_enrichment(
+        run_id, ctx.company_id, expected_heartbeat_at=row["heartbeat_at"],
+    )
+    assert second is None
+
+
+def test_sweep_stalled_enrichment_clears_the_flag_without_ever_failing_the_run(ctx):
+    """A run whose process died mid-enrichment reaches a terminal,
+    honest state without human intervention — and its findings stay intact.
+    Never `runs_db.fail()`: that would hide a perfectly good, already-
+    published analysis behind an error screen."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _start(ctx).json()["id"]
+    require_client().table("crucible_findings").insert({
+        "run_id": run_id, "company_id": ctx.company_id,
+        "statement": "Renewals stall on the parts flow",
+        "claim_ids": ["c1"], "adjudication": "corroborated",
+        "impact_value": 4, "currency": "accounts", "confidence_band": "medium",
+        "tier": "deep",
+    }).execute()
+    runs_db.update(
+        run_id, ctx.company_id, status="ready", goal_text="raise renewals",
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+
+    swept = sweep_stalled_enrichment()
+    assert swept == 1
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert row["status"] == "ready"          # NEVER failed
+    assert row["prioritisation"]["enrichment_pending"] is False
+    assert row["prioritisation"]["enrichment_outcome"] in (
+        "completed_by_sweep", "gave_up_after_sweep",
+    )
+    # The finding saved before enrichment ever started is untouched.
+    assert len(row["findings"]) == 1
+    assert row["findings"][0]["statement"] == "Renewals stall on the parts flow"
+
+    # A second tick must not re-process the same, now-current, run.
+    assert sweep_stalled_enrichment() == 0
+
+
+def _stalled_run(ctx, *, goal_text, statement):
+    """A `ready` run, findings already saved, `enrichment_pending` left up by
+    a worker that died — the shape `sweep_stalled_enrichment` exists to
+    rescue. Factored out because several tests below each need one."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    run_id = _start(ctx, goal=goal_text).json()["id"]
+    require_client().table("crucible_findings").insert({
+        "run_id": run_id, "company_id": ctx.company_id,
+        "statement": statement, "claim_ids": [], "adjudication": None,
+        "impact_value": None, "currency": "accounts",
+        "confidence_band": "low", "tier": "deep",
+    }).execute()
+    runs_db.update(
+        run_id, ctx.company_id, status="ready", goal_text=goal_text,
+        prioritisation={"enrichment_pending": True},
+        heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    return run_id
+
+
+def test_sweep_stalled_enrichment_caps_recoveries_per_tick(ctx):
+    """One recovery measured 105s of synchronous model calls, inline inside
+    the SAME 5-minute job that also fails abandoned Ask jobs. Several
+    stranded runs in one tick would overrun the interval and skip that other
+    sweep's execution — a different subsystem's reliability degraded by this
+    one's recovery. A cap bounds work per tick; a run left untouched this
+    tick is DEFERRED, not dropped — it is still a candidate next tick,
+    because its `heartbeat_at` was never touched."""
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_ids = [
+        _stalled_run(ctx, goal_text=f"goal {i}", statement=f"finding {i}")
+        for i in range(3)
+    ]
+
+    def pending(rid):
+        return bool(
+            runs_db.get(rid, ctx.company_id)["prioritisation"]
+            .get("enrichment_pending")
+        )
+
+    swept_first_tick = sweep_stalled_enrichment(max_recoveries=2)
+    assert swept_first_tick == 2
+    still_pending = [rid for rid in run_ids if pending(rid)]
+    assert len(still_pending) == 1, "the cap should leave exactly one run untouched"
+
+    # DEFERRED, NOT DROPPED.
+    swept_second_tick = sweep_stalled_enrichment(max_recoveries=2)
+    assert swept_second_tick == 1
+    assert not any(pending(rid) for rid in run_ids)
+
+
+def test_sweep_recovered_enrichment_step_is_not_clobbered_by_a_stale_snapshot(ctx):
+    """`_reenrich_stalled_run` used to write back the `meta` snapshot it read
+    at the TOP of the function — captured BEFORE `_run_enrichment` ran its
+    own `_progress` calls — silently erasing every one of them on the final
+    write. A sweep-recovered run showed `progress.enrichment_step: null`
+    while a normally-completed run kept its last stage name
+    ("deep_recommending"). Re-reading the row fresh right before the final
+    write, like `execute_run`'s own tail already does, closes the gap: both
+    paths now agree."""
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _stalled_run(
+        ctx, goal_text="raise renewals",
+        statement="Renewals stall on the parts flow",
+    )
+
+    assert sweep_stalled_enrichment() == 1
+
+    row = runs_db.get(run_id, ctx.company_id)
+    progress = row["prioritisation"].get("progress") or {}
+    # `_run_enrichment` ALWAYS reaches "deep_recommending" — it is the last
+    # stage it narrates, set unconditionally regardless of whether judging
+    # relevance, the flat pass, or the deep pass individually failed.
+    assert progress.get("enrichment_step") == "deep_recommending", (
+        f"expected the sweep's own progress write to survive; got {progress!r}"
+    )
+
+
+def test_sweep_recovery_publishes_the_actual_deep_recommendation_count(ctx):
+    """The narration recap's "top N written up in full" line reads
+    `progress.deep`. It used to freeze at Stage 10a's screening-tier cap the
+    moment `execute_run` published it, before enrichment (and its citation
+    gate) had even run — a constant, not the count of what was actually
+    written up. `_run_enrichment` now corrects it, in BOTH paths that call
+    it. Offline under pytest, so the deep pass writes nothing — the true,
+    corrected count here is 0, not whatever the tiering cap happened to be.
+    """
+    from app.db import crucible_runs as runs_db
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    run_id = _stalled_run(
+        ctx, goal_text="raise renewals",
+        statement="Renewals stall on the parts flow",
+    )
+    # Simulate the stale pre-enrichment publish `execute_run` makes, so this
+    # test actually exercises the correction rather than starting from a
+    # value that already happens to be right.
+    runs_db.update(
+        run_id, ctx.company_id,
+        prioritisation={
+            "enrichment_pending": True,
+            "progress": {"deep": 5},
+        },
+    )
+
+    assert sweep_stalled_enrichment() == 1
+
+    row = runs_db.get(run_id, ctx.company_id)
+    progress = row["prioritisation"].get("progress") or {}
+    assert progress.get("deep") == 0
+
+
+def test_document_creation_is_refused_while_enrichment_is_pending(ctx):
+    """`POST /{run_id}/document` is idempotent FOREVER — a document made
+    while `enrichment_pending` is true would permanently lack the
+    recommendations and the appendix, certifying itself as complete with no
+    way back. Refused with a 409 instead."""
+    from app.db import crucible_runs as runs_db
+
+    run_id = _start(ctx).json()["id"]
+    runs_db.update(
+        run_id, ctx.company_id, status="ready",
+        prioritisation={"enrichment_pending": True},
+    )
+    resp = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert resp.status_code == 409
+
+    runs_db.update(
+        run_id, ctx.company_id,
+        prioritisation={"enrichment_pending": False},
+    )
+    resp = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert resp.status_code == 200
+
+
+def test_load_findings_pages_past_the_row_cap(ctx, monkeypatch):
+    """The hardening note: `load_findings` used to carry no `.range` at all,
+    so Supabase's default row cap would silently truncate a large run — a
+    known run hit 831 findings, 83% of the way there. Proven here by shrinking
+    the page size rather than inserting a thousand real rows: if the paging
+    loop is missing, this run's own findings get cut off at the fake page
+    size instead of returning all of them."""
+    from app.db import crucible_runs as runs_db
+    from app.db.client import require_client
+
+    monkeypatch.setattr(runs_db, "_FINDINGS_PAGE", 2)
+
+    run_id = _start(ctx).json()["id"]
+    client = require_client()
+    for i in range(5):
+        client.table("crucible_findings").insert({
+            "run_id": run_id, "company_id": ctx.company_id,
+            "statement": f"finding {i}", "claim_ids": [], "tier": "shallow",
+        }).execute()
+        client.table("crucible_ledger").insert({
+            "run_id": run_id, "company_id": ctx.company_id,
+            "label": f"rejected {i}", "reason": "anecdote", "claim_ids": [],
+        }).execute()
+
+    findings, ledger = runs_db.load_findings(run_id, ctx.company_id)
+    assert len(findings) == 5
+    assert len(ledger) == 5
+    # INSERTION ORDER PRESERVED across pages.
+    assert [f["statement"] for f in findings] == [f"finding {i}" for i in range(5)]
+
+
 def test_an_unlocked_definition_is_refused_by_the_db_layer(ctx):
     """Stated where the caller can see it, so a mistake is a readable error
     rather than a Postgres constraint violation at 3am."""
@@ -760,6 +1103,88 @@ def test_approving_the_plan_is_what_starts_the_analysis(ctx):
     assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] in ("ready", "failed")
 
 
+# ─── The chat hand-off bug: a count named in the reader's own sentence ───────
+#
+# Chat dispatches the planner's EXTRACTED goal as `goal_text` ("reduce
+# churn") — right for the plan's own metric resolution below — and drops the
+# reader's literal sentence ("What are three things I can do to reduce
+# churn?") on the floor, so the count it names never reached the
+# recommendation count's arithmetic. `asked_text` is the fix: carried
+# alongside `goal_text`, read ONLY for the count/target, never for the
+# definition.
+
+def test_the_readers_literal_ask_reaches_the_recommendation_count_on_the_folded_path(ctx):
+    """The FOLDED path — a goal naming a metric family resolves straight to
+    the plan and on to the run in one `/approve`, which is the common case
+    and the one dispatched from chat. `_signal` rows with no embeddings still
+    let claims through, so this reaches `_run_enrichment` for real."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    typed = "What are three things I can do to reduce churn?"
+    run_id = _start(ctx, goal="reduce churn", asked_text=typed).json()["id"]
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["asked_text"] == typed
+    assert plan["goal_text"] == "reduce churn"
+
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "you asked for 3, so the top 3 get a full recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_the_readers_literal_ask_reaches_the_recommendation_count_through_confirm(ctx):
+    """The NON-folded path — a goal with nothing to propose stops at its own
+    gate first. `asked_text` has to survive that extra hop too: `/confirm`
+    reads it back off the row, same as `/approve` does on the folded path."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    typed = "What are two initiatives that would help us here?"
+    run_id = _start(ctx, goal=NO_METRIC, asked_text=typed).json()["id"]
+    _confirm(ctx, run_id)
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["asked_text"] == typed
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "you asked for 2, so the top 2 get a full recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_no_literal_ask_is_unaffected_ac4(ctx):
+    """AC4 / backward compatibility: a run started with no `asked_text` — the
+    direct API, and every run created before this field existed — reads the
+    count off `goal_text` exactly as it always did."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal="reduce churn").json()["id"]  # no asked_text
+    assert "asked_text" not in _prioritisation(run_id)["plan"] \
+        or not _prioritisation(run_id)["plan"]["asked_text"]
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    meta = _prioritisation(run_id)
+    assert meta.get("recommendation_basis") == (
+        "no count or target was named in the goal, so the top 2 get a full "
+        "recommendation."
+    ), meta.get("recommendation_basis")
+
+
+def test_the_literal_ask_never_changes_which_metric_convention_is_adopted(ctx):
+    """I9: `asked_text` must never become a back door to inferring the
+    definition from words the extraction itself dropped. A sentence naming a
+    DIFFERENT metric family than the extracted goal must not move the
+    adopted convention — only `goal_text` may."""
+    typed = "What are three things I can do to grow revenue this quarter?"
+    run_id = _start(ctx, goal="reduce churn", asked_text=typed).json()["id"]
+    plan = _prioritisation(run_id)["plan"]
+    # The churn convention, from `goal_text` — not the revenue one `typed`
+    # would propose if the literal sentence were ever read for the metric.
+    assert "LOGO churn" in plan["definition_text"]
+    assert "recognised" not in plan["definition_text"].lower()
+
+
 def test_a_double_approval_cannot_start_two_analyses(ctx):
     """Same race as double-confirm, same fix: the expected status is in the
     WHERE clause, so the second click loses the claim."""
@@ -841,6 +1266,79 @@ def test_excluding_a_numeric_source_flips_the_gap_the_run_states(ctx):
     assert "nothing connected here carries numbers" in becauses, (
         "the reader lost the gap that became true when they dropped analytics"
     )
+
+
+# ─── The framework is chosen from the inventory, not hardcoded ─────────────
+
+
+def test_the_plan_chooses_moscow_when_nothing_carries_a_number(ctx):
+    """The corpus MoSCoW exists for. RICE cannot derive Reach or Impact
+    from three customer_voice signals — measured on a real 1,275-signal
+    corpus, this is exactly the shape that scores 26/26 findings `None`."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "moscow"
+    assert plan["framework_reason"]
+    assert "account_value" not in [q["id"] for q in plan.get("questions") or []]
+
+
+def test_the_plan_chooses_rice_when_a_numeric_source_is_connected(ctx):
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    require_client().table("kg_signal").insert({
+        "id": "sig-9200", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "analytics", "content": "activation rate moved",
+        "properties": {}, "provenance": {"doc": "NW-3002"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "rice"
+    assert "account_value" in [q["id"] for q in plan.get("questions") or []]
+
+
+def test_dropping_the_only_numeric_source_at_approval_downgrades_the_framework(ctx):
+    """Framework selection is RE-DERIVED from the KEPT inventory at approve
+    time, same fix as the gaps re-derivation above and for the same reason: a
+    reader who unticks the one source that made RICE derivable must not keep
+    a RICE table where every row scores `None` — MoSCoW's whole reason
+    for existing, one step later than the bug the gaps fix already covers."""
+    from app.db.client import require_client
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    require_client().table("kg_signal").insert({
+        "id": "sig-9201", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "analytics", "content": "activation rate moved",
+        "properties": {}, "provenance": {"doc": "NW-3003"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }).execute()
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    offered = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert offered["framework"] == "rice", "fixture is wrong: RICE must be chosen BEFORE the exclusion"
+
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": ["analytics"], "hypotheses": []})
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["framework"] == "moscow", (
+        "the run kept ranking by RICE after the reader dropped the only "
+        "source that made it derivable"
+    )
+    assert "account_value" not in [q["id"] for q in plan.get("questions") or []]
 
 
 def test_the_approved_plan_records_what_the_user_decided(ctx):
@@ -1441,7 +1939,7 @@ def test_the_balance_identity_is_exercised_with_real_drops(ctx):
     `max(0, groups - 2 * ungroupable)`, which on a real corpus publishes 414
     where the truth is 622. The only shape that pins the coefficient is the one
     where both terms are non-zero, and it existed in no test. Third round of
-    "the fixture does not contain the condition" on this PR."""
+    "the fixture does not contain the condition"."""
     from app.crucible.pipeline import NARRATED_DROPS
     # Themed and embeddable -> real findings.
     for i in range(6):
@@ -1992,3 +2490,128 @@ def test_approving_unchanged_leaves_the_proposal_exactly_as_shown(ctx):
     shown = _prioritisation(body["id"])["plan"]["definition_text"]
     ctx.client.post(f"/v1/crucible/{body['id']}/approve", json={})
     assert _prioritisation(body["id"])["plan"]["definition_text"] == shown
+
+
+def test_the_report_is_published_before_any_model_is_asked_anything():
+    """THE BUG THAT ACTUALLY BIT, and it is about ORDER rather than errors.
+
+    The relevance gate and the recommendations ran ABOVE `save_findings`, so
+    everything the deterministic pipeline computed in seconds sat unsaved and
+    invisible behind four sequential model calls. On staging a 149-finding run
+    hung thirteen minutes past its last narration line showing nothing, with no
+    error to show — because there was no error. Both layers caught exceptions
+    and neither had any notion of time.
+
+    Asserted on the SOURCE ORDER, because that is the property: findings saved
+    and the run marked ready before either enrichment is reached.
+
+    `judge_relevance`/`build_recommendations` moved out of `execute_run`'s own
+    body into `_run_enrichment` (SHARED with the stalled-enrichment sweep's re-run, so the same
+    decision is never reimplemented twice) — so the check now reads BOTH
+    functions' source, concatenated in the order they actually run: everything
+    `execute_run` does up to the point it calls `_run_enrichment`, THEN
+    everything inside `_run_enrichment` itself, which is exactly the order
+    those statements execute in.
+    """
+    import ast
+    import inspect
+
+    from app.routes import crucible as routes
+
+    combined_src = (
+        inspect.cleandoc(inspect.getsource(routes.execute_run)) + "\n"
+        + inspect.cleandoc(inspect.getsource(routes._run_enrichment))
+    )
+    tree = ast.parse(combined_src)
+    marks: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        src = ast.unparse(node)
+        if "save_findings" in src:
+            marks.append(("save", node.lineno))
+        elif 'status="ready"' in src or "status='ready'" in src:
+            marks.append(("ready", node.lineno))
+        elif "judge_relevance" in src:
+            marks.append(("gate", node.lineno))
+        elif "build_recommendations" in src:
+            marks.append(("recommend", node.lineno))
+
+    order = [name for name, _ in sorted(marks, key=lambda m: m[1])]
+    for required in ("save", "ready", "gate", "recommend"):
+        assert required in order, f"{required} not found in execute_run"
+
+    assert order.index("save") < order.index("gate"), (
+        "the findings must be saved before the relevance gate is asked "
+        f"anything — order was {order}"
+    )
+    assert order.index("ready") < order.index("gate"), (
+        "the run must be READY before the gate runs; the panel polls on it, so "
+        f"enriching first keeps the reader on a spinner — order was {order}"
+    )
+    assert order.index("ready") < order.index("recommend"), (
+        f"the run must be READY before recommendations — order was {order}"
+    )
+
+
+def test_the_run_announces_that_enrichment_is_still_coming():
+    """THE HANDSHAKE, AND THE REGRESSION IT CLOSES.
+
+    Publishing the report before the gate and the recommendations is what stops
+    the reader waiting on four model calls. But `ready` is TERMINAL for the
+    panel's poller, so that same fix stopped the client listening before the
+    results landed — they were written to a row nobody read again. The analysis
+    appeared and the suggestions never did, which is exactly what Apurva saw.
+
+    Asserted on source order: the flag must go UP before `ready`, so there is no
+    window where a panel can see a ready run without knowing more is coming, and
+    DOWN in the write that publishes the results rather than in one of its own.
+
+    `up`/`ready` are still `execute_run`'s own statements. `down` and the merge
+    of `_run_enrichment`'s results (`meta.update(enrichment_meta)`) moved into
+    a tight block at the end of `execute_run`'s tail — the enriched data is
+    read back from `_run_enrichment`'s RETURN VALUE now, not assigned to
+    `meta["set_aside_by_rank"]` directly inside `execute_run`, so `results` is
+    redefined as that merge line rather than a no-longer-existing assignment.
+    """
+    import ast
+    import inspect
+
+    from app.routes import crucible as routes
+
+    src = inspect.cleandoc(inspect.getsource(routes.execute_run))
+    tree = ast.parse(src)
+
+    up = down = ready = results = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            t = ast.unparse(node)
+            flat = t.replace('"', "'")
+            if "enrichment_pending'] = True" in flat:
+                up = node.lineno
+            elif "enrichment_pending'] = False" in flat:
+                down = node.lineno
+        if isinstance(node, ast.Call):
+            # `ast.unparse` normalises quotes, so match on the normalised form
+            # rather than on how the source happens to be written.
+            unparsed = ast.unparse(node).replace('"', "'")
+            if "status='ready'" in unparsed:
+                ready = node.lineno
+            elif unparsed == "meta.update(enrichment_meta)":
+                results = node.lineno
+
+    assert up and down and ready and results, (up, down, ready, results)
+    assert up < ready, "the flag must be raised before the run is marked ready"
+    assert down > ready, "the flag comes down after the enrichment, not before"
+    # The enriched results are merged in, THEN the flag comes down, THEN (a
+    # line or two later) the single `runs_db.update` publishes both together.
+    # Cleared in a separate write would leave a window where the panel stopped
+    # polling and the verdicts are not there yet.
+    assert results < down, (
+        "the enrichment results must be merged into `meta` BEFORE the "
+        "pending flag comes down"
+    )
+    assert down - results <= 3, (
+        f"the flag is cleared {down - results} lines after the results are "
+        "merged in; it must be the same write, not a separate one"
+    )

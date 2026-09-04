@@ -23,6 +23,11 @@ const openPalette = vi.fn()
 const toggleSidebar = vi.fn()
 let sidebarCollapsed = true
 
+// The rail carries a trial countdown that links to billing, so it now uses the
+// router directly — `goTo` takes a screen id and the settings SECTION rides
+// the query string.
+vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }))
+
 vi.mock("../../../context/NavigationContext", () => ({
   useNavigation: () => ({
     currentScreen: "brief",
@@ -173,25 +178,36 @@ describe("Sidebar — Workbench (hidden)", () => {
 // deliberately does NOT appear here: it moved to Settings → Account, and the
 // rail's user row is display-only.
 describe("Sidebar — nav affordances preserved after restyle", () => {
-  // The rail's Search trigger is hidden for now (product call, 2026-07-31). The
-  // palette is NOT removed: AppShell still renders it and owns ⌘K, so this only
-  // asserts the button is absent — never that search stopped working.
-  it("no longer renders the Search trigger (palette + ⌘K are untouched)", () => {
-    render(React.createElement(Sidebar))
-    expect(screen.queryByTestId("palette-trigger")).toBeNull()
-    expect(screen.queryByLabelText("Search (Ctrl+K)")).toBeNull()
-    expect(openPalette).not.toHaveBeenCalled()
+  // The Search trigger is back (2026-08-31) — but in the identity ACTIONS row,
+  // between Feedback and Settings, not in the nav where it used to live. The
+  // order there is load-bearing: sync, feedback, search, settings.
+  it("renders the Search trigger in the actions row, between Feedback and Settings", () => {
+    const { container } = render(React.createElement(Sidebar))
+    const trigger = screen.getByTestId("palette-trigger")
+    expect(trigger).not.toBeNull()
+
+    const ids = Array.from(
+      container.querySelectorAll(".sb-rail-actions button"),
+    ).map((el) => el.getAttribute("data-testid"))
+    expect(ids).toEqual([
+      "sidebar-sync",
+      "sidebar-feedback",
+      "palette-trigger",
+      "sidebar-settings",
+    ])
+
+    fireEvent.click(trigger)
+    expect(openPalette).toHaveBeenCalled()
   })
 
   // Workbench is deliberately absent from this list — it is hidden on a product
   // call (2026-08-07), guarded by the "Workbench (hidden)" suite above.
-  it("renders New chat, Top Insights, Guide, Settings + Feedback", () => {
+  it("renders New chat and Top Insights; Settings and Feedback moved to the identity row", () => {
     render(React.createElement(Sidebar))
     for (const label of [
       "New chat",
       "Top Insights",
-      "Ideation",
-      "Guide",
+      "Backlog",
       "Settings",
       "Feedback",
     ]) {
@@ -213,17 +229,13 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Skills")).toBeNull()
   })
 
-  it("Guide is an anchor to the public /docs site (not a goTo screen), opening safely in a new tab", () => {
-    render(React.createElement(Sidebar))
-    const guide = screen.getByTestId("sidebar-guide-link") as HTMLAnchorElement
-    expect(guide.tagName).toBe("A")
-    expect(guide.getAttribute("href")).toBe("/docs")
-    expect(guide.getAttribute("target")).toBe("_blank")
-    expect(guide.getAttribute("rel")).toBe("noopener noreferrer")
-    // It navigates via the anchor, never through the SPA screen router.
-    fireEvent.click(guide)
-    expect(goTo).not.toHaveBeenCalled()
-    expect(goToNewChat).not.toHaveBeenCalled()
+  it("no longer carries a Guide link — it moved into Settings", () => {
+    // Guide is the public docs site, and Settings is already where the
+    // read-about-it surfaces live. The rail's bottom block is gone entirely:
+    // its three rows are two icons in the identity row plus this move.
+    render(<Sidebar />)
+    expect(screen.queryByTestId("sidebar-guide-link")).toBeNull()
+    expect(screen.queryByLabelText("Guide")).toBeNull()
   })
 
   it("no longer renders a Sources rail item (hidden from the rail; screen + route kept)", () => {
@@ -236,9 +248,9 @@ describe("Sidebar — nav affordances preserved after restyle", () => {
     expect(screen.queryByLabelText("Sign out")).toBeNull()
   })
 
-  it("renders the Ideation rail icon (restored to the nav)", () => {
+  it("renders the Backlog rail icon (named Ideation until 2026-08-27)", () => {
     render(React.createElement(Sidebar))
-    fireEvent.click(screen.getByLabelText("Ideation"))
+    fireEvent.click(screen.getByLabelText("Backlog"))
     expect(goTo).toHaveBeenCalledWith("ideation")
   })
 
@@ -508,11 +520,42 @@ describe("Sidebar — the threads themselves are in the nav", () => {
     }
   })
 
-  it("keeps one row for the rest, and it is the history screen", async () => {
+  it("keeps a way to the rest, and it is the history screen", async () => {
     conversations = seed(25)
     await openExpanded()
     fireEvent.click(screen.getByTestId("sidebar-view-all-chats"))
     expect(goTo).toHaveBeenCalledWith("chats")
+  })
+
+  it("puts that way in the HEADER, not under the list", async () => {
+    // It used to be a row at the bottom, which put the control for "the
+    // threads that are not here" behind a scroll past all twenty that are.
+    // The list is capped at twenty precisely because that is where it stops
+    // being scannable, so the door cannot live at the end of it.
+    conversations = seed(25)
+    const section = await openExpanded()
+    const head = section.querySelector(".sb-chats-head")
+    expect(head).toBeTruthy()
+    expect(head!.querySelector('[data-testid="sidebar-view-all-chats"]')).toBeTruthy()
+    // …and it is not also still under the list.
+    expect(section.querySelectorAll('[data-testid="sidebar-view-all-chats"]'))
+      .toHaveLength(1)
+  })
+
+  it("says where it goes in words, and shows it is a way out", async () => {
+    // BOTH HALVES, and they do different jobs. An arrow alone in this corner
+    // is a guess the reader has to make — expand? collapse? new? — so the
+    // label says where it goes. A line of small grey text is not obviously
+    // clickable, so the outward arrow is what makes it read as a control.
+    conversations = seed(3)
+    await openExpanded()
+    const link = screen.getByTestId("sidebar-view-all-chats")
+    expect(link.textContent?.trim()).toBe("Chat history")
+    // Decorative: the words are the accessible name, so the arrow must not
+    // add a second one for a screen reader to read out.
+    const arrow = link.querySelector("svg")
+    expect(arrow).toBeTruthy()
+    expect(arrow!.getAttribute("aria-hidden")).toBe("true")
   })
 
   it("says nothing at all when there are no threads", async () => {

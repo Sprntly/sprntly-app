@@ -102,6 +102,15 @@ export type WorkspaceCompany = {
   id: string
   slug: string
   display_name: string
+  /** Billing, read straight off the companies row (the `companies(*)` embed
+   *  already returns them). Present so the onboarding payment gate can decide
+   *  where to send someone without a round trip on every sign-in — see
+   *  lib/billingAccess. Null on a company created before billing shipped. */
+  plan: string | null
+  subscription_status: string | null
+  /** While `subscription_status` is "trialing" this IS the trial end — the
+   *  date of the first charge. See lib/billingAccess's trialDaysLeft. */
+  current_period_end: string | null
   /** @deprecated Use `product` — kept for rows not yet migrated to products table */
   product_description: string | null
   product: WorkspaceProduct | null
@@ -115,6 +124,10 @@ export type WorkspaceCompany = {
   competitors: string[]
   tech_stack: string[]
   okrs: string | null
+  /** The company's own website. Distinct from `product.website`: onboarding
+   *  collects both on its first step. Null for every company onboarded before
+   *  2026-09-03, when the one field on that page wrote to the product. */
+  website: string | null
   mission: string | null
   strategy: string | null
   portfolio: string | null
@@ -179,6 +192,12 @@ export type UserProfile = {
   onboarding_step: number
   onboarding_completed_at: string | null
   skipped_fields: string[]
+  /** When this user finished OR skipped the first-run product tour; null until
+   *  they have. Deliberately per-USER and not per-workspace: an invited member
+   *  joins a workspace whose `onboarding_completed_at` was set long before they
+   *  existed, so a workspace-level marker would show the tour to the owner and
+   *  silently skip it for everyone they invite. */
+  product_tour_completed_at: string | null
 }
 
 export const INDUSTRIES = [
@@ -289,103 +308,93 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
 
 /**
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
- * the single source of truth for the onboarding route order. The flow follows
- * the 2026-07-21 screenshot spec (which collapsed team/strategy/decisions into
- * one workspace step and added a personalize step) + the optional api-key step
- * the spec omits but we keep — 10 steps + the define-metrics sub-flow:
+ * the single source of truth for the onboarding route order.
  *
- *   1. company     → CompanyStep         (name* + website + strategy/OKRs;
- *                                         mission, portfolio + planning cycle
- *                                         behind "Add more". Kicks the website
- *                                         analysis in the BACKGROUND, and
- *                                         creates the company row.)
- *   2. import-context → ImportContextStep (hand over the .md your own
- *                                         assistant already wrote — OPTIONAL.
- *                                         Behind `company` since 2026-07-27 so
- *                                         the name + website just entered are
- *                                         written into the prompt it hands out.)
- *   3. connectors  → Connectors          (connect your tools — OPTIONAL,
- *                                         skippable; zero connectors is a
- *                                         supported finish)
- *   4. api-key     → ApiKey              (the workspace's own Claude/Anthropic
- *                                         key — OPTIONAL, skippable; set now so
- *                                         the token-heavy knowledge-graph build
- *                                         runs on it, or later in Settings →
- *                                         Admin)
- *   5. product     → ProductStep         (name* + website + surfaces* +
- *                                         monetization + users; competitors
- *                                         behind a disclosure)
- *   6. workspace   → WorkspaceStep       (workspace name* + what it works on* +
- *                                         team strategy/roadmap; sizing +
- *                                         anything else behind "Add more")
- *   7. metrics     → MetricsStep         (pick up to 5 success metrics* +
- *                                         prioritization framework*)
- *   8. invite      → InviteStep          (teammates: email + job role +
- *                                         permission, bulk paste, CSV import;
- *                                         skippable)
- *   9. review      → ReviewStep          (AI-drafted business context — read,
- *                                         edit, accept)
- *  10. personalize → PersonalizeStep     (what the workspace surfaces + brief
- *                                         delivery cadence/channel/time)
+ * FOUR STEPS SINCE 2026-09-03 (down from ten, briefly five). The flow was
+ * asking someone who had not seen the product yet to write down their OKRs,
+ * their success metrics, their prioritization framework, their team's scope —
+ * and, last to go, who else should join a team of one. Everything cut is still
+ * editable, in Settings, where it can be answered once there is a reason to:
  *
- * After step 9 the UNNUMBERED define-metrics sub-flow (route
- * /onboarding/define-metrics, no progress dots — like the your-name gate)
- * confirms a definition + analytics mapping per picked metric, reviews them,
- * and "generate knowledge graph" COMPLETES onboarding + kicks the first brief.
- * That sub-flow is GATED on a live analytics connection: with none there is
- * nothing to map events against, so PersonalizeStep finishes onboarding
- * directly instead. The gate lives on step 9 (it moved off Review when
- * personalize was inserted between them) — see hasLiveAnalyticsConnection.
+ *   1. company     → CompanyStep    (company name* + website, product name +
+ *                                    website. Kicks the website analysis in the
+ *                                    BACKGROUND and creates the company row —
+ *                                    including its default "Main workspace".)
+ *   2. connectors  → Connectors     (connect your tools — OPTIONAL, skippable;
+ *                                    zero connectors is a supported finish)
+ *   3. review      → ReviewStep     (AI-drafted business context — read, edit,
+ *                                    accept)
+ *   4. personalize → PersonalizeStep (what the workspace surfaces + brief
+ *                                    delivery cadence/channel/time, then
+ *                                    completes onboarding)
  *
- * The api-key step (restored 2026-07-19) is OPTIONAL/skippable for everyone —
- * skip it and the workspace runs on the platform key until a key is added here
- * or in Settings → Admin.
+ * WHAT WAS REMOVED, AND WHERE IT WENT:
  *
- * The step-6 workspace NAME is a company field (companies.team_name), not the
- * workspaces row — renaming an actual workspace still lives in
- * Settings → Workspaces.
+ *   import-context → gone. Uploading the .md your own assistant wrote fed a
+ *                    background extraction that prefilled the very steps this
+ *                    change deletes; with nothing left to prefill it was a
+ *                    detour with no destination.
+ *   api-key        → Settings → Admin (unchanged; it was always optional here)
+ *   product        → Settings → Product & Category. Its name and website moved
+ *                    onto the company step; monetization, users, competitors
+ *                    and surfaces are scraped where the site says so.
+ *   workspace      → a default "Main workspace" is created for every company
+ *                    (see DEFAULT_WORKSPACE_NAME). Someone signing up alone
+ *                    does not yet have a team boundary to describe, and
+ *                    Settings → Workspaces still creates real ones.
+ *   metrics        → Settings → KPI Settings (metrics + definitions); the
+ *                    prioritization framework it also collected is in
+ *                    Settings → Process & Planning.
+ *   invite         → Settings → Team & roles, which already sends the exact
+ *                    same POST /v1/team/invites and now also carries the bulk
+ *                    paste + CSV import this step had (see lib/teamApi.ts) —
+ *                    the "individual joining, may not care about a team yet"
+ *                    reasoning that emptied the workspace step applies here
+ *                    too, and Team & roles was the one destination that could
+ *                    take the capability with it rather than dropping it.
+ *
+ * The unnumbered `your-name` gate and the `define-metrics` sub-flow are
+ * unchanged routes; define-metrics is now only reachable when metrics have been
+ * picked in Settings, because nothing in the flow picks them any more.
  *
  * `onboarding_step` (the integer DB column) is the 1-based INDEX into this
- * array. Use `slugForStep` / `stepForSlug` to convert, and `clampStep` to keep
- * persisted values (including stale ones from older flows) in range.
+ * array. Use `slugForStep` / `stepForSlug` to convert and `clampStep` to keep
+ * persisted values in range.
+ *
+ * MARKERS WRITTEN BY AN OLDER FLOW WERE REBASED IN SQL, not translated here —
+ * migration 20260903160000 for the ten-step → five-step cut, and
+ * 20260903170000 for five → four when the invite step followed. Nothing at
+ * runtime can tell a legacy index from a current one meaning something else, so
+ * a translation applied on read would have to fire for both directions,
+ * permanently resuming everyone a step behind where they left off. The
+ * one-time rebase leaves every stored value meaning what this array says.
  */
+/**
+ * The workspace every company starts with, named and described for them.
+ *
+ * The onboarding step that used to ask for these was removed on 2026-09-03.
+ * Someone signing up alone has no team boundary to describe yet — "what does
+ * your workspace work on" is a question about an org chart they may not have —
+ * and the answer was blocking a flow they were trying to get through. A company
+ * gets one workspace, it owns everything, and Settings → Workspaces still
+ * creates real ones for teams that grow into needing them.
+ *
+ * Applied ONLY while the workspace is still unnamed (`team_name == null`, the
+ * "Default" sentinel `rowToCompany` maps), so a workspace someone has since
+ * renamed is never overwritten by a later pass through the company step.
+ */
+export const DEFAULT_WORKSPACE_NAME = "Main workspace"
+
+export const DEFAULT_WORKSPACE_SCOPE =
+  "Everything the company works on lives here — every brief, PRD, ticket and "
+  + "prototype. You own the whole workflow in this workspace; add more from "
+  + "Settings → Workspaces if you ever want to split it up."
+
 export const ONBOARDING_STEP_SLUGS = [
-  // `company` leads again (2026-07-27), and `import-context` sits directly
-  // behind it. The two swapped because the prompt the import step hands out
-  // OPENS by asking which company the file is about: run it first and the user
-  // retypes their own name and URL into it, run it second and we write both
-  // into the prompt for them from what they just entered — the assistant starts
-  // with the entity locked instead of inferring it, and a wrong company is the
-  // one error that whole document is built to avoid. (It briefly led the flow
-  // 2026-07-25 so it could prefill the company step too; filling that one step
-  // by hand is the price of filling the prompt correctly.)
+  // The name and website collected here are what every later step and the
+  // background website analysis are keyed on, so it still leads.
   "company",
-  // Client feedback 2026-07-22: hand over the context you have already
-  // explained to your own AI assistant instead of retyping it. OPTIONAL —
-  // "Fill it in manually" advances with nothing imported, and every step behind
-  // this one is seeded fill-only, so a late extraction pops into anything the
-  // user hasn't typed.
-  "import-context",
-  // Reordered from the v7 spec (client feedback, 2026-07-22). `connectors` and
-  // `api-key` are pulled up to sit right behind the import + company pair.
-  //
-  // The reason is the import: it kicks a background LLM extraction over the
-  // uploaded file, and connectors + api-key are the two steps in the flow that
-  // extraction cannot prefill (one wires OAuth, the other takes a secret). So
-  // they are the steps worth spending its latency on. Everything the import
-  // DOES prefill — metrics, workspace scope, product — sits behind them, and
-  // opens with the extracted fields already in place.
   "connectors",
-  "api-key",
-  // `product` before `workspace` (2026-07-28). A workspace is defined as the
-  // slice of the product a team owns (see WorkspaceStep), so asking what the
-  // product IS before asking which part of it this team runs is the order the
-  // two steps actually read in — the reverse asked people to scope a thing they
-  // hadn't named yet. They swapped positions wholesale; neither screen changed.
-  "product",
-  "workspace",
-  "metrics",
-  "invite",
   "review",
   "personalize",
 ] as const

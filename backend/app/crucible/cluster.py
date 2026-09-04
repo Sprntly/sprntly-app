@@ -105,12 +105,21 @@ _EXAMPLE_MAX = 200
 
 
 def example_for(text: str) -> str:
-    """One claim in the source's own words, for quoting beside a topic.
+    """One claim, summarised, to sit beside a topic as its example.
 
-    THE SAME CAUSAL CUT as `label_for`, and for the same reason: a quote that
-    explains WHY would be an unsupported causal claim wearing quotation marks
-    (I5). It differs only in how much it may keep, and in what it does when it
-    has to stop.
+    NOT A QUOTATION, AND CALLERS MUST NOT PRESENT IT AS ONE. What arrives here
+    is already an extractor paraphrase — `graph.extractor` validates a
+    verbatim quote against the transcript to gate the write and then discards
+    it by design, so no stored assertion is anyone's actual words. This then
+    cuts that paraphrase at a causal connective and may ellipsise it, leaving
+    text at three removes from anything spoken. Rendering it in quotation
+    marks, which every caller used to do, told the reader a source said words
+    in an order no source used. `pipeline.EXAMPLE_LEAD_IN` and
+    `report._EXAMPLE_LEAD_IN` label it for what it is instead.
+
+    THE SAME CAUSAL CUT as `label_for`, and for the same reason: an example
+    that explains WHY would be an unsupported causal claim (I5). It differs
+    only in how much it may keep, and in what it does when it has to stop.
 
     ENDS WHERE A READER CAN TELL IT ENDED. Preference order: the source's own
     sentence boundary inside the budget, then a word boundary with an ellipsis.
@@ -118,7 +127,7 @@ def example_for(text: str) -> str:
     source, because the reader cannot see that anything was removed.
 
     Returns "" rather than a placeholder for text that reduces to nothing —
-    `label_for`'s "unlabelled" is a fine label and a terrible quotation.
+    `label_for`'s "unlabelled" is a fine label and a terrible example.
     """
     s = _drop_leading_cause(" ".join((text or "").split()))
     low = s.lower()

@@ -86,6 +86,7 @@ from app.skill_router import (
     is_context_dependent_followup,
     is_data_analysis_request,
     is_jira_lookup,
+    is_project_completion_request,
     is_project_content_request,
     is_project_edit_request,
     is_project_tool_request,
@@ -1142,7 +1143,12 @@ def _answer_voc_report(
     # pair, so the two cannot drift", and a pinned `/voice-of-customer-report`
     # returning less feedback than the unpinned question would be exactly that
     # drift — in the direction the explicit request least expects.
-    bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
+    # content_leg=False: same rationale as `call_digest.build_kg_context` — a
+    # pinned voice-of-customer report's answer IS the widened Leg A+B count,
+    # and Leg C must not silently change what that count includes.
+    bundle = _retrieve_kg_bundle(
+        enterprise_id, question, scale=VOC_SCALE, content_leg=False,
+    )
     if not bundle:
         return None
     corpus_text = render_context_section(bundle)
@@ -1513,6 +1519,10 @@ def _m_call_digest(
         enterprise_id=enterprise_id, question=question, history=history,
         constraints=(plan.constraints if plan is not None else None),
         on_phase=on_phase,
+        # DOCUMENT OR ANSWER, decided by the planner rather than re-derived
+        # from the question's words inside the digest. None without a plan,
+        # which is exactly the regex behaviour this dispatch had before.
+        wants_report=getattr(plan, "wants_report", None),
     )
 
 
@@ -1822,6 +1832,102 @@ def _planned_projects_context(
         return ""
 
 
+def _planned_backlog_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """This company's backlog, when the PLAN asked for it.
+
+    Fourth of the own-records thunks (`_planned_library_context`,
+    `_planned_team_context`, `_planned_projects_context`), same shape and same
+    wave. Scoped by COMPANY alone, because `ideation_items` is
+    (`db/ideation.py`) — it takes no workspace and no caller.
+
+    Never raises — `backlog_block` swallows its own read failure — but wrapped
+    anyway, on the rule every gather leg here follows."""
+    if not enterprise_id or not plan.include_backlog:
+        return ""
+    try:
+        from app.backlog_context import backlog_block
+
+        block = backlog_block(enterprise_id)
+        logger.info(
+            "[planner] exec backlog company=%s chars=%d", enterprise_id, len(block)
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a backlog read degrades, never breaks chat
+        logger.exception("[planner] backlog block failed for %s", enterprise_id)
+        return ""
+
+
+def _planned_knowledge_base_context(
+    enterprise_id: Optional[str], plan: "AskPlan"
+) -> str:
+    """What Sprntly has LEARNED for this company, when the PLAN asked for it.
+
+    Fifth of the own-records thunks, same shape and same wave as the four
+    above it. What it answers is the one thing none of them — and none of the
+    retrieval paths — could: not "what do we know about X", which the graph
+    bundle serves, but "what do you know at all", which needs counts.
+
+    Never raises — `knowledge_base_block` swallows every read failure and
+    degrades to zero rather than to a number it invented — but wrapped anyway,
+    on the rule every gather leg here follows: no context block is worth an
+    answer."""
+    if not enterprise_id or not plan.include_knowledge_base:
+        return ""
+    try:
+        from app.knowledge_base_context import knowledge_base_block
+
+        block = knowledge_base_block(enterprise_id)
+        logger.info(
+            "[planner] exec knowledge-base company=%s chars=%d",
+            enterprise_id, len(block),
+        )
+        return block
+    except Exception:  # noqa: BLE001 — a memory read degrades, never breaks chat
+        logger.exception(
+            "[planner] knowledge base block failed for %s", enterprise_id
+        )
+        return ""
+
+
+def _knowledge_base_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the memory itself and
+    about nothing else — the fifth twin of `_library_only_plan`.
+
+    What it excludes is subtler than the other four, because the contamination
+    is not another system's word: it is this system's own content. Asked "what
+    do you know about us" with a retrieved bundle of signals beside the counts,
+    a model answers with the handful of topics it can see rather than with what
+    is actually there — a confident, specific, wrong answer to a question about
+    scale. The counts are the whole grounding, and `include_knowledge_graph`
+    being false is the plan saying so."""
+    return bool(
+        plan is not None
+        and plan.include_knowledge_base
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
+def _backlog_only_plan(plan) -> bool:
+    """THE PLAN'S OWN VERDICT that the question is about the backlog and about
+    nothing else — the fourth twin of `_library_only_plan`.
+
+    The contamination it excludes is the word again, and here it is worse than
+    for projects: every connected tracker HAS a backlog, and a model asked
+    "what's in my backlog" with Jira beside the real list will answer with
+    Jira's — which is the exact failure this block exists to close."""
+    return bool(
+        plan is not None
+        and plan.include_backlog
+        and not plan.include_knowledge_graph
+        and not plan.documents
+        and not plan.sources
+    )
+
+
 def _projects_only_plan(plan) -> bool:
     """THE PLAN'S OWN VERDICT that the question is about projects and about
     nothing else — the third twin of `_library_only_plan`.
@@ -2041,6 +2147,75 @@ def _defers_to_report_pipeline(plan: "Optional[AskPlan]") -> bool:
     )
 
 
+#: The `Plan.action` values that name TICKET-OWNERSHIP/authoring work — an
+#: action the delegate tool loop has no execution path for (it can only
+#: create a NEW delegation row via `handle_delegate_task`; it cannot
+#: assign/update/generate a ticket). `"delegate"` is deliberately OUT of this
+#: set — it is the loop's OWN action. See `ask_planner._ACTIONS`'s
+#: `"delegate"` entry: `chat_intent._plan_to_envelope` rewrites it to
+#: `"answer"` only on the separate client-dispatch envelope path; the RAW
+#: `Plan` reaching this gate via `ask_job_runner.run_ask_job` still carries
+#: `"delegate"` unrewritten, and it must keep claiming the turn.
+_TICKET_ACTION_IDS: frozenset[str] = frozenset({
+    "assign_tickets",
+    "update_ticket",
+    "generate_tickets",
+})
+
+
+def _defers_to_ticket_action(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    ticket-ownership/authoring action — the mirror of
+    `_defers_to_report_pipeline`, one more narrow AND-clause on the sixth
+    branch's own claim rather than a new mechanism.
+
+    Root cause this closes: in a project with NO tickets, "assign the auth
+    ticket to David" is lexically an `is_project_tool_request` match — the
+    regex is object-blind, "assign X to Y" matches identically whether X is
+    a ticket or a person — even though the planner has already correctly
+    classified the turn `assign_tickets` (ticket OWNERSHIP, not a task
+    delegation). The delegate tool loop has no ticket-assignment tool at
+    all, so it fabricated a delegation row ("Handle the auth ticket")
+    instead of declining. When the planner has already named a
+    ticket-family action for this exact turn, the delegate loop's claim is
+    wrong on its face: defer instead, so the turn falls through to the
+    composer, which can answer honestly (e.g. "there's no auth ticket in
+    this project yet") rather than fabricating a hand-off.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan) leaves the
+    sixth branch's admission exactly as the gates above already decide it."""
+    return bool(plan is not None and plan.action in _TICKET_ACTION_IDS)
+
+
+def _admits_on_delegate_plan(plan: "Optional[AskPlan]") -> bool:
+    """True when the ask-planner has already resolved THIS turn to a
+    delegation — the mirror of `_defers_to_ticket_action`, but an ADMIT
+    disjunct on the sixth branch's own gate rather than a DEFER AND-clause.
+
+    Root cause this closes: `skill_router.is_project_tool_request` runs its
+    mention veto FIRST, and that veto's alternation includes "summarize" —
+    so a turn like "can you have David look into X and summarize the
+    differences" is vetoed by the crude regex even though the planner has
+    ALREADY classified it `delegate` (see `ask_planner._ACTIONS`'s
+    `"delegate"` entry; the raw `Plan` reaching this gate via
+    `ask_job_runner.run_ask_job` still carries `"delegate"` unrewritten —
+    the `delegate`->`answer` rewrite is only on the separate
+    client-dispatch-envelope path). Trust the planner's verdict: admit the
+    turn into the tool loop regardless of what the lexical gate/veto decide.
+    Safe to admit unconditionally — `handle_delegate_task` re-resolves the
+    assignee against the roster and declines gracefully for a non-member,
+    and `_defers_to_ticket_action` already subtracts the ticket-ownership
+    actions this gate must NOT claim, so there is no fabrication risk this
+    disjunct could introduce that the loop doesn't already handle.
+
+    A no-op (False) for `plan is None` — every caller that predates the
+    planner threading (and any turn the planner failed to plan, e.g.
+    planner-decide off) leaves the sixth branch's admission exactly as the
+    gates above already decide it."""
+    return bool(plan is not None and plan.action == "delegate")
+
+
 def _plan_entity(plan: "Optional[AskPlan]") -> Optional[str]:
     """The specific subject this question is about, when the planner named one.
 
@@ -2123,21 +2298,35 @@ _PRD_EDIT_CLAIM_WITHOUT_TOOL_CALL_RE = re.compile(
 #: never happened — no brief, no ledger row); detecting it triggers the
 #: forcing pass that makes `delegate_task` actually fire so the confirmation
 #: reflects the REAL outcome. Scoped to a delegation verb + a forward-looking
-#: framing so it doesn't fire on `delegate_task`'s own past-tense confirmation
-#: ("I've asked Ada to …", already grounded by the handler).
+#: framing so it doesn't fire on `delegate_task`'s own past-tense confirmation.
+#:
+#: Backstop (b): also admits the PAST-tense phrasing of the same lie ("I've
+#: asked David to review…", "I told Ada to take this", "handed this off to
+#: Sam", "David is on it") — the shape the tool-less composer path used to
+#: echo verbatim from `_PRIVATE_SCOPE_DELEGATE_GUIDANCE`'s confirmation
+#: template. Admitting past tense here is safe ONLY because the sole caller
+#: (`_try_scoped_tool_answer`) guards this regex on `not delegate_task_
+#: narrations` — i.e. it only ever fires when `delegate_task` provably did
+#: NOT run this turn, so a genuine tool-grounded confirmation (whose text is
+#: overridden by the handler's own return regardless of what it says) can
+#: never trip the forcing pass.
 _DELEGATION_PROMISE_WITHOUT_TOOL_CALL_RE = re.compile(
     r"\b(?:on it|i'?ll|i will|i'?m going to|i am going to|let me|going to|gonna)\b"
     r"[^.!?\n]{0,60}?"
     r"\b(?:delegat\w*|assign\w*|hand(?:ing|\s+off)?|loop\w*\s+\w+\s+in|"
     r"pass(?:ing)?\s+(?:this|that|it)\s+(?:to|off)|route\w*|send\w*\s+(?:this|that|it)\s+to)\b"
     r"|\bdelegating\b|\bassigning\b"
-    r"|\bhanding\s+(?:this|that|it)\b|\blooping\s+\w+\s+in\b|\brouting\s+(?:this|that|it)\b",
+    r"|\bhanding\s+(?:this|that|it)\b|\blooping\s+\w+\s+in\b|\brouting\s+(?:this|that|it)\b"
+    # Past-tense promise-without-call (Backstop b — see docstring above).
+    r"|\bi(?:'ve|\s+have)?\s+(?:already\s+)?(?:asked|told|had)\s+\w+\s+to\s+\w+\b"
+    r"|\bi(?:'ve|\s+have)?\s+(?:already\s+)?hand(?:ed)?\s+(?:this|that|it)\s+(?:off\s+)?to\s+\w+\b"
+    r"|\b\w+\s+is\s+(?:on\s+it|now\s+on\s+it|reviewing\s+it|looking\s+into\s+it)\b",
     re.IGNORECASE,
 )
 
 def _try_scoped_tool_answer(
     *, scope: SurfaceScope, question: str, history: Optional[list[dict]],
-    enterprise_id: str, dataset: str,
+    enterprise_id: str, dataset: str, admitted_completion: bool = False,
 ) -> Optional[dict]:
     """The SIXTH ladder branch (project surfaces) — RELOCATED, not
     reimplemented, from `project_individual_agent.respond_individual` /
@@ -2199,6 +2388,18 @@ def _try_scoped_tool_answer(
     # truthful (it only claims "marked done" when a row was written) and never
     # ends on a bare "noted" the ledger doesn't back.
     complete_task_narrations: list[str] = []
+    # Captures every `get_task_ledger` dispatch's real return, in call order —
+    # the READ-tool sibling of the terminal-write overrides above. A read
+    # tool's result is already grounded truth (straight off the DB), but
+    # `run_tool_loop` still grants the model a free-text final turn, which is
+    # free to summarize/reshape/fabricate ledger rows instead of relaying what
+    # it actually read (observed live: a fabricated ledger table reproduced
+    # from an earlier, ungrounded "I've asked <name>" claim in the
+    # transcript). Mirrors `edit_prd_narrations`: when `get_task_ledger` was
+    # called this turn, the LAST captured real return OVERRIDES the model's
+    # free text, so a rendered ledger table can only ever reflect the tool's
+    # actual return, never conversation context.
+    task_ledger_narrations: list[str] = []
 
     def _dispatch(name: str, tool_input: dict) -> str:
         from app.project_group_context import dispatch_read_tool
@@ -2208,6 +2409,8 @@ def _try_scoped_tool_answer(
             project_id=scope.project_id, dataset=dataset, company_id=enterprise_id,
         )
         if read is not None:
+            if name == "get_task_ledger":
+                task_ledger_narrations.append(read)
             return read
         if name == "edit_prd" and scope.edit_prd_handler is not None:
             # In-band PRD edit → applies DIRECTLY through the shared editor
@@ -2304,6 +2507,34 @@ def _try_scoped_tool_answer(
                 dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
                 meta_out=meta, force_tool="delegate_task",
             )
+        # Completion analogue of the delegate forcing pass above. The turn was
+        # DETERMINISTICALLY admitted as a first-person completion claim
+        # (`admitted_completion`, gated on `is_project_completion_request` at
+        # the caller), yet the model finished the normal loop WITHOUT ever
+        # calling `complete_task` (no captured narration) — the same "confirms
+        # without doing" failure the delegate guard closes: the model says
+        # "noted, I'll mark that done" and the ledger never moves. Re-run the
+        # loop forcing the tool so it actually writes; `handle_complete_task`'s
+        # authoritative return then OVERRIDES the model's free text below (it
+        # no-ops gracefully if the speaker has no open task, so a false-positive
+        # admission is absorbed). `elif` on the delegate guard keeps it at most
+        # ONE forcing pass per turn; the `not delegate_task_narrations` guard
+        # ensures we never force a completion when a delegate write already
+        # fired this turn (the override block prioritises delegate over this).
+        elif (
+            admitted_completion
+            and not complete_task_narrations
+            and not delegate_task_narrations
+        ):
+            logger.warning(
+                "completion_admitted_without_tool_call project_id=%s — forcing complete_task",
+                scope.project_id,
+            )
+            run_tool_loop(
+                system=system, user=user, tools=list(scope.extra_tools),
+                dispatch=_dispatch, model=DEFAULT_MODEL, max_iters=3,
+                meta_out=meta, force_tool="complete_task",
+            )
     except Exception:  # noqa: BLE001 — AD-P7 degrade policy, split by surface (see docstring)
         logger.warning(
             "scoped_tool_reply_failed project_id=%s surface=%s",
@@ -2347,11 +2578,20 @@ def _try_scoped_tool_answer(
         # `edit_prd` call's actual result. Last call wins — mirrors "the
         # PRD is now in whatever state the last edit call left it in".
         text = edit_prd_narrations[-1]
+    elif task_ledger_narrations:
+        # Ground the ledger table in the tool's real return — the read-tool
+        # sibling of the write-tool overrides above. Last call wins, same
+        # precedent: a model that calls `get_task_ledger` more than once this
+        # turn (e.g. once, then again after a delegate/complete call earlier
+        # in the SAME loop failed to reach this branch) is shown the most
+        # recent real read.
+        text = task_ledger_narrations[-1]
 
     # Empty-text guard (the primary empty-loop fix). Reached only when NO
-    # terminal-tool narration override fired above (a delegate/complete/edit_prd
-    # turn always sets `text` to its handler's non-empty confirmation, so those
-    # legit-but-short answers never land here) — i.e. this is a genuine
+    # terminal-tool narration override fired above (a delegate/complete/
+    # edit_prd/get_task_ledger turn always sets `text` to its handler's
+    # non-empty confirmation, so those legit-but-short answers never land
+    # here) — i.e. this is a genuine
     # no-answer: `run_tool_loop` burned all its iterations on tool calls and
     # returned "" (or whitespace). Surfacing that verbatim stores `{"answer":
     # ""}` and the client renders a blank bubble. Treat it EXACTLY like the
@@ -2405,33 +2645,44 @@ def _fold_project_context(
     scope: Optional[SurfaceScope], history: Optional[list[dict]],
 ) -> Optional[list[dict]]:
     """DECLINE/fall-through seam (AC5b/AC5c): when `scope` is a project
-    surface, fold its `system_addendum` + `context_payload` into `history`
-    as one synthetic context row, reusing the exact technique `routes/
-    ask.py:347` already uses for the private surface's own breadth block.
+    surface, fold its addendum + `context_payload` into `history` as one
+    synthetic context row, reusing the exact technique `routes/ask.py:347`
+    already uses for the private surface's own breadth block.
+
+    The addendum folded here is `scope.composer_fold_addendum` — a SEPARATE
+    string from `scope.system_addendum` (the tool loop's own system prompt) —
+    falling back to `system_addendum` only when `composer_fold_addendum` is
+    empty (pre-existing callers that never set the new field). This turn has
+    NO tools available (the sixth-branch gate declined it), so it must never
+    receive tool-specific guidance — e.g. the delegate_task confirmation
+    template — that would read as a claim the model can back up. See
+    `SurfaceScope.composer_fold_addendum` and `_PRIVATE_SCOPE_COMPOSER_FOLD`.
 
     LOAD-BEARING for the private surface, which has no other path for its
     roster/ledger/memory block to reach the composer once the sixth-branch
     gate declines a turn.
 
     Also where the accept-with-nudge instruction reaches a plain-Q&A turn:
-    `scope.system_addendum` carries the nudge sentence (see
-    `_PRIVATE_SCOPE_SYSTEM`), so a delegation-phrased ask the sixth-branch
+    the folded addendum carries the nudge sentence (see
+    `PROJECT_TOOL_NUDGE`), so a delegation-phrased ask the sixth-branch
     gate MISSED still tells the user to phrase it explicitly rather than
     silently doing nothing.
 
     A no-op (returns `history` unchanged) for `scope is None`/main, or a
-    project scope whose `system_addendum`/`context_payload` are both empty.
+    project scope whose addendum/`context_payload` are both empty.
 
     `context_payload`, when non-empty, is prepended with `PROJECT_FACTS_
     AUTHORITATIVE_PREAMBLE` — the "answer from THIS block, don't deflect"
     header — so the composer fall-through frames the project's
     ledger/roster/memory facts authoritatively instead of folding them as
     a passive, deflectable "Context:" row. Join order is UNCHANGED:
-    `system_addendum` first, `context_payload` second."""
+    addendum first, `context_payload` second."""
     if scope is None or scope.surface == Surface.main:
         return history
     parts = []
-    if scope.system_addendum:
+    if scope.composer_fold_addendum:
+        parts.append(scope.composer_fold_addendum)
+    elif scope.system_addendum:
         parts.append(scope.system_addendum)
     if scope.context_payload:
         parts.append(f"{PROJECT_FACTS_AUTHORITATIVE_PREAMBLE}\n{scope.context_payload}")
@@ -2561,6 +2812,18 @@ def answer(
             # never fires on a non-member destination — see
             # `_is_bare_send_to_roster_member`'s docstring.
             or _is_bare_send_to_roster_member(routing_text, scope)
+            # A first-person completion CLAIM ("I'm done with the pricing
+            # one-pager", "finished that", "sent it over") — the assignee (or
+            # the task-ledger tick, which submits the same shape) reporting
+            # THEIR OWN delegated task done. Admitting it here is a DETERMINISTIC
+            # regex decision (`is_project_completion_request` reuses the same
+            # interrogative/mention veto so "is the review done?" never trips
+            # it), routing the turn to the `complete_task` tool below instead of
+            # leaving it to the flaky ask-planner (which misrouted it to the
+            # backlog agent). `handle_complete_task` no-ops gracefully on a
+            # false positive (speaker has no open task), so this is safe to
+            # admit greedily.
+            or is_project_completion_request(routing_text, history)
             # An edit-intent turn must REACH the tool loop so the model can call
             # the in-band `edit_prd` tool. GUARDED on `edit_prd_handler` — only
             # the GROUP surface registers one, so this disjunct is always False
@@ -2570,6 +2833,13 @@ def answer(
                 scope.edit_prd_handler is not None
                 and is_project_edit_request(routing_text, history)
             )
+            # The planner has ALREADY classified this exact turn `delegate`
+            # ("can you have David look into X and summarize the
+            # differences") — trust that verdict even when `is_project_tool_
+            # request`'s own mention veto (its alternation includes
+            # "summarize") would otherwise block it from ever reaching here.
+            # See `_admits_on_delegate_plan`'s docstring.
+            or _admits_on_delegate_plan(plan)
         )
         # Yield to the connector interceptor path when the turn NAMES a live
         # source: `_skip_project_connectors` returns True only when NO source is
@@ -2589,10 +2859,48 @@ def answer(
         # caller (`ask_job_runner.run_ask_job`) before `answer()` ever runs,
         # so this reads it rather than reordering anything below.
         and not _defers_to_report_pipeline(plan)
+        # Yield to the composer when the planner has ALREADY resolved this
+        # turn to a ticket-ownership/authoring action ("assign the auth
+        # ticket to David" in a ticketless project): `is_project_tool_
+        # request`'s "assign/send X to Y" regex is object-blind between a
+        # ticket and a person, but the delegate loop has no ticket-
+        # assignment tool and would fabricate a delegation row rather than
+        # decline. `"delegate"` itself is excluded from the deferred set —
+        # see `_defers_to_ticket_action`'s docstring.
+        #
+        # EXEMPTION: an admitted first-person completion CLAIM overrides this
+        # deferral. Live-verified failure: the ask-planner classifies realistic
+        # completion phrasings ("I'm done with the security review", the ledger
+        # tick's "I've finished this task: '…'. Please mark it complete.") as
+        # `action=update_ticket` at ~0.82–0.85 confidence, so
+        # `_defers_to_ticket_action(plan)` was vetoing the completion branch and
+        # `complete_task` never fired — completion then fell to the
+        # non-deterministic background classifier, which confirmed "done" while
+        # the ledger stayed open. A completion claim must reach `complete_task`
+        # deterministically even when the planner mislabels it `update_ticket`.
+        # Safe: (1) `is_project_completion_request` is tightly scoped — first-
+        # person/declarative claims only, yes/no questions vetoed — so a genuine
+        # ticket-edit ("change the acceptance criteria on the export ticket") is
+        # NOT a completion and still defers; (2) `handle_complete_task` no-ops/
+        # disambiguates when there is no single matching open task; (3) no
+        # double-handling — the ticket-update EXECUTOR (`is_ticket_update`
+        # interceptor, regex-gated on the message's words) never matches a
+        # completion phrasing AND sits far below this branch, which returns
+        # first when it claims the turn.
+        and (
+            not _defers_to_ticket_action(plan)
+            or is_project_completion_request(routing_text, history)
+        )
     ):
         scoped_result = _try_scoped_tool_answer(
             scope=scope, question=question, history=history,
             enterprise_id=enterprise_id, dataset=dataset,
+            # Deterministic completion admission (same predicate as the ladder
+            # disjunct above) → the tool-loop forcing pass insists on
+            # `complete_task` if the model narrates a completion without calling
+            # it. Recomputed here (cheap regex) rather than plumbed as a flag
+            # through the big `if` so the gate's disjuncts stay independent.
+            admitted_completion=is_project_completion_request(routing_text, history),
         )
         if scoped_result is not None:
             return scoped_result
@@ -3341,6 +3649,8 @@ def answer(
         library_context_fn = None
         team_context_fn = None
         projects_context_fn = None
+        backlog_context_fn = None
+        knowledge_base_context_fn = None
         # ── LIVE READS STOOD DOWN, NOT REMOVED (owner decision 2026-08-11) ──
         # With the connector refresh on a 10-minute cadence, the knowledge
         # graph already holds near-live connector data — so the per-question
@@ -3441,19 +3751,35 @@ def answer(
             projects_context_fn = lambda: _planned_projects_context(  # noqa: E731
                 enterprise_id, plan
             )
+            # And the backlog, on both branches for the same reason: "is this
+            # already on the backlog" is asked from beside a PRD constantly.
+            backlog_context_fn = lambda: _planned_backlog_context(  # noqa: E731
+                enterprise_id, plan
+            )
+            # And what Sprntly has learned, on both branches too: "what do you
+            # actually know about us" is asked from beside a PRD as readily as
+            # from the main chat, and it is a question about the memory as a
+            # whole rather than about the PRD on screen.
+            knowledge_base_context_fn = lambda: _planned_knowledge_base_context(  # noqa: E731
+                enterprise_id, plan
+            )
         return compose_ask_answer(
             dataset, question, enterprise_id=enterprise_id, prd_context=prd_context,
             history=history, live_context_fn=live_context_fn,
             library_context_fn=library_context_fn,
             team_context_fn=team_context_fn,
             projects_context_fn=projects_context_fn,
-            # One flag, three blocks: each is an exhaustive read of Sprntly's
+            backlog_context_fn=backlog_context_fn,
+            knowledge_base_context_fn=knowledge_base_context_fn,
+            # One flag, five blocks: each is an exhaustive read of Sprntly's
             # own records, and a question about any of them is narrowed away
             # from the corpus/KG/document index identically.
             library_only=(
                 _library_only_plan(plan)
                 or _team_only_plan(plan)
                 or _projects_only_plan(plan)
+                or _backlog_only_plan(plan)
+                or _knowledge_base_only_plan(plan)
             ),
             on_delta=on_delta,
             # Real pipeline-leg phases on the COMMON direct-answer path — the
@@ -3646,6 +3972,11 @@ def answer(
                 # Narrates its gather→synthesis legs (competitive_intel parity);
                 # David's most-used report and the reported blank-wait path.
                 on_phase=on_phase,
+                # And WHERE the answer goes — the plan's own verdict, for the
+                # same reason its window travels with it: a decision the
+                # planner already made from the whole sentence beats one the
+                # digest re-derives from its surface words.
+                wants_report=getattr(plan, "wants_report", None),
             )
         # DELIBERATELY NOT STREAMED, for the same reason as
         # `call_digest._answer_query` (see the comment at its call site).

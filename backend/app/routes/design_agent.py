@@ -91,6 +91,7 @@ from app.db.prototypes import (
     verify_share_passcode,
     clear_pending_question,
 )
+from app.billing import enforce
 from app.db.prototype_comments import list_comments  # iterate grounding reads open threads
 from app.db.prototype_screenshots import insert_screenshots, resolve_screenshot_keys
 from app.db.usage_events import finalize_usage_event, start_usage_event
@@ -637,6 +638,12 @@ async def generate(
     if existing:
         _log_kickoff("dedupe")
         return GenerateResponse(prototype_id=existing["id"], status=existing["status"])
+
+    # Billable action. Charged AFTER the dedupe above (a reused prototype is
+    # free) and after every rejection gate, so nothing that 4xx'd is billed.
+    # The most expensive action in the table: a real vite build in a
+    # subprocess on top of the generation itself.
+    enforce.bill(workspace_id, "prototype", actor_user_id=company.user_id)
 
     # Connected-repo identifier the user chose as the existing codebase to match.
     # No fetch, no clone, no agent tool. The repo full_name remains request-only
@@ -3750,6 +3757,11 @@ async def post_iterate(
         )
     except QueueFullError:
         raise HTTPException(status_code=429, detail={"error": "queue_full", "max": 5})
+
+    # Billable action. Charged only once the iteration actually holds a queue
+    # slot — after the ownership/lock/ready gates, after the rate limiter, and
+    # after the queue-full 429 — so nothing that was refused is ever billed.
+    enforce.bill(workspace_id, "prototype_iterate", actor_user_id=company.user_id)
 
     logger.info("prototype_iterate_started prototype_id=%s", prototype_id)
     task = asyncio.create_task(

@@ -66,12 +66,19 @@ def test_every_settings_pane_is_on_the_map():
     if not SETTINGS_LAYOUT.exists():  # pragma: no cover
         pytest.skip(f"{SETTINGS_LAYOUT} not present")
     src = SETTINGS_LAYOUT.read_text(encoding="utf-8")
-    ids = set(
-        re.findall(
-            r'\{\s*id:\s*"([\w-]+)"\s*,\s*label:\s*"[^"]*"\s*,\s*available:\s*true',
+    # A row carrying an `href` is a door OUT of Settings, not a pane: today
+    # that is Guide, which opens the public docs site. It has no `?section=`
+    # to link to, so it is named in NAV (with where it now lives) rather than
+    # in SETTINGS, and demanding a pane entry for it would be demanding a link
+    # that lands on Profile.
+    ids = {
+        sid
+        for sid, tail in re.findall(
+            r'\{\s*id:\s*"([\w-]+)"\s*,\s*label:\s*"[^"]*"\s*,\s*available:\s*true([^}]*)\}',
             src,
         )
-    )
+        if "href:" not in tail
+    }
     assert ids, "SettingsLayout.tsx parsed to zero panes — the file's shape changed"
     mapped = {sid for _, sid, _ in app_map.SETTINGS}
     missing = sorted(ids - mapped)

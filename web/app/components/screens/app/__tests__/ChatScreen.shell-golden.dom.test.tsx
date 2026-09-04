@@ -29,6 +29,14 @@
 // equality is what still makes the C1→C3 argument above hold for everything
 // the migration covered.
 //
+// BASELINE MOVED A THIRD TIME (2026-08-31), for the first-run product tour.
+// The composer root carries one new attribute, `data-tour="composer"`, so the
+// tour can spotlight the actual input rather than describe it. That is the
+// whole diff: 21 snapshots, one attribute each, no node added, moved or
+// reordered. Verified by the check below — `sed 's/ data-tour="composer"//g'`
+// over the new goldens comes back byte-identical to the old ones — so the
+// C1→C3 extraction argument above still holds.
+//
 // A future diff here that is NOT a named, intended feature is still the bug
 // this suite exists to catch. The check to run before accepting one: strip the
 // nodes the feature added and confirm the rest is unchanged.

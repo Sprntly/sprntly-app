@@ -1,5 +1,8 @@
 node_modules
 .next
+# Verification builds get their own dir so they cannot clobber a running
+# dev server's .next — see NEXT_DIST_DIR in next.config.ts.
+.next-verify
 out
 .DS_Store
 *.tsbuildinfo

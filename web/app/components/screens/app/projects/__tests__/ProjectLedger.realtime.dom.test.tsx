@@ -2,13 +2,16 @@
 //
 // Ledger liveness — the ledger surfaces (Task-ledger modal, rail counts, the
 // assignee's inline brief-turn affordance) going live on the caller's own
-// per-user `delegation.event` broadcast. `useRealtimeChannel` itself is
-// mocked (its subscribe/reconnect/degrade lifecycle is covered by
+// per-user channel. `useRealtimeChannel` itself is mocked (its
+// subscribe/reconnect/degrade lifecycle is covered by
 // useRealtimeChannel.dom.test.tsx) — this file asserts the CONSUMER wiring:
-// one per-user channel per surface (never the group channel), a
-// `delegation.event` refetching counts + re-reading the open modal + patching
-// the brief-turn status, the reconnect reconcile, the degraded fallback, and
-// non-breakage of `brief.delivered` + the send path.
+// one per-user channel per surface (never the group channel), BOTH
+// `delegation.event` AND `brief.delivered` refetching counts + re-reading the
+// open modal (the latter is the only live signal for a lifecycle notice with
+// no paired status change — a ping, a blocked/can't-do route-back, an
+// escalation), a `delegation.event` also patching the brief-turn status, the
+// reconnect reconcile, the degraded fallback, and non-breakage of the send
+// path.
 import * as React from "react"
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
@@ -260,22 +263,75 @@ beforeEach(() => {
 })
 afterEach(() => cleanup())
 
+// ── AC-4: the OPEN Task-ledger modal re-reads its flat table on a live event ──
+// The original `test_modal_updates_on_delegation_event` asserted the (now
+// removed) Task-ledger RAIL CARD. Post-redesign (commit 8f217ad3c) the modal is
+// a flat table (Task / Assigned to / Created by, owned-only tick-to-complete)
+// and carries the live-reconcile itself: a `delegation.event` on the caller's
+// per-user channel bumps `ledgerVersion`, which the open modal consumes to
+// re-read `projectsApi.ledger`. This reproduces that intent against the NEW
+// table DOM — open the modal, fire the event, watch the row flip to done.
+describe("Task-ledger modal — live reconcile against the flat table (AC-4)", () => {
+  it("test_modal_table_rereads_on_delegation_event: a per-user delegation.event re-reads the open modal's table", async () => {
+    // One OPEN owned row to start (assigned_to_me), delivered so it is routable.
+    assignedRows = [row({ delegation_id: 5, task_summary: "Draft the pricing page", status: "assigned", bucket: "open" })]
+    waitingRows = []
+    await renderDetailReady()
+
+    // Open the Task-ledger modal from the top bar.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("topbar-tasks"))
+      await Promise.resolve()
+    })
+    await waitFor(() => expect(screen.getByTestId("ledger-row-5")).toBeTruthy())
+    // Open, so the tick checkbox is unchecked and the summary shows 1 open.
+    expect(screen.getByTestId("ledger-check-5").getAttribute("aria-checked")).toBe("false")
+    expect(screen.getByTestId("ledger-open-summary").textContent).toContain("1 open")
+
+    // The task completes server-side; a live delegation.event lands on the
+    // caller's per-user channel → ledgerVersion bumps → the modal re-reads.
+    assignedRows = [row({ delegation_id: 5, task_summary: "Draft the pricing page", status: "completed", bucket: "done" })]
+    await act(async () => {
+      perUserHandlers().onEvent("delegation.event", { delegation_id: 5, status: "completed" })
+      await Promise.resolve()
+    })
+
+    // The row now reflects the done state (checked) and the open count drops.
+    await waitFor(() => expect(screen.getByTestId("ledger-check-5").getAttribute("aria-checked")).toBe("true"))
+    await waitFor(() => expect(screen.getByTestId("ledger-open-summary").textContent).toContain("0 open"))
+  })
+})
+
 // ── AC-5: rail counts go live ──
-// The `test_modal_updates_on_delegation_event` (AC-4) and
-// `test_rail_counts_update_on_delegation_event` (AC-5) cases that lived here
-// asserted the Task-ledger rail card (`task-ledger-view-all` /
+// The `test_rail_counts_update_on_delegation_event` (AC-5) case that also lived
+// here asserted the Task-ledger rail card (`task-ledger-view-all` /
 // `task-ledger-counts`) — that card is deliberately UN-MOUNTED from
-// ProjectDetailScreen for now (see the comment there), so the DOM they
+// ProjectDetailScreen for now (see the comment there), so the DOM it
 // asserted against no longer exists. Deleted rather than left red; the
 // wiring underneath (`ledgerCounts`/`ledgerRows`/`ledgerVersion`) is still
-// exercised indirectly by the reconnect-reconcile and degradation tests
-// below, which don't depend on the rail card's own markup.
+// exercised by the modal-reconcile case above plus the reconnect-reconcile and
+// degradation tests below, which don't depend on the rail card's own markup.
 describe("rail counts — live update (AC-5)", () => {
-  it("ignores unrelated events (brief.delivered does not refetch counts)", async () => {
+  it("brief.delivered ALSO refetches counts — it is the only live signal for a status-less notice", async () => {
+    // A ping, a blocked/can't-do route-back, and an escalation notice all
+    // post a turn via `brief.delivered` with NO paired `delegation.event`
+    // (no derived status actually changed) — so if this event were still
+    // ignored, those notices would never move the rail card / an open
+    // Task-ledger modal until the next poll tick or reconnect.
     await renderDetailReady()
     const callsAfterMount = ledgerCountsMock.mock.calls.length
     await act(async () => {
       perUserHandlers().onEvent("brief.delivered", { assignee_user_id: "u1" })
+      await Promise.resolve()
+    })
+    expect(ledgerCountsMock.mock.calls.length).toBe(callsAfterMount + 1)
+  })
+
+  it("ignores events outside the known set", async () => {
+    await renderDetailReady()
+    const callsAfterMount = ledgerCountsMock.mock.calls.length
+    await act(async () => {
+      perUserHandlers().onEvent("mention.received", { assignee_user_id: "u1" })
       await Promise.resolve()
     })
     expect(ledgerCountsMock.mock.calls.length).toBe(callsAfterMount)

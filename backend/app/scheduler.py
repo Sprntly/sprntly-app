@@ -47,6 +47,7 @@ from app.brief_schedule import (
     should_run_brief,
 )
 from app.config import settings
+from app.billing import plans
 from app.db.companies import list_companies
 from app.entitlements import top_insights_enabled
 from app.kg_ingest.auto_sync import (
@@ -75,6 +76,63 @@ _scheduler: AsyncIOScheduler | None = None
 _last_brief_generation: dict[str, datetime] = {}
 _last_brief_delivery: dict[str, datetime] = {}
 
+
+
+def _billing_allows_scheduled_work(company: dict) -> bool:
+    """Whether the scheduler should spend OUR money on this tenant tonight.
+
+    Scheduled work — connector refreshes, KG synthesis, brief generation — is
+    not charged to anyone's credit balance. It is our Anthropic bill, run on a
+    timer, for every company in the table. So a company whose subscription has
+    lapsed keeps costing us money indefinitely while being unable to use any of
+    what that money produces.
+
+    Deliberately keyed on `settings.billing_enforced` rather than on
+    `subscription_lock_mode`: the lock mode decides what a LAPSED CUSTOMER SEES,
+    which is a product question, while this is a question about our own spend.
+    With enforcement off — CI, local dev, and any deploy that has not turned
+    billing on — every company is worked as before.
+
+    `past_due` still runs, for the same reason it still grants access: Stripe is
+    working the card and the customer has not gone anywhere.
+    """
+    if not (plans.BILLING_ENABLED and settings.billing_enforced):
+        return True
+    # ABSENT IS NOT LAPSED. `list_companies` selects these best-effort, and its
+    # fallback select drops them entirely — so a schema quirk or an older test
+    # client would otherwise read as "no subscription" for EVERY tenant and
+    # silently stop the whole scheduler. Fail open: a missing signal means we
+    # do not know, and not knowing must not cancel everyone's briefs.
+    if "subscription_status" not in company and "plan" not in company:
+        return True
+    allowed = plans.subscription_grants_access(
+        company.get("plan"), company.get("subscription_status")
+    )
+    if not allowed:
+        logger.info(
+            "scheduler: skipping company=%s plan=%s status=%s — subscription inactive",
+            company.get("slug") or company.get("id"),
+            company.get("plan"),
+            company.get("subscription_status"),
+        )
+    return allowed
+
+
+def _billable(companies: list[dict] | None) -> list[dict]:
+    """Drop the tenants we should not be spending on. One filter, four callers.
+
+    TAKES THE ROWS, rather than fetching them. Fetching here looked tidier and
+    was wrong: this module reaches `list_companies` two different ways — a
+    module-level import at the top of the file, and a function-local import
+    inside the synthesis cycle — and the suite patches BOTH targets depending
+    on the test. Centralising the fetch picked one of them and silently broke
+    every test that patches the other, in a scheduler where "returned nothing"
+    is a log line rather than an error.
+
+    So each loop keeps whatever it already resolved, and only the decision is
+    shared. Slightly less tidy, and it cannot go quietly wrong.
+    """
+    return [c for c in (companies or []) if _billing_allows_scheduled_work(c)]
 
 def _company_workspace_slugs(company_id: str | None, company_slug: str) -> list[tuple[str, str]]:
     """(ledger_key, dataset_slug) pairs to generate briefs for — one per
@@ -129,7 +187,7 @@ def _refresh_all_company_connectors() -> None:
     # exhausted LLM credit balance and an expired Zoom refresh token.
     logger.info("refresh-connectors: cycle START")
     try:
-        companies = list_companies() or []
+        companies = _billable(list_companies())
     except Exception:
         logger.exception("refresh-connectors: failed to list companies")
         return
@@ -256,7 +314,7 @@ async def _run_synthesis_for_all_companies() -> None:
     from app.synthesis_brief import generate_brief_for
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:
         logger.error("Scheduler: failed to list companies: %s", exc)
         return
@@ -349,7 +407,7 @@ async def _run_brief_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Top Insights tick: failed to list companies: %s", exc)
         return
@@ -577,7 +635,7 @@ async def _run_monthly_reports_tick(now: datetime | None = None) -> None:
     now = now or datetime.now(timezone.utc)
 
     try:
-        companies = list_companies()
+        companies = _billable(list_companies())
     except Exception as exc:  # noqa: BLE001
         logger.error("Monthly reports tick: failed to list companies: %s", exc)
         return
@@ -711,6 +769,75 @@ async def _run_task_followup_cycle() -> None:
         logger.info("Scheduler: task followup cycle → %s", summary)
     except Exception as exc:  # noqa: BLE001 — never let one cycle kill the job
         logger.error("Scheduler: task followup cycle failed: %s", exc)
+
+
+async def _run_trial_ending_cycle() -> None:
+    """Warn every company whose trial ends soon.
+
+    THE ONLY EMAIL NOTHING PUSHES AT US. Every other one rides a webhook or an
+    action; "your trial ends in two days" is a date arriving, so somebody has
+    to look.
+
+    Two days, not Stripe's seven. Stripe's own trial reminder is hard-wired to
+    seven days before the end and `plans.TRIAL_DAYS` is seven — so it would
+    land at signup, telling a customer who has just arrived that their trial is
+    ending. Turn Stripe's off and let this one do the job.
+
+    Idempotent by the send log, not by the tick: this runs hourly, and every
+    tick inside the window would otherwise mail the same person again.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from app.billing import emails as billing_emails
+    from app.db.companies import list_companies
+
+    # PAYMENTS HIDDEN: say nothing. Unlike the gates, this job keys on the
+    # company row alone, so a tenant left `trialing` in the database from
+    # before the switch would otherwise be mailed a countdown to a paywall the
+    # app no longer shows, with no screen to act on it.
+    if not plans.BILLING_ENABLED:
+        return
+
+    try:
+        companies = list_companies() or []
+    except Exception:
+        logger.exception("trial-ending: failed to list companies")
+        return
+
+    now = datetime.now(timezone.utc)
+    warned = 0
+    for company in companies:
+        if (company.get("subscription_status") or "") != "trialing":
+            continue
+        end_raw = company.get("current_period_end")
+        sub_id = company.get("stripe_subscription_id") or ""
+        if not end_raw or not sub_id:
+            continue
+        try:
+            ends = datetime.fromisoformat(str(end_raw).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+
+        remaining = ends - now
+        # Inside the window and not already past. The lower bound matters: a
+        # trial that ended an hour ago should not be warned about, and a
+        # negative "ends in -1 days" is worse than silence.
+        if not timedelta(0) < remaining <= timedelta(days=billing_emails.TRIAL_ENDING_LEAD_DAYS):
+            continue
+
+        # Round UP: at 23 hours left a reader has one more day, and "0 days"
+        # beside a subscription nobody has charged reads as a fault.
+        days_left = max(1, -(-remaining.days * 24 + remaining.seconds // 3600) // 24)
+        try:
+            warned += billing_emails.trial_ending(
+                str(company["id"]), subscription_id=sub_id, days_left=days_left
+            )
+        except Exception:
+            logger.warning(
+                "trial-ending: send failed for %s", company.get("slug"), exc_info=True
+            )
+    if warned:
+        logger.info("trial-ending: warned %s recipient(s)", warned)
 
 
 async def _run_scheduled_cycle() -> None:
@@ -860,6 +987,20 @@ def _run_orphan_ask_job_sweep() -> None:
             )
     except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
         logger.exception("stranded Goal Analysis document sweep failed")
+    try:
+        # Goal Analysis runs stranded mid-ENRICHMENT. Already `ready` —
+        # findings published — so `sweep_orphans` above cannot see them (its
+        # own predicate is `resolving_goal`/`planning`/`running`). Re-runs
+        # enrichment once from the stored rows, then clears the flag with an
+        # honest outcome either way. Never fails the run — see the function's
+        # own docstring for why.
+        from app.routes.crucible import sweep_stalled_enrichment
+
+        n = sweep_stalled_enrichment()
+        if n:
+            logger.info("Re-ran %d stalled Goal Analysis enrichment(s)", n)
+    except Exception:  # noqa: BLE001 — a sweep failure must not crash the scheduler
+        logger.exception("stalled Goal Analysis enrichment sweep failed")
 
 
 def _run_jira_personal_data_report() -> None:
@@ -991,6 +1132,17 @@ def start_scheduler() -> None:
         trigger=IntervalTrigger(minutes=skill_sync_minutes),
         id="skill_source_sync",
         name=f"Sync GitHub skill folders (every {skill_sync_minutes}m)",
+        replace_existing=True,
+    )
+    # Trial-ending reminders. Hourly is finer than it needs to be for a
+    # two-day window, and that is the point: the send log makes an extra tick
+    # free, while a coarse cadence risks stepping over the window entirely if a
+    # deploy happens to land inside it.
+    _scheduler.add_job(
+        _run_trial_ending_cycle,
+        trigger=IntervalTrigger(minutes=60),
+        id="trial_ending_reminders",
+        name="Warn companies whose trial ends soon (hourly)",
         replace_existing=True,
     )
     # Monthly intelligence reports: once a month per company, run each

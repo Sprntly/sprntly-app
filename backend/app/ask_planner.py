@@ -189,13 +189,67 @@ PLANNER_MODEL = "claude-sonnet-4-6"
 #     routing-accuracy query over the pair measures nothing. `edit_artifact`
 #     landed in #1316 without a bump and `analyse_goal` in #1321 without one
 #     either; both are covered by this bump rather than left uncounted.
+#   v14: `analyse_goal` learned that a goal asked AS A QUESTION is still a goal.
+#     v13 taught the action with imperative examples ("increase revenue by 5%",
+#     "reduce churn") and then drew the exclusion at "A GOAL IS NOT A QUESTION
+#     ABOUT A METRIC" — a line between statements and questions rather than
+#     between reporting a number and changing one. Observed live: "How to grow
+#     revenue by 5%" routed to `answer` and reached the DS agent, while "How can
+#     we grow revenue by 5%" routed correctly, which is a distinction no user
+#     could be expected to make. A v13 row and a v14 row answer the question
+#     differently for every interrogative goal, so they must not be pooled.
 #   v13: the where/what line inside `list_artifacts`. "Where on Sprntly do I
 #     find my created PRDs" is a request to be shown around the app, and it
 #     used to compete with the library listing; the answer path now holds the
 #     product's screen map (app/app_map.py), so a v13 row sends those to
 #     `answer` where a v12 row could reasonably have listed. Same menu, but a
 #     different question is being asked of it, so the two must not be pooled.
-_PROMPT_VERSION = "ask-planner-v13"
+#   v15: the action menu gained `delegate` — hand a NEW task to a project
+#     teammate ("ask David to review the PRD", "assign David to review the
+#     evidence doc"). Reported failure: these phrasings matched
+#     `assign_tickets`'s verb instead and dead-ended at "This PRD has no
+#     tickets yet", so nothing was ever delivered. A v14 row could not name
+#     this action at all; widening on v4's rule — a v15 row answers a
+#     question no v14 row was asked ("is this a hand-off to a teammate, not a
+#     ticket-ownership change") — so the two must not be pooled.
+#   v16: the menu gained `backlog_action` plus `include_backlog` — the
+#     product's BACKLOG, which no earlier version could read or change. "add
+#     dark mode to the backlog" and "mark the export bug as done" used to land
+#     on `answer`, where the best available outcome was prose about a change
+#     nothing made, and "what's in my backlog" was answered out of the
+#     knowledge graph with a synced Jira board. Exclusive on v7's rule for the
+#     read flag (the block is the whole grounding) and widening on v4's rule
+#     both ways, so v15 and v16 rows must not be pooled.
+#   v17: the create_artifact rules gained "AN ATTACHED DOCUMENT IS THE
+#     SUBJECT". Staging, 2026-09-03: "generate a report for me" + a PDF planned
+#     create_artifact correctly and then wrote task: "", so the gate dropped it
+#     to a generic answer over the PDF. A v17 row is told to write the brief
+#     FROM the attachment (and `_gate_action` now keeps the action with the
+#     attached text as the brief when it still does not); a v16 row was never
+#     asked, so the two must not be pooled.
+#   v18: `wants_report`. Report-versus-answer stopped being a regex over the
+#     question's surface words (`call_digest.is_voc_query`) and became the
+#     planner's own field. A v17 row was never asked where its answer should
+#     go, so its pipeline picks say nothing about whether a document was
+#     wanted; the two must not be pooled. (v17 is #1459's — the attached-
+#     document brief — which this deliberately does not renumber.)
+#   v20: `include_knowledge_base` — a question about what Sprntly KNOWS, as
+#     opposed to one answered from what it knows. Reported: "the chat system
+#     does not understand KG". Asked what its memory holds, the assistant had
+#     nothing to say: every retrieval path answers about a TOPIC, and none can
+#     say how much there is or where it came from. A v19 row had no way to ask
+#     for that block, so its answers to those questions were ungrounded by
+#     construction; the two must not be pooled. (v18 is #1460's wants_report
+#     and v19 is #1461's prioritisation rule; both land ahead of this one.)
+#   v21: the analyse_goal menu learned that PRIORITISATION IS NOT A GOAL.
+#     Reported: "help me prioritise the roadmap for Q4" started a Goal
+#     Analysis run — a definition gate in front of a question with no metric
+#     to define — and its panel landed over whichever thread the reader had
+#     moved to. A v20 row could send a ranking question either way; a v21 row
+#     is told which, so the two must not be pooled. (v19 was this change's
+#     number while it queued behind #1460 and #1462; it never shipped, so no
+#     row carries it.)
+_PROMPT_VERSION = "ask-planner-v21"
 
 # Both picks clear the same bar the router already applies to its own two picks
 # (`qa_agent._LLM_ROUTE_THRESHOLD`). Duplicated as its own constant rather than
@@ -255,6 +309,37 @@ _ACTIONS: frozenset[str] = frozenset({
     # is written. Its argument is `instruction` (the assignment request,
     # self-contained: who was named, which tickets were meant).
     "assign_tickets",
+    # Hand a NEW task/brief to a project teammate — "ask David to review the
+    # PRD", "tell Priya to figure out which requirements are important",
+    # "assign David to review the evidence doc and flag risks", "get Sam to
+    # draft an outline", "have Maya look at the export bug". Its own action
+    # rather than a shading of `assign_tickets`, and the split has nothing to
+    # do with the word "assign" — it is about what exists before the message:
+    # `assign_tickets` reassigns OWNERSHIP of a ticket that ALREADY EXISTS
+    # (its whole universe is the thread's generated tickets, `_NEEDS_PRD`-
+    # gated); this hands a teammate something to DO, with no ticket and no
+    # PRD required or implied. Reported failure this closes: "assign David to
+    # review the evidence doc" — a delegation with no ticket in sight —
+    # matched `assign_tickets`'s verb instead and dead-ended on "This PRD has
+    # no tickets yet" (`ticket_assign.py`), with nothing ever delivered to
+    # David.
+    #
+    # Set `instruction` to the hand-off, self-contained: who was named and
+    # what they are being asked to do, the same shape `assign_tickets`'s own
+    # argument takes.
+    #
+    # NOT A CLIENT DISPATCH, on purpose — mirrors `update_ticket`'s own entry
+    # in `_ACTIONS`. `chat_intent._plan_to_envelope` rewrites this straight to
+    # `answer` before the client ever sees it: the project chat's existing
+    # scoped tool loop (`skill_router.is_project_tool_request` →
+    # `delegate_task` → `project_delegation.handle_delegate_task`) already
+    # resolves the assignee against the roster, writes the brief and delivers
+    # it, once it actually SEES the message — and the ORIGINAL message
+    # reaching `/v1/ask` unparaphrased is exactly what that loop reads. This
+    # action exists so the decision is the PLANNER'S OWN, explicit and gated,
+    # never guessed by a text regex alone and never confused with the
+    # ticket-ownership action above it — not to open a second write path.
+    "delegate",
     "multi_agent",
     # Retrieval, not authoring: "open the billing PRD" names a document to SHOW.
     # It is a client intent (`chat_intent._CLIENT_INTENTS`), so a planner that
@@ -343,6 +428,14 @@ _ACTIONS: frozenset[str] = frozenset({
     # Its argument is `task` — what the project is ABOUT, in the user's words,
     # which becomes its name.
     "create_project",
+    # CHANGE the backlog — add an idea, move one to done / in progress /
+    # dismissed, or re-order it. Its argument is `instruction` (the request,
+    # self-contained: which ideas were named and what should happen to them),
+    # the same shape `assign_tickets` takes and for the same reason: resolving
+    # a phrase like "the export bug" to a row is a live read plus a judgement,
+    # and it may need to ASK. READING the backlog is not this action — that is
+    # `answer` with include_backlog=true, which needs no argument at all.
+    "backlog_action",
 })
 
 #: The kinds `list_artifacts` can narrow to. "all" — the default and the gate's
@@ -372,6 +465,9 @@ _NEEDS_TASK: frozenset[str] = frozenset({
     # only ask that about a stated goal. With no task there is nothing to ask
     # about, so this degrades to `answer` — which can ask what they meant.
     ACTION_ANALYSE_GOAL,
+    # ONE EXCEPTION, applied in `_gate_action`: with a document ATTACHED and
+    # the brief empty, `create_artifact` is kept and the attached text becomes
+    # the brief — see `_attached_document_brief`. Every other member degrades.
     # A document with no brief is a blank page with a title. Unlike
     # `generate_prd` — which has a chat surface that asks "what should it
     # cover?" and waits — there is no such prompt for an arbitrary document
@@ -392,6 +488,15 @@ _NEEDS_INSTRUCTION: frozenset[str] = frozenset({
     # assign them to — same "an action whose ARGUMENT is missing is worse than
     # no action" rule as the other two.
     "assign_tickets",
+    # A hand-off with no instruction has nobody to hand a task to and no task
+    # to hand off — same rule again, and `delegate` is downgraded to `answer`
+    # rather than dispatched with nothing for the tool loop to act on.
+    "delegate",
+    # A backlog change with no instruction has nothing to change. `answer` is
+    # the recoverable landing here in the strongest sense: it carries the
+    # backlog block, so the reply can list what is on it and ask which idea
+    # they meant.
+    "backlog_action",
 })
 #: `open_artifact` without a subject to look up is not an open request — the
 #: same "an action whose ARGUMENT is missing is worse than no action" rule the
@@ -504,8 +609,10 @@ _PLANNER_SCHEMA: dict = {
         "instruction": {
             "type": "string",
             "description": (
-                "edit_prd / update_ticket / assign_tickets only: the change to "
-                "apply, self-contained."
+                "edit_prd / update_ticket / assign_tickets / delegate only: "
+                "the change to apply (edit_prd/update_ticket), the assignment "
+                "request (assign_tickets), or the hand-off — who and what "
+                "(delegate) — self-contained."
             ),
         },
         # THE FORM, decided after the SUBJECT. Schema order is generation order,
@@ -627,6 +734,23 @@ _PLANNER_SCHEMA: dict = {
             ),
         },
         "confidence": {"type": "number", "description": "0..1"},
+        # WHERE A PIPELINE'S ANSWER GOES, and it is the model's call rather
+        # than a regex's. Generated straight after `pipeline_id` because it is
+        # only meaningful once one has been picked.
+        "wants_report": {
+            "type": "boolean",
+            "description": (
+                "Did the user ASK FOR A DOCUMENT? true ONLY when the message "
+                "explicitly requests one — 'report', 'write-up', 'one-pager', "
+                "'deck', 'digest', 'document', 'doc', 'PDF', 'write this up' — "
+                "or names a document by its name ('voice of customer', 'VoC'). "
+                "false for every QUESTION about customers, feedback, "
+                "competitors or the market, however long or detailed, and "
+                "false when no pipeline is picked. A question answered in the "
+                "chat costs one more message if they did want the document; a "
+                "document nobody asked for costs minutes and a panel."
+            ),
+        },
         "sources": {
             "type": "array",
             "items": {"type": "string"},
@@ -661,6 +785,25 @@ _PLANNER_SCHEMA: dict = {
                 "Whether the answer needs this workspace's PROJECTS — what a "
                 "project is and which ones the caller belongs to — true when "
                 "the question is ABOUT projects, false for everything else."
+            ),
+        },
+        "include_knowledge_base": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs a description of WHAT SPRNTLY HAS "
+                "LEARNED for this company and how much is in it — true when "
+                "the question is ABOUT that memory itself ('what do you know "
+                "about us', 'what is in my knowledge base'), false when the "
+                "question is about the product, which is nearly always."
+            ),
+        },
+        "include_backlog": {
+            "type": "boolean",
+            "description": (
+                "Whether the answer needs this company's BACKLOG — what the "
+                "backlog is and the ideas currently on it, in rank order — "
+                "true when the question is ABOUT the backlog, false for "
+                "everything else."
             ),
         },
         "web_search": {
@@ -715,9 +858,10 @@ _PLANNER_SCHEMA: dict = {
     "required": [
         "reason", "action", "action_confidence",
         "company_skill_id", "company_confidence",
-        "pipeline_id", "confidence", "sources",
+        "pipeline_id", "confidence", "wants_report", "sources",
         "include_knowledge_graph", "include_library", "include_team",
-        "include_projects", "web_search", "in_scope",
+        "include_projects", "include_backlog", "include_knowledge_base",
+        "web_search", "in_scope",
     ],
     # The planner's contract is exactly these fields; anything else is the model
     # improvising. Reading stays tolerant either way (every gate below uses
@@ -794,18 +938,32 @@ or wants an answer.
       correct outcome and better than either alternative.
 - edit_prd — the user wants the PRD that is already open CHANGED: "make it
   shorter", "add a risks section", "tighten the scope". Set `instruction`.
-- edit_artifact — the user wants the REPORT or the DOCUMENT open beside this
-  chat CHANGED: "convert the RICE section into a table", "cut the appendix",
-  "rewrite the summary for an exec", "add a risks section to that report",
-  "make the report shorter". Set `instruction` to the change, self-contained.
-  A LINE ABOVE NAMING A REPORT OR A DOCUMENT IS THE PRECONDITION, and there
-  are two of them. "Active tab: report #45 … is open beside this chat" is the
+- edit_artifact — the user wants the REPORT, the DOCUMENT or the EVIDENCE
+  PAGE open beside this chat CHANGED: "convert the RICE section into a table",
+  "cut the appendix", "rewrite the summary for an exec", "add a risks section
+  to that report", "make the report shorter", "improve the evidence with a
+  chart of the data in it", "add a chart to the evidence". Set `instruction`
+  to the change, self-contained.
+  A CHART IS AN EDIT TO THE DOCUMENT, NOT A REPLY. "Improve the evidence with
+  an analytical chart" asks for the chart to end up IN the evidence page —
+  answering it in the chat gives the reader a picture beside the document it
+  belongs in, which is the reported failure this action closes for evidence.
+  The same is true of a table, a section, a summary or a diagram: if it
+  belongs in the document, this is the action.
+  A LINE ABOVE NAMING A REPORT, A DOCUMENT OR AN EVIDENCE PAGE IS THE
+  PRECONDITION, and there are two of them. "Active tab: report #45 … is open beside this chat" is the
   reader looking at it. "In this chat: report #45 … was produced in this
   conversation" is a document this thread made that is not on screen — still a
   referent, because "that report" in the chat that wrote it means that report.
   Either one is enough to choose this action; with NEITHER line present there
   is nothing to edit and the request is `answer`. A PRD open instead is
   edit_prd — the two are different documents behind different editors.
+  WHEN A PRD AND AN EVIDENCE PAGE ARE BOTH OPEN, the words decide, and they
+  usually say which outright: "improve the evidence…" / "add a chart to the
+  evidence" is edit_artifact against the evidence page, and "make this PRD
+  shorter" / "add a rollout section" is edit_prd. An instruction naming
+  neither belongs to the PRD — it is the document the reader is working on,
+  and the evidence exists to support it.
   A QUESTION ABOUT the open document is `answer`, not this: "what does the
   report say about pricing?" and "is the RICE section right?" want prose in the
   chat. Only an instruction to CHANGE it is this action.
@@ -850,18 +1008,54 @@ or wants an answer.
   generate_prd, whichever fits. Only the container is this action, and a
   question about projects ("what is a project", "what projects do I have") is
   `answer` with include_projects=true.
+- backlog_action — CHANGE this company's backlog: add an idea to it, move an
+  idea to done / in progress / dismissed, or re-order it. "add dark mode to the
+  backlog", "put the top three complaints on the backlog", "mark the CSV export
+  bug as done", "move the mobile idea to in progress", "drop the SSO idea",
+  "re-sequence the backlog by impact", "push revenue items up".
+  Set `instruction` to the request in the USER'S OWN WORDS, self-contained:
+  which ideas were named and what should happen to them. The execution layer
+  reads the live backlog, resolves the phrasing against it, and ASKS when a
+  name matches several ideas or none — so name what they said rather than
+  guessing an id, and never refuse for ambiguity here.
+  READING IS NOT THIS ACTION. "what's in my backlog", "what should we work on
+  next" and "is X on the backlog" are `answer` with include_backlog=true. Only
+  a request to CHANGE it is this one.
+  NOR IS BUILDING FROM IT. "generate a PRD for the top backlog idea" is
+  generate_prd — the backlog is where the subject came from, not what changes.
 - analyse_goal — a business GOAL the user wants MOVED: "increase revenue by
   5%", "reduce churn", "improve activation this quarter", "get retention up".
+  ASKED AS A QUESTION IS STILL A GOAL, and this is the most common way people
+  phrase one: "how to grow revenue by 5%", "how do we reduce churn?", "how can
+  we improve activation?", "what can we do about retention?", "ways to grow
+  revenue". All of these are `analyse_goal`.
   Set `task` to the goal in the USER'S OWN WORDS, including any number they
   gave ("increase revenue by 5%", not "revenue"). The number is part of the
   goal and Goal Analysis asks about it.
-  A GOAL IS NOT A QUESTION ABOUT A METRIC. "what is our churn?", "how did
-  revenue move last quarter?", "show me activation" all REPORT a number and
-  are `answer`. This action is for wanting the number to CHANGE.
+  THE LINE IS REPORT versus CHANGE, not statement versus question. "what is our
+  churn?", "how did revenue move last quarter?", "show me activation" ask what a
+  number IS or WAS — they REPORT, and they are `answer`. "how do we reduce
+  churn?" asks how to CHANGE it, and that is this action however it is phrased.
   Choose it even when you could attempt an answer yourself. Goal Analysis
   stops and asks what the metric means, states what it will read, and runs
   only once the user approves — a goal answered directly skips the
   confirmation the user needs in order to defend the result.
+  A GOAL NAMES A METRIC. PRIORITISATION DOES NOT, and that is the line.
+  "help me prioritise the roadmap for Q4", "what should we build next?",
+  "which of these should we do first?", "rank these features", "what are the
+  top three things to work on?", "how should we sequence this quarter?" ask
+  which work comes FIRST. There is no number in them to define, nothing to
+  confirm the meaning of, and nothing for Goal Analysis to ask about — it
+  opens by asking what the metric means, so pointed at a prioritisation
+  question it asks a question with no answer, in a panel, instead of the
+  ranked list the user wanted in the chat. All of these are `answer`
+  (include_backlog=true when the backlog is what is being ranked).
+  Reported: a prioritisation question started a Goal Analysis run, and the
+  reader — who had moved on — found its panel over a thread that had asked
+  for nothing.
+  A goal that HAPPENS to mention priority is still a goal: "what should we
+  prioritise to reduce churn 3%?" names a metric and a number, so it is this
+  action. The test is the metric, never the word "prioritise".
 - generate_tickets — break a PRD or spec into tickets / stories / work items.
   Set `task`.
 - generate_prototype — an interactive prototype or mockup. Set `task`.
@@ -874,6 +1068,23 @@ or wants an answer.
   should get. The product resolves names against the workspace roster and asks
   per-ticket when the message names people but not which ticket each one gets
   — so an instruction that only names people is still complete.
+- delegate — hand a NEW task to a teammate, not a ticket: "ask David to
+  review the PRD", "tell David to figure out which requirements are
+  important", "assign David to review the evidence doc", "assign David to
+  review the evidence doc and flag risks", "ask David to take a look at the
+  evidence doc", "get Sam to draft an outline", "have Maya look at the export
+  bug", "loop Priya in on the pricing work".
+  Set `instruction` to the hand-off, self-contained: who was named and what
+  they are being asked to do. NO TICKET, NO PRD, required or implied — the
+  product resolves the name against the project roster and delivers a brief
+  into their own chat; it never touches a ticket's ownership field.
+  delegate vs assign_tickets is NEVER about the word "assign" — it is about
+  what the message points AT. "Assign the login ticket to Dave" names an
+  EXISTING ticket (assign_tickets); "assign David to review the login flow"
+  names a PERSON and a NEW piece of work with no ticket in sight (delegate).
+  When in doubt because no ticket, key, or the word "ticket(s)" appears
+  anywhere in the request, it is a hand-off, not an ownership change —
+  choose delegate.
 - multi_agent — the full multi-agent analysis suite: a PRD, an evidence report
   and four analysis documents (technical design, QA test cases, risk analysis,
   traceability matrix), all cross-referenced. Set `task`.
@@ -941,11 +1152,9 @@ Rules that decide the close calls:
   CHANNEL — a name after "#", "my slack channel", "the team on slack" — never
   a person's name. "Send this to Fortune to prioritize", "give this to the
   designer", "hand this off to Priya", "loop Dave in on this" name a TEAMMATE,
-  not a channel — that is never share_to_slack, whatever the verb. It is
-  `answer`: naming a teammate as the target of "send/give/hand/assign ... to"
-  is a delegation, which the assistant itself resolves and hands off when it
-  answers — not a build action you choose here, and never a guess that a
-  person's name is a Slack channel.
+  not a channel — that is never share_to_slack, whatever the verb. Naming a
+  teammate as the target of "send/give/hand/assign ... to" is `delegate`, and
+  never a guess that a person's name is a Slack channel.
 
 - THEIR OWN CREATIONS vs THEIR CONNECTED SOURCES decides list_artifacts vs
   answer. "What are my PRDs / tickets / reports?" means the documents THEY
@@ -982,6 +1191,18 @@ Rules that decide the close calls:
   BELONGS to → assign_tickets — even when phrased as an update ("update the
   ticket to Dave", "put Priya on the login ticket"). ASKING about ownership is
   neither: "who is assigned to the auth ticket?" is `answer`.
+- EXISTING TICKET vs NEW TASK decides assign_tickets vs delegate, and this is
+  the pair most often confused because both can be phrased with "assign …
+  to". "Assign the auth ticket to Dave", "give these tickets to Priya",
+  "reassign SPR-3 to Maya" all name a ticket or tickets already in the thread
+  → assign_tickets. "Assign David to review the evidence doc", "ask David to
+  take a look at the export bug", "tell Priya to figure out which
+  requirements are important" name a PERSON and a piece of work with no
+  ticket anywhere in the sentence → delegate. A message naming BOTH a person
+  and an existing ticket by key or clear reference ("put the login ticket on
+  Dave's plate") is still assign_tickets — the ticket is the object being
+  moved. A message naming a person and a VERB PHRASE with no ticket in sight
+  is delegate, even when the verb is "assign".
 - ASKING ABOUT a document is not asking FOR one. "What does the PRD say about
   auth?" is `answer`. This applies hardest to create_artifact, where the
   library is SHARED with the whole team: a document created from a question
@@ -994,6 +1215,13 @@ Rules that decide the close calls:
 - The task brief must be self-contained and drawn from the WHOLE conversation.
   If the thread spent twenty turns specifying a feature and the last message is
   "draft it up", the brief describes the feature, not the words "draft it up".
+- AN ATTACHED DOCUMENT IS THE SUBJECT. When the message carries an
+  `[Attached files]` block and asks for a report or any other document
+  without naming what it should cover, the attached document is what it
+  should cover: write the brief FROM it — what the document is about, what a
+  report on it would say — and set `artifact_kind` to what they called it.
+  Never leave `task` empty for create_artifact when a file is attached; a
+  brief you are unsure of beats a request thrown away.
 
 === DEDICATED PIPELINES ===
 
@@ -1034,6 +1262,49 @@ Only send it to the public web when the message ASKS for the public web.
 
 When a pipeline is chosen it owns the answer. Do not also request sources or a
 web search — the pipeline does its own gathering.
+
+=== REPORT OR ANSWER: `wants_report` ===
+
+Picking a pipeline decides WHAT GETS READ. It does not decide WHERE THE ANSWER
+GOES — `wants_report` does, and it is a separate question you answer separately.
+
+A REPORT IS A DOCUMENT SOMEBODY ASKED FOR. Set `wants_report` true ONLY when
+the message asks for one in so many words:
+
+  * it names a document — "report", "write-up", "write this up", "one-pager",
+    "digest", "deck", "document", "doc", "PDF";
+  * or it names a document BY NAME — "voice of customer", "VoC", "competitive
+    intelligence review", "public feedback report".
+
+Everything else is false, and false is the normal answer. A question about
+customers is a QUESTION, however long, however detailed, and however many
+sources it takes to answer:
+
+  * "look at all customer conversations in the last month and show me what
+    product features users are asking for" — false. It says look, not write.
+  * "what are customers complaining about?" — false.
+  * "summarize last week's customer calls" — false. A summary is an answer.
+  * "give me a list of the features clients asked for, as a table" — false.
+    They named the shape they wanted and it was not a document.
+  * "what are people saying about us on Reddit?" — false.
+  * "give me a voice-of-customer report for last month" — true.
+  * "write last week's calls up as a one-pager" — true.
+
+THE SAME PIPELINE SERVES BOTH. A false verdict does not mean reading less: the
+pipeline still fetches the calls, the graph and the connected sources exactly
+as it would for the document, and answers from all of it IN THE CHAT. So a
+question that needs the pipeline's gathering should still name the pipeline —
+just with `wants_report` false.
+
+THE COST IS NOT SYMMETRIC, which is why the bar is "they said the word". Get
+it wrong towards `false` and someone who wanted a document reads the answer and
+asks for it, one message later. Get it wrong towards `true` and someone who
+asked a question waits minutes for a document they did not want, in a panel
+they did not open, while the answer they wanted never appears in the thread.
+When you are unsure, it is false.
+
+Leave it false whenever `pipeline_id` is "none" — there is no document to
+write, and the field is ignored.
 
 === LIVE MACHINERY ===
 
@@ -1378,6 +1649,61 @@ grounding, and a connected tracker full of "projects" is the exact wrong answer.
 The exception is a question that names the connected tool itself ("what Jira
 projects can we push to") — that is the tracker, not this.
 
+=== QUESTIONS ABOUT WHAT SPRNTLY KNOWS ===
+
+Sprntly keeps a MEMORY for each company: everything it has extracted from the
+sources they connected — customer conversations, team chat, tickets, analytics,
+revenue, documents — as dated, sourced facts, plus the themes, accounts and
+decisions those facts are about. It is what every answer here is grounded on.
+
+A question about THE MEMORY ITSELF is a different question from one answered
+FROM it, and only the first sets include_knowledge_base=true:
+
+  * "what do you know about us", "what is in your memory", "what have you
+    learned so far", "how much data do you have on us", "what is my knowledge
+    base / knowledge graph / KG", "where does what you know come from",
+    "how up to date is what you know" — TRUE. These ask what the memory holds,
+    and the answer is counts and sources, not signals about a topic.
+  * "what are customers complaining about", "what do we know about export
+    failures", "what is our churn" — FALSE, and these are the overwhelming
+    majority. They are answered FROM the memory with
+    include_knowledge_graph=true, which is a different field and a different
+    job: that one retrieves what is relevant to a topic, this one describes
+    the whole.
+
+READERS NAME IT MANY WAYS and several of them are our internal words —
+"knowledge graph", "KG", "the graph", "your brain", "the knowledge base". Every
+one of those is this, and a question using them is answerable, not out of
+scope. The answer describes their product memory in plain language.
+
+Set include_knowledge_graph=false alongside it, pick NO sources and name NO
+documents, on the same rule as the library, the team, projects and the backlog:
+the block is the whole grounding for these, and retrieved signals about a topic
+answer a question nobody asked. A question that genuinely crosses both — "what
+do you know about Acme, and how much of it is recent?" — keeps the graph.
+
+The action stays `answer`: a question about what we know is still a question.
+
+=== QUESTIONS ABOUT THE BACKLOG ===
+
+THE BACKLOG is Sprntly's pool of product ideas: the themes the weekly
+prioritization ranked but the current Top Insights brief did NOT pick, plus any
+idea a person added by hand. Each carries a rank (lower is higher priority), a
+type (Bug / New initiative / UI) and a status. It is NOT a Jira backlog, not a
+sprint board, and NOT this workspace's tickets — those are generated from a PRD.
+
+Set include_backlog=true for: "what's in my backlog", "what is the backlog",
+"what should we work on next", "what's the top idea", "is X already on the
+backlog", "how many ideas do we have", "what did we ship". Also set it on a
+message that asks to CHANGE the backlog, so the confirmation can say what is
+already there.
+
+For these, set include_knowledge_graph=false, pick NO sources and name NO
+documents, on the same rule as the library, the team and projects: the block is
+the whole grounding, and a connected tracker full of "backlog" is the exact
+wrong answer. The exception is a question that names the connected tool itself
+("what's in our Jira backlog") — that is the tracker, not this.
+
 It is false for everything else, including a message that merely mentions work
 happening on something.
 
@@ -1416,11 +1742,23 @@ class Plan:
     company_confidence: float = 0.0
     pipeline_id: Optional[str] = None
     confidence: float = 0.0
+    #: Did the user ASK FOR A DOCUMENT? The report pipelines each serve two
+    #: shapes — the document, and the same evidence answered in the chat — and
+    #: this is which one was wanted. Only ever true alongside a report
+    #: `pipeline_id` (`apply_gates` clamps it), so `False` covers both "they
+    #: asked a question" and "no pipeline ran".
+    wants_report: bool = False
     sources: list[str] = field(default_factory=list)
     include_knowledge_graph: bool = False
     include_library: bool = False
     include_team: bool = False
     include_projects: bool = False
+    include_backlog: bool = False
+    #: Whether the answer needs a description of the company's product memory
+    #: ITSELF — what it holds and where it came from — rather than signals
+    #: retrieved from it (`include_knowledge_graph`, which is the field for
+    #: every ordinary question). See `knowledge_base_context.py`.
+    include_knowledge_base: bool = False
     web_search: bool = False
     constraints: dict = field(default_factory=dict)
     artifact_type: Optional[str] = None
@@ -1486,6 +1824,8 @@ class Plan:
             "library": self.include_library,
             "team": self.include_team,
             "projects": self.include_projects,
+            "backlog": self.include_backlog,
+            "knowledge_base": self.include_knowledge_base,
             # Both are usually None; logged unconditionally anyway, because the
             # interesting line is the one where a build named a format and the
             # gate refused it — an omitted key would make that indistinguishable
@@ -1509,6 +1849,11 @@ class Plan:
             # next to a plan line saying `web: false` looks like the executor
             # ignoring the plan, when it is the plan saying "no SECOND search".
             "web": "pipeline" if self.pipeline_id else self.web_search,
+            # WHERE the pipeline's answer was going to be written. Logged
+            # unconditionally because the first question asked of a report
+            # nobody wanted — and of an answer someone expected a document for
+            # — is "did the plan think they asked for one".
+            "wants_report": self.wants_report,
             "constraints": self.constraints,
             "in_scope": self.in_scope,
             "confidence": round(
@@ -1630,10 +1975,14 @@ def _open_artifact_block(
     if open_artifact:
         kind = str(open_artifact.get("kind") or "").strip().lower()
         oid = open_artifact.get("id")
-        # Only the two kinds the editor can actually act on. An unknown kind is
+        # Only the kinds the editor can actually act on. An unknown kind is
         # dropped rather than rendered: a line naming something no action can
         # target invites the model to choose one that will then be refused.
-        if kind in {"report", "document"} and oid is not None:
+        # `evidence` joined the set when evidence pages gained an editor
+        # (`artifact_chat_edit.edit_evidence_scoped`) — before that, a request
+        # to change the evidence open on screen had nowhere to go, and the
+        # chat wrote the change into the conversation instead.
+        if kind in {"report", "document", "evidence"} and oid is not None:
             raw = str(open_artifact.get("title") or "").strip()
             # One line, bounded: the title is customer text landing in a prompt,
             # and a newline inside it could forge a section header here.
@@ -1945,11 +2294,58 @@ def _clean_str(value: Any) -> Optional[str]:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
-def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
+#: The literals the composer / router put in front of attached-document text.
+#: `[Attached files]` is what ChatScreen.tsx `submitAsk` inlines (the exact
+#: constant is `qa_agent._ATTACHED_FILES_MARKER`); `[Attached document names]`
+#: is what `qa_agent._routing_text_with_filenames` appends for the router's
+#: filenames-only view. Checked as bare tokens so whitespace reshaping upstream
+#: cannot hide an attachment. An established convention, not a new coupling —
+#: `db/asks.py` and `routes/ask.py` already reason about the same literal.
+_ATTACHMENT_MARKERS: tuple[str, ...] = ("[Attached files]", "[Attached document names]")
+
+
+def _attached_document_brief(question: Any) -> str:
+    """The brief `create_artifact` falls back to when the model left `task`
+    empty but the user ATTACHED a document — or "" when nothing was attached.
+
+    Seen on staging (2026-09-03): "generate a report for me" + a PDF. The
+    planner chose `create_artifact` / `artifact_kind: "report"` — correctly —
+    but wrote `task: ""`, reasoning the request was "unresolvable without
+    clarification", and `_NEEDS_TASK` then dropped it to a generic `answer`.
+    The user got a 66-second Q&A over the PDF instead of a report, and no one
+    asked them anything: the planner has no clarify action, so an empty brief
+    is its only way to say "not sure", and the gate read that as "nothing to
+    build".
+
+    With a document attached, the subject is not missing — it is the document.
+    So the fallback brief is the user's own words plus the attached text as
+    they sent it (the `question` `plan()` receives carries the whole inlined
+    block; only the log line is clamped), cut to `_TASK_CHARS` like every
+    model-written brief. The generator (`custom_artifact_generate`) tolerates
+    a thin brief, takes the conversation as `context`, and grounds a thin one
+    by retrieval, so this is real material, not a title on a blank page.
+
+    Deliberately NOT applied when nothing is attached: a bare "generate a
+    report" with no subject anywhere in the thread really is a blank page,
+    and `answer` — which can ask what they meant — stays the right landing.
+    Newlines are kept (a document's structure is signal); only length is
+    bounded."""
+    text = question.strip() if isinstance(question, str) else ""
+    if not text or not any(marker in text for marker in _ATTACHMENT_MARKERS):
+        return ""
+    return text[:_TASK_CHARS]
+
+
+def _gate_action(
+    raw: Any, task: Any, instruction: Any, *, fallback_task: str = ""
+) -> tuple[str, str, str]:
     """`(action, task, instruction)`, with an unusable action degraded to
     `answer` rather than dispatched.
 
-    Two rules, both of them "fail towards answering":
+    Two rules, both of them "fail towards answering" — with one exception,
+    `create_artifact` when `fallback_task` is non-empty (a document was
+    attached; see `_attached_document_brief`), which fails towards BUILDING
+    from the attachment instead:
 
       * An action outside the known set is the model improvising. `answer` is
         the safe landing — it is what every message did before the planner
@@ -1976,6 +2372,12 @@ def _gate_action(raw: Any, task: Any, instruction: Any) -> tuple[str, str, str]:
     )
 
     if action in _NEEDS_TASK and not task_text:
+        if action == "create_artifact" and fallback_task:
+            logger.info(
+                "[planner] create_artifact kept with an empty brief: a document "
+                "is attached, using it as the subject"
+            )
+            return action, fallback_task, instruction_text
         logger.info("[planner] %s dropped to answer: no task brief", action)
         return ACTION_ANSWER, "", ""
     if action in _NEEDS_INSTRUCTION and not instruction_text:
@@ -2109,6 +2511,7 @@ def apply_gates(
     connected: list[str],
     known_documents: Optional[set[str]] = None,
     templates: Optional[list[dict]] = None,
+    question: str = "",
 ) -> Plan:
     """Turn one raw model payload into a gated `Plan`. Never raises.
 
@@ -2120,8 +2523,12 @@ def apply_gates(
     and `_gate_template` — see there. Both are optional so every existing caller
     and test keeps its exact behaviour; only `plan()`, which has already read
     both catalogs to build the prompt, supplies them."""
+    # `question` is optional for the same reason `known_documents` and
+    # `templates` are: only `plan()` has it. Without it there is no attachment
+    # to fall back to and the gate behaves exactly as before.
     action, task, instruction = _gate_action(
-        out.get("action"), out.get("task"), out.get("instruction")
+        out.get("action"), out.get("task"), out.get("instruction"),
+        fallback_task=_attached_document_brief(question),
     )
     # GOAL ANALYSIS IS ENTITLEMENT-GATED, and the gate belongs HERE rather than
     # only on the route it dispatches to. The route's `require_crucible_module`
@@ -2184,6 +2591,27 @@ def apply_gates(
         pipeline_id = None
         sources = []
         web_search = False
+
+    # WHERE THE PIPELINE'S ANSWER GOES, clamped to the pipelines that can
+    # actually write a document. The model is asked this outright (see the
+    # prompt's REPORT OR ANSWER section) rather than having it inferred from
+    # the question's surface words downstream, which is where the previous
+    # verdict lived: `call_digest.is_voc_query`, a regex that had to be widened
+    # twice in one day (a summary ask, then a table ask) because each new
+    # phrasing that meant "answer me" defaulted to the document.
+    #
+    # Clamped for the same "belongs to its action" reason every argument above
+    # is: `wants_report` on a plan that picked no pipeline — or picked a lookup
+    # like `tracker-lookup` — names a document nothing was ever going to write.
+    wants_report = bool(out.get("wants_report"))
+    if wants_report:
+        try:
+            from app.qa_agent import _REPORT_PIPELINE_IDS
+
+            wants_report = pipeline_id in _REPORT_PIPELINE_IDS
+        except Exception:  # noqa: BLE001 — a gate must never break a plan
+            logger.exception("report-pipeline set unreadable; wants_report cleared")
+            wants_report = False
 
     if pipeline_id is not None:
         # PIPELINE EXCLUSIVITY. A chosen pipeline owns the answer and does its
@@ -2289,11 +2717,14 @@ def apply_gates(
         company_confidence=company_confidence,
         pipeline_id=pipeline_id,
         confidence=confidence,
+        wants_report=wants_report,
         sources=sources,
         include_knowledge_graph=bool(out.get("include_knowledge_graph")),
         include_library=include_library,
         include_team=bool(out.get("include_team")),
         include_projects=bool(out.get("include_projects")),
+        include_backlog=bool(out.get("include_backlog")),
+        include_knowledge_base=bool(out.get("include_knowledge_base")),
         web_search=web_search,
         constraints=_gate_constraints(out.get("constraints")),
         # Strict `is False`, so a missing or malformed field FAILS OPEN to the
@@ -2414,6 +2845,7 @@ def plan(
         connected=connected,
         known_documents=known_documents,
         templates=templates,
+        question=question,
     )
 
 
@@ -3172,6 +3604,7 @@ def _log_comparison(
             "include_library": planned.include_library,
             "include_team": planned.include_team,
             "include_projects": planned.include_projects,
+            "include_backlog": planned.include_backlog,
             "artifact_template_id": planned.artifact_template_id,
             "template_query": planned.template_query,
             "web_search": planned.web_search,

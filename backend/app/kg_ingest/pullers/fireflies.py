@@ -114,8 +114,8 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
 """
 
 # KG-ingest query — the richer FREE digest fields (outline/topics_discussed/
-# tasks/questions/gist cost nothing extra — same API call, no extra LLM spend)
-# PLUS `sentences`, so a fact that lives ONLY in the transcript (never
+# gist cost nothing extra — same API call, no extra LLM spend) PLUS
+# `sentences`, so a fact that lives ONLY in the transcript (never
 # surfaced anywhere in the digest) still reaches the checklist pass (closes
 # "transcript-only facts never ingested"). §6 is about PERSISTENCE, not about
 # what the in-memory checklist text may contain: the sentences ride the
@@ -128,11 +128,15 @@ query Transcripts($limit: Int, $skip: Int, $fromDate: DateTime, $toDate: DateTim
     title
     date
     participants
-    summary { overview action_items keywords gist outline topics_discussed tasks questions }
+    summary { overview action_items keywords gist outline topics_discussed }
     sentences { speaker_name text }
   }
 }
 """
+# NOTE: `tasks` and `questions` are NOT valid fields on Fireflies' GraphQL
+# `Summary` type — requesting them makes the whole query 400. Their
+# action-item content is already covered by `action_items` above, so do not
+# re-add them (verified live against the Fireflies API).
 
 # Digest query (on-demand path) — adds `sentences` for transient quotes and
 # `skip` so windows holding more than one API page (50) can be fetched in full.
@@ -189,6 +193,15 @@ class CallTranscript:
     #: explains. Empty for a call that needs no caveat — which is every
     #: Fireflies call, since Fireflies only returns transcribed meetings.
     note: str = ""
+    #: Full sentence-level transcript ([{"speaker_name", "text"}, ...]), as
+    #: `call_index.fetch_transcript` returns it — NOT the same material as
+    #: `quotes` above, which is a bounded sample. Empty for every call this
+    #: puller's own digest fetch produces (`fetch_calls` never sets it); only
+    #: `call_index`'s single-call read path populates it, so that path can
+    #: answer from the `call_transcripts` store at equivalent quality to a
+    #: live fetch instead of the thinner quote sample. Defaulted and placed
+    #: last so every existing construction site is untouched.
+    sentences: list[dict] = field(default_factory=list)
 
     def render(self, max_quotes: Optional[int] = None) -> str:
         """Render one call into the skill's input corpus — header, distilled

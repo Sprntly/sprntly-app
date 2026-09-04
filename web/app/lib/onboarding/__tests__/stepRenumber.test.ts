@@ -1,13 +1,21 @@
-// Slug-routing integrity for the semantic-routes onboarding flow. The flow is
-// the v7 redesign (screenshot spec 2026-07-21), keeping the optional api-key
-// step the spec omits and adding the optional import-context step from client
-// feedback 2026-07-22, ordered so the company step leads (its name + website
-// fill the prompt the import hands out) and the two steps an import can't
-// prefill cover its background extraction: company → import-context →
-// connectors → api-key →
-// product → workspace → metrics → invite → review → personalize, then the UNNUMBERED
-// define-metrics sub-flow completes onboarding. `workspace` here is the merged
-// team/strategy/decisions card, not the long-retired workspace-NAMING closer.
+// Slug-routing integrity for the semantic-routes onboarding flow.
+//
+// FIVE STEPS SINCE 2026-09-03: company → connectors → invite → review →
+// personalize, then the UNNUMBERED define-metrics sub-flow completes
+// onboarding. The flow was cut from ten because it asked someone who had not
+// seen the product yet for their OKRs, success metrics, prioritization
+// framework and team scope — every one of which is still editable, in Settings.
+//
+// The five that went: import-context (deleted outright — it prefilled the very
+// steps removed around it), api-key (Settings → Admin), product (Settings →
+// Product & Category; its name and website moved onto the company step),
+// workspace (a default "Main workspace" is created instead) and metrics
+// (Settings → KPI Settings, with the prioritization framework in Process &
+// Planning).
+//
+// Persisted `onboarding_step` markers written by the ten-step flow were rebased
+// in migration 20260903160000 — the indexes do NOT line up between the two.
+//
 // The old combined `business-info`, the `business-context` review, the
 // agent-naming `coworkers` step and the `analyzing` loader stay removed.
 // These guard the total step count and the slug↔screen mapping (no gaps,
@@ -19,32 +27,37 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 10 numbered steps in flow order (v7 + kept api-key + import-context)", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(10)
-    expect(ONBOARDING_SCREENS).toHaveLength(10)
+  it("has exactly 4 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(4)
+    expect(ONBOARDING_SCREENS).toHaveLength(4)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
-      // `company` leads again (2026-07-27) and `import-context` sits behind it:
-      // the name + website it collects are written into the prompt the import
-      // step hands out, so the assistant searches for the right company.
+      // `company` still leads: the company row does not exist until it saves,
+      // and the website analysis it kicks off is what `review` later reads.
       "company",
-      "import-context",
       "connectors",
-      "api-key",
-      // Swapped 2026-07-28: the product is named before the workspace that owns
-      // a slice of it.
-      "product",
-      "workspace",
-      "metrics",
-      "invite",
       "review",
       "personalize",
     ])
+    // Cut on 2026-09-03 — out of the numbered flow, screens deleted. invite
+    // went last, folded into Settings → Team & roles rather than dropped.
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("import-context")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("api-key")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("product")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("workspace")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("metrics")
+    expect([...ONBOARDING_STEP_SLUGS]).not.toContain("invite")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-import-context")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-api-key")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-product")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-workspace")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-metrics")
+    expect(ONBOARDING_SCREENS).not.toContain("ob-invite")
     // The dropped/folded steps stay out of the numbered flow.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("coworkers")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-info")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("business-context")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("first-brief")
-    // Folded into the merged workspace step — no longer routes of their own.
+    // Folded into the long-retired workspace card — never routes of their own.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("team")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("strategy")
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("decisions")

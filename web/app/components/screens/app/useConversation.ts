@@ -51,7 +51,7 @@ import { buildQuotedMessage } from "../../../lib/chatQuote"
 import { dispatchChatIntent, type ChatIntentExecutors } from "../../../lib/chat/dispatchChatIntent"
 import { useChatIntentExecutors } from "../../shared/chat-shell/useChatIntentExecutors"
 import {
-  runEditPrdAction, runShareToSlackAction, runAssignTicketsAction,
+  runEditPrdAction, runShareToSlackAction, runAssignTicketsAction, runBacklogAction,
   runCreateProjectAction,
 } from "../../shared/chat-shell/conversation/actions"
 import { projectPath } from "../../../lib/routes"
@@ -78,6 +78,9 @@ export interface MainConversationAdapter {
   activeTabId: string | null
   /** Live active-tab id, for the handle's `isActive`. */
   activeTabIdRef: RefObject<string | null>
+  /** Raised while a command is dispatched onto a tab the user has since left —
+   *  the generation runs there, but nothing steals the screen. See ChatScreen. */
+  commandInBackgroundRef: RefObject<boolean>
   setTabs: Dispatch<SetStateAction<ChatTab[]>>
   /** Per-tab busy set (composer-blocking, keyed by tab id). */
   setBusyTabs: Dispatch<SetStateAction<ReadonlySet<string>>>
@@ -131,6 +134,14 @@ export interface MainConversationAdapter {
   postSummary: (key: string, kind: "prd" | "evidence" | "prototype" | "ticket_set", artifactId: number) => void
   setContent: (patch: Partial<AppContentState>) => void
   openContentPanel: (tab: ContentPanelTab) => void
+  /** Open a panel FOR A NAMED TAB — now if it is on screen, else held on that
+   *  tab until the reader returns. Forwarded straight to the generation flows;
+   *  see `ChatScreen.openPanelForTab` for why an async panel must not follow
+   *  the reader. */
+  openPanelForTab: (tabId: string, tab: ContentPanelTab) => void
+  /** Take the panel down. Used by the report path when a run that opened it
+   *  turns out not to have produced a document. */
+  closeContentPanel: () => void
   content: AppContentState
 
   // ── Composer (the whole useComposer return; wrapper-owned so the tab
@@ -223,7 +234,7 @@ export type Conversation = MainConversation &
 export function openArtifactForPanel(
   content: AppContentState,
   conversationId: number | null,
-): { kind: "report" | "document"; id: number } | null {
+): { kind: "report" | "document" | "evidence"; id: number } | null {
   if (content.documentId != null) {
     return { kind: "document", id: content.documentId }
   }
@@ -233,7 +244,19 @@ export function openArtifactForPanel(
       : []
   const shown =
     content.reportFocusId ?? (rows.length === 1 ? rows[0].id : null)
-  return shown != null ? { kind: "report", id: shown } : null
+  if (shown != null) return { kind: "report", id: shown }
+  // The evidence page on this tab, last — it is the referent for "improve the
+  // evidence", which had none before evidence gained an editor, so a request to
+  // add a chart to it was answered by drawing the chart into the chat.
+  //
+  // BOTH halves are required. `evidenceId` alone can outlive the tab it was
+  // read on, and `evidence` alone (the rendered document) does not say WHICH
+  // row it came from; pointing an edit at the wrong page is the one thing this
+  // must never do. The tab sync writes them together for exactly this reason.
+  if (content.evidenceId != null && content.evidence != null) {
+    return { kind: "evidence", id: content.evidenceId }
+  }
+  return null
 }
 
 /** What the chat says when the editor decided the message was a QUESTION about
@@ -272,6 +295,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     tabsRef,
     activeTabId,
     activeTabIdRef,
+    commandInBackgroundRef,
     setTabs,
     setBusyTabs,
     askingTabsRef,
@@ -295,6 +319,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     postSummary,
     setContent,
     openContentPanel,
+    openPanelForTab,
+    closeContentPanel,
     content,
     composer,
     busy,
@@ -424,13 +450,44 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   // and the deltas render there instead of scrolling through the chat the
   // document is about to appear beside. `null` ends the run: settled, failed or
   // stopped, all of which mean the panel stops writing.
-  const onReportStream = useCallback((markdown: string | null) => {
-    setContent(
-      markdown === null
-        ? { reportGenerating: false, reportPartialMd: null }
-        : { reportPartialMd: markdown },
-    )
-  }, [setContent])
+  const onReportStream = useCallback((
+    markdown: string | null, produced?: boolean, tabId?: string,
+  ) => {
+    if (markdown !== null) {
+      setContent({ reportPartialMd: markdown })
+      return
+    }
+    setContent({ reportGenerating: false, reportPartialMd: null })
+    // THE RUN PROMISED A REPORT AND PRODUCED NONE. Clearing the generating flag
+    // was never enough on its own: the panel this send opened stays on screen,
+    // now reading "No reports in this chat" beside an answer that is sitting
+    // complete in the thread. Reported exactly that way ("it's actually
+    // returning an answer, but it opens the panel also… the panel says no
+    // reports in the chat").
+    //
+    // The panel is only ever open here because `reportRun` opened it a moment
+    // ago, so closing it takes back this turn's own claim and nothing else. A
+    // report that DID land keeps its panel, which is the whole point of the
+    // distinction.
+    //
+    // This is the client's half of a two-sided guarantee, and it holds even
+    // when the server's half is wrong: `chat_intent` decides `report` before
+    // the answer path runs, so any disagreement between the two — a declined
+    // pipeline, a question its query mode claims, a shape rule the endpoint
+    // has not learned yet — ends as a panel that closes rather than an empty
+    // one the reader has to dismiss.
+    if (produced === false) {
+      closeContentPanel()
+      // …and the tab's standing request goes with it. `panelWanted` survives
+      // being shown (a reader may leave and return many times while a report
+      // writes), so without this the panel would come back on every later
+      // visit to a thread whose report was never written.
+      if (tabId) {
+        setTabs((prev) => prev.map((t) =>
+          t.id === tabId ? { ...t, panelWanted: undefined } : t))
+      }
+    }
+  }, [setContent, closeContentPanel, setTabs])
 
   const onAnswer = useCallback((res: AskResponse) => {
     if (res._report) setContent({ reportsRefreshKey: Date.now() })
@@ -473,6 +530,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
     finalizeConversationTurn,
     setContent,
     openContentPanel,
+    openPanelForTab,
     content,
     showToast,
     openArtifactInPanel,
@@ -573,6 +631,22 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       const id =
         typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `turn-${Date.now()}`
       const hasAttachments = attachments.length > 0
+      // CAPTURED, THEN CLEARED, in the same tick the turn is rendered.
+      //
+      // The chip used to sit in the composer until extraction came back — a
+      // server round trip of several seconds, on a send whose TEXT had already
+      // vanished (`handleComposerSubmit` clears the draft immediately). So the
+      // reader watched a document they had already sent, still attached, and
+      // reasonably wondered whether it had gone. It followed them to other
+      // tabs too, because the composer is one instance for all of them.
+      //
+      // The lateness was not an oversight: the failure path below needs the
+      // attachments back for a retry. Clearing here and RESTORING there gets
+      // both — the chip goes when the message does, and a failed extraction
+      // hands the file back rather than leaving it stuck to a send that
+      // already happened.
+      const sentAttachments = attachments
+      if (hasAttachments) setAttachments([])
       // Chips render from NAMES here; each attachment's content is folded on
       // AFTER extraction resolves (below). The folded text still rides `sendQuery`.
       const newTurn: ThreadTurn = {
@@ -603,11 +677,13 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       // `rollbackOptimistic`; the attachment-failure branch clears it too.
       setBusyTabs((prev) => addToSet(prev, targetTabId))
       // Undo the optimistic turn/tab so a COMMAND branch (which renders its own
-      // turn) is not doubled. Restores the pre-send active-tab identity — incl.
-      // `activeTabIdRef`, which the command executors read to resolve their
-      // target — so command routing is byte-identical to dispatching before any
-      // optimistic render happened.
-      const rollbackOptimistic = () => {
+      // turn) is not doubled, and restore the pre-send active tab — so command
+      // routing is byte-identical to dispatching before any optimistic render
+      // happened. `activeTabIdRef`, which the command executors read to resolve
+      // their target, is pinned by the dispatch site itself (below): it has to
+      // survive the reader wandering off during the classify await, which this
+      // rollback knows nothing about. `keepFocus` is false exactly then.
+      const rollbackOptimistic = (keepFocus: boolean) => {
         // Clear the busy flag set on the optimistic commit so the command branch
         // leaves no stranded "thinking"/composer-disabled state on the tab (the
         // command renders its own turn and manages its own busy state, exactly as
@@ -620,12 +696,13 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
         // not committed yet at that point, so without this the command grounds on
         // the very optimistic turn we are removing — folding the user's own
         // command text in as a "Conversation (this chat)" source doc. Mirrors the
-        // synchronous `activeTabIdRef.current` restore already done just below.
+        // synchronous `activeTabIdRef.current` pin the dispatch site does.
         if (spawnedNewTab) {
           if (tabsRef.current) tabsRef.current = tabsRef.current.filter((t) => t.id !== targetTabId)
           setTabs((prev) => prev.filter((t) => t.id !== targetTabId))
-          setActiveTabId(prevActiveTabId)
-          activeTabIdRef.current = prevActiveTabId
+          // …but not when the reader has moved on: they are somewhere else on
+          // purpose, and the tab being removed is not the one they are looking at.
+          if (keepFocus) setActiveTabId(prevActiveTabId)
         } else {
           const rollTab = (t: ChatTab): ChatTab => t.id === targetTabId
             ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
@@ -727,7 +804,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {
-                  setAttachments([])
+                  // No `setAttachments([])` here: the send already cleared the
+                  // composer, and `docFile` was captured before it did.
                   importPrdCommandFlow(docFile, {
                     openTickets: true, seedQuery: trimmed,
                     artifactTemplateId: env.artifact_template_id,
@@ -737,7 +815,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 }
                 if (activeTab?.prd) {
                   setContent({ prd: activeTab.prd, prdMeta: activeTab.briefMeta })
-                  openContentPanel("tickets")
+                  openPanelForTab(activeTab.id, "tickets")
                   settlePendingSend()
                   return
                 }
@@ -783,7 +861,28 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                       reportFocusStandalone: false,
                       reportsRefreshKey: Date.now(),
                     })
-                    openContentPanel("reports")
+                    openPanelForTab(tabId, "reports")
+                    return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
+                  }
+                  if (target.kind === "evidence") {
+                    const { evidenceApi } = await import("../../../lib/api")
+                    const res = await evidenceApi.chatEdit(target.id, instruction)
+                    if (res.sections_changed.length === 0) {
+                      return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
+                    }
+                    // The panel is showing the body this edit just replaced, so
+                    // hand it the new one rather than leaving the reader to
+                    // reopen the page to see what changed.
+                    const { markdownToEvidenceState } = await import(
+                      "../../../lib/evidence-adapter"
+                    )
+                    setContent({
+                      evidence: markdownToEvidenceState(res.payload_md),
+                      evidenceId: target.id,
+                      evidenceGenerating: false,
+                      evidencePartialHtml: null,
+                    })
+                    openPanelForTab(tabId, "evidence")
                     return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                   }
                   const res = await customArtifactsApi.chatEdit(target.id, instruction)
@@ -791,7 +890,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                     return { reply: plainReply(res.summary || NO_EDIT_NEEDED) }
                   }
                   setContent({ documentId: target.id, documentGenerating: false })
-                  openContentPanel("document")
+                  openPanelForTab(tabId, "document")
                   return { reply: plainReply(editedReply(res.summary, res.sections_changed)) }
                 })
                 settlePendingSend()
@@ -802,7 +901,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               },
               onGeneratePrd: (env) => {
                 if (docFile) {
-                  setAttachments([])
+                  // Cleared at send; see the tickets branch above.
                   importPrdCommandFlow(docFile, {
                     openTickets: false, seedQuery: trimmed,
                     artifactTemplateId: env.artifact_template_id,
@@ -881,6 +980,26 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 })
                 settlePendingSend()
               },
+              // "Add dark mode to the backlog", "mark the export bug as done",
+              // "re-sequence by impact" — the backlog is company-scoped, so
+              // this runs the same way from any tab. The dock question (which
+              // idea / what type) parks on THIS tab, like the assign batch.
+              onBacklogAction: (instruction) => {
+                const tabId = activeTab?.id ?? targetTabId
+                void runBacklogAction(trimmed, instruction, {
+                  emitTurn: emitCommandTurn,
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
+                  canAskInDock: true,
+                  onDockQuestion: (turnId, question) => {
+                    if (question.kind !== "backlog") return
+                    setTabs((prev) => prev.map((t) =>
+                      t.id === tabId
+                        ? { ...t, pendingBacklog: { questions: question.questions, applied: question.applied, turnId } }
+                        : t))
+                  },
+                })
+                settlePendingSend()
+              },
               onAnswer: () => {},
             })
           // Peek whether a structured command will own the tab: a PURE routing
@@ -898,8 +1017,34 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             ) as ChatIntentExecutors,
           ).handled
           if (wouldHandle) {
-            rollbackOptimistic()
-            dispatchChatIntent(envelope, dispatchCtx, executors)
+            // The classify round-trip above is SECONDS long (a real one has been
+            // measured at 13s with a PDF folded into the planner prompt), and the
+            // command executors resolve their target tab from `activeTabIdRef` —
+            // live, read now. A tab switch inside that window therefore handed the
+            // generation to wherever the reader had gone: a PRD asked for in one
+            // chat was built in, and took over, a blank tab opened while waiting
+            // (conversation and all), while the thread that asked for it stayed
+            // empty. So pin the ref to the tab this send was RESOLVED to for the
+            // duration of the dispatch — `targetTabId`, or the pre-send tab when
+            // the rollback has just removed a spawned one — and hand it straight
+            // back afterwards, so the async continuations (which guard their panel
+            // writes on "am I still the active tab?") read the truth again.
+            const liveTabId = activeTabIdRef.current
+            const pinnedTabId = spawnedNewTab ? prevActiveTabId : targetTabId
+            // Where the reader actually is. `commandInBackgroundRef` is what keeps
+            // the pinned dispatch from yanking them out of it: the generation lands
+            // (and shows its generating state) on the tab that asked, and switching
+            // back there reopens its panel by the ordinary refocus route.
+            const movedAway = liveTabId !== pinnedTabId
+            commandInBackgroundRef.current = movedAway
+            rollbackOptimistic(!movedAway)
+            activeTabIdRef.current = pinnedTabId
+            try {
+              dispatchChatIntent(envelope, dispatchCtx, executors)
+            } finally {
+              activeTabIdRef.current = liveTabId
+              commandInBackgroundRef.current = false
+            }
             return
           }
           // An `answer` that will write a REPORT. Not a dispatch — the ask path
@@ -918,7 +1063,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       let persistedAttachments: { name: string; content: string; key?: string | null; mime?: string | null; size?: number | null }[] | undefined
       if (hasAttachments) {
         setBusyTabs((prev) => addToSet(prev, targetTabId))
-        const pending = attachments
+        // The captured list, not the state — that was emptied at send.
+        const pending = sentAttachments
         let ctx: string
         try {
           // Per attachment: extract text ONCE (client-text | early-extracted |
@@ -936,7 +1082,6 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
             ? { ...t, thread: t.thread.map((tn) => tn.id === id ? { ...tn, attachments: withContent } : tn) }
             : t))
           sendQuery = `${sendQuery}\n\n[Attached files]\n${ctx}`
-          setAttachments([]) // clear after successful extraction only
         } catch (e) {
           // Extraction failed: roll the optimistic turn back so no ghost
           // "thinking" bubble is stranded, but KEEP the attachments for retry.
@@ -952,6 +1097,11 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               ? { ...t, title: prevTitle ?? t.title, thread: t.thread.filter((tn) => tn.id !== id) }
               : t))
           }
+          // THE FILE COMES BACK. The turn is rolled back above, so the send
+          // never happened as far as the thread is concerned — leaving the
+          // composer empty would mean the reader had to find and attach it
+          // again to act on the toast this line shows them.
+          setAttachments((current) => (current.length > 0 ? current : sentAttachments))
           showToast("Couldn't read attachment", (e instanceof Error ? e.message : String(e)).slice(0, 200))
           return
         }
@@ -964,7 +1114,15 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
           reportFocusId: null,
           reportFocusStandalone: false,
         })
-        openContentPanel("reports")
+        // FOR THE TAB THAT ASKED, not for wherever the reader is by now. This
+        // open is several seconds after the send — the planner round-trip, then
+        // attachment extraction — and it used to call `openContentPanel`
+        // directly, so starting a report and stepping to another tab put a
+        // "Generating report…" panel over a thread that had asked for nothing.
+        // Reported after the PRD path was fixed and this one was not: "for
+        // report… I move to another tab, it shows the reports on the other tab
+        // even when I've not asked any question."
+        openPanelForTab(targetTabId, "reports")
       }
       await runConversationAsk({ targetTabId, id, displayQuery, sendQuery, persistedAttachments, reportRun })
     },

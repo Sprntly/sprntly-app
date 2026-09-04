@@ -623,12 +623,11 @@ def test_the_call_is_attributed_and_pinned(monkeypatch):
     kw = calls[0]
     assert kw["agent"] == "ask-planner"
     assert kw["purpose"] == "plan"
-    # v11 since the menu gained the product's PROJECTS — `include_projects`
-    # and the `create_project` action, neither of which any earlier version
-    # could name. The version is pinned here rather than merely compared to
-    # itself because pooling rows across versions would pool two different
-    # menus.
-    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v13"
+    # v16 since the menu gained the product's BACKLOG — `include_backlog` and
+    # the `backlog_action` action, neither of which any earlier version could
+    # name. The version is pinned here rather than merely compared to itself
+    # because pooling rows across versions would pool two different menus.
+    assert kw["prompt_version"] == ap._PROMPT_VERSION == "ask-planner-v21"
     # Sonnet since v3: the planner now synthesizes `task`/`instruction`, which
     # is the job `chat_intent` picked sonnet for ("compressing a long thread
     # into a self-contained task brief is exactly what the smallest model does
@@ -681,12 +680,20 @@ def test_the_schema_property_order_is_load_bearing():
         # skill/pipeline choices like every other action argument.
         "list_kind", "list_mode",
         "company_skill_id", "company_confidence",
-        "pipeline_id", "confidence",
+        # `wants_report` straight after the pipeline it qualifies: WHAT gets
+        # read, then WHERE the answer goes. Deciding the destination before a
+        # pipeline exists would be deciding it about nothing.
+        "pipeline_id", "confidence", "wants_report",
         # The team roster sits with the other own-records flag it behaves
         # like: both are exhaustive reads of Sprntly's own tables, and both
         # are decided after the skill/pipeline choice they cannot influence.
         "sources", "include_knowledge_graph", "include_library", "include_team",
-        "include_projects", "web_search", "documents",
+        # The backlog is the fourth own-records flag and sits with the other
+        # three, after the skill/pipeline choice it cannot influence.
+        # …and the fifth: what Sprntly has LEARNED, as opposed to what it
+        # can retrieve about a topic. Same family, same place in the order.
+        "include_projects", "include_knowledge_base", "include_backlog",
+        "web_search", "documents",
         "constraints", "in_scope",
     ]
     assert ap._PLANNER_SCHEMA["additionalProperties"] is False
@@ -715,8 +722,14 @@ def test_the_schema_property_order_is_load_bearing():
     assert "include_library" in ap._PLANNER_SCHEMA["required"]
     assert "include_team" in ap._PLANNER_SCHEMA["required"]
     assert "include_projects" in ap._PLANNER_SCHEMA["required"]
+    assert "include_backlog" in ap._PLANNER_SCHEMA["required"]
+    assert "include_knowledge_base" in ap._PLANNER_SCHEMA["required"]
     assert "action_confidence" in ap._PLANNER_SCHEMA["required"]
-    assert len(ap._PLANNER_SCHEMA["required"]) == 14
+    # `wants_report` is required on the same rule as the include_* booleans: an
+    # omitted boolean is indistinguishable from a considered `false`, and this
+    # one decides whether a document gets written.
+    assert "wants_report" in ap._PLANNER_SCHEMA["required"]
+    assert len(ap._PLANNER_SCHEMA["required"]) == 17
 
 
 # ── the action fork (v3) ─────────────────────────────────────────────────────
@@ -777,7 +790,7 @@ def test_generate_prd_survives_an_empty_task_on_purpose():
     assert "generate_prd" not in ap._NEEDS_TASK
 
 
-@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets"])
+@pytest.mark.parametrize("action", ["edit_prd", "update_ticket", "assign_tickets", "delegate"])
 def test_an_edit_without_an_instruction_degrades_to_answer(action):
     """`chat_intent` already applies this rule (`no_instruction` → answer);
     rewriting a document toward nothing is worse than not rewriting it — and

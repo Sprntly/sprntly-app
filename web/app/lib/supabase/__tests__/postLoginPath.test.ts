@@ -68,6 +68,7 @@ vi.mock("../../prdAccessApi", () => ({
 }))
 
 import { postLoginPath } from "../client"
+import { BILLING_ENABLED } from "../../billingAccess"
 import { ONBOARDING_STEP_SLUGS, slugForStep } from "../../onboarding/types"
 import { ApiError } from "../../api"
 
@@ -475,5 +476,121 @@ describe("postLoginPath — bare-link guest account state (pending_prd_public_id
     })
     expect(await postLoginPath()).toBe(FIRST_STEP)
     expect(tryAutoJoinCompanyForPrdMock).not.toHaveBeenCalled()
+  })
+})
+
+describe("postLoginPath — the onboarding payment gate", () => {
+  // Payment sits between creating a company and the rest of onboarding. This
+  // is the ROUTING half of that gate: `enforce.bill` on the backend is what
+  // actually refuses work, and nothing here can grant access the server will
+  // not honour.
+  //
+  // The gate is COMPANY-level, not user-level, which is what stops an invited
+  // teammate being charged for a company that already pays.
+
+  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
+  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
+  it.skipIf(!BILLING_ENABLED)("sends an unpaid company's unfinished onboarding to the plan gate", async () => {
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 2,
+      plan: "starter",
+      subscription_status: null,
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe("/onboarding/plan")
+  })
+
+  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
+  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
+  it.skipIf(!BILLING_ENABLED)("keeps sending them back there until they finish — the step is NOT rewound", async () => {
+    // Someone who abandons at Stripe still has a company row, a verified
+    // email and a persisted step naming where they carry on. That is the
+    // whole reason payment sits this early: an abandoned signup is a lead.
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 6,
+      subscription_status: "canceled",
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe("/onboarding/plan")
+
+    // …and once paid, they resume on the step they left, not at the start.
+    vi.resetAllMocks()
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 6,
+      subscription_status: "active",
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)
+  })
+
+  it.runIf(!BILLING_ENABLED)("payments hidden: an unpaid company resumes its own step, not the gate", async () => {
+    // The step is still NOT rewound — that half never depended on payment.
+    // What changes is the destination: they carry on where they left off
+    // instead of being parked in front of a plan picker.
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 6,
+      plan: "starter",
+      subscription_status: "canceled",
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)
+  })
+
+  it("lets a trialling company straight through — the card is on file", async () => {
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 3,
+      subscription_status: "trialing",
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(3)}`)
+  })
+
+  it("does not gate a company whose plan was never sold through Stripe", async () => {
+    // LEGACY and ENTERPRISE carry a null subscription_status by design.
+    // Gating them on one would lock every pre-billing tenant out of their own
+    // unfinished onboarding the day this ships.
+    for (const plan of ["legacy", "enterprise"]) {
+      vi.resetAllMocks()
+      existingMemberUser({
+        onboarding_completed_at: null,
+        onboarding_step: 4,
+        plan,
+        subscription_status: null,
+      })
+      acceptInviteMock.mockRejectedValue(new Error("no invite"))
+      expect(await postLoginPath(), plan).toBe(`/onboarding/${slugForStep(4)}`)
+    }
+  })
+
+  it("never gates a company that has FINISHED onboarding", async () => {
+    // The gate is an onboarding step, not a paywall on the whole app. Someone
+    // already inside whose subscription lapses is the enforcement layer's
+    // problem (402 on generation), not a reason to throw them back into
+    // signup.
+    existingMemberUser({
+      onboarding_completed_at: "2026-01-02T00:00:00Z",
+      subscription_status: null,
+    })
+    acceptInviteMock.mockRejectedValue(new Error("no invite"))
+    expect(await postLoginPath()).toBe("/")
+  })
+
+  it("still surfaces an invite conflict ahead of the gate", async () => {
+    // A user who cannot join this company at all should be told that, not
+    // asked to pay for it.
+    existingMemberUser({
+      onboarding_completed_at: null,
+      onboarding_step: 2,
+      subscription_status: null,
+    })
+    acceptInviteMock.mockRejectedValue(
+      new ApiError(409, { detail: "already in another company" }),
+    )
+    expect(await postLoginPath()).toBe("/invite-conflict")
   })
 })

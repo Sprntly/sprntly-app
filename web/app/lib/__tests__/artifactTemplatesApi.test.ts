@@ -210,8 +210,9 @@ describe("artifactTemplatesApi", () => {
     })
 
     it("activate's 409 body survives intact for the caller to translate", async () => {
-      // apiErrorMessage can't read this shape (object detail), so the BODY is
-      // the contract — compileNotes.activationRefusal reads it.
+      // The BODY is the contract — compileNotes.activationRefusal reads
+      // `code` and `notes[]` to decide which guidance to show and whether to
+      // offer a refetch, which no single sentence can express.
       const detail = {
         message: "This format isn't ready.",
         code: "not_ready",
@@ -226,8 +227,10 @@ describe("artifactTemplatesApi", () => {
         const err = e as ApiError
         expect(err.status).toBe(409)
         expect((err.body as { detail: unknown }).detail).toEqual(detail)
-        // And the reason this test exists: the generic message is useless here.
-        expect(err.message).toBe("Request failed (409)")
+        // apiErrorMessage lifts `detail.message` now, so err.message is
+        // readable rather than "Request failed (409)". The body must still
+        // arrive untouched — that is what this test is really guarding.
+        expect(err.message).toBe("This format isn't ready.")
       }
     })
 

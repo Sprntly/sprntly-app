@@ -39,11 +39,13 @@ import {
  *
  * The FOOTER drives it: Skip / Continue complete the open category, collapse
  * it, and reveal the next. Once none are left Continue leaves the step,
- * relabelled "Continue to your key". A progress bar + "N of M reviewed"
- * counter track position within the step.
+ * relabelled "See what we learned" — the review step's own headline, since
+ * the api-key step this used to name is gone. A progress bar + "N of M
+ * reviewed" counter track position within the step.
  *
  * WHY THIS SITS AT STEP 3, right after the context import: this step and the
- * api-key step after it are the only two the import cannot prefill — one wires
+ * api-key step that used to follow it were the two the (now removed) context
+ * import could not prefill — one wires
  * OAuth, the other takes a secret — so they are the two worth spending the
  * background extraction's latency on. The user works through these categories
  * while the LLM reads their uploaded file; every step from metrics onward
@@ -201,7 +203,7 @@ function CategoryIcon({ catKey }: { catKey: string }) {
   return <Icon />
 }
 
-/** Upload glyph on the per-category manual-upload fallback strip. */
+/** Upload glyph on the per-category upload tile — the first card in the row. */
 function UploadIcon(props: SVGProps<SVGSVGElement>) {
   return (
     <svg {...iconProps({ width: 13, height: 13, ...props })}>
@@ -224,6 +226,16 @@ export function Connectors() {
   const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  // The paste box's text, per category. Kept here rather than in the box so
+  // switching categories and coming back does not lose what was typed — the
+  // accordion unmounts the closed one.
+  const [pasted, setPasted] = useState<Record<string, string>>({})
+  // What was uploaded, per category, this session. The names are kept — not
+  // just a count — because "3 files uploaded." leaves the reader to remember
+  // WHICH three, on the one step where the whole question is what data got in.
+  // Keyed by category so a file dropped on Analytics is not listed under
+  // Voice; ordered as picked, newest last, the way a picker returns them.
+  const [uploadedFiles, setUploadedFiles] = useState<Record<string, string[]>>({})
   // Category keys that had a file uploaded this session — they count as
   // "Connected" in the summary row even with no provider selected.
   const [uploadedCats, setUploadedCats] = useState<Set<string>>(new Set())
@@ -314,8 +326,11 @@ export function Connectors() {
    * Settings → Connectors), and mark the category as reviewed-with-evidence
    * so its summary row reads Connected rather than Skipped.
    */
-  async function onUploadFiles(categoryKey: string, picked: FileList | null) {
-    if (!picked || picked.length === 0 || !workspace) return
+  async function onUploadFiles(
+    categoryKey: string,
+    picked: FileList | File[] | null,
+  ): Promise<boolean> {
+    if (!picked || picked.length === 0 || !workspace) return false
     const list = Array.from(picked)
     setUploadingCat(categoryKey)
     setUploadNotice(null)
@@ -323,22 +338,56 @@ export function Connectors() {
       const r = await companiesApi.uploadFiles(workspace.slug, list)
       if (r.ingested.length > 0) {
         setUploadedCats((prev) => new Set(prev).add(categoryKey))
-        setUploadNotice(
-          r.ingested.length === 1
-            ? `${r.ingested[0].filename} uploaded.`
-            : `${r.ingested.length} files uploaded.`,
-        )
+        // THE LIST IS THE CONFIRMATION, so there is no sentence to write. A
+        // notice saying "3 files uploaded." beside a list of the three is the
+        // same fact twice, and the one that disappears on the next action is
+        // the one that was carrying it.
+        setUploadedFiles((prev) => {
+          const seen = new Set(prev[categoryKey] ?? [])
+          const added = r.ingested
+            .map((f) => f.filename)
+            // Re-picking the same file replaces it server-side rather than
+            // adding a second source, so it must not appear twice here.
+            .filter((n) => !seen.has(n))
+          return { ...prev, [categoryKey]: [...(prev[categoryKey] ?? []), ...added] }
+        })
       }
       if (r.errors.length > 0) {
         setUploadNotice(
           r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
         )
       }
+      return r.ingested.length > 0
     } catch (e) {
       setUploadNotice(e instanceof Error ? e.message : String(e))
+      return false
     } finally {
       setUploadingCat(null)
     }
+  }
+
+  /**
+   * Save pasted text. IT IS AN UPLOAD — the same endpoint, the same ingestion,
+   * the same row in the same table as a dropped file. The text is wrapped in a
+   * `.md` File and posted through `companiesApi.uploadFiles`, because `.md`
+   * passes through `ingest.convert` untouched (`_SUFFIX_TO_CONVERTER`), so a
+   * paste and a file land identically. A second endpoint would have been a
+   * second ingestion path to keep in step for no gain.
+   *
+   * The name carries the minute, so pasting twice in one session files two
+   * sources rather than silently replacing the first.
+   */
+  async function onSavePasted(categoryKey: string) {
+    const text = (pasted[categoryKey] ?? "").trim()
+    if (!text || !workspace) return
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-")
+    const file = new File([text], `pasted-notes-${categoryKey}-${stamp}.md`, {
+      type: "text/markdown",
+    })
+    // Clear on success only, inside the shared handler — a failed save that
+    // emptied the box would take the reader's typing with it.
+    const ok = await onUploadFiles(categoryKey, [file])
+    if (ok) setPasted((prev) => ({ ...prev, [categoryKey]: "" }))
   }
 
   /**
@@ -355,10 +404,10 @@ export function Connectors() {
       // stale literal here silently resumes the user onto the wrong step.
       const updated = await advanceOnboardingStep(
         workspace.id,
-        stepForSlug("api-key") ?? 4,
+        stepForSlug("review") ?? 3,
       )
       setWorkspace(updated)
-      router.push("/onboarding/api-key")
+      router.push("/onboarding/review")
     } finally {
       setSaving(false)
     }
@@ -421,7 +470,7 @@ export function Connectors() {
 
   return (
     <OnboardingChrome
-      step={3}
+      step={stepForSlug("connectors") ?? 2}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -437,10 +486,16 @@ export function Connectors() {
           reviewed
         </>
       }
-      onBack={() => router.push("/onboarding/import-context")}
+      onBack={() => router.push("/onboarding/company")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
-      continueLabel={leavesStep ? "Continue to your key" : "Continue"}
+      // NAMES THE NEXT SCREEN, and that screen changed underneath this label.
+      // The api-key step it promised was removed from the flow; leaving here
+      // goes to `/onboarding/review`, whose own heading is "Here's what we
+      // learned." So the button says that — a Continue that names a step the
+      // product no longer has is worse than a bare "Continue", because the
+      // reader spends the next screen looking for the key it promised.
+      continueLabel={leavesStep ? "See what we learned" : "Continue"}
       continueDisabled={saving}
       loading={saving}
     >
@@ -501,6 +556,52 @@ export function Connectors() {
               {isOpen && (
                 <div className="conn-step-body">
                   <div className="conn-grid">
+                    {/* UPLOAD IS THE FIRST TILE IN THE ROW, not a strip under
+                        it. As a full-width dashed bar below the logos it read
+                        as a footnote to the connectors — which is backwards
+                        for the PM this step is hardest on, the one who cannot
+                        authorise an OAuth app and whose only way to bring data
+                        in IS the file picker. First position and the same tile
+                        geometry make it one of the options rather than the
+                        consolation under them.
+
+                        Hidden for the categories that opt out in the catalog
+                        (pm, code, docs): ticket and repo data cannot stay
+                        current from a one-off export, and Company
+                        documentation takes uploads through the named-source
+                        picker in Settings instead. */}
+                    {cat.allowsManualUpload !== false && (
+                      <label
+                        className="conn conn-upload"
+                        aria-busy={uploadingCat === cat.key}
+                        // The accepted extensions used to render as a second
+                        // line. At tile width that is either truncated or a
+                        // wrapped paragraph in a row of one-line cards, so it
+                        // moves to the tooltip and the label carries the verb.
+                        title={
+                          cat.uploadAccept
+                            ? `Upload files — ${cat.uploadAccept}`
+                            : "Upload files"
+                        }
+                        data-testid={`conn-upload-${cat.key}`}
+                      >
+                        <UploadIcon className="conn-logo" aria-hidden />
+                        <span className="conn-name">
+                          {uploadingCat === cat.key ? "Uploading…" : "Upload files"}
+                        </span>
+                        <input
+                          type="file"
+                          multiple
+                          accept={(cat.uploadExtensions ?? []).join(",")}
+                          disabled={uploadingCat !== null}
+                          style={{ display: "none" }}
+                          onChange={(e) => {
+                            void onUploadFiles(cat.key, e.target.files)
+                            e.target.value = ""
+                          }}
+                        />
+                      </label>
+                    )}
                     {cat.items.map((item) => {
                       const live = connected.has(item.id)
                       const sel = selected.has(item.id)
@@ -523,36 +624,92 @@ export function Connectors() {
                       )
                     })}
                   </div>
-                  {/* Manual fallback for PMs without OAuth access. Hidden for
-                      categories that opt out in the catalog (pm, code, docs) —
-                      ticket and repo data can't stay current from a one-off
-                      export, and Company documentation takes uploads through
-                      the named-source picker in Settings instead. */}
-                  {cat.allowsManualUpload !== false && (
-                    <label
-                      className="conn-upload"
-                      aria-busy={uploadingCat === cat.key}
-                    >
-                      <UploadIcon aria-hidden />
-                      <span className="t">
-                        {uploadingCat === cat.key
-                          ? "Uploading…"
-                          : "Or upload files manually"}
-                      </span>
-                      <span className="s">{cat.uploadAccept ?? ""}</span>
-                      <input
-                        type="file"
-                        multiple
-                        accept={(cat.uploadExtensions ?? []).join(",")}
+                  {/* PASTE, for a shelf with nothing to connect. Research has
+                      no connector today (Marvin is coming-soon) and is kept
+                      alive by `keepWhenEmpty` precisely because what onboarding
+                      wants from it is the PM's own material — interview notes,
+                      survey answers, quotes. A lone upload tile asks them to go
+                      and make a file out of something they can already read on
+                      screen; a box takes it as it is.
+
+                      Gated on having NO connector rather than on the category
+                      being named "research": the reason is the empty shelf, so
+                      the condition is the empty shelf. A category that gains a
+                      connector loses the box, which is the right outcome — the
+                      connector is the better answer whenever there is one. */}
+                  {cat.items.length === 0 && cat.allowsManualUpload !== false && (
+                    <div className="conn-paste">
+                      <label
+                        className="conn-paste-label"
+                        htmlFor={`conn-paste-${cat.key}`}
+                      >
+                        Or paste it here
+                      </label>
+                      <textarea
+                        id={`conn-paste-${cat.key}`}
+                        className="conn-paste-box"
+                        data-testid={`conn-paste-${cat.key}`}
+                        rows={5}
+                        placeholder="Paste interview notes, survey answers, user quotes — anything you already have written down."
+                        value={pasted[cat.key] ?? ""}
+                        onChange={(e) =>
+                          setPasted((prev) => ({ ...prev, [cat.key]: e.target.value }))
+                        }
                         disabled={uploadingCat !== null}
-                        style={{ display: "none" }}
-                        onChange={(e) => {
-                          void onUploadFiles(cat.key, e.target.files)
-                          e.target.value = ""
-                        }}
                       />
-                    </label>
+                      <div className="conn-paste-foot">
+                        {/* SAYS WHERE IT GOES. "Save" alone leaves the reader
+                            wondering whether this is a scratchpad; it is the
+                            same destination a dropped file has. */}
+                        <span className="conn-paste-hint">
+                          Saved with your uploads, and read the same way.
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-secondary conn-paste-save"
+                          data-testid={`conn-paste-save-${cat.key}`}
+                          disabled={
+                            uploadingCat !== null
+                            || (pasted[cat.key] ?? "").trim().length === 0
+                          }
+                          onClick={() => void onSavePasted(cat.key)}
+                        >
+                          {uploadingCat === cat.key ? "Saving…" : "Save notes"}
+                        </button>
+                      </div>
+                    </div>
                   )}
+                  {/* WHAT LANDED, listed. Scoped to this category — the
+                      state is keyed by it — so a file dropped on Analytics is
+                      not confirmed under Voice. `role="status"` so a screen
+                      reader hears the file arrive rather than only seeing it.
+                      Empty until something is uploaded, which is why there is
+                      no "nothing yet" line: an empty list under an upload tile
+                      says the same thing without a sentence. */}
+                  {(uploadedFiles[cat.key]?.length ?? 0) > 0 && (
+                    <ul
+                      className="conn-uploaded"
+                      role="status"
+                      data-testid={`conn-uploaded-${cat.key}`}
+                    >
+                      {uploadedFiles[cat.key]!.map((name) => (
+                        <li key={name} className="conn-uploaded-row">
+                          <Check
+                            className="conn-uploaded-tick"
+                            style={{ width: 11, height: 11 }}
+                            aria-hidden
+                          />
+                          {/* The full name in `title`, for the one that is
+                              longer than the row it sits in. */}
+                          <span className="conn-uploaded-name" title={name}>
+                            {name}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  {/* Failures only. Success is the list above; a message that
+                      has to survive is not a message that fades. */}
                   {uploadNotice && (
                     <p className="onb-field-hint" role="status">
                       {uploadNotice}
@@ -564,11 +721,6 @@ export function Connectors() {
           )
         })}
       </div>
-
-      <p className="conn-note">
-        OAuth and API-key connections are configured in Settings → Connectors
-        after onboarding. Selections here pre-stage what you intend to wire up.
-      </p>
 
       <ConnectorConnectModal
         providerId={modalProvider}

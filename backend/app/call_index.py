@@ -949,42 +949,71 @@ def clear_company(company_id: str, provider: Optional[str] = None) -> None:
                            company_id, exc_info=True)
 
 
+def _call_from_row(row: dict) -> IndexedCall:
+    """One `call_index` row, as the answer paths consume it. Shared by every
+    reader (`list_calls` and the name-matched candidate query below) so the
+    row shape is parsed in exactly one place."""
+    return IndexedCall(
+        external_id=row["external_id"],
+        title=row.get("title") or "",
+        call_date=row.get("call_date"),
+        duration_min=row.get("duration_min"),
+        participants=row.get("participants") or [],
+        account=row.get("account"),
+        summary=row.get("summary") or "",
+        provider=row.get("provider") or PROVIDER_FIREFLIES,
+    )
+
+
 def list_calls(
     company_id: str,
     *,
     since: Optional[datetime] = None,
     until: Optional[datetime] = None,
     limit: int = 50,
+    name_terms: Optional[list[str]] = None,
 ) -> list[IndexedCall]:
     """Calls for a company, newest first, optionally within a window.
 
     A pure DB read — the whole point. No source API call, no model.
+
+    `name_terms`, when given, narrows the read SERVER-SIDE to rows whose
+    account or title contains ANY of the terms (case-insensitive substring) —
+    across the company's FULL history, not just the newest `limit` rows.
+    `resolve_calls` uses this so a NAMED call (an account, a title word) is
+    found wherever it sits in the catalogue, instead of only among the most
+    recent `limit` calls. Every other caller leaves it at the default `None`
+    and reads exactly as before. Terms are re-checked against `[A-Za-z0-9]+`
+    here — `resolve_calls`' own `_query_terms` already guarantees this shape,
+    but this function becomes a raw PostgREST filter string when the argument
+    is used, so nothing reaches it unescaped regardless of caller.
     """
     from app.db.client import require_client
 
     query = (
         require_client().table("call_index").select("*")
         .eq("company_id", company_id)
-        .order("call_date", desc=True)
-        .limit(limit)
     )
+    if name_terms is not None:
+        safe_terms = [t for t in name_terms if re.fullmatch(r"[A-Za-z0-9]+", t)]
+        if not safe_terms:
+            return []
+        # PostgREST's or() syntax uses `*` for the ilike wildcard: its own
+        # commas and parens are the clause separators, so the literal `%`
+        # the single-column `.ilike()` helper substitutes automatically is
+        # not available when building a raw or_() filter by hand.
+        or_filter = ",".join(
+            clause
+            for term in safe_terms
+            for clause in (f"account.ilike.*{term}*", f"title.ilike.*{term}*")
+        )
+        query = query.or_(or_filter)
+    query = query.order("call_date", desc=True).limit(limit)
     if since is not None:
         query = query.gte("call_date", since.isoformat())
     if until is not None:
         query = query.lte("call_date", until.isoformat())
-    return [
-        IndexedCall(
-            external_id=row["external_id"],
-            title=row.get("title") or "",
-            call_date=row.get("call_date"),
-            duration_min=row.get("duration_min"),
-            participants=row.get("participants") or [],
-            account=row.get("account"),
-            summary=row.get("summary") or "",
-            provider=row.get("provider") or PROVIDER_FIREFLIES,
-        )
-        for row in (query.execute().data or [])
-    ]
+    return [_call_from_row(row) for row in (query.execute().data or [])]
 
 
 def count_calls(
@@ -1478,6 +1507,14 @@ _DATE_REFERENCE = re.compile(r"\b(\d{4}-\d{2}-\d{2})\b")
 # source.
 _MIN_SUBSTRING_TERM = 4
 
+# Headroom for the name-matched candidate query below — generous, but still a
+# cap so a term so common it matches most of a very large catalogue cannot
+# pull an unbounded number of rows into Python. This is NOT a recency window:
+# unlike the old `limit=200` newest-first read, which one rows fall inside it
+# turns on the NAME MATCH the query already ran server-side, not on how
+# recently the call happened.
+_RESOLUTION_CANDIDATE_CAP = 2000
+
 
 def _call_words(call: IndexedCall) -> set[str]:
     """A call's account and title as individual normalized words, for whole-word
@@ -1498,15 +1535,53 @@ def resolve_calls(company_id: str, question: str, *, limit: int = 200) -> list[I
     preferring WHOLE-WORD hits and admitting a substring only when the term is
     long enough to be distinctive. Returns [] when nothing matches, so the caller
     falls through rather than summarizing an arbitrary call.
+
+    The CANDIDATE SET this scores over is queried by name across the company's
+    ENTIRE history (`list_calls(..., name_terms=...)`) when the question names
+    anything — this used to be `list_calls(limit=200)`, the newest 200 rows
+    with no name filter at all, so a call outside that recency window could
+    never be found however exactly it was named (a live report on a large
+    catalogue found a named account+demo call sitting well past the newest
+    200 rows by `call_date DESC`, resolving to zero matches). Only a bare date
+    reference ("summarize the call on 2026-07-22"), which names no term the
+    database can filter on, falls back to a date-scoped `list_calls` read.
     """
     terms = _query_terms(question)
     date_match = _DATE_REFERENCE.search(question or "")
     on_date = date_match.group(1) if date_match else None
     if not terms and not on_date:
         return []
+
+    # Digits that survived `_query_terms` as a bare fragment of the DATE the
+    # question named ("2026" out of "2026-07-22" — the tokenizer splits on
+    # the hyphens) are not a NAME, they are the date leaking through. Only
+    # excluded when a date was actually found, so a genuinely numeric account
+    # name stays usable on every other question.
+    filter_terms = [t for t in terms if not t.isdigit()] if on_date else terms
+
+    if filter_terms:
+        candidates = list_calls(
+            company_id, name_terms=filter_terms,
+            limit=max(limit, _RESOLUTION_CANDIDATE_CAP),
+        )
+    else:
+        # Nothing left to filter by NAME — only a date was given (or every
+        # term was a fragment of it). Scope the read to that one day rather
+        # than the newest `limit` rows, for the identical reason a name filter
+        # exists at all: the named day could be older than the most recent
+        # `limit` calls.
+        try:
+            day_start = datetime.fromisoformat(on_date).replace(tzinfo=timezone.utc)
+        except ValueError:
+            return []
+        candidates = list_calls(
+            company_id, since=day_start, until=day_start + timedelta(days=1),
+            limit=max(limit, _RESOLUTION_CANDIDATE_CAP),
+        )
+
     joined = _norm("".join(terms))
     scored: list[tuple[int, IndexedCall]] = []
-    for call in list_calls(company_id, limit=limit):
+    for call in candidates:
         haystack = _norm(f"{call.account or ''}{call.title or ''}")
         words = _call_words(call)
         score = 0
@@ -1867,24 +1942,95 @@ def select_from_candidates(reply: str, candidates: list[IndexedCall]) -> list[In
     return []
 
 
+def _stored_transcript_raw(company_id: str, call: IndexedCall) -> Optional[dict]:
+    """A stored transcript for ONE call, reshaped for `render_transcript` — or
+    None when the store has nothing usable.
+
+    Only a payload carrying `sentences` counts as usable: `call_digest`'s own
+    writes to this same store predate this field and hold a bounded quote
+    SAMPLE, not the full transcript a single-call summary needs to match
+    live-fetch quality — reading that thinner shape here would silently
+    downgrade every cached single-call answer, so a row without it is treated
+    exactly like no row at all (falls through to the live fetch below)."""
+    from app.db.call_transcripts import load_call_transcript
+
+    payload = load_call_transcript(company_id, call.provider, call.external_id)
+    if not payload:
+        return None
+    sentences = payload.get("sentences") or []
+    if not sentences:
+        return None
+    return {
+        "title": payload.get("title") or call.title,
+        "summary": {"overview": payload.get("overview") or ""},
+        "sentences": sentences,
+    }
+
+
+def _warm_transcript_store(company_id: str, call: IndexedCall, raw: dict) -> None:
+    """Persist a live-fetched transcript so the NEXT ask for this call is
+    answered from the store (see `_stored_transcript_raw`) — mirrors
+    `call_digest.build_corpus`'s write-through. `store_call_transcripts`
+    itself is best-effort and never raises, so this never risks the answer
+    that triggered it.
+
+    Also derives `quotes` the same bounded way `fireflies.fetch_calls`
+    already does for the digest's own store writes, so a row this path warms
+    is never thinner than one the digest would have written for the same
+    call — a later digest run reusing this row loses nothing."""
+    from app.db.call_transcripts import store_call_transcripts
+    from app.kg_ingest.pullers.fireflies import CallTranscript, _QUOTES_PER_CALL
+
+    sentences = raw.get("sentences") or []
+    summary = raw.get("summary") or {}
+    quotes: list[dict] = []
+    for sent in sentences[:_QUOTES_PER_CALL]:
+        text = (sent.get("text") or "").strip()
+        if not text:
+            continue
+        quotes.append({"speaker": sent.get("speaker_name") or "?", "text": text})
+    store_call_transcripts(company_id, [CallTranscript(
+        external_id=call.external_id,
+        title=raw.get("title") or call.title,
+        date=call.call_date or "",
+        participants=call.participants or [],
+        overview=summary.get("overview") or "",
+        action_items=summary.get("action_items") or "",
+        keywords=summary.get("keywords") or [],
+        quotes=quotes,
+        provider=call.provider,
+        sentences=sentences,
+    )])
+
+
 def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -> Optional[dict]:
     """Fetch each named call's transcript and summarize. One model call over
-    however many transcripts were selected — still far below the whole window."""
+    however many transcripts were selected — still far below the whole window.
+
+    Stored-first (mirrors `call_digest.build_corpus`'s pattern): a transcript
+    already cached with full sentences answers without the live provider
+    round trip (the ~12s Fireflies leg this path used to pay on every ask);
+    a miss falls through to the live fetch and warms the cache with what it
+    returns, so the next ask for the same call is stored-fast too."""
     from app.graph.gateway import llm_call
 
     blocks: list[str] = []
     used: list[IndexedCall] = []
     for call in calls[:_MAX_CALLS_PER_ANSWER]:
-        # Frozen Fireflies call shape again (see _state_for): the existing
-        # single-call tests patch `fetch_transcript` with a two-argument
-        # stand-in, and those tests are the proof this path did not move.
-        raw = (
-            fetch_transcript(company_id, call.external_id)
-            if call.provider == PROVIDER_FIREFLIES
-            else fetch_transcript(
-                company_id, call.external_id, provider=call.provider
+        raw = _stored_transcript_raw(company_id, call)
+        if not (raw and (raw.get("sentences") or [])):
+            # Frozen Fireflies call shape again (see _state_for): the existing
+            # single-call tests patch `fetch_transcript` with a two-argument
+            # stand-in, and those tests are the proof this path did not move.
+            raw = (
+                fetch_transcript(company_id, call.external_id)
+                if call.provider == PROVIDER_FIREFLIES
+                else fetch_transcript(
+                    company_id, call.external_id, provider=call.provider
+                )
             )
-        )
+            if raw and (raw.get("sentences") or []):
+                _warm_transcript_store(company_id, call, raw)
         if raw and (raw.get("sentences") or []):
             blocks.append(render_transcript(raw))
             used.append(call)
@@ -1926,6 +2072,64 @@ def _summarize_calls(company_id: str, question: str, calls: list[IndexedCall]) -
     }
 
 
+def _kg_fallback_for_single_call(company_id: str, question: str) -> Optional[dict]:
+    """A named entity's distilled KG signals, when no INDEXED CALL resolved
+    for it — a genuine decline, not a truncated read (see `resolve_calls`).
+
+    `resolve_calls` returning [] means no call in this company's index
+    matched, not that the entity is unknown to Sprntly: the KG extractor pulls
+    signals from every synced source, so an entity with no matching transcript
+    can still have real distilled context. Without this, that case answered
+    with a bare "no summary available" — a decline dressed as a fact, for an
+    entity the graph already had something on.
+
+    Deterministic, not planner-gated: this runs on every single-call decline
+    regardless of the turn's `include_knowledge_graph` flag. A named
+    single-call ask ("summarize the Acme call") reads as a transcript request,
+    not a "what do we know about X" question, so the LLM planner has no
+    reliable reason to grant KG access to it — relying on the planner to flip
+    that flag here would silently reintroduce the same failure on a turn where
+    it guesses wrong.
+
+    Best-effort like every other KG read in this codebase: any failure (no
+    pgvector, partial KG, unavailable DB) degrades to None — the caller's
+    existing "no summary available" stands, it never breaks the turn.
+    """
+    try:
+        from app.graph.facade import GraphFacade
+        from app.graph.retrieval import render_context_section, retrieve_context
+
+        bundle = retrieve_context(
+            GraphFacade(), company_id, question, content_leg=True,
+        )
+    except Exception:  # noqa: BLE001 — a KG read must never break a decline
+        logger.warning(
+            "call-index: KG fallback failed for %s", company_id, exc_info=True
+        )
+        return None
+    if not bundle or bundle.get("empty"):
+        return None
+    try:
+        rendered = (render_context_section(bundle) or "").strip()
+    except Exception:  # noqa: BLE001
+        logger.warning(
+            "call-index: KG fallback render failed for %s", company_id, exc_info=True
+        )
+        return None
+    if not rendered:
+        return None
+    return {
+        "answer": (
+            "I couldn't find a matching recorded call for this, but here is "
+            "what the knowledge graph has extracted on it — not a transcript, "
+            "so treat it as a lead rather than a full account:\n\n" + rendered
+        ),
+        "key_points": [], "citations": [], "confidence": 0.4,
+        "unanswered": "", "_skill": None,
+        "_skill_source": "call-index-kg-fallback",
+    }
+
+
 def answer_single_call(
     company_id: str, question: str, *, history=None,
     fresh: Optional[Freshness] = None,
@@ -1961,7 +2165,7 @@ def answer_single_call(
 
     matches = resolve_calls(company_id, question)
     if not matches:
-        return None
+        return _kg_fallback_for_single_call(company_id, question)
 
     # Ambiguous: several calls fit. Ask, from the index, at zero model cost —
     # cheaper AND more useful than picking one and being wrong.

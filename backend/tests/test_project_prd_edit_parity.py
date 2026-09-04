@@ -24,7 +24,7 @@ Deterministic fake-DB/fake-editor tier (mirrors `test_project_chat_edit.py`
 + `test_projects_prd_chat_edit_route.py`'s own conventions): real
 `projects`/`project_members`/`project_artifacts`/`prds`/`prd_versions` rows
 via `tenant_client` + `isolated_settings`, the editor LLM call mocked at
-`app.prd_questions.apply_chat_edit`, and the group turn's tool-loop call
+`app.prd_edit.apply_chat_edit`, and the group turn's tool-loop call
 mocked at `app.llm.run_tool_loop` (same seam the retired group-edit tests
 used) so the `edit_prd` tool fires deterministically without a real model.
 The real cross-project/cross-tenant Postgres fan-out + a real LLM apply are
@@ -38,7 +38,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 import app.routes.projects as projects_route
 from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace
@@ -107,7 +107,7 @@ def _seed_project(t, isolated_settings, *, name: str = "Edit parity project") ->
 
 def _mock_editor(monkeypatch, *, html="<html><body><h1>Doc v2</h1></body></html>",
                   sections_changed=("Requirements",), summary="Tightened requirements."):
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": html, "sections_changed": list(sections_changed), "summary": summary,
     })
 
@@ -220,7 +220,7 @@ def test_write_route_no_prd_id_returns_open_a_prd_and_no_write(
     before = _payload(prd_id)
 
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
@@ -253,7 +253,7 @@ def test_cross_project_prd_edit_denied_and_no_write(
     before = _payload(prd_b)
 
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_a}/prd/chat-edit",
@@ -303,7 +303,7 @@ def test_cross_tenant_prd_edit_soft_404_no_write(
     # NOT attached to any of `t`'s projects — a foreign-tenant PRD altogether.
 
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
@@ -335,7 +335,7 @@ def test_editor_no_change_returns_no_edit(tenant_client, isolated_settings, monk
     projects_db.add_artifact(project_id, "prd", prd_id)
     before = _payload(prd_id)
 
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: {
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: {
         "html": "<html><body><h1>Doc</h1></body></html>",
         "sections_changed": [], "summary": "",
     })

@@ -7,6 +7,14 @@ import { planNarrative } from "../goalPlanNarrative"
 const flat = (steps: ReturnType<typeof planNarrative>): string[] =>
   steps.map((s) => [s.text, ...(s.items ?? [])].join(" "))
 
+/** The "what gets read" step, found by content rather than by index. Every
+ *  fixture in this file carries a definition, which now narrates as its own
+ *  step ahead of this one — so this step is index 0 only when there is
+ *  nothing to confirm, and index 1 otherwise. Finding it by its own words
+ *  keeps these assertions honest about what they are actually checking. */
+const sourcesLine = (lines: string[]): string =>
+  lines.find((l) => /^Read /.test(l)) ?? ""
+
 const src = (source_type: string, label: string, signal_count: number) =>
   ({ source_type, label, signal_count, witnesses: "what people said" }) as never
 
@@ -29,11 +37,11 @@ const PLAN = {
 describe("the plan reads as an approach, not a form", () => {
   it("names the sources a reader would recognise, with the total", () => {
     const steps = flat(planNarrative(PLAN, new Set()))
-    expect(steps[0]).toContain("customer calls")
-    expect(steps[0]).toContain("the tracker")
-    expect(steps[0]).toContain("product analytics")
+    expect(sourcesLine(steps)).toContain("customer calls")
+    expect(sourcesLine(steps)).toContain("the tracker")
+    expect(sourcesLine(steps)).toContain("product analytics")
     // 412 + 88 + 1500 — the number the reader is agreeing to.
-    expect(steps[0]).toContain("2,000")
+    expect(sourcesLine(steps)).toContain("2,000")
   })
 
   it("rewrites itself when a source is dropped, rather than describing the old run", () => {
@@ -41,15 +49,15 @@ describe("the plan reads as an approach, not a form", () => {
     // kept describing analytics after the reader unticked analytics would be
     // the most confidently wrong sentence on the card.
     const steps = flat(planNarrative(PLAN, new Set(["analytics"])))
-    expect(steps[0]).not.toContain("product analytics")
-    expect(steps[0]).toContain("customer calls")
-    expect(steps[0]).toContain("500")      // 412 + 88
-    expect(steps[0]).not.toContain("2,000")
+    expect(sourcesLine(steps)).not.toContain("product analytics")
+    expect(sourcesLine(steps)).toContain("customer calls")
+    expect(sourcesLine(steps)).toContain("500")      // 412 + 88
+    expect(sourcesLine(steps)).not.toContain("2,000")
   })
 
   it("says so plainly when everything is unticked", () => {
     const steps = flat(planNarrative(PLAN, new Set(["customer_voice", "project_mgmt", "analytics"])))
-    expect(steps[0]).toMatch(/read nothing/i)
+    expect(steps.find((l) => /read nothing/i.test(l))).toBeTruthy()
   })
 
   it("promises a number nowhere, because nothing has been read yet", () => {
@@ -84,6 +92,26 @@ describe("the plan reads as an approach, not a form", () => {
     expect(undefinedDef.join(" ")).not.toMatch(/your own definition/i)
   })
 
+  it("confirms the definition as the plan's own first step, not a box below it", () => {
+    // Every fixture here carries a definition, so it leads.
+    const steps = planNarrative(PLAN, new Set())
+    expect(steps[0].text).toMatch(/confirm what this means/i)
+    // The adopted words themselves live in this step, and only this one — the
+    // later "judge what survives" step points back at it instead of quoting
+    // it again.
+    const adopted = planNarrative({ ...PLAN, definition_adopted: true }, new Set())
+    expect(adopted[0].text).toContain("revenue means new ARR closed this quarter")
+    const judgeSteps = adopted.filter((s) => /judge what survives/i.test(s.text))
+    expect(judgeSteps).toHaveLength(1)
+    expect(judgeSteps[0].text).not.toContain("revenue means new ARR closed this quarter")
+  })
+
+  it("has nothing to confirm, and says nothing about confirming, when there is no definition", () => {
+    const steps = flat(planNarrative({ ...PLAN, definition_text: "" }, new Set()))
+    expect(steps.join(" ")).not.toMatch(/confirm what this means/i)
+    expect(steps.join(" ")).not.toMatch(/judge what survives/i)
+  })
+
   it("takes the deliverables from the planner rather than writing its own", () => {
     const steps = flat(planNarrative(PLAN, new Set())).join(" ")
     expect(steps).toContain("ranked list of what is blocking this")
@@ -96,6 +124,17 @@ describe("the plan reads as an approach, not a form", () => {
     )).join(" ")
     expect(other).toContain("one-line answer and nothing else")
     expect(other).not.toContain("ranked list")
+  })
+
+  it("promises to show what got set aside, without inventing a count before anything is read", () => {
+    const steps = planNarrative(PLAN, new Set())
+    const setAside = steps.find((s) => /set aside/i.test(s.text))
+    expect(setAside).toBeTruthy()
+    // A COMMITMENT, NOT A RESULT: this runs before the run reads anything, so
+    // it cannot yet know how many findings will end up here.
+    expect(setAside!.text).not.toMatch(/\d/)
+    // Stated ahead of the hard limits, which stay the last word.
+    expect(steps.indexOf(setAside!)).toBeLessThan(steps.length - 1)
   })
 
   it("counts the declared gaps and puts them last, as part of the approach", () => {
@@ -155,5 +194,66 @@ describe("the plan reads as an approach, not a form", () => {
     const give = steps.find((s) => s.text.startsWith("Give you"))!
     expect(give.items).toBeUndefined()
     expect(give.text).toBe("Give you a ranked list.")
+  })
+  it("names the ranking framework in the plan, before the run", () => {
+    // Apurva: "in the initial plan that we are going to output, we should
+    // highlight that we are using the RICE framework." A ranking method
+    // discovered in the output is a convention; one stated in the plan is a
+    // choice the reader can still say no to.
+    const steps = planNarrative({ ...PLAN, framework: "RICE" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect(rank).toBeTruthy()
+    expect(rank.items).toBeTruthy()
+    const terms = (rank.items ?? []).join(" ")
+    expect(terms).toMatch(/Reach/)
+    expect(terms).toMatch(/Impact/)
+    expect(terms).toMatch(/Confidence/)
+    // AND THAT EFFORT IS NOT IN THE DATA. RICE's letters carry an assumption
+    // this corpus cannot satisfy, and saying so in the plan is cheaper than
+    // explaining it under a table afterwards.
+    expect(terms).toMatch(/not in your connected data/i)
+  })
+
+  it("says nothing about ranking when no framework was set", () => {
+    const steps = planNarrative({ ...PLAN, framework: "" } as never, new Set())
+    expect(steps.find((s) => /RICE|Rank what survives/.test(s.text))).toBeUndefined()
+  })
+
+  it("names MoSCoW's own terms, not RICE's, when that is the chosen framework", () => {
+    // The chosen framework is named, and its terms are ITS terms — a
+    // plan that picked MoSCoW because nothing carries a number must not then
+    // describe Reach/Impact/Effort, which is exactly the arithmetic MoSCoW
+    // was chosen to avoid promising.
+    // `framework` here is lowercase — the real stored/comparison value a run
+    // actually sends — so this also locks in the display casing: the step's
+    // own sentence must say "MoSCoW", never the raw stored value.
+    const steps = planNarrative({ ...PLAN, framework: "moscow" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("MoSCoW"))!
+    expect(rank).toBeTruthy()
+    expect(rank.text).not.toContain("moscow")
+    const terms = (rank.items ?? []).join(" ")
+    expect(terms).toMatch(/MUST/)
+    expect(terms).toMatch(/SHOULD|COULD/)
+    expect(terms).not.toMatch(/Reach —|Impact —|Effort —/)
+  })
+
+  it("says RICE in the step's sentence even when the stored value is lowercase", () => {
+    // Mirrors the MoSCoW case above, for the other direction: a real run
+    // stores "rice", never pre-cased text.
+    const steps = planNarrative({ ...PLAN, framework: "rice" } as never, new Set())
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect(rank).toBeTruthy()
+    expect(rank.text).not.toContain("rice:")
+  })
+
+  it("states why this framework was chosen, alongside its name", () => {
+    // The chosen framework and the reason it was chosen both appear in the
+    // plan and in the final report.
+    const steps = planNarrative(
+      { ...PLAN, framework: "RICE", framework_reason: "a numeric source is connected" } as never,
+      new Set(),
+    )
+    const rank = steps.find((s) => s.text.includes("RICE"))!
+    expect((rank.items ?? []).join(" ")).toContain("a numeric source is connected")
   })
 })

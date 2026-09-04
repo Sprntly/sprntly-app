@@ -57,7 +57,7 @@ import {
 } from "../../../../lib/api"
 import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
 import { openArtifactCandidateAsItem } from "./artifactCandidates"
-import { ProjectMainThread } from "./ProjectMainThread"
+import { ProjectMainThread, type ProjectChatSubmit, type ProjectChatSubmitRef } from "./ProjectMainThread"
 import { ProjectArtifactsDrawer } from "./ProjectArtifactsDrawer"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
 import { useContent } from "../../../../context/ContentContext"
@@ -144,6 +144,15 @@ function ArtifactsIcon() {
   )
 }
 
+function TasksIcon() {
+  return (
+    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M9 11l3 3 8-8" />
+      <path d="M20 12v6a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h9" />
+    </svg>
+  )
+}
+
 function LockIcon() {
   return (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
@@ -223,6 +232,10 @@ export type ProjectDetailViewProps = {
   artifactsDrawerFilter?: ProjectArtifactType
   /** Closes the artifacts drawer (container's `onCloseRailModal`). */
   onCloseArtifactsDrawer: () => void
+  /** Passed straight into `ProjectMainThread` so the chat publishes its
+   *  `submitAsk` here — the Task-ledger tick completes a task through the
+   *  composer's own submit path (see `TaskModal`'s `onCompleteTask`). */
+  chatSubmitRef?: ProjectChatSubmitRef
 }
 
 /** Pure presentational shell — the surface a test renders directly, same
@@ -231,7 +244,7 @@ export function ProjectDetailView({
   project,
   artifacts,
   memory: _memory,
-  ledgerCounts: _ledgerCounts,
+  ledgerCounts,
   ledgerRows: _ledgerRows,
   onOpenArtifacts,
   onOpenArtifactInPlace,
@@ -240,12 +253,16 @@ export function ProjectDetailView({
   onOpenSettings,
   onOpenInvite,
   insightNote,
-  currentUserId: _currentUserId,
+  // No longer unused-by-design: also threaded into `ProjectMainThread` below
+  // (realtime per-user topic), alongside its existing member-removal-gating
+  // use (still unimplemented in this View — see the prop's own docstring).
+  currentUserId,
   onRemoveMember: _onRemoveMember,
   refetchArtifacts,
   artifactsDrawerOpen,
   artifactsDrawerFilter,
   onCloseArtifactsDrawer,
+  chatSubmitRef,
 }: ProjectDetailViewProps) {
   const humans = useMemo(() => project.members.filter((m): m is HumanMember => m.kind === "human"), [project.members])
   // The SAME decision main chat uses for "open the PRD" — the evidence-vs-PRD
@@ -321,11 +338,22 @@ export function ProjectDetailView({
 
         <span className={styles.topSpacer} />
 
-        {/* Top-bar "See all tasks" affordance removed — the task ledger is
-            reached conversationally (backend `get_task_ledger`, rendered
-            inline in chat). The `onOpenTasks` → TaskModal open-state chain
-            below is deliberately retained (not orphaned) so the modal stays
-            mountable for a future/other trigger without a re-wire. */}
+        {/* Top-bar task-ledger trigger — opens the "Task ledger" TaskModal via
+            the `onOpenTasks` → `railModal.kind === "tasks"` chain. The badge
+            shows the caller's OPEN tasks (assigned-to-me + waiting-on), a
+            best-effort mirror of the polled counts; the modal is the authority. */}
+        <button
+          type="button"
+          className={styles.railToggle}
+          onClick={onOpenTasks}
+          data-testid="topbar-tasks"
+        >
+          <TasksIcon />
+          Tasks
+          <span className={styles.topbarCount}>
+            {ledgerCounts ? ledgerCounts.assigned_to_me_open + ledgerCounts.waiting_on_open : 0}
+          </span>
+        </button>
         <button
           type="button"
           className={styles.railToggle}
@@ -368,10 +396,12 @@ export function ProjectDetailView({
               // asserted flat-route premise hold rather than patching a live bug.
               key={project.id}
               projectId={project.id}
+              currentUserId={currentUserId}
               onOpenArtifact={onOpenArtifactCandidate}
               insightNote={insightNote}
               onArtifactsChanged={refetchArtifacts}
               openPrdId={openPrdId}
+              submitRef={chatSubmitRef}
             />
           </div>
         </main>
@@ -450,6 +480,18 @@ export function ProjectDetailScreen({
     initialPrdParamRef.current = searchParams?.get("prd") ?? null
   }
   const currentUserId = auth.kind === "authed" ? auth.user.id : null
+  // The chat surface publishes its `submitAsk` here (see `ProjectMainThread`).
+  // The Task-ledger tick sends a completion turn through it so the completion
+  // runs on the composer's ONE ask→persist path (optimistic echo + reply
+  // persist), never the reproduced start→poll→persist that phantom-flashed.
+  const chatSubmitRef = useRef<ProjectChatSubmit | null>(null)
+  const onCompleteTask = useCallback(
+    (text: string): Promise<void> =>
+      chatSubmitRef.current
+        ? chatSubmitRef.current(text)
+        : Promise.reject(new Error("project chat not ready")),
+    [],
+  )
   const [state, setState] = useState<LoadState>({ status: "loading" })
   const [railModal, setRailModal] = useState<OpenModal>(null)
   // The top-bar gear's "Project settings" modal — `null` = closed, a tab
@@ -475,7 +517,7 @@ export function ProjectDetailScreen({
   // `null` = drawer closed. Driven purely by local state, never the URL.
   // The SAME global content store + side-panel main uses (mounted via AppShell).
   const { content, setContent } = useContent()
-  const { openContentPanel, contentPanelTab } = useNavigation()
+  const { openContentPanel, contentPanelTab, showToast } = useNavigation()
   // The PRD open in that panel — parity with main chat's open-tab `prd_id`,
   // threaded to both chat surfaces as the edit target. `null` when no PRD is open.
   const openPrdId =
@@ -570,10 +612,20 @@ export function ProjectDetailScreen({
         /* best-effort — leave the last-known rows */
       })
   }, [projectId])
-  // The caller's OWN per-user channel carries BOTH `brief.delivered` (R1-05,
-  // the unread badge) and `delegation.event` (the ledger status change): the
-  // latter refetches the rail counts and bumps `ledgerVersion` so an open
-  // modal re-reads. Any other event is ignored — one subscription, one topic.
+  // The caller's OWN per-user channel carries THREE events. `delegation.event`
+  // (a derived STATUS change) and `brief.delivered` (a TURN posted into the
+  // caller's own individual chat — a fresh brief, or a lifecycle notice: a
+  // "✓ … finished" completion notice, a blocked/can't-do route-back, a
+  // scheduled check-in ping/escalation) both refetch the rail counts + rows
+  // and bump `ledgerVersion` so an open Task-ledger modal re-reads — the SAME
+  // treatment for both, because several of `brief.delivered`'s own senders
+  // (blocked/can't-do/ping/escalation) carry NO paired `delegation.event` at
+  // all (no derived status actually changed), so `brief.delivered` is the
+  // ONLY live signal this screen gets for them. There is no separate "unread
+  // badge" affordance left to patch (removed with the Group⇆Private toggle) —
+  // this refetch IS this screen's live-update surface for a newly delivered
+  // brief or notice; a richer per-turn indicator is a later pass. Any other
+  // event is ignored — one subscription, one topic.
   // "Added to a project" live landing: the SAME per-user channel also carries
   // `member.added` (both add paths — POST /members and POST /tag — publish it).
   // Bring the just-added user straight into the project's private chat (the
@@ -588,7 +640,7 @@ export function ProjectDetailScreen({
         landOnMemberAddedRef.current(payload)
         return
       }
-      if (event === "delegation.event") {
+      if (event === "delegation.event" || event === "brief.delivered") {
         refetchLedgerCounts()
         refetchLedgerRows()
         setLedgerVersion((v) => v + 1)
@@ -806,14 +858,30 @@ export function ProjectDetailScreen({
   // (mounted at the app root via AppShell) and open the panel on the "prd" tab.
   // Extracted from `onOpenArtifactInPlace` so the URL-restore effect below can
   // reuse the EXACT same terminal action (no second content-set path to drift).
+  //
+  // Opens the panel SYNCHRONOUSLY, before the fetch resolves — mirrors main
+  // chat's own PRD-by-id load (ChatScreen's `savedPrdId` branch): flip
+  // `prdGenerating` + `openContentPanel` first so the panel mounts on its own
+  // loading skeleton immediately, then fill in the real document (or clear the
+  // flag and toast) when the fetch settles. Opening only inside `.then` left a
+  // dead gap — drawer gone, chat full-width, nothing on the right — for the
+  // whole round-trip. Already-loaded PRDs short-circuit the refetch entirely.
   const openPrdInPanelById = useCallback((prdId: number) => {
+    if (content.prd && content.prd.prd_id === prdId) {
+      openContentPanel("prd")
+      return
+    }
+    setContent({ prd: null, prdMeta: null, prdGenerating: true, prdPartialHtml: null })
+    openContentPanel("prd")
     void loadPrdById(prdId).then((r) => {
       if (r.ok) {
         setContent({ prd: r.prd, prdMeta: null, prdGenerating: false, prdPartialHtml: null })
-        openContentPanel("prd")
+      } else {
+        setContent({ prdGenerating: false, prdPartialHtml: null })
+        showToast("Couldn't load PRD", r.message)
       }
     })
-  }, [setContent, openContentPanel])
+  }, [content.prd, setContent, openContentPanel, showToast])
 
   // One-shot restore: on (re)load of `/projects?…&prd=<id|public_id>`, re-open
   // that PRD IN-PLACE beside the project chat. The global `useArtifactUrlSync`
@@ -822,6 +890,14 @@ export function ProjectDetailScreen({
   // tab. Waits for the project shell to be ready so the panel opens over a live
   // surface; accepts both the canonical `public_id` (uuid) and the still-valid
   // legacy bare-integer id, exactly as `useArtifactUrlSync` does.
+  //
+  // No-flash fast path (client decision D1, 2026-09-02): the seamless
+  // auto-nav into a just-created PRD lands here with `content.prd` ALREADY
+  // holding that exact PRD (set by the main-chat generate success path before
+  // it navigated). Refetching it via `GET /v1/prd/{id}` anyway is a network
+  // round-trip that reads as a flash + delay for zero benefit — skip it and
+  // just make sure the panel is open. Only a cold deep-link/refresh (no
+  // matching `content.prd` yet) falls through to the real fetch below.
   const restoredPrdRef = useRef(false)
   useEffect(() => {
     if (restoredPrdRef.current) return
@@ -832,6 +908,10 @@ export function ProjectDetailScreen({
       return
     }
     restoredPrdRef.current = true
+    if (content.prd && (String(content.prd.prd_id) === raw || content.prd.public_id === raw)) {
+      openContentPanel("prd")
+      return
+    }
     const asInt = Number(raw)
     if (Number.isInteger(asInt) && asInt > 0) {
       openPrdInPanelById(asInt)
@@ -844,7 +924,7 @@ export function ProjectDetailScreen({
         // Unknown/foreign public_id — no content, no crash (mirrors
         // useArtifactUrlSync's own 404 handling).
       })
-  }, [state.status, openPrdInPanelById])
+  }, [state.status, openPrdInPanelById, content.prd, openContentPanel])
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
   // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,
@@ -981,6 +1061,7 @@ export function ProjectDetailScreen({
         artifactsDrawerOpen={railModal?.kind === "artifacts"}
         artifactsDrawerFilter={railModal?.kind === "artifacts" ? railModal.type : undefined}
         onCloseArtifactsDrawer={onCloseRailModal}
+        chatSubmitRef={chatSubmitRef}
       />
       <ConfirmDialog
         open={removeTarget != null}
@@ -990,6 +1071,10 @@ export function ProjectDetailScreen({
         busyLabel="Removing…"
         tone="danger"
         busy={removeBusy}
+        // Remove can be triggered from the Members tab INSIDE the project
+        // settings modal (also a `modal-overlay`), so this confirm must render
+        // above it rather than behind it. Harmless when opened outside a modal.
+        elevated
         onConfirm={onConfirmRemove}
         onCancel={onCancelRemove}
       />
@@ -1013,6 +1098,7 @@ export function ProjectDetailScreen({
         projectId={projectId}
         onClose={onCloseRailModal}
         ledgerVersion={ledgerVersion}
+        onCompleteTask={onCompleteTask}
       />
     </AppLayout>
   )

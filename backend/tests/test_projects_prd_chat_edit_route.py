@@ -14,7 +14,7 @@ by `test_project_prd_edit_parity.py` instead.
 Real `projects`/`project_members`/`project_artifacts`/`prds`/`prd_versions`
 rows via `tenant_client` + `isolated_settings` (the fake in-memory Supabase
 every backend suite composes on); the editor LLM call is mocked at
-`app.prd_questions.apply_chat_edit`, the same seam every chat-edit test in
+`app.prd_edit.apply_chat_edit`, the same seam every chat-edit test in
 this repo patches. The real cross-project/cross-tenant Postgres fan-out is
 exercised by the env-gated `test_projects_prd_chat_edit_route_live.py`.
 """
@@ -24,7 +24,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import app.prd_questions as prd_questions
+import app.prd_edit as prd_edit
 from tests import _fake_supabase
 from app.db.client import require_client
 from app.db.workspaces import ensure_default_workspace
@@ -100,7 +100,7 @@ def test_route_requires_membership(tenant_client, isolated_settings, monkeypatch
     non_member_id, _ = seed_same_tenant_non_member(SimpleNamespace(company_id=t.company_id))
     headers = tenant_client.bearer(non_member_id)
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
@@ -117,7 +117,7 @@ def test_route_flag_off_no_write(tenant_client, isolated_settings, monkeypatch):
     t = tenant_client.make(slug="acme")
     project_id, prd_id = _seed_project(t, isolated_settings)
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",
@@ -149,7 +149,7 @@ def test_route_explicit_prd_id_cross_tenant_denied(
     # NOT attached to any of `t`'s projects — a foreign-tenant PRD altogether.
 
     editor_called = []
-    monkeypatch.setattr(prd_questions, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
+    monkeypatch.setattr(prd_edit, "apply_chat_edit", lambda *a, **kw: editor_called.append(1))
 
     resp = t.client.post(
         f"/v1/projects/{project_id}/prd/chat-edit",

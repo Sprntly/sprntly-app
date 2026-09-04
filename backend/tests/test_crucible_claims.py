@@ -139,6 +139,156 @@ def test_nothing_projected_ever_reaches_causally_tested():
             assert STRENGTH_SCORE[claim.strength] <= STRENGTH_SCORE["measured"]
 
 
+# ── A grounded commercial figure raises ITS OWN claim, not the whole kind ────
+# The number the extractor's checklist pass now captures (a customer's own
+# stated dollar figure) reclassifies the CLAIM that carries it — never the
+# `commercial_term` kind wholesale, which would let a bare "pricing came up"
+# paraphrase with no real number vote on magnitude too.
+
+
+def test_a_grounded_commercial_amount_becomes_a_magnitude_claim():
+    """David's own worked example: a number a customer states on the call
+    is legitimate, authoritative evidence about size — not a mechanism
+    claim capped at `reported`."""
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue",
+        properties={"amount": 100000, "currency": "USD",
+                    "basis": "total-contract", "certainty": "quoted"},
+    ), {})
+    assert claim is not None
+    assert claim.type == "magnitude"
+    assert claim.authoritative is True
+    assert claim.strength == "measured"
+    assert claim.magnitude == 100000.0
+
+
+def test_a_commercial_term_without_a_grounded_amount_stays_a_mechanism_claim():
+    """The un-grounded, common case (a paraphrase with no real number behind
+    it) is UNCHANGED by the change above: `commercial_term` still defaults to
+    `mechanism`, capped at `reported` — the pre-existing, deliberate gap
+    documented on `KIND_TO_CLAIM_TYPE`."""
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue", properties={},
+    ), {})
+    assert claim is not None
+    assert claim.type == "mechanism"
+    assert claim.authoritative is False
+    assert claim.strength == "reported"
+    assert claim.magnitude is None
+
+
+# ── A price becomes a deal value through `basis`, never through `kind` ──────
+#
+# The write side attaches a figure to `commercial_term` AND `pricing`; this
+# read side used to admit only the first, so most of what the extractor
+# captured was enriched and then discarded. The fix is NOT to admit `pricing`
+# wholesale: a per-seat rate is not a sum, and summing one would be a
+# projection wearing a quoted figure's clothes. The distinction is not
+# expressible in `kind` — it is one model judgement over a taxonomy whose own
+# prose blurs the two — so it is read off `basis`, a field of the same
+# grounded shape with a closed vocabulary the extractor's validator enforces.
+
+
+def test_both_eligible_kinds_are_admitted_because_they_feed_different_lines():
+    """They are not better and worse. `commercial_term` carries committed
+    money and is summable; `pricing` carries a rate card and is reported as
+    a range. Excluding either would drop a line the report needs."""
+    from app.crucible.claims import _GROUNDED_MAGNITUDE_KINDS
+    from app.graph.extractor import _AMOUNT_ELIGIBLE_KINDS
+
+    assert _GROUNDED_MAGNITUDE_KINDS == {"commercial_term", "pricing"}
+    # The read side admits exactly what the write side attaches a figure to.
+    assert _GROUNDED_MAGNITUDE_KINDS == _AMOUNT_ELIGIBLE_KINDS
+
+
+@pytest.mark.parametrize("basis", ["total-contract", "one-off", "per-seat",
+                                   "per-year", None, ""])
+def test_a_priced_figure_is_read_whatever_its_basis(basis):
+    """THE BASIS GATE IS GONE, and the reason it existed is the reason it
+    could go: it admitted a price only with a sum-eligible basis, because a
+    per-seat rate without a seat count is not a sum. Nothing sums a list
+    price now — `pipeline._figure_is_committed` keeps them out of the
+    committed total by construction — so the arithmetic it guarded cannot
+    happen, while the gate itself emptied the pricing line on any historical
+    corpus, where the backfill never writes `basis` at all."""
+    claim = project_signal(sig(
+        kind="pricing", source_type="revenue",
+        properties={"amount": 12000, "currency": "USD", "basis": basis},
+    ), {})
+    assert claim is not None
+    assert claim.magnitude == 12000.0
+    assert claim.type == "magnitude"
+
+
+@pytest.mark.parametrize("bad_amount", ["a lot", True, float("nan"), float("inf"), None, [1]])
+def test_a_non_numeric_amount_never_reclassifies_or_sets_magnitude(bad_amount):
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue",
+        properties={"amount": bad_amount},
+    ), {})
+    assert claim is not None
+    assert claim.type == "mechanism"
+    assert claim.magnitude is None
+
+
+@pytest.mark.parametrize("zero_amount", [0, 0.0])
+def test_a_literal_zero_amount_is_treated_as_no_figure_stated(zero_amount):
+    """I2/I3, re-checked at projection time and not just at the write
+    boundary: `_grounded_commercial_amount` must return `None` for a
+    literal `0` — treated exactly like a missing figure, never like a
+    real quoted $0 — even if some future writer other than this repo's own
+    extractor ever puts a `0` in `properties["amount"]`."""
+    from app.crucible.claims import _grounded_commercial_amount
+
+    assert _grounded_commercial_amount(
+        "commercial_term", {"amount": zero_amount}
+    ) is None
+
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="revenue",
+        properties={"amount": zero_amount, "currency": "USD"},
+    ), {})
+    assert claim is not None
+    assert claim.type == "mechanism"
+    assert claim.authoritative is False
+    assert claim.strength == "reported"
+    assert claim.magnitude is None
+
+
+def test_a_grounded_amount_on_a_non_commercial_kind_is_never_treated_as_one():
+    """The reclassification is gated on `kind`, not merely on the presence of
+    an `amount` key — a coincidental numeric `properties["amount"]` on an
+    unrelated kind (e.g. from the open-extraction pass's free-form
+    `properties`) must not size anything."""
+    claim = project_signal(sig(
+        kind="feature_request", source_type="revenue",
+        properties={"amount": 100000},
+    ), {})
+    assert claim is not None
+    assert claim.type == "preference"
+    assert claim.magnitude is None
+
+
+def test_a_grounded_amount_from_a_self_selected_source_still_cannot_size_anything():
+    """I4 still governs: if a `commercial_term` signal with a real amount
+    somehow arrives tagged `customer_voice` rather than `revenue` (outside
+    the checklist pass's own contract), the self-selection rule still caps
+    it at `reported` — the magnitude reclassification does not bypass I4."""
+    claim = project_signal(sig(
+        kind="commercial_term", source_type="customer_voice",
+        properties={"amount": 50000},
+    ), {})
+    assert claim is not None
+    assert claim.type == "magnitude"
+    assert claim.authoritative is False
+    assert claim.strength == "reported"
+    # The figure itself is still carried — I3 does not hide a real number,
+    # it only refuses to let an unauthoritative source SIZE anything with it
+    # (population/impact sizing reads `population_value`/pipeline
+    # aggregation, never a bare `Claim.magnitude`).
+    assert claim.magnitude == 50000.0
+
+
 # ── Population ───────────────────────────────────────────────────────────────
 
 @pytest.mark.parametrize("value", [

@@ -78,3 +78,16 @@ scikit-learn>=1.3
 # model's sandbox, so it must not run on a Pillow with known decoder CVEs;
 # >=10.3 clears CVE-2024-28219 (_imagingcms buffer overflow, fixed in 10.3.0).
 Pillow>=10.3
+# Stripe — subscriptions, Checkout, the customer portal, and webhook signature
+# verification (app/billing/stripe_client.py). A floor rather than an exact pin:
+# Stripe versions its REST API separately from the SDK, and the API version is
+# pinned explicitly in stripe_client.py, so SDK upgrades do not silently change
+# request or response shapes. 15.x requires Python >=3.9 and so is fine on the
+# 3.11 the deploy venv runs.
+#
+# Hand-rolling this was considered and rejected: the REST calls themselves are
+# plain HTTP, but webhook signature verification is a security boundary
+# (timing-safe compare plus a replay-window tolerance), and the SDK also
+# supplies idempotency-key handling and retries on the money path. Not the
+# place to save a dependency.
+stripe>=15.5,<16

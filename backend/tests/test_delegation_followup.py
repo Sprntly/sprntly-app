@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 
 from app import delegation_followup as followup_mod
+from app import project_delegation
 from app.db import conversations as conversations_db
 from app.db import delegation_events as delegation_events_db
 from app.db import delegation_followup_sends as sends_db
@@ -282,6 +283,40 @@ def test_ping_posts_dm_records_and_reschedules(isolated_settings, monkeypatch):
     assert followup["next_check_in"] > prior_next.isoformat()  # floor-clamped, must lengthen
 
 
+def test_ping_publishes_brief_delivered_to_the_assignee(isolated_settings, monkeypatch):
+    """Check-in liveness (part 2, spec 3a): a scheduled ping is a turn posted
+    into the assignee's own individual chat, the same shape a fresh brief
+    delivery already is — it must live-append the same way, reusing the
+    exact `brief.delivered` mechanic (no new channel/event)."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    _bypass_cap(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Ping task")
+
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Ping task",
+        next_check_in=_FROZEN_NOW - timedelta(hours=1),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch, decision="ping", dm_text="Checking in on this — any update?")
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["pinged"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{assignee_id}"
+    assert notices[0][2]["content"] == "Checking in on this — any update?"
+
+
 def test_reschedule_sends_nothing(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     _freeze(monkeypatch)
@@ -416,6 +451,44 @@ def test_escalate_posts_to_requester_not_assignee(isolated_settings, monkeypatch
     assert len(sends_db.sends_for_delegation(deleg_id, channel="dm")) == 1
 
 
+def test_escalate_publishes_brief_delivered_to_the_requester(isolated_settings, monkeypatch):
+    """Same check-in liveness as the ping test above, on the requester's own
+    channel this time — the escalation notice is their version of a
+    check-in."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    _bypass_cap(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(
+        ctx, project["id"], assignee_id, task_summary="Escalate task",
+    )
+    sends_db.record_send(
+        delegation_id=deleg_id, company_id="co-1", assignee_user_id=assignee_id,
+        check_key="prior-1", channel="dm",
+    )
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Escalate task",
+        expected_completion=_FROZEN_NOW - timedelta(days=3),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch, decision="escalate")
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["escalated"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "Escalate task" in notices[0][2]["content"]
+
+
 # ── Step-0 soft-done short-circuit (AC13) ─────────────────────────────────
 
 
@@ -449,6 +522,85 @@ def test_soft_done_finalized_without_llm_or_ping(isolated_settings, monkeypatch)
     assert len(turns) == 1  # no ping turn posted
 
     assert sends_db.sends_for_delegation(deleg_id) == []
+
+
+def test_soft_done_finalize_publishes_the_completion_notice(isolated_settings, monkeypatch):
+    """The finalize step calls `notify_requester_task_completed`
+    (`delegation_status_ingest.py`) — the same helper the inbound
+    `done_explicit` reply path uses — so it inherits that path's own
+    completion-notice publish for free. This proves the wiring survives
+    reaching it from the OTHER caller (the outbound sweep, not an inbound
+    reply)."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_id, conv_id = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Soft-done task")
+
+    row = _due_row(
+        deleg_id=deleg_id, project_id=project["id"], conv_id=conv_id,
+        assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Soft-done task",
+        pending_done_since=_FROZEN_NOW - timedelta(hours=2),
+    )
+    _install_due(monkeypatch, [row])
+    _stub_decision_llm(monkeypatch)
+    published: list[tuple[str, str, dict]] = []
+    monkeypatch.setattr(
+        project_delegation, "publish_broadcast",
+        lambda topic, event, payload: published.append((topic, event, payload)),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["finalized"] == 1
+    notices = [p for p in published if p[1] == "brief.delivered"]
+    assert len(notices) == 1, published
+    assert notices[0][0] == f"project:{project['id']}:user:{ctx.user_id}"
+    assert "finished" in notices[0][2]["content"]
+
+
+def test_sweep_finalize_emails_once_per_delegation_not_per_sweep(isolated_settings, monkeypatch):
+    """Two due soft-done delegations finalized in the SAME sweep pass
+    must produce TWO completion-email calls (one per delegation) — the
+    email fires inside `_process_one`/`notify_requester_task_completed`,
+    never hung off `run_task_followup_cycle`'s own sweep loop."""
+    ctx = company_client(monkeypatch)
+    _freeze(monkeypatch)
+    project = _create_project(ctx)
+    assignee_id = _seed_assignee(project["id"])
+    deleg_a, conv_a = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Task A")
+    deleg_b, conv_b = _seed_delegation(ctx, project["id"], assignee_id, task_summary="Task B")
+
+    rows = [
+        _due_row(
+            deleg_id=deleg_a, project_id=project["id"], conv_id=conv_a,
+            assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Task A",
+            pending_done_since=_FROZEN_NOW - timedelta(hours=2),
+        ),
+        _due_row(
+            deleg_id=deleg_b, project_id=project["id"], conv_id=conv_b,
+            assigner_id=ctx.user_id, assignee_id=assignee_id, task_summary="Task B",
+            pending_done_since=_FROZEN_NOW - timedelta(hours=2),
+        ),
+    ]
+    _install_due(monkeypatch, rows)
+    _stub_decision_llm(monkeypatch)
+
+    from app import delegation_status_ingest as ingest_mod
+
+    calls: list[tuple] = []
+    monkeypatch.setattr(
+        ingest_mod, "_notify_assigner_task_completed_email",
+        lambda project_id, delegation_id, *, assignee_user_id: calls.append(
+            (project_id, delegation_id, assignee_user_id)
+        ),
+    )
+
+    summary = followup_mod.run_task_followup_cycle()
+
+    assert summary["finalized"] == 2
+    assert len(calls) == 2, "must fire per-delegation, never once for the whole sweep"
+    assert {c[1] for c in calls} == {deleg_a, deleg_b}
 
 
 # ── Idempotency (AC14) ─────────────────────────────────────────────────────
@@ -646,6 +798,325 @@ def test_email_body_has_cta_no_task_content():
     assert "Draft the pricing page" not in body_text  # never task content
     assert "Draft the pricing page" not in body_html
     assert "chat=individual" in link
+
+
+# ── Assignment / completion emails (pure) ────────────────────────────────
+
+
+def test_assignment_email_skipped_without_key(isolated_settings, monkeypatch):
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "", raising=False)
+    ok = email_mod.send_assignment_email(
+        to_email="a@b.com", assigner_name="Fortune", project_id=1, project_name="Design Sprint",
+    )
+    assert ok is False
+
+
+def test_completion_email_skipped_without_key(isolated_settings, monkeypatch):
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "", raising=False)
+    ok = email_mod.send_completion_email(
+        to_email="a@b.com", assignee_name="Fortune", project_id=1, project_name="Design Sprint",
+    )
+    assert ok is False
+
+
+def test_assignment_email_locked_copy_and_link():
+    from app import delegation_followup_email as email_mod
+
+    subject, body_text, body_html = email_mod.render_assignment_email(
+        assigner_name="Fortune", project_id=42, project_name="Design Sprint",
+    )
+    link = email_mod.project_chat_link(42)
+    assert subject == "Fortune assigned you a task in Design Sprint"
+    assert "Fortune assigned you a task in Design Sprint" in body_text
+    assert "pick it up" in body_text
+    assert link in body_text
+    assert link in body_html.replace("&amp;", "&")
+    assert "chat=individual" in link
+
+
+def test_completion_email_locked_copy_and_link():
+    from app import delegation_followup_email as email_mod
+
+    subject, body_text, body_html = email_mod.render_completion_email(
+        assignee_name="Fortune", project_id=42, project_name="Design Sprint",
+    )
+    link = email_mod.project_chat_link(42)
+    assert subject == "Fortune completed the task you assigned in Design Sprint"
+    assert "Fortune finished the task you assigned in Design Sprint" in body_text
+    assert link in body_text
+    assert link in body_html.replace("&amp;", "&")
+
+
+def test_assignment_email_falls_back_to_generic_names():
+    from app import delegation_followup_email as email_mod
+
+    subject, body_text, _ = email_mod.render_assignment_email(
+        assigner_name="", project_id=1, project_name="",
+    )
+    assert subject == "A teammate assigned you a task in Sprntly"
+    assert "A teammate assigned you a task in Sprntly" in body_text
+
+
+def test_completion_email_falls_back_to_generic_project_name():
+    from app import delegation_followup_email as email_mod
+
+    subject, body_text, _ = email_mod.render_completion_email(
+        assignee_name="Fortune", project_id=1, project_name="",
+    )
+    assert subject == "Fortune completed the task you assigned in Sprntly"
+    assert "in Sprntly" in body_text
+
+
+# ── Successful send is self-evidencing in logs ──────────────────────────────
+
+
+def test_send_via_resend_logs_message_id_on_success(isolated_settings, monkeypatch, caplog):
+    """A 2xx Resend response logs an INFO line carrying the recipient +
+    the Resend message-id BEFORE returning True — so a successful send
+    leaves a trace, not just failures."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            return {"id": "msg_abc123"}
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="assignment",
+        )
+
+    assert ok is True
+    sent_lines = [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    assert len(sent_lines) == 1
+    msg = sent_lines[0].getMessage()
+    assert "assignee@co.com" in msg
+    assert "msg_abc123" in msg
+    assert "assignment" in msg
+
+
+def test_send_via_resend_logs_success_when_body_unparseable(isolated_settings, monkeypatch, caplog):
+    """A 2xx response with an unparseable/empty body still logs success
+    (message_id=None) and still returns True — parsing the id never
+    turns a successful send into an error."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 200
+        text = "ok"
+
+        def json(self):
+            raise ValueError("no body")
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="completion",
+        )
+
+    assert ok is True
+    sent_lines = [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    assert len(sent_lines) == 1
+    msg = sent_lines[0].getMessage()
+    assert "message_id=None" in msg
+
+
+def test_send_via_resend_failure_branch_unchanged(isolated_settings, monkeypatch, caplog):
+    """Non-2xx still warns and returns False — the success-logging change
+    must not touch this branch."""
+    from app import delegation_followup_email as email_mod
+    from app import config as config_mod
+
+    monkeypatch.setattr(config_mod.settings, "resend_api_key", "re_test", raising=False)
+
+    class _Resp:
+        status_code = 500
+        text = "boom"
+
+    monkeypatch.setattr(email_mod.httpx, "post", lambda url, **kw: _Resp())
+
+    with caplog.at_level(logging.INFO):
+        ok = email_mod._send_via_resend(
+            to_email="assignee@co.com", subject="s", body_text="t", body_html="<p>h</p>",
+            log_label="assignment",
+        )
+
+    assert ok is False
+    assert not [r for r in caplog.records if r.getMessage().startswith("resend_sent")]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "assignee@co.com" in warnings[0].getMessage()
+
+
+# ── Privacy property tests: no email ever carries task text ────────────────
+
+
+_DISTINCTIVE_TASK = "Draft the confidential Q4 pricing memo for Acme Corp"
+
+
+def test_assignment_email_never_carries_task_text_end_to_end(isolated_settings, monkeypatch):
+    """Drive the REAL assignment call-site (`handle_delegate_task`) with a
+    distinctive task string and assert it never reaches the rendered
+    subject/text/html — proving the privacy rule holds for the actual
+    wired path, not just the renderer's signature."""
+    from app import project_delegation
+    from app import delegation_followup_email as email_mod
+    from app.db import projects as projects_db
+    from tests._company_helpers import company_client
+
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Privacy project"}).json()
+
+    from app.db.client import require_client
+
+    assignee_id = "assignee-privacy"
+    require_client().table("profiles").insert(
+        {"id": assignee_id, "email": "assignee@co.com", "full_name": "Fortune Adeyemi"}
+    ).execute()
+    projects_db.add_member(project["id"], assignee_id)
+
+    def _fake_call_md(*, system, user, model, meta_out=None, **kwargs):  # noqa: ARG001
+        if meta_out is not None:
+            meta_out.update(
+                {"model": model, "input_tokens": 1, "output_tokens": 1,
+                 "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}
+            )
+        return "Here is the brief. Please proceed."
+
+    monkeypatch.setattr(project_delegation, "call_md", _fake_call_md)
+
+    captured: list[dict] = []
+
+    def _fake_send_assignment_email(**kwargs):
+        captured.append(kwargs)
+        return True
+
+    monkeypatch.setattr(email_mod, "send_assignment_email", _fake_send_assignment_email)
+    monkeypatch.setattr(project_delegation, "send_assignment_email", _fake_send_assignment_email)
+
+    roster = projects_db.list_members(project["id"])
+    result = project_delegation.handle_delegate_task(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        source_conversation_id=1,
+        source_turn_id=1,
+        roster=roster,
+        dataset="",
+        company_id="unused-in-fake-db",
+        tool_input={"assignee": "Fortune", "task_summary": _DISTINCTIVE_TASK},
+    )
+    assert "Assigned to" in result
+    assert len(captured) == 1
+
+    subject, body_text, body_html = email_mod.render_assignment_email(
+        assigner_name=captured[0]["assigner_name"],
+        project_id=captured[0]["project_id"],
+        project_name=captured[0]["project_name"],
+    )
+    assert _DISTINCTIVE_TASK not in subject
+    assert _DISTINCTIVE_TASK not in body_text
+    assert _DISTINCTIVE_TASK not in body_html
+    # And the kwargs actually sent to the sender never carried the task text.
+    assert all(_DISTINCTIVE_TASK not in str(v) for v in captured[0].values())
+
+
+def test_completion_email_never_carries_task_text_end_to_end(isolated_settings, monkeypatch):
+    """Drive the REAL completion call-site (`handle_complete_task`) with a
+    distinctive task string and assert it never reaches the rendered
+    subject/text/html."""
+    from app import project_delegation
+    from app import delegation_status_ingest as ingest
+    from app import delegation_followup_email as email_mod
+    from app.db import projects as projects_db
+    from app.db.project_delegations import record_delegation
+    from tests._company_helpers import company_client
+
+    ctx = company_client(monkeypatch)
+    project = ctx.client.post("/v1/projects", json={"name": "Privacy completion project"}).json()
+
+    from app.db.client import require_client
+
+    assignee_id = "assignee-privacy-2"
+    require_client().table("profiles").insert(
+        {"id": assignee_id, "email": "assignee2@co.com", "full_name": "Fortune Adeyemi"}
+    ).execute()
+    projects_db.add_member(project["id"], assignee_id)
+    require_client().table("profiles").upsert(
+        {"id": ctx.user_id, "email": "assigner@co.com", "full_name": "Alex Assigner"}
+    ).execute()
+
+    deleg = record_delegation(
+        project_id=project["id"],
+        assigner_user_id=ctx.user_id,
+        assignee_user_id=assignee_id,
+        task_summary=_DISTINCTIVE_TASK,
+        source_conversation_id=None,
+        source_turn_id=None,
+        delivered_conversation_id=None,
+        delivered_turn_id=None,
+    )
+
+    captured: list[dict] = []
+
+    def _fake_send_completion_email(**kwargs):
+        captured.append(kwargs)
+        return True
+
+    monkeypatch.setattr(email_mod, "send_completion_email", _fake_send_completion_email)
+    monkeypatch.setattr(project_delegation, "send_completion_email", _fake_send_completion_email)
+    # `list_status_for_assignee` reads the real-rig-only `v_delegation_status`
+    # view (see `test_delegation_truthfulness.py`'s identical note) — a
+    # `FakeSupabaseClient` cannot evaluate it, so stand in with one OPEN row
+    # for this delegation, mirroring `test_project_join_greeting.py`'s pattern.
+    monkeypatch.setattr(
+        project_delegation, "list_status_for_assignee",
+        lambda project_id, user_id: [
+            {"delegation_id": deleg["id"], "status": "assigned", "task_summary": _DISTINCTIVE_TASK}
+        ],
+    )
+    monkeypatch.setattr(
+        project_delegation, "status_dto", lambda delegation_id: None,
+    )
+    monkeypatch.setattr(
+        project_delegation, "_publish_delegation_event", lambda **kwargs: None,
+    )
+
+    result = project_delegation.handle_complete_task(
+        project_id=project["id"],
+        completer_user_id=assignee_id,
+        tool_input={"task_summary": _DISTINCTIVE_TASK},
+    )
+    assert "marked" in result
+    assert len(captured) == 1
+
+    subject, body_text, body_html = email_mod.render_completion_email(
+        assignee_name=captured[0]["assignee_name"],
+        project_id=captured[0]["project_id"],
+        project_name=captured[0]["project_name"],
+    )
+    assert _DISTINCTIVE_TASK not in subject
+    assert _DISTINCTIVE_TASK not in body_text
+    assert _DISTINCTIVE_TASK not in body_html
+    assert all(_DISTINCTIVE_TASK not in str(v) for v in captured[0].values())
 
 
 # ── Non-breakage (AC19) ─────────────────────────────────────────────────────

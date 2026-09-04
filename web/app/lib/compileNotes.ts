@@ -309,10 +309,11 @@ export function translateCompileNotes(
 /**
  * The activate 409's `detail`, translated.
  *
- * `apiErrorMessage` (lib/api.ts:27) handles a string or a validation-list
- * `detail` only, so an OBJECT detail falls through to "Request failed (409)" —
- * which tells the user nothing and is the worst possible copy for the one
- * refusal they are most likely to hit. Read the object directly instead.
+ * `apiErrorMessage` (lib/api.ts:27) now lifts `detail.message` out of an
+ * OBJECT detail, so `err.message` is at least readable. It is still not enough
+ * here: this refusal carries `code` and a `notes[]` array that decide which
+ * guidance to show and whether to offer a refetch, and a single sentence
+ * cannot express that. Read the object directly.
  *
  * The 409's OWN codes (`not_ready`, `activation_raced`) are deliberately
  * outside COMPILE_NOTE_CODES and must not be fed to the note table: they

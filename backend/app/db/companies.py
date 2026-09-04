@@ -45,7 +45,17 @@ def list_companies() -> list[dict]:
     try:
         result = (
             client.table("companies")
-            .select("id, slug, display_name, notification_settings, feature_flags")
+            # `plan` and `subscription_status` are selected for the scheduler,
+            # which skips tenants whose subscription has lapsed rather than
+            # spending our own Anthropic budget on them nightly. They ride the
+            # BEST-EFFORT select on purpose: if the column is missing (the fake
+            # test client, or a schema older than the billing migration) the
+            # fallback below leaves them absent, and the scheduler's guard has
+            # to treat "absent" as "do not know" rather than as "lapsed".
+            .select(
+                "id, slug, display_name, notification_settings, feature_flags, "
+                "plan, subscription_status"
+            )
             .order("slug", desc=False)
             .execute()
         )
@@ -621,6 +631,37 @@ def prototype_enabled_for_company(company_id: str) -> bool:
     if value is None:
         return True
     return bool(value)
+
+
+@retry_on_disconnect
+def declared_prioritization_framework(company_id: str) -> str | None:
+    """The framework this company named at onboarding
+    (`companies.prioritization_framework`), already canonicalised to one of
+    the DB CHECK constraint's six values (goal-based, rice, wsjf, moscow,
+    kano, volume-severity) by the onboarding wizard's own classifier — this
+    reads the stored value verbatim rather than re-classifying it.
+
+    None when unset, the row is missing, or the read fails (legacy schema,
+    fake test client) — callers fall back to choosing a framework from the
+    data alone, which is always a safe default.
+    """
+    try:
+        rows = (
+            require_client()
+            .table("companies")
+            .select("prioritization_framework")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — framework selection must never 500 a run
+        return None
+    if not rows:
+        return None
+    value = rows[0].get("prioritization_framework")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 @retry_on_disconnect

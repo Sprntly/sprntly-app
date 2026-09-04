@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Optional
 
 from app.db.client import require_client, utc_now
 
@@ -55,6 +55,37 @@ def store_call_transcripts(company_id: str, calls: list[Any]) -> int:
     except Exception:  # noqa: BLE001 — persistence is best-effort
         logger.warning("call_transcripts: store failed for %s", company_id, exc_info=True)
         return 0
+
+
+def load_call_transcript(
+    company_id: str, provider: str, external_id: str
+) -> Optional[dict]:
+    """One stored transcript payload, by its exact key — for a caller that
+    wants a single named call (the single-call read path) rather than a
+    window (`load_call_transcripts` below, the digest's shape). Never raises;
+    a read failure or a missing row both return None, and the caller falls
+    back to a live fetch either way."""
+    if not company_id or not external_id:
+        return None
+    try:
+        resp = (
+            require_client().table(_TABLE)
+            .select("payload")
+            .eq("company_id", company_id)
+            .eq("provider", provider)
+            .eq("external_id", external_id)
+            .execute()
+        )
+    except Exception:  # noqa: BLE001 — a read failure degrades to the live path
+        logger.warning(
+            "call_transcripts: point load failed for %s/%s/%s",
+            company_id, provider, external_id, exc_info=True,
+        )
+        return None
+    rows = resp.data or []
+    if not rows:
+        return None
+    return rows[0].get("payload") or None
 
 
 def load_call_transcripts(

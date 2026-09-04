@@ -303,7 +303,7 @@ def test_voc_off_uses_the_single_pass_forced_json(monkeypatch):
                                stop_reason="end_turn")
     monkeypatch.setattr(gateway_mod, "llm_call", _fake)
 
-    out = cd.answer(enterprise_id="co", question="summarize customer calls last week")
+    out = cd.answer(enterprise_id="co", question="give me a voice of customer report for last week")
     assert out["answer"].startswith("## Voice of customer")
     # Forced-JSON single-pass, scoped to the VoC skill — the map-reduce branch
     # never ran (the tripwire would have raised).

@@ -12,6 +12,7 @@
   overflow-y: auto;
 }
 
+/* Retained (rendered by a future feature-flag path) — left as-is per spec. */
 .ffBadge {
   display: inline-flex;
   align-items: center;
@@ -28,78 +29,155 @@
   vertical-align: middle;
 }
 
-.sec {
+/* Small open-count line under the title (replaces the removed paragraph). */
+.openSummary {
+  font-size: 11.5px;
+  color: var(--muted);
+  margin: 2px 0 0;
+}
+
+/* ── The flat ledger table ── */
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+}
+
+.th {
+  text-align: left;
   font-size: 10px;
   font-weight: 700;
-  letter-spacing: 0.08em;
+  letter-spacing: 0.07em;
   text-transform: uppercase;
   color: var(--ink-4);
-  margin: 14px 0 4px;
-}
-
-.sec:first-child {
-  margin-top: 2px;
-}
-
-.row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 9px 0;
+  padding: 4px 10px 8px;
   border-bottom: 1px solid var(--line);
+  white-space: nowrap;
 }
 
-.row:last-child {
+.thCheck {
+  width: 34px;
+  padding-left: 2px;
+  padding-right: 0;
+}
+
+.td {
+  padding: 10px 10px;
+  border-bottom: 1px solid var(--line);
+  color: var(--ink);
+  vertical-align: middle;
+}
+
+.table tbody tr:last-child .td {
   border-bottom: none;
 }
 
-.box {
-  width: 17px;
-  height: 17px;
-  border-radius: 5px;
-  border: 1.5px solid var(--line-strong);
-  background: var(--surface-2);
-  flex-shrink: 0;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
+.tdCheck {
+  padding-left: 2px;
+  padding-right: 0;
+  width: 34px;
 }
 
-.boxDone {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.main {
-  flex: 1;
-  min-width: 0;
-}
-
-.text {
-  font-size: 12.5px;
+.tdTask {
   color: var(--ink);
   line-height: 1.4;
+  min-width: 160px;
 }
 
-.rowDone .text {
+.taskDone {
   color: var(--ink-3);
   text-decoration: line-through;
   text-decoration-color: var(--ink-4);
 }
 
-.sub {
-  font-size: 11px;
-  color: var(--muted);
-  margin-top: 2px;
-  margin-bottom: 7px;
-}
-
-.statusLabel {
-  font-weight: 600;
+.rowDone .td {
   color: var(--ink-3);
 }
 
+/* ── Complete checkbox ── */
+.checkbox {
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  border: 1.5px solid var(--line-strong);
+  background: var(--surface-2);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  cursor: pointer;
+  padding: 0;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.checkbox:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.checkbox:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.checkbox:disabled {
+  cursor: default;
+}
+
+.checkboxDone {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+/* Informational rows (viewer created but handed off) have no checkbox — this
+ * holds the column's width so Task/Assigned-to/Created-by stay aligned. */
+.checkPlaceholder {
+  display: inline-block;
+  width: 18px;
+  height: 18px;
+}
+
+/* ── Person cell (Assigned to / Created by) ── */
+.person {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.chip {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+.chipYou {
+  background: var(--ink);
+  color: #fff;
+}
+
+.personName {
+  font-size: 12px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowDone .personName {
+  color: var(--ink-3);
+}
+
+/* ── States ── */
 .stateNote {
   font-size: 12.5px;
   color: var(--muted);
@@ -107,10 +185,11 @@
   text-align: center;
 }
 
-.emptyNote {
-  font-size: 12px;
+.empty {
+  font-size: 12.5px;
   color: var(--muted);
-  padding: 6px 0 4px;
+  padding: 18px 4px;
+  text-align: center;
 }
 
 .actionError {

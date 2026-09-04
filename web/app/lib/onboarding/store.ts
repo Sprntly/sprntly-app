@@ -1,4 +1,5 @@
-import { onboardingApi, orgInviteApi } from "../api"
+import { billingApi, onboardingApi, orgInviteApi } from "../api"
+import { takeReferralCode } from "../referral"
 import { generateSlug } from "../onboard-helpers"
 import { getSupabase } from "../supabase/client"
 import {
@@ -81,6 +82,9 @@ function rowToCompany(
     ws.is_default === true && ws.slug === "default" && wsName === "Default"
   return {
     id: String(row.id),
+    plan: (row.plan as string | null) ?? null,
+    subscription_status: (row.subscription_status as string | null) ?? null,
+    current_period_end: (row.current_period_end as string | null) ?? null,
     slug: String(row.slug),
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
@@ -96,6 +100,10 @@ function rowToCompany(
     competitors: Array.isArray(row.competitors) ? (row.competitors as string[]) : [],
     tech_stack: Array.isArray(row.tech_stack) ? (row.tech_stack as string[]) : [],
     okrs: (row.okrs as string | null) ?? null,
+    // The COMPANY's site, distinct from `product.website` since 2026-09-03.
+    // Null on every row onboarded before that; the website analysis falls back
+    // to the product's, which is where the single old field wrote.
+    website: (row.website as string | null) ?? null,
     mission: (row.mission as string | null) ?? null,
     strategy: (row.strategy as string | null) ?? null,
     portfolio: (row.portfolio as string | null) ?? null,
@@ -139,7 +147,7 @@ function rowToCompany(
 }
 
 const PROFILE_COLUMNS =
-  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields"
+  "id, email, first_name, last_name, role, priorities, timezone, account_type, onboarding_step, onboarding_completed_at, skipped_fields, product_tour_completed_at"
 
 function rowToProfile(row: Record<string, unknown>): UserProfile {
   return {
@@ -154,6 +162,32 @@ function rowToProfile(row: Record<string, unknown>): UserProfile {
     onboarding_step: Number(row.onboarding_step) || 0,
     onboarding_completed_at: (row.onboarding_completed_at as string | null) ?? null,
     skipped_fields: Array.isArray(row.skipped_fields) ? (row.skipped_fields as string[]) : [],
+    product_tour_completed_at:
+      (row.product_tour_completed_at as string | null) ?? null,
+  }
+}
+
+/**
+ * Mark the first-run product tour as done for this user.
+ *
+ * Called for a FINISH and for a SKIP alike — a skip is a decision, and
+ * re-showing something someone dismissed is how a welcome mat becomes a
+ * nuisance. Writes `now()` client-side rather than reading it back, because
+ * the only thing any caller asks of this column is "is it null".
+ *
+ * Best-effort by design: the worst case of a failed write is that the tour
+ * offers itself once more on the next visit, which is not worth blocking the
+ * UI or surfacing an error for. The caller closes the tour either way.
+ */
+export async function markProductTourSeen(userId: string): Promise<void> {
+  try {
+    const supabase = getSupabase()
+    await supabase
+      .from("profiles")
+      .update({ product_tour_completed_at: new Date().toISOString() })
+      .eq("id", userId)
+  } catch {
+    /* see the docstring: a lost write costs one extra showing, nothing more */
   }
 }
 
@@ -398,6 +432,9 @@ export async function createWorkspace(input: {
   /** Blank → no primary product is created yet (products_name_nonempty). */
   productName: string
   productWebsite?: string | null
+  /** The COMPANY's own site. Separate from `productWebsite` — see the
+   *  companies.website migration. */
+  website?: string | null
   /** The signup choice, denormalized from profiles.account_type so
    *  company-scoped reads never need a join. */
   accountType?: AccountType | null
@@ -435,6 +472,7 @@ export async function createWorkspace(input: {
         created_by: input.userId,
         slug: trySlug,
         display_name: input.companyName.trim(),
+        website: input.website?.trim() || null,
         account_type: input.accountType ?? "company",
         mission: input.mission?.trim() || null,
         strategy: input.strategy?.trim() || null,
@@ -468,6 +506,20 @@ export async function createWorkspace(input: {
         await orgInviteApi.claim()
       } catch {
         /* no pending invite, or transient — onboarding proceeds regardless */
+      }
+      // Referral attribution: if this person arrived on a friend's `?ref=`
+      // link, record who to pay. Nothing is granted here — the referrer is
+      // credited when THIS company subscribes, so signing up (free and
+      // repeatable) never pays out. Best-effort for the same reason as the
+      // org-invite claim above: an unknown code must not block someone
+      // creating their workspace.
+      const referralCode = takeReferralCode()
+      if (referralCode) {
+        try {
+          await billingApi.claimReferral(referralCode)
+        } catch {
+          /* unknown or already-claimed code — onboarding proceeds regardless */
+        }
       }
       // No name yet (import-first) → no product row. `products_name_nonempty`
       // rejects a blank one, and the company/product steps both upsert it.

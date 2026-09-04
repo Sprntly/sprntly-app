@@ -92,6 +92,9 @@ type WorkspaceCtx = {
    *  (a plain org member can be a workspace-level admin). Null until the
    *  workspaces list lands. */
   orgRole: string | null
+  /** "off" | "read_only" | "hard". The backend owns this; the shell
+   *  reads it to decide where to send a lapsed customer. */
+  subscriptionLockMode: string
   setActiveWorkspace: (id: string) => void
   refresh: () => Promise<void>
 }
@@ -125,6 +128,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [activeWorkspace, setActiveWorkspaceState] =
     useState<WorkspaceSummary | null>(null)
   const [orgRole, setOrgRole] = useState<string | null>(null)
+  const [subscriptionLockMode, setSubscriptionLockMode] = useState("off")
 
   // Tracks whether the FIRST authed load has completed, so subsequent refreshes
   // (e.g. a Supabase token refresh on tab refocus) re-fetch in the background
@@ -181,6 +185,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         const { workspaces: list, org_role } = listRes
         setWorkspaces(list)
         setOrgRole(org_role ?? null)
+        // Absent means off: an older backend, or a failed fetch, must never
+        // lock anybody out of an app that was working a moment ago.
+        setSubscriptionLockMode(listRes.subscription_lock_mode || "off")
         const storedId = readStoredActiveWorkspace(authUserId)
         const active =
           list.find((x) => x.id === storedId) ??
@@ -232,6 +239,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaces,
       activeWorkspace,
       orgRole,
+      subscriptionLockMode,
       setActiveWorkspace,
       refresh,
     }),
@@ -243,6 +251,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
       workspaces,
       activeWorkspace,
       orgRole,
+      subscriptionLockMode,
       setActiveWorkspace,
       refresh,
     ],

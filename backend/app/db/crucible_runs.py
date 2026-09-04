@@ -47,6 +47,14 @@ def create(
     goal_text: str,
     conversation_id: Optional[int] = None,
     created_by: Optional[str] = None,
+    #: THE READER'S OWN SENTENCE, when the caller has one distinct from
+    #: `goal_text` — chat sends the planner's EXTRACTED goal as `goal_text`
+    #: and this alongside it, so a count or target the reader phrased in
+    #: their own words is not silently dropped. Stored here, ONCE, because
+    #: this is the only place a run's whole life this text is ever supplied —
+    #: every later stage (`confirm`, `approve`) reads it back off the row
+    #: rather than being resupplied it.
+    asked_text: Optional[str] = None,
 ) -> dict:
     """Create the row FIRST, before any work. Returns it immediately."""
     row = {
@@ -57,6 +65,14 @@ def create(
         "status": "resolving_goal",
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
     }
+    stripped = (asked_text or "").strip()
+    if stripped:
+        # RIDES IN `prioritisation`, same as the plan and the progress
+        # narration this blob already carries — no migration needed. Written
+        # only when non-blank, so a caller with nothing to add (the direct
+        # API, an older client) leaves the row byte-for-byte what it was
+        # before this field existed.
+        row["prioritisation"] = {"asked_text": stripped}
     res = require_client().table(TABLE).insert(row).execute()
     return (res.data or [{}])[0]
 
@@ -172,25 +188,51 @@ def save_findings(
         ]).execute()
 
 
+#: Supabase/PostgREST's own default cap on rows returned by one request. An
+#: unpaged `select` past this silently returns exactly this many rows with no
+#: error — not a partial-result flag, not a warning, nothing to catch. A real
+#: run hit 831 findings, 83% of the way there, before anyone noticed this
+#: reader had no `.range` at all.
+_FINDINGS_PAGE = 1000
+
+
+def _paged(client, table: str, run_id: int, company_id: str) -> list[dict]:
+    """Every row of `table` for this run, paged past PostgREST's row cap.
+
+    ORDER IS NOT OPTIONAL WITH `.range` — an unordered query's rows may come
+    back in a different order per page, which can repeat a row on page 2 and
+    never return another (the same reasoning `routes/crucible.py`'s
+    `_signal_page` states for the same pattern).
+    """
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = (
+            client.table(table).select("*")
+            .eq("run_id", run_id).eq("company_id", company_id)
+            .order("id")
+            .range(offset, offset + _FINDINGS_PAGE - 1)
+            .execute()
+        ).data or []
+        rows.extend(page)
+        if len(page) < _FINDINGS_PAGE:
+            break
+        offset += _FINDINGS_PAGE
+    return rows
+
+
 def load_findings(run_id: int, company_id: str) -> tuple[list[dict], list[dict]]:
     client = require_client()
-    findings = (
-        client.table("crucible_findings").select("*")
-        .eq("run_id", run_id).eq("company_id", company_id)
-        # INSERTION ORDER IS THE RANK. `save_findings` writes one batch in the
-        # order `_rank` produced, and that order is not recoverable from any
-        # column: it puts an authoritative CONFLICT first regardless of size,
-        # because two sources that may both speak disagreeing is worth more
-        # than either claim. Re-sorting by `impact_value` here threw that away
-        # and sent conflicts to the bottom — while the `tier` written at rank
-        # time still said `deep`, so the row claimed a standing its position
-        # contradicted.
-        .order("id").execute()
-    ).data or []
-    ledger = (
-        client.table("crucible_ledger").select("*")
-        .eq("run_id", run_id).eq("company_id", company_id).execute()
-    ).data or []
+    # INSERTION ORDER IS THE RANK. `save_findings` writes one batch in the
+    # order `_rank` produced, and that order is not recoverable from any
+    # column: it puts an authoritative CONFLICT first regardless of size,
+    # because two sources that may both speak disagreeing is worth more
+    # than either claim. Re-sorting by `impact_value` here threw that away
+    # and sent conflicts to the bottom — while the `tier` written at rank
+    # time still said `deep`, so the row claimed a standing its position
+    # contradicted. `_paged`'s own `.order("id")` preserves it across pages.
+    findings = _paged(client, "crucible_findings", run_id, company_id)
+    ledger = _paged(client, "crucible_ledger", run_id, company_id)
     return findings, ledger
 
 
@@ -247,6 +289,18 @@ def sweep_orphans(*, older_than_minutes: int = 45) -> int:
     Recurring, not startup-only: a process that dies at 03:00 must not leave a
     row spinning until the next deploy. `custom_artifacts` shipped this
     startup-only and it had to be fixed later — same mistake, already made once.
+
+    CHECKED AGAINST `find_stalled_enrichment`'s OWN `.limit(100)` DEFECT, AND
+    FOUND NOT TO SHARE ITS EXPOSURE. The shape is the same (an unordered
+    `.limit(100)` ahead of a predicate), but the predicate here is
+    `status IN (resolving_goal, planning, running)` — every one of those is a
+    non-terminal state, so every row `fail()` touches LEAVES the candidate set
+    for good. A tenant with more than 100 genuinely stuck runs in one tick
+    still drains across a few ticks; nothing here can accumulate the way a
+    `ready` run's history does. `find_stalled_enrichment` matches on `ready`,
+    a TERMINAL state every normally-completed run sits in forever, so its
+    matching pool only grows — the harmless majority permanently outcompetes
+    the rare real candidate for the same 100 slots. Left as-is.
     """
     cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
     cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
@@ -262,6 +316,117 @@ def sweep_orphans(*, older_than_minutes: int = 45) -> int:
     if stale:
         logger.info("crucible: swept %d abandoned run(s)", len(stale))
     return len(stale)
+
+
+#: How stale `heartbeat_at` must be before an enrichment is presumed dead.
+#: `_progress` (routes/crucible.py) refreshes it before each of the three
+#: model-call stages, so a genuinely healthy enrichment never sits idle this
+#: long — a single stage can retry up to `app.llm.MAX_ATTEMPTS` times against
+#: `app.llm._REQUEST_TIMEOUT_S = 120.0`, which is a worst case around 8
+#: minutes; this leaves real margin above that rather than tripping on a slow
+#: provider.
+STALLED_ENRICHMENT_AGE_MINUTES = 10
+
+#: `find_stalled_enrichment`'s per-page size while it walks every
+#: `ready`-and-stale row (see the function's own docstring for why it cannot
+#: stop at the first page). Independent of `_FINDINGS_PAGE` — that one mirrors
+#: PostgREST's own default cap; this one is just a reasonable chunk size for a
+#: query this function fully controls.
+_STALLED_ENRICHMENT_PAGE = 500
+
+#: A run-away safety valve, not a business rule: the total number of
+#: `ready`-and-stale rows one sweep tick will examine, across every page. A
+#: real candidate is almost always a small handful (see the function's own
+#: docstring), so this bounds the pathological case — a very old company with
+#: tens of thousands of completed runs — without reintroducing the silent
+#: early-truncation this replaces. `.order("heartbeat_at", desc=True)` below
+#: means a cap this generous would only ever bite on ancient, ordinary
+#: completions, never on a genuinely recent stall.
+_STALLED_ENRICHMENT_SCAN_CAP = 5000
+
+
+def find_stalled_enrichment(
+    *, older_than_minutes: int = STALLED_ENRICHMENT_AGE_MINUTES,
+) -> list[dict]:
+    """Runs that are `ready`, still say `enrichment_pending`, and have not
+    heartbeat in a while — `sweep_orphans`'s own predicate (`resolving_goal`,
+    `planning`, `running`) never sees these, because a run this stuck already
+    published its findings and moved to `ready` before its worker died. THE
+    ROW IS THE JOB, same as `sweep_orphans` — no separate job table.
+
+    WHY THIS PAGES RATHER THAN TAKING ONE `.limit(100)`. `ready` is a
+    TERMINAL state every normally-completed run sits in forever, so the
+    `status="ready" AND heartbeat_at < cutoff` predicate matches every old
+    completed run as well as a genuinely stalled one, and that harmless
+    majority only grows over the life of the table. A single unordered
+    `.limit(100)` ahead of the `enrichment_pending` filter below let that
+    majority permanently crowd the rare real candidate out of the page it was
+    filtered from — a company whose completed-run history passed 100 stopped
+    being rescuable at all, silently. Paging past that page, instead of
+    stopping at it, is what makes the candidate set actually a function of
+    `enrichment_pending` again rather than of row order.
+
+    `.order("heartbeat_at", desc=True)` is defence in depth for the
+    (extremely unlikely, given `_STALLED_ENRICHMENT_SCAN_CAP`) case where
+    scanning is cut short: a genuine stall's heartbeat stops within
+    `older_than_minutes` of falling stale, so it is always more RECENT than
+    an old completed run's frozen-forever heartbeat, and sorting
+    most-recent-first surfaces it before the cap would ever bite.
+
+    Client-side filtered on `enrichment_pending`, deliberately: it lives
+    inside the `prioritisation` jsonb blob, not a column.
+    """
+    cutoff = datetime.now(timezone.utc).timestamp() - older_than_minutes * 60
+    cutoff_iso = datetime.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
+    client = require_client()
+    out: list[dict] = []
+    scanned = 0
+    offset = 0
+    while scanned < _STALLED_ENRICHMENT_SCAN_CAP:
+        page = (
+            client.table(TABLE).select("*")
+            .eq("status", "ready")
+            .lt("heartbeat_at", cutoff_iso)
+            .order("heartbeat_at", desc=True)
+            .range(offset, offset + _STALLED_ENRICHMENT_PAGE - 1)
+            .execute()
+        ).data or []
+        for row in page:
+            meta = row.get("prioritisation") or {}
+            if isinstance(meta, str):
+                try:
+                    meta = json.loads(meta)
+                except Exception:  # noqa: BLE001
+                    meta = {}
+            if isinstance(meta, dict) and meta.get("enrichment_pending"):
+                out.append(row)
+        scanned += len(page)
+        if len(page) < _STALLED_ENRICHMENT_PAGE:
+            break
+        offset += _STALLED_ENRICHMENT_PAGE
+    return out
+
+
+def claim_stalled_enrichment(
+    run_id: int, company_id: str, *, expected_heartbeat_at
+) -> Optional[dict]:
+    """Atomically claim a stalled enrichment for a re-run. None if lost.
+
+    THE CLAIM IS IN THE WHERE CLAUSE (`heartbeat_at` still equal to the value
+    just read), same reasoning as `claim_for_confirmation`: read-then-write
+    would let two sweep ticks — or a sweep tick racing the run's own worker,
+    which was alive after all and about to heartbeat — both see the same stale
+    row and both re-run enrichment. The loser's update touches zero rows and
+    gets None back; it does no work.
+    """
+    res = (
+        require_client().table(TABLE)
+        .update({"heartbeat_at": datetime.now(timezone.utc).isoformat()})
+        .eq("id", run_id).eq("company_id", company_id)
+        .eq("heartbeat_at", expected_heartbeat_at)   # the claim
+        .execute()
+    )
+    return (res.data or [None])[0]
 
 
 def save_definition(company_id: str, definition) -> Optional[int]:

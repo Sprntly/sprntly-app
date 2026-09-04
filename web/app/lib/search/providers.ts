@@ -14,7 +14,7 @@ import {
   type SkillInfo,
   type TeamMemberRecord,
 } from "../api"
-import { prototypePath } from "../routes"
+import { pathForScreen, prototypePath } from "../routes"
 import type { SearchItem } from "./types"
 
 // ── Dynamic search providers: workspace entities, fetched lazily ─────────────
@@ -26,6 +26,12 @@ import type { SearchItem } from "./types"
 // others (allSettled). Switching workspace hits a different cache key.
 
 /** Cap noisy collections so one domain can't drown the index. */
+// Templates and Skills live inside Settings now, so their paths carry a
+// `?section=` already — read from the one route map rather than spelled out
+// here, so a future move can't leave the palette pointing at a dead path.
+const SKILLS_PATH = pathForScreen("skills")
+const TEMPLATES_PATH = pathForScreen("templates")
+
 const MAX_CHATS = 200
 
 const cache = new Map<string, Promise<SearchItem[]>>()
@@ -80,11 +86,13 @@ function skillItem(s: SkillInfo): SearchItem {
     title: s.label,
     subtitle: s.description,
     breadcrumb: ["Skills", s.category],
-    url: "/skills",
+    url: SKILLS_PATH,
     keywords: [s.trigger, s.category],
     iconId: "skill",
-    // Deep-link into the skills page pre-filtered to this skill.
-    action: { kind: "path", path: `/skills?q=${encodeURIComponent(s.label)}` },
+    // Deep-link into the Skills pane pre-filtered to this skill. `?q=` is read
+    // off useSearchParams, not the pathname, so it survived the move into
+    // Settings unchanged.
+    action: { kind: "path", path: `${SKILLS_PATH}&q=${encodeURIComponent(s.label)}` },
   }
 }
 
@@ -160,7 +168,7 @@ function templateItem(t: CompanyTemplate): SearchItem {
     title: t.label ?? t.filename,
     subtitle: "Template",
     breadcrumb: ["Templates"],
-    url: "/templates",
+    url: TEMPLATES_PATH,
     keywords: ["template", t.type],
     iconId: "template",
     action: { kind: "screen", screen: "templates" },

@@ -296,6 +296,29 @@ def test_promote_schema_and_flat_insert_unchanged():
     assert "CREATE TABLE" not in src.upper()
 
 
+def test_promote_system_distinguishes_settled_from_requested():
+    """Fix: a bare request/instruction ("assign X to Y") whose fulfilment
+    the excerpt does not confirm — especially one Sprntly's own reply
+    refutes (no such ticket/person/artifact, or declined) — must NOT be
+    promoted as a settled fact. The prompt must say so explicitly, and must
+    NOT ban imperative phrasing outright (a confirmed assignment still
+    promotes)."""
+    lowered = project_memory._PROMOTE_SYSTEM.lower()
+    assert "settled" in lowered
+    assert "declined" in lowered
+    assert "does not confirm" in lowered
+    assert "doesn't exist" in lowered
+    # The narrow-scope guarantee: confirmed, plainly-stated assignments must
+    # still be named as promoting — not a blanket ban on imperative phrasing.
+    assert "still promotes" in lowered or "still promote" in lowered
+
+    # Negative-space: a prompt that doesn't distinguish settled-vs-requested
+    # must not satisfy this check.
+    weak_prompt = "Promote any assignment or decision mentioned in the excerpt."
+    assert "settled" not in weak_prompt.lower()
+    assert "declined" not in weak_prompt.lower()
+
+
 def test_promote_system_length_within_bounds():
     """Property test — the enriched prompt grew (more categories) but must
     stay within a sane bound, never unboundedly."""
@@ -888,3 +911,77 @@ def test_live_user_authored_restate_is_skipped(client, fixture_ids, project_ids,
     assert rows[0]["body"] == user_entry["body"], "the user entry must be byte-identical, untouched"
     assert rows[0]["promoted_by"] is None
     assert rows[0]["author_user_id"] == fixture_ids["user_id"]
+
+
+# ── Memory-echo confabulation regression (settled-vs-requested) ─────────
+#
+# The exact bug: an unfulfilled or declined delegation request ("assign the
+# auth ticket to David") was promoted as a settled assignment fact even
+# though no delegation occurred, because the pre-fix prompt had no signal
+# distinguishing a bare imperative from a confirmed action. Both tests need
+# the REAL classifier's actual decision on this distinction, not the mocked
+# wiring — a stub can't prove the prompt rule actually changes the model's
+# classification (`[[feedback_stubbed-e2e-masks-loop-behaviour]]`).
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
+def test_live_unfulfilled_declined_assignment_is_skipped(client, fixture_ids, project_ids, sb):
+    """The exact confabulation regression: a bare delegation request whose
+    own reply says the target doesn't exist must NOT be promoted as a
+    settled assignment."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live promotion declined-assign {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    from app.db import conversations as conversations_db
+
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
+
+    declined_transcript = (
+        "Ada (PM): @Sprntly can you assign the auth ticket to David?\n"
+        "Sprntly: I couldn't find a ticket matching \"auth ticket\" in this "
+        "project, so I wasn't able to assign anything to David. Can you "
+        "point me to the specific ticket?"
+    )
+    result = project_memory.maybe_promote_turn(project["id"], conv["id"], declined_transcript)
+    assert result is None, (
+        "an unfulfilled/declined delegation request must not be promoted as "
+        "a settled assignment fact"
+    )
+
+    rows = memory_db.list_entries(project["id"])
+    assert rows == [], "no row may exist for a declined delegation request"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(not _RUN_LIVE, reason=_LIVE_SKIP_REASON)
+def test_live_confirmed_assignment_still_promotes(client, fixture_ids, project_ids, sb):
+    """Non-regression: the settled-vs-requested tightening must NOT
+    over-suppress a genuine, confirmed assignment — this must still
+    promote exactly as before the fix."""
+    project = client.post(
+        "/v1/projects", json={"name": f"Live promotion confirmed-assign {uuid.uuid4().hex[:8]}"}
+    ).json()
+    project_ids.append(project["id"])
+
+    from app.db import conversations as conversations_db
+
+    conv = conversations_db.create_individual_project_chat(project["id"], fixture_ids["user_id"])
+
+    confirmed_transcript = (
+        "Ada (PM): @Sprntly assign the database migration to Ada — she's "
+        "picking it up this sprint.\n"
+        "Sprntly: Done — the database migration is now assigned to Ada."
+    )
+    result = project_memory.maybe_promote_turn(project["id"], conv["id"], confirmed_transcript)
+    assert result is not None, (
+        "a confirmed, settled assignment must still be promoted — the "
+        "settled-vs-requested tightening must not ban imperative phrasing "
+        "outright"
+    )
+    assert "ada" in result["body"].lower()
+
+    rows = memory_db.list_entries(project["id"])
+    assert len(rows) == 1

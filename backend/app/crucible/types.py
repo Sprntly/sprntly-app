@@ -35,7 +35,7 @@ import math
 from dataclasses import dataclass, field
 from datetime import datetime
 from types import MappingProxyType
-from typing import Any, Literal, Mapping, Optional, Sequence
+from typing import Any, Literal, Mapping, NamedTuple, Optional, Sequence
 
 
 class FrozenDict(dict):
@@ -140,6 +140,88 @@ DECAY_HALFLIFE_DAYS: Mapping[str, float] = MappingProxyType({
 SelectionBias = Literal["none", "self_selected", "sampled", "census"]
 
 ConfidenceBand = Literal["high", "medium", "low"]
+
+class GroundedFigure(NamedTuple):
+    """One deduplicated, transcript-stated commercial figure.
+
+    THE IDENTITY, NOT JUST THE NUMBER, and that is the whole reason this type
+    exists rather than a bare `float`. A finding's grounded sum is already
+    deduplicated within itself, but the same deal can be described by two
+    different signals that cluster into two different findings — clustering
+    keys on subject, so a renewal figure can legitimately appear under both a
+    pricing theme and a churn theme. Summing findings' totals would then count
+    that money twice. Carrying the identities lets any consumer that sums
+    ACROSS findings apply the same rule one more time.
+
+    `account_key` IS OPAQUE ON PURPOSE. Deduplication needs to know that two
+    figures belong to the same customer; nothing downstream needs to know
+    WHICH customer, and this value travels into scored objects that are
+    logged and diffed. A stable digest gives the first and refuses the
+    second. Empty string means no account was named, which is its own
+    identity class (see `pipeline._grounded_commercial_native_units`).
+
+    `derived` marks a figure read back out of a written summary rather than
+    captured against a verified verbatim quote. The failure mode there is
+    transcription error, not invention — so it is a reason to hedge the
+    wording proportionately, never a reason to hide the figure.
+
+    `committed` IS THE FIELD THAT DECIDES WHETHER A FIGURE MAY BE ADDED UP,
+    and it exists because deduplication was solving the wrong problem. A
+    sample of the real corpus found one list price — "$30,000 for 50 users" —
+    quoted to SIXTEEN different accounts across sixteen different sales
+    calls. Those are not duplicates: they are sixteen genuine prospects and
+    sixteen genuine mentions, so nothing about deduplication touches them.
+    They are also not $480,000 of anything. Summing was the wrong OPERATION,
+    not merely the wrong rows.
+
+    So a committed figure (an issued quote, a contract value, a named deal)
+    is summable and answers a money target. A list price is a RATE CARD:
+    reported as a range across the accounts it was quoted to, never totalled,
+    because the total means nothing.
+
+    DEFAULTS TO FALSE — the non-additive side. Every failure in this feature's
+    history has been over-claiming, so a figure nothing has positively
+    identified as committed stays out of the sum.
+    """
+
+    account_key: str
+    amount: float
+    derived: bool
+    committed: bool = False
+    #: May this figure appear in the non-additive pricing range? A THIRD
+    #: STATE: a figure can be neither summed nor ranged — a salary, a
+    #: competitor's fee, a hypothetical — and before the classifier existed
+    #: everything that failed the committed test silently became a price,
+    #: which is how a candidate's career track record became a pricing
+    #: maximum.
+    list_price: bool = False
+
+
+#: How many ordinal bands a size is REPORTED in. Quartiles: enough to
+#: separate a big finding from a small one, few enough that the output never
+#: implies a precision the underlying evidence cannot support. A percentile
+#: would read as measurement; a quartile reads as what it is, a rough
+#: position among peers.
+#:
+#: A DISPLAY GRANULARITY, NOT AN ORDERING ONE. Ordering reads `size_rank`,
+#: the underlying position at full resolution, because quantising first and
+#: then trying to break the ties would mean comparing findings measured in
+#: different currencies — the exact comparison the band exists to avoid. So
+#: the coarse number is what a reader sees and the fine one is what sorts.
+SIZE_BANDS = 4
+
+
+def _band_for_rank(size_rank: Optional[float]) -> Optional[int]:
+    """A full-resolution position among peers -> the quartile it is reported
+    in. `None` in, `None` out: nothing to rank is not band 1.
+
+    Clamped at both ends so a rank of exactly 0.0 cannot produce a band 0 and
+    floating-point drift just above 1.0 cannot produce a band 5.
+    """
+    if size_rank is None:
+        return None
+    return max(1, min(SIZE_BANDS, math.ceil(SIZE_BANDS * size_rank)))
+
 
 #: Field names that carry "how many sources agree". Impact may never read one.
 #: Enforced by `invariants.assert_no_corroboration_fields`, which is why this is
@@ -338,6 +420,33 @@ class Claim:
     magnitude: Optional[float] = None
     direction: Literal["positive", "negative", "neutral"] = "neutral"
     subject_cluster_id: Optional[str] = None
+    #: WHAT KIND OF MONEY `magnitude` IS — one of
+    #: `app.crucible.figure_class.FIGURE_CLASSES`, or `None` when nothing
+    #: classified it (the model was not run, or did not answer for this
+    #: claim). `None` is not a category and never means "assume the good
+    #: one": the pipeline falls back to its deterministic phrase families,
+    #: which admit money to a sum only on a positive signal.
+    #:
+    #: A CATEGORY, NEVER A DECISION (I2). The consequence of each class —
+    #: summed, ranged, or refused — is a fixed table in `pipeline`, not
+    #: anything the classifier returns.
+    figure_class: Optional[str] = None
+    #: THE VERB THE GRAPH ALREADY PUT ON THIS CLAIM'S EDGE TO ITS THEME — one
+    #: of `SUPPORTS` / `REQUESTS` / `AFFECTS` / `PRESSURES` / `BLOCKED_BY`, or
+    #: `None` when the graph did not theme this claim at all.
+    #:
+    #: NOT A SECOND CLAIM TYPE, and the distinction is the whole reason this
+    #: field earns its place. The verb on its own is ~90% predictable from
+    #: `type` (a `BLOCKED_BY` edge sits on a deal-blocker claim, a `REQUESTS`
+    #: edge on a feature request), so reading it as a per-claim label would be
+    #: re-deriving what `type` already says. What it adds is DIRECTION: it
+    #: names the theme the claim is blocked on or asking for, and that target
+    #: is shared across claims from documents nobody read together. The value
+    #: is therefore only ever visible in AGGREGATE — see
+    #: `pipeline._graph_relations`.
+    #:
+    #: I3: `None` means the graph asserted nothing here, never "unrelated".
+    graph_relation: Optional[str] = None
     raw: Any = None           # original payload, always retained
 
     def __post_init__(self) -> None:
@@ -389,6 +498,21 @@ class ImpactInputs:
     `affected_population` and `movable_gap` are `Optional` because a corpus that
     never measured them yields `None`, which must survive to the output as
     "not measured" rather than collapsing to a confident zero (I3).
+
+    `size_rank` IS A CROSS-FINDING COMPARISON, AND IT IS STILL NOT
+    CORROBORATION. Every other field here describes this finding alone; the
+    rank describes where its size falls among the other findings in the same
+    run. That is a legitimate thing for size to depend on and an illegitimate
+    thing for size to be computed from at scoring time, so the comparison
+    happens in Stage 8 — BEFORE any scoring — and arrives here as an ordinary
+    input. `score_impact` still reads this object and nothing else.
+
+    The distinction that keeps I1 intact: the rank orders findings by how much
+    money or how many accounts they carry, never by how many claims say so.
+    An amount restated ten times and an amount stated once rank identically,
+    because the sum they rank on is deduplicated before it is taken (see
+    `pipeline._grounded_commercial_native_units`). Corroboration cannot reach
+    this field, which is why the dedup had to land first.
     """
     currency: GoalCurrency
     affected_population: Optional[float]
@@ -396,6 +520,27 @@ class ImpactInputs:
     value_per_unit: Optional[float]
     assumed_params: tuple[AssumedParam, ...] = ()
     native_units: Mapping[str, float] = field(default_factory=dict)
+    #: Where this finding's size falls among its OWN currency's peers in the
+    #: same run, from just above 0 to 1.0 for the largest — dollar findings
+    #: against dollar findings, reach findings against reach findings.
+    #: `None` means there was nothing to rank: no grounded figure and no
+    #: measured reach.
+    #:
+    #: STORED AT FULL RESOLUTION, RENDERED AS A QUARTILE. `size_band` below
+    #: derives from this rather than sitting beside it as a second field,
+    #: so the number a reader sees and the number that sorts can never
+    #: disagree.
+    size_rank: Optional[float] = None
+    #: The deduplicated figures behind `native_units`' grounded dollar sum,
+    #: carried as identities so a consumer summing ACROSS findings can apply
+    #: the same deduplication one more time. See `GroundedFigure`.
+    grounded_figures: tuple[GroundedFigure, ...] = ()
+
+    @property
+    def size_band(self) -> Optional[int]:
+        """The reportable quartile, 1..4 with 4 largest. Derived, never
+        stored — see `size_rank`."""
+        return _band_for_rank(self.size_rank)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -405,7 +550,8 @@ class ImpactInputs:
     def __hash__(self) -> int:
         return hash((self.currency, self.affected_population, self.movable_gap,
                      self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units)))
+                     _hashable(self.native_units), self.size_rank,
+                     self.grounded_figures))
 
 
 @dataclass(frozen=True)
@@ -444,6 +590,22 @@ class Impact:
     value_per_unit: Optional[float]
     assumed_params: tuple[AssumedParam, ...] = ()
     native_units: Mapping[str, float] = field(default_factory=dict)
+    #: Carried through from `ImpactInputs` unchanged, so ordering can read it
+    #: off the FROZEN score without ever recomputing a comparison (I10). A
+    #: finding can be unsizeable in the goal's currency (`value is None`) and
+    #: still carry a rank, which is the case a quoted figure with no named
+    #: account produces: we did not measure its reach, and saying so is not
+    #: the same as saying it is worth nothing.
+    size_rank: Optional[float] = None
+    #: Carried through from `ImpactInputs` so a consumer summing across
+    #: findings can deduplicate the same money one more time.
+    grounded_figures: tuple[GroundedFigure, ...] = ()
+
+    @property
+    def size_band(self) -> Optional[int]:
+        """The reportable quartile, 1..4 with 4 largest. Derived from
+        `size_rank`, never stored alongside it."""
+        return _band_for_rank(self.size_rank)
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -453,7 +615,8 @@ class Impact:
     def __hash__(self) -> int:
         return hash((self.value, self.currency, self.affected_population,
                      self.movable_gap, self.value_per_unit, self.assumed_params,
-                     _hashable(self.native_units)))
+                     _hashable(self.native_units), self.size_rank,
+                     self.grounded_figures))
 
 
 @dataclass(frozen=True)
@@ -520,6 +683,28 @@ class EffortEstimate:
         return self.weeks is not None
 
 
+# ── Graph-asserted relations ─────────────────────────────────────────────────
+
+class GraphRelation(NamedTuple):
+    """One verb the knowledge graph asserts between a finding's claims and its
+    theme, with how much of the finding stands behind it.
+
+    A COUNT OF CLAIMS, DELIBERATELY NOT A SCORE. This travels on `Finding`, and
+    `score_impact` is handed the whole `Finding` — so a number here is one
+    refactor away from becoming a size bonus, which is I1's failure mode
+    exactly. It is listed in `invariants._FINDING_MUTATIONS` so the flagship I1
+    sweep mutates it and fails loudly if impact ever starts reading it.
+
+    `accounts` is the customer-side names behind those claims, already scoped
+    to the goal population by the caller. Empty when no claim named one — which
+    is why prose must check it rather than printing "0 accounts".
+    """
+    #: `SUPPORTS` / `REQUESTS` / `AFFECTS` / `PRESSURES` / `BLOCKED_BY`.
+    relation: str
+    claims: int
+    accounts: tuple[str, ...]
+
+
 # ── Finding ──────────────────────────────────────────────────────────────────
 
 Adjudication = Literal[
@@ -567,3 +752,15 @@ class Finding:
     #: form — never re-derived, because an example that is innocent alone can be
     #: causal in a sentence and the lint runs on the sentence.
     example: str = ""
+    #: WHAT THE GRAPH ASSERTS ABOUT THIS FINDING'S THEME, in its own closed
+    #: vocabulary, ordered most-claims-first with ties broken on the relation
+    #: name so a re-run cannot reorder it.
+    #:
+    #: `None` — NOT `()` — when no claim in the group carried an edge. I3: a
+    #: finding the graph said nothing about must read as unmeasured, and an
+    #: empty tuple renders as "no blockers, no requests", which is a claim the
+    #: graph never made. `()` is unreachable by construction here, so a
+    #: renderer that sees it is looking at a hand-built fixture.
+    #:
+    #: FOR RENDERING AND FOR PROSE, NEVER FOR SIZE. See `GraphRelation`.
+    graph_relations: Optional[tuple[GraphRelation, ...]] = None

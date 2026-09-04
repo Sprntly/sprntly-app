@@ -1,3 +1,4 @@
+import { frameworkDisplayName } from "./goalFrameworkDisplay"
 import type { GoalRunPlan } from "./api"
 
 /** The plan, said as a person would say it.
@@ -38,11 +39,34 @@ export type PlanStep = {
 export function planNarrative(
   plan: Pick<GoalRunPlan,
     "sources" | "definition_text" | "will_produce" | "cannot_answer"
-    | "definition_adopted">,
+    | "definition_adopted" | "framework" | "framework_reason">,
   excluded: ReadonlySet<string>,
 ): PlanStep[] {
   const kept = (plan.sources ?? []).filter((s) => !excluded.has(s.source_type))
   const steps: PlanStep[] = []
+
+  // 0. WHAT IT WILL BE JUDGED AGAINST, CONFIRMED FIRST. Everything after this
+  //    step — what counts as a finding, what a source is trusted to witness,
+  //    what gets ranked — depends on it, so it is named before any of them
+  //    rather than surfacing three steps in as a qualifier on "judge what
+  //    survives". David: "Confirm what revenue means here. I work to your
+  //    definition exactly as written." Only when a definition exists — the
+  //    run never infers one (I9), so neither does this.
+  //
+  //    THE WORDS THEMSELVES LIVE HERE, ONCE. A later step still judges
+  //    survivors against this definition, but it points back at this one
+  //    instead of quoting it again — see the note there for why printing the
+  //    same sentence twice was exactly the failure this file already fixed
+  //    once (the "QUOTED ONLY WHEN IT IS SETTLED" note below).
+  if (plan.definition_text?.trim()) {
+    steps.push({
+      text: plan.definition_adopted
+        ? `Confirm what this means — I work to your definition of it exactly` +
+          ` as written: “${plan.definition_text.trim()}”.`
+        : "Confirm what this means — I work to your definition of it exactly" +
+          " as written, which you confirm below.",
+    })
+  }
 
   // 1. WHAT GETS READ. Named in the reader's own vocabulary — the labels the
   //    checkboxes carry — not in source-type slugs.
@@ -69,19 +93,61 @@ export function planNarrative(
       " source is not in a position to know.",
   })
 
-  // 3. WHAT IT IS MEASURED AGAINST. Only when a definition was adopted — the
-  //    run never infers one, so neither does this.
+  // 3. WHAT IT IS MEASURED AGAINST. Only when a definition exists — same
+  //    gating as step 0. THE WORDS THEMSELVES sit there, not here: quoting
+  //    them again on this step printed the same sentence twice on one card —
+  //    the "multiple repetitions" the feedback asked us to cut, and exactly
+  //    the failure mode the "QUOTED ONLY WHEN IT IS SETTLED" note used to warn
+  //    about at this spot. This step now only points back at step 0.
   if (plan.definition_text?.trim()) {
-    // QUOTED ONLY WHEN IT IS SETTLED. While the definition is still a proposal
-    // it is sitting in an editable field a few lines below this, so quoting it
-    // here printed the same sentence twice on one card — the "multiple
-    // repetitions" the feedback asked us to cut, reintroduced by the fix for
-    // the rest of it. Pointing at it is enough while it is still on screen;
-    // once it is adopted the field is gone and the words have to be here.
     steps.push({
       text: plan.definition_adopted
-        ? `Judge what survives against your own definition: “${plan.definition_text.trim()}”.`
-        : "Judge what survives against your own definition of the metric, which you confirm below.",
+        ? "Judge what survives against that definition."
+        : "Judge what survives against the definition you confirm above.",
+    })
+  }
+
+  // 3b. HOW THE SURVIVORS GET ORDERED, named before the run — AND WHY THAT
+  //     FRAMEWORK, not another.
+  //
+  // Apurva: "in the initial plan that we are going to output, we should
+  // highlight that we are using the RICE framework." A ranking method
+  // discovered in the output is a convention; one stated in the plan is a
+  // choice, and the reader can say no to it while the gate is still open.
+  //
+  // CHOSEN BY CODE OVER WHAT IS CONNECTED, never by a model (I2) — see
+  // `app.crucible.framework.select_framework`. RICE needs a numeric source
+  // (analytics/revenue/measured outcome) to size Reach and Impact; without
+  // one it renders every row unmeasured rather than ranking badly (measured
+  // on a real corpus: 26/26 findings scored `None`). MoSCoW needs only a
+  // stated blocker or a stated preference, which any corpus with either
+  // already carries — so the terms spelled out below differ by which
+  // framework this run actually picked.
+  const framework = (plan.framework || "").trim()
+  if (framework) {
+    const isMoscow = framework.trim().toLowerCase() === "moscow"
+    const items = isMoscow
+      ? [
+          "MUST — a stated blocker: something is stopping an account today",
+          "SHOULD or COULD — a stated preference: something an account asked for",
+          "Graded by how many independent source documents back each one, not by raw claim count",
+        ]
+      : [
+          "Reach — how many of your accounts the theme touches, counted",
+          "Impact — how directly it bears on the metric, read from the kind of claim behind it",
+          "Confidence — the band the evidence earns, not a guess",
+          "Effort — not in your connected data, so the ranking is by reach × impact × confidence until you supply one",
+        ]
+    const reason = (plan.framework_reason || "").trim()
+    steps.push({
+      // THE READER'S WORD, NOT THE STORED VALUE. `plan.framework` is the
+      // storage/comparison value ("rice", "moscow") — a real run never sends
+      // pre-cased text, so interpolating it directly here printed "moscow"
+      // in the middle of a sentence. `frameworkDisplayName` is the frontend
+      // mirror of `app.crucible.framework.display_name`; keep the two in
+      // step if either changes.
+      text: `Rank what survives with ${frameworkDisplayName(framework)}:`,
+      items: reason ? [...items, reason] : items,
     })
   }
 
@@ -96,6 +162,21 @@ export function planNarrative(
     // this branch exists to prevent; see `PlanStep.items`.
     steps.push({ text: "Give you:", items: produce })
   }
+
+  // 4b. WHAT GETS DROPPED, SHOWN RATHER THAN HIDDEN. Stated as a promise here
+  //     because otherwise the reader only meets it later, as a section in the
+  //     finished report — a commitment discovered after the fact reads as an
+  //     apology, not a design choice. Unconditional, like step 2's
+  //     corroboration rules: this is how the run always works, not something
+  //     read off this particular plan.
+  //
+  //     NO COUNT HERE. This step runs before the run reads anything, so it
+  //     cannot say how many findings will end up set aside — only that it
+  //     will show them, and why, when it does. The number itself belongs to
+  //     the finished report, from evidence, same as the deliverables above.
+  steps.push({
+    text: "Show you what got set aside — every finding that did not survive, with the reason it was dropped.",
+  })
 
   // 5. WHAT IT WILL NOT DO. Last, and stated as a step, because a limit
   //    disclosed up front is part of the approach — not a footnote to it.

@@ -1,5 +1,6 @@
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -139,6 +140,56 @@ class Settings(BaseSettings):
     # ingest, the catalog backfill, the scheduled brief). Off by default: the
     # trade is latency for money, so each call site opts in and this switch
     # turns the whole mechanism off again without a revert.
+    # WHAT A LAPSED CUSTOMER SEES. `enforce.bill` already refuses their work at
+    # the server; this decides how honest the app looks about it.
+    #
+    #   "off"       — nothing changes. The app renders normally and each action
+    #                 fails with a 402. This is today's behaviour and the worst
+    #                 of the three: a working-looking app where nothing works.
+    #   "read_only" — existing artifacts stay readable, creating anything is
+    #                 routed to Billing. Work they already paid to produce is
+    #                 not held hostage to an expired card.
+    #   "hard"      — every route goes to Billing. Nothing else is reachable
+    #                 except signing out.
+    #
+    # Applies to `canceled` and `unpaid` only. NOT `past_due`: Stripe is still
+    # retrying the card there and the customer may not even know yet — locking
+    # someone out mid-retry is how a bounced card becomes a cancellation.
+    subscription_lock_mode: str = "off"
+
+    # From: header for billing mail. The Resend API key is scoped to the
+    # verified `mail.sprntly.ai` domain, so a bare `@sprntly.ai` sender is
+    # rejected with a 403 — see app/mailer.py.
+    billing_from_email: str = ""
+
+    @field_validator("subscription_lock_mode", mode="before")
+    @classmethod
+    def _clean_lock_mode(cls, v: object) -> str:
+        """Normalise, and never fail OPEN in silence.
+
+        `SUBSCRIPTION_LOCK_MODE=hard # off|read_only|hard` in a .env file
+        arrives here as the whole string INCLUDING the comment, which matched
+        none of the three values and therefore disabled the lock — quietly,
+        because "unrecognised" and "off" were the same answer. A setting that
+        turns itself off when someone documents it inline is a trap, and it
+        cost a testing session to find.
+
+        So: take the first token, lowercase it, and SAY SO when the result is
+        not a mode we know. The fallback is still "off" — failing closed would
+        wall every customer out of a working app over a typo — but it is now a
+        log line rather than silence.
+        """
+        text = str(v or "").split("#", 1)[0].strip().strip("\"'").lower()
+        if text in ("off", "read_only", "hard"):
+            return text
+        if text:
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "subscription_lock_mode=%r is not off|read_only|hard — treating as 'off'",
+                v,
+            )
+        return "off"
     llm_batch_enabled: bool = False
 
     # When True, a backend startup whose prototype template version is greater
@@ -180,6 +231,56 @@ class Settings(BaseSettings):
     evidence_warm_count: int = 1
     allowed_origins: str = "http://localhost:3000"
     env: str = "development"
+
+    # ── Stripe ────────────────────────────────────────────────────────────
+    # Unset everywhere except the environments that actually sell. Billing is
+    # INERT without a secret key: routes 503 with "billing is not configured"
+    # rather than half-working, which keeps local dev and CI from needing
+    # credentials at all (see app/billing/stripe_client.py::configured).
+    # The paywall's master switch, OFF by default and deliberately separate
+    # from having Stripe credentials.
+    #
+    # Two reasons it is not simply `bool(stripe_secret_key)`. First, staging
+    # shares the PROD Supabase project, so a paywall that switched itself on
+    # the moment this merged would start refusing real customers' generations
+    # before anyone had looked at it. Second, an env var going missing in prod
+    # would silently make everything free — a fail-open on a money path — and
+    # an explicit flag makes the enforced state a decision rather than a side
+    # effect.
+    #
+    # OFF means `app.billing.enforce` is a no-op: nothing is gated and nothing
+    # is debited. Subscriptions, top-ups and referrals all still work, so the
+    # rollout is: ship, subscribe a test company, watch the webhooks land, then
+    # flip this on.
+    billing_enforced: bool = False
+    stripe_secret_key: str = ""
+    # From the Stripe dashboard's webhook endpoint. Signature verification is
+    # skipped-and-rejected without it — an unverified webhook body is attacker
+    # input that grants credits, so a missing secret must fail closed.
+    stripe_webhook_secret: str = ""
+    # Price ids, created in the Stripe dashboard rather than in code so pricing
+    # can change without a deploy. One per (plan x interval); an empty one
+    # makes that specific plan unbuyable and is reported as such.
+    stripe_price_starter_monthly: str = ""
+    stripe_price_starter_annual: str = ""
+    stripe_price_product_builder_monthly: str = ""
+    stripe_price_product_builder_annual: str = ""
+    # Where Checkout and the customer portal send the browser back to. The web
+    # app is a static export, so these are plain page URLs with no server-side
+    # callback handler behind them.
+    # WHERE STRIPE SENDS THE BROWSER BACK. Empty by default and composed from
+    # `frontend_url` — see `billing_return`.
+    #
+    # It used to default to a literal localhost URL, and nothing set it on any
+    # deployed environment: `sync-backend-env.yml` writes GOOGLE_*,
+    # TOKEN_ENCRYPTION_KEY, FRONTEND_URL and INTERNAL_API_KEY, and not this. So
+    # staging quietly served `http://localhost:3000/...` as a customer's
+    # referral link, and would have returned a paying customer from Stripe
+    # Checkout to a machine that is not theirs.
+    #
+    # A localhost default is only ever right on localhost; anywhere else it is
+    # a silent misconfiguration that looks like a working setting.
+    billing_return_url: str = ""
 
     demo_password: str = ""
     jwt_secret: str = "dev-only-change-me"
@@ -470,11 +571,15 @@ class Settings(BaseSettings):
     #
     # WHY THESE EXIST when the sweep already has a kill switch above: a sweep
     # leg is not only a read. `connector_lookup/sweep_persist.py` writes what a
-    # leg read into the tenant's KNOWLEDGE GRAPH, and merging to main deploys to
-    # staging, and STAGING WRITES LAND ON THE PROD SUPABASE. So merging these
-    # two brand-new adapters unflagged would start writing prod tenants' graphs
-    # from code that has never run against real data — an irreversible data
-    # action taken as a side effect of a merge.
+    # leg read into the tenant's KNOWLEDGE GRAPH, so an unflagged merge would
+    # start writing real tenants' graphs from code that has never run against
+    # real data — an irreversible data action taken as a side effect of a merge.
+    #
+    # Until 2026-09-01 that blast radius was PROD, because staging wrote to the
+    # prod Supabase project. The environments are separate now (see
+    # BRANCHING.md), so an unflagged merge to main would poison staging rather
+    # than prod. That is a smaller fire, not the absence of one, and it is why
+    # these flags survive the split rather than being deleted with it.
     #
     # A bad graph write is worse than a bad migration, and our safety apparatus
     # is pointed at the migration: that one gets a gate, a file, a version row
@@ -675,6 +780,15 @@ class Settings(BaseSettings):
     task_followup_enabled: bool = False
     task_followup_interval_hours: int = 1
 
+    # In-session "are you done?" check (context_assembler_project.py): while
+    # an assignee is chatting in their PRIVATE project chat, proactively ask
+    # (never mark done, never assume done) whether an OPEN task delegated TO
+    # them is finished, when their message relates to it. OFF by default —
+    # request-time gate, no behavior change at all while unset; the
+    # completion itself still flows exclusively through the existing
+    # `delegation_status_ingest.maybe_ingest_status` reply classifier.
+    insession_task_check_enabled: bool = False
+
     # Extraction evals (app/graph/evals.py): a scheduled, sampled structural
     # check of recent extraction output per skill_id against the expected
     # shape each vendored connector-extraction skill declares in its own
@@ -839,6 +953,35 @@ class Settings(BaseSettings):
         if prefix == "/":
             prefix = ""
         return f"{origin}{prefix}/v1/design-agent"
+
+
+    @property
+    def app_origin(self) -> str:
+        """Scheme + host this app is served from, with no path.
+
+        `frontend_url` is the one setting that already names it AND is actually
+        written to every deployed box by `sync-backend-env.yml`. Anything that
+        needs to build a customer-visible URL should come through here rather
+        than inventing a second source that nobody remembers to set.
+        """
+        raw = (self.frontend_url or "http://localhost:3000").strip().rstrip("/")
+        parts = raw.split("://", 1)
+        if len(parts) == 2:
+            return f"{parts[0]}://{parts[1].split('/', 1)[0]}"
+        return raw.split("/", 1)[0]
+
+    @property
+    def billing_return(self) -> str:
+        """Where Stripe returns the browser after Checkout or the portal.
+
+        An explicit `BILLING_RETURN_URL` wins, for an environment that genuinely
+        needs a different destination. Otherwise it is composed from the origin
+        this app is actually served from, so it cannot be left pointing at
+        somebody's laptop.
+        """
+        if self.billing_return_url.strip():
+            return self.billing_return_url.strip()
+        return f"{self.app_origin}/settings?section=billing"
 
     @property
     def data_path(self) -> Path:

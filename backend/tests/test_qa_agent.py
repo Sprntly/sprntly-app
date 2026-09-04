@@ -420,6 +420,30 @@ def test_m_call_digest_forwards_plan_constraints_including_criterion(monkeypatch
     assert captured["constraints"] == {
         "since": "2026-07-01", "criterion": "raised a billing complaint",
     }
+    # A plan-shaped stub with no `wants_report` degrades to the digest's own
+    # regex (None) rather than raising on the answer path.
+    assert captured["wants_report"] is None
+
+
+def test_m_call_digest_forwards_where_the_answer_goes(monkeypatch):
+    """`wants_report` travels with the constraints, for the same reason: a
+    verdict the planner reached from the whole sentence beats one the digest
+    re-derives from its surface words."""
+    import app.call_digest as cd
+    from types import SimpleNamespace
+
+    captured: dict = {}
+    monkeypatch.setattr(cd, "has_call_source", lambda cid: True)
+    monkeypatch.setattr(
+        cd, "answer",
+        lambda **kw: captured.update(kw) or {"answer": "x", "_skill_source": "y"},
+    )
+    for wants in (True, False):
+        qa._m_call_digest(
+            enterprise_id="ent", question="what are customers saying", history=[],
+            plan=SimpleNamespace(constraints={}, wants_report=wants),
+        )
+        assert captured["wants_report"] is wants
 
 
 def test_answer_intercepts_call_digest_before_routing(monkeypatch):
@@ -2477,7 +2501,7 @@ def test_stale_connector_ask_reaches_project_branch_end_to_end(monkeypatch):
         extra_tools=({"name": "get_project_memory"},),
     )
 
-    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset):
+    def _fake_scoped_tool_answer(*, scope, question, history, enterprise_id, dataset, **kwargs):
         return {"answer": "project-scoped-context", "_skill_source": "project-tools"}
 
     monkeypatch.setattr(qa, "_try_scoped_tool_answer", _fake_scoped_tool_answer)

@@ -1969,8 +1969,8 @@
     padding: 0 12px;
   }
 
-  .sidebar--expanded .sb-rail-new,
-  .sidebar--expanded .sb-rail-search {
+
+  .sidebar--expanded .sb-rail-new {
     height: 34px;
   }
 
@@ -2104,61 +2104,6 @@
     height: 18px;
   }
 
-  /* Global search trigger (⌘K) — sits under the workspace switcher, above
-     New chat. Collapsed: a 38px icon square like .sb-rail-new; expanded: a
-     faux search input with the label + kbd hint. */
-  .sb-rail-search {
-    width: 38px;
-    height: 38px;
-    border-radius: 9px;
-    background: var(--nav-2);
-    border: 1px solid transparent;
-    color: var(--nav-text);
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    margin-bottom: 10px;
-    flex-shrink: 0;
-    position: relative;
-    transition: background 0.12s, color 0.12s;
-  }
-
-  .sb-rail-search:hover {
-    background: var(--nav-2);
-    color: var(--nav-text-hover);
-  }
-
-  .sb-rail-search:hover .nav-tooltip {
-    opacity: 1;
-    transform: translate(4px, -50%);
-  }
-
-  .sb-rail-search-kbd {
-    display: none;
-    margin-left: auto;
-    font-size: 10px;
-    font-family: var(--font-mono);
-    color: var(--nav-text);
-    border: 1px solid var(--on-dark-alpha-14);
-    border-radius: 4px;
-    padding: 1px 5px;
-    line-height: 1.4;
-  }
-
-  .sidebar--expanded .sb-rail-search {
-    width: 100%;
-    justify-content: flex-start;
-    gap: 10px;
-    padding: 0 12px;
-    height: 40px;
-    border-color: var(--on-dark-alpha-14);
-  }
-
-  .sidebar--expanded .sb-rail-search-kbd {
-    display: inline-block;
-  }
-
   .sb-rail-nav {
     display: flex;
     flex-direction: column;
@@ -2282,8 +2227,16 @@
     margin-top: 10px;
   }
 
+  /* Label left, the way to the rest right — one line, baseline-aligned. */
   .sb-chats-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
     padding: 0 10px 6px;
+  }
+
+  .sb-chats-head-label {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.05em;
@@ -2401,25 +2354,65 @@
     border-color: var(--nav-accent);
   }
 
+  /* In the header now, not a row under the list. Sized DOWN from the row it
+     used to be: beside an 11px uppercase label it is a companion to the
+     heading rather than a twenty-first item, so it takes no block padding, no
+     hover fill, and no row height. */
   .sb-chats-all {
     flex: none;
-    padding: 8px 10px;
-    margin-top: 4px;
-    border-radius: 8px;
-    font-weight: 500;
+    /* Label and arrow on one line, the arrow nudged to sit on the text's
+       optical centre rather than its baseline. */
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 0;
     border: none;
     background: none;
     color: var(--nav-text);
-    font-size: 12.5px;
-    text-align: left;
+    font-size: 11.5px;
+    font-weight: 500;
+    line-height: 1;
+    white-space: nowrap;
+    text-align: right;
     cursor: pointer;
-    opacity: 0.75;
+    opacity: 0.7;
   }
 
   .sb-chats-all:hover {
     opacity: 1;
     color: var(--nav-text-hover);
-    background: var(--nav-hover-bg, rgba(255, 255, 255, 0.07));
+  }
+
+  /* The underline belongs to the WORDS. Running it under the arrow too draws
+     a line through the arrowhead's tail and reads as a strikethrough. */
+  .sb-chats-all:hover .sb-chats-all-label {
+    text-decoration: underline;
+  }
+
+  /* It leans out of the corner on hover, in the direction it points — the
+     same motion the docs topbar's external link uses. */
+  .sb-chats-all svg {
+    transition: transform 0.12s ease;
+  }
+
+  .sb-chats-all:hover svg {
+    transform: translate(1px, -1px);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sb-chats-all svg,
+    .sb-chats-all:hover svg {
+      transition: none;
+      transform: none;
+    }
+  }
+
+  /* Keyboard reach: with the hover fill gone, focus needs its own mark. */
+  .sb-chats-all:focus-visible {
+    opacity: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: 3px;
   }
 
   /* ── The draggable edge ───────────────────────────────────────────────
@@ -2544,6 +2537,79 @@
     margin: 4px 0;
   }
 
+  /* The trial countdown, carried on every screen. It sits above the identity
+     row and renders only while trialling, so a paid workspace loses no rail
+     space to it. */
+  .sb-trial {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    margin: 0 0 6px;
+    padding: 7px 8px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: var(--surface-2);
+    color: var(--ink-2);
+    text-align: left;
+    cursor: pointer;
+    transition: background 0.12s, border-color 0.12s;
+  }
+
+  .sb-trial:hover {
+    background: var(--surface-3);
+    border-color: var(--line-strong);
+    color: var(--ink);
+  }
+
+  /* The number keeps a fixed square so a two-digit count does not resize the
+     row, and so it still lines up with the avatar below when the rail is
+     collapsed to icons. */
+  .sb-trial-num {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border-radius: 7px;
+    background: var(--ink);
+    color: var(--surface-2, #fff);
+    font-size: 11.5px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .sb-trial-copy {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    line-height: 1.25;
+  }
+
+  .sb-trial-label {
+    font-size: 11.5px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .sb-trial-days {
+    font-size: 10.5px;
+    color: var(--ink-3);
+    white-space: nowrap;
+  }
+
+  /* Collapsed to icons: the words go, the number stays — it is the only part
+     that still says anything at 56px wide. */
+  .sidebar--collapsed .sb-trial {
+    justify-content: center;
+    padding: 7px 0;
+  }
+
+  .sidebar--collapsed .sb-trial-copy {
+    display: none;
+  }
+
   .sb-rail-user {
     display: flex;
     flex-direction: column;
@@ -2557,6 +2623,11 @@
   /* Display-only identity chip (sign-out moved to Settings → Account), so no
      pointer/hover affordances. */
   .sb-rail-avatar {
+    /* NEVER SHRINKS. A flex child defaults to `flex-shrink: 1`, so when the
+       row ran out of room this 32px box was the first thing to give — and a
+       squashed box with `border-radius: 50%` is an OVAL. The initials chip is
+       a fixed shape; the NAME beside it is the part that truncates. */
+    flex: none;
     width: 32px;
     height: 32px;
     border-radius: 50%;
@@ -2575,6 +2646,61 @@
      pinned on the right whatever the name length; collapsed, the avatar and
      name are hidden (see .sidebar--collapsed .sb-rail-avatar) and this is the
      row's only visible element — a lone rail icon. */
+  /* The identity row's actions — sync, feedback, settings — left to right.
+     Same 28px box as the sync button they sit beside, so the three read as one
+     control group rather than as a button with two afterthoughts. They replace
+     three full-width rows above the divider; the row was already the place an
+     action earned its slot over identity chrome, and now it holds all three. */
+  .sb-rail-action {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    flex-shrink: 0;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
+    color: var(--nav-text);
+    cursor: pointer;
+    position: relative;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .sb-rail-action:hover {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-rail-action.active {
+    background: var(--nav-2);
+    color: var(--nav-text-hover);
+  }
+
+  .sb-rail-action:hover .nav-tooltip {
+    opacity: 1;
+    transform: translate(4px, -50%);
+  }
+
+  /* The three actions, inline with the name. `flex: none` so they keep their
+     full size and the NAME is what gives way — the name is truncatable, a
+     26px icon is not. */
+  .sb-rail-actions {
+    display: flex;
+    align-items: center;
+    gap: 1px;
+    flex: none;
+    margin-left: auto;
+  }
+
+  /* Collapsed, the avatar and name are hidden and these four are the whole
+     footer — stacked, since four of them do not fit across a 60px rail. */
+  .sidebar--collapsed .sb-rail-actions {
+    flex-direction: column;
+    align-items: center;
+    margin-left: 0;
+  }
+
   .sb-sync-btn {
     display: flex;
     align-items: center;
@@ -2964,8 +3090,8 @@
   }
 
   .main.main--reading .prd-chart {
-    margin: 12px 0 16px;
-    padding: 14px 14px;
+    margin: 16px 0 20px;
+    padding: 14px 2px 2px;
   }
 
   .main.main--reading .prd-foot {
@@ -4958,12 +5084,21 @@
   }
 
   /* PRD infographics — bar / line / pie / stat / gauge charts rendered inline */
+  /* A FIGURE IN THE PROSE, not a widget parked in it. The card — border, fill,
+     radius — was doing the work that white space and a caption do better: it
+     boxed the chart off from the sentence that introduces it, which is the one
+     thing a reader needs to connect. What is left is air, a hairline to mark
+     where the prose stops, and the marks themselves carrying the colour.
+
+     The chrome the skill calls recessive is the chrome AROUND the data, not
+     the data. */
   .prd-chart {
-    margin: 16px 0 22px;
-    padding: 16px 18px;
-    border: 1px solid var(--line);
-    border-radius: 12px;
-    background: var(--surface-2);
+    margin: 22px 0 26px;
+    padding: 18px 2px 4px;
+    border: none;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
+    background: none;
   }
 
   .prd-chart-title {
@@ -5007,15 +5142,126 @@
   }
 
   .prd-bar-track {
-    height: 22px;
+    /* Capped, not filling its slot: the leftover is air, which is what keeps a
+       stack of bars readable as a ranking rather than as a block. */
+    height: 20px;
     background: var(--surface-3);
     border-radius: 6px;
     overflow: hidden;
   }
 
+  /* ── Chart motion ─────────────────────────────────────────────────────
+     Every mark below reveals off ONE flag — `[data-revealed]` on the figure,
+     set by an IntersectionObserver when the card is actually scrolled into
+     view (see `useRevealed`). Charts render inside a streaming reply, so a
+     mount-time animation would play against half a dataset in a card nobody
+     is looking at yet.
+
+     The resting state is the FINISHED chart. Everything here is an override
+     that applies only while `data-revealed="false"` — so a browser with no
+     observer, a test, or a printed page shows real data rather than an empty
+     frame. Decoration must never be load-bearing for reading the numbers. */
+
+  /* Bars grow from the baseline. */
+  .prd-chart[data-revealed="false"] .prd-bar-fill {
+    width: 0 !important;
+  }
+
+  .prd-bar-fill {
+    transition: width 620ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  /* The line draws itself, left to right. `pathLength: 1` on the element makes
+     the dash a fraction of the path, so shape does not change the duration. */
+  .prd-line-path {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 760ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-path {
+    stroke-dashoffset: 1;
+  }
+
+  /* Dots land after the line reaches them, each carrying a 2px ring in the
+     surface colour so a marker sitting on the line, a gridline or a neighbour
+     still reads as its own mark. */
+  .prd-line-dot {
+    stroke: var(--surface-2);
+    stroke-width: 2;
+    opacity: 1;
+    transition: opacity 240ms ease;
+  }
+
+  .prd-chart[data-revealed="false"] .prd-line-dot {
+    opacity: 0;
+  }
+
+  /* Slices scale up from the centre of the ring, in order. */
+  .prd-pie-slice {
+    transform-origin: center;
+    transform: scale(1);
+    opacity: 1;
+    /* `fill-opacity` carries the DIM (hover), `opacity` carries the REVEAL.
+       Two rules on one property fight the moment someone hovers mid-reveal. */
+    transition: transform 460ms cubic-bezier(0.22, 0.61, 0.36, 1),
+      opacity 300ms ease, fill-opacity 140ms ease;
+  }
+
+  /* The slice being read lifts a little out of the ring. */
+  .prd-pie-slice[data-active="true"] {
+    transform: scale(1.03);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-pie-slice {
+    transform: scale(0.86);
+    opacity: 0;
+  }
+
+  /* The gauge sweeps from empty. */
+  .prd-gauge-value {
+    stroke-dasharray: 1;
+    stroke-dashoffset: 0;
+    transition: stroke-dashoffset 700ms cubic-bezier(0.33, 0.9, 0.4, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-gauge-value {
+    stroke-dashoffset: 1;
+  }
+
+  /* Stat tiles rise. */
+  .prd-stat {
+    opacity: 1;
+    transform: translateY(0);
+    transition: opacity 320ms ease, transform 420ms cubic-bezier(0.22, 0.61, 0.36, 1);
+  }
+
+  .prd-chart[data-revealed="false"] .prd-stat {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+
+  /* ASKED FOR LESS MOTION MEANS NONE. `useRevealed` already returns revealed
+     on the first render under this query, so nothing should animate — this is
+     the belt to that braces: any mark that slips through has its transition
+     removed rather than slowed. */
+  @media (prefers-reduced-motion: reduce) {
+    .prd-bar-fill,
+    .prd-line-path,
+    .prd-line-dot,
+    .prd-pie-slice,
+    .prd-gauge-value,
+    .prd-stat {
+      transition: none !important;
+    }
+  }
+
   .prd-bar-fill {
     height: 100%;
-    border-radius: 6px;
+    /* Rounded at the DATA end, square at the baseline — a bar rounded at both
+       ends reads as floating, and at 0 it would show a lozenge where there is
+       no data. */
+    border-radius: 0 4px 4px 0;
     transition: width 0.3s ease;
   }
 
@@ -5062,11 +5308,87 @@
   }
 
   .prd-pie-legend li {
+    display: block;
+  }
+
+  /* The legend row is the keyboard's way into the ring, so it is a real
+     button: full width, its own hover and focus states, and the same
+     highlight the slice gets. */
+  .prd-pie-legend-row {
     display: grid;
     grid-template-columns: 12px 1fr auto;
     gap: 8px;
     align-items: center;
+    width: 100%;
+    padding: 4px 6px;
+    border: none;
+    border-radius: 6px;
+    background: none;
+    color: inherit;
+    font: inherit;
     font-size: 12.5px;
+    text-align: left;
+    cursor: default;
+    transition: background 0.12s;
+  }
+
+  .prd-pie-legend-row:hover,
+  .prd-pie-legend-row[data-active="true"] {
+    background: var(--surface-3);
+  }
+
+  .prd-pie-legend-row:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  .prd-pie-pct {
+    color: var(--muted);
+  }
+
+  /* The ring and its readout share one stacking context so the centre figure
+     sits in the hole rather than beside it. */
+  .prd-pie-ring {
+    position: relative;
+    display: inline-flex;
+    flex: none;
+  }
+
+  .prd-pie-center {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 1px;
+    pointer-events: none;
+    text-align: center;
+    /* Inside a 88px hole — anything wider than this wraps into the ring. */
+    padding: 0 26px;
+  }
+
+  .prd-pie-center-val {
+    font-size: 22px;
+    font-weight: 600;
+    line-height: 1.1;
+    color: var(--ink);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .prd-pie-center-lbl {
+    font-size: 10.5px;
+    line-height: 1.2;
+    color: var(--muted);
+    overflow: hidden;
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+  }
+
+  /* Pointing at a slice is reading, not clicking. */
+  .prd-pie-slice {
+    cursor: default;
   }
 
   .prd-pie-swatch {
@@ -10693,6 +11015,21 @@
     margin: 0.7em 0;
   }
 
+  /* A CHART IS NOT A CODE BLOCK. It arrives as a fenced ```chart block, so the
+     markdown renderer wraps it in <pre> and it inherited all of the chrome
+     above — a bordered, tinted, padded box — and then drew its own card inside
+     that. Two frames around one figure, which is what "it looks some way"
+     was. The fence is a transport detail; strip it and let the figure be the
+     only container. */
+  .ai-bar-reply-answer pre:has(.prd-chart) {
+    background: none;
+    border: none;
+    border-radius: 0;
+    padding: 0;
+    margin: 0;
+    overflow: visible;
+  }
+
   .ai-bar-reply-answer pre code {
     border: 0;
     padding: 0;
@@ -12459,6 +12796,81 @@
   .setx-nav-item.soon {
     opacity: 0.55;
     cursor: not-allowed;
+  }
+
+  /* ---- The pane dropdown ------------------------------------------------
+     A row that owns several views opens under itself. The height animates via
+     `grid-template-rows: 0fr -> 1fr`, which is the one way to transition to a
+     content height nobody has to hardcode — a max-height guess either clips a
+     four-item drawer or makes a two-item one crawl open against dead space. */
+  .setx-nav-chev {
+    flex: none;
+    transition: transform 0.18s ease;
+  }
+
+  .setx-nav-item[aria-expanded="true"] .setx-nav-chev {
+    transform: rotate(180deg);
+  }
+
+  .setx-nav-sub {
+    display: grid;
+    grid-template-rows: 0fr;
+    transition: grid-template-rows 0.18s ease;
+  }
+
+  .setx-nav-sub[data-open="true"] {
+    grid-template-rows: 1fr;
+  }
+
+  .setx-nav-sub-inner {
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    /* The rail the views hang from — it reads as one group and lines the
+       labels up under the parent row's icon. */
+    margin: 0 0 0 19px;
+    padding-left: 10px;
+    border-left: 1px solid var(--line);
+  }
+
+  .setx-nav-sub[data-open="true"] .setx-nav-sub-inner {
+    margin-top: 4px;
+    margin-bottom: 8px;
+  }
+
+  .setx-nav-subitem {
+    text-align: left;
+    padding: 7px 10px;
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--ink-3);
+    cursor: pointer;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .setx-nav-subitem:hover {
+    background: var(--surface-3);
+    color: var(--ink);
+  }
+
+  .setx-nav-subitem.active {
+    color: var(--ink);
+    font-weight: 600;
+    background: var(--surface-3);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .setx-nav-sub,
+    .setx-nav-chev {
+      transition: none;
+    }
   }
 
   .setx-nav-badge {
@@ -19428,13 +19840,6 @@
     flex: 1;
   }
 
-  .onb-foot-meta {
-    margin-top: 34px;
-    font-size: 11px;
-    color: var(--ink-4);
-    text-align: center;
-  }
-
   /* Form primitives — scoped to the onboarding card/footer. */
   .onb-card .form-grid {
     display: grid;
@@ -19543,6 +19948,150 @@
     background: rgba(193, 56, 56, 0.08);
     border-radius: var(--radius-sm);
     margin-bottom: 16px;
+  }
+
+  /* Onboarding payment gate (`/onboarding/plan`) — the unnumbered step between
+     creating a company and the rest of the flow. Two self-serve plans, an
+     interval toggle, and a sales line for the tiers that carry no self-serve
+     price. */
+  .onb-form-notice {
+    color: var(--ink-2);
+    font-size: 13px;
+    padding: 8px 12px;
+    background: var(--surface-3);
+    border-radius: var(--radius-sm);
+    margin-bottom: 16px;
+  }
+
+  .onb-plan-toggle {
+    display: inline-flex;
+    gap: 4px;
+    padding: 3px;
+    margin: 4px 0 18px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--surface);
+  }
+
+  .onb-plan-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 6px 14px;
+    border: none;
+    border-radius: 999px;
+    background: none;
+    color: var(--ink-3);
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.12s, color 0.12s;
+  }
+
+  .onb-plan-toggle-btn.active {
+    background: var(--surface-2);
+    color: var(--ink);
+    font-weight: 600;
+    box-shadow: var(--shadow-sm);
+  }
+
+  .onb-plan-save {
+    font-size: 10.5px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    color: var(--accent-ink);
+  }
+
+  /* Two cards, side by side where there is room. `auto-fit` rather than a
+     fixed two-column grid so a third self-serve plan would not need a CSS
+     change to sit correctly. */
+  .onb-plan-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 20px;
+  }
+
+  .onb-plan-card {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    text-align: left;
+    padding: 16px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-2);
+    cursor: pointer;
+    transition: border-color 0.12s, box-shadow 0.12s;
+  }
+
+  .onb-plan-card:hover {
+    border-color: var(--line-strong);
+  }
+
+  /* The chosen plan carries a 2px ring drawn with box-shadow rather than a
+     thicker border, so selecting one does not resize the card and nudge its
+     neighbour. */
+  .onb-plan-card.active {
+    border-color: var(--ink);
+    box-shadow: inset 0 0 0 1px var(--ink);
+  }
+
+  .onb-plan-name {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+  }
+
+  .onb-plan-price {
+    font-size: 24px;
+    font-weight: 600;
+    color: var(--ink);
+    line-height: 1.1;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .onb-plan-per {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--ink-3);
+  }
+
+  .onb-plan-credits {
+    font-size: 12px;
+    color: var(--ink-2);
+  }
+
+  .onb-plan-blurb {
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.45;
+  }
+
+  .onb-plan-continue {
+    width: 100%;
+  }
+
+  .onb-plan-sales {
+    margin: 14px 0 0;
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .onb-plan-sales a {
+    color: var(--ink-2);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+
+  /* Waiting on the webhook after a successful Checkout. Deliberately calm:
+     the money has already moved, so this must not read as an error state. */
+  .onb-plan-spinner {
+    margin-top: 18px;
+    font-size: 13px;
+    color: var(--ink-3);
   }
 
   /* Import-context step (onboarding 02) — bring existing AI-assistant
@@ -20475,36 +21024,138 @@
   }
 
   /* Manual-upload fallback strip inside an open category. */
+  /* THE UPLOAD TILE. It carries `.conn` as well, so every dimension — padding,
+     radius, gap, the grid cell it sits in — comes from the connector card and
+     cannot drift from it. Only the colour and the border style are its own.
+
+     LIGHT GREEN, and it is the one filled tile in the row on purpose: this is
+     the way in for a PM who cannot authorise an OAuth app, and as a dashed
+     grey bar under the logos it read as a footnote to the options rather than
+     one of them. The fill is the existing accent tint (`--accent-soft`), not a
+     new colour — every other green in the product resolves from the same
+     token, so a brand change moves this with it. */
   .onb-card .conn-upload {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-top: 12px;
-    padding: 11px 13px;
-    border: 1px dashed var(--line);
-    border-radius: var(--radius-sm);
-    cursor: pointer;
-    color: var(--ink-2);
-    transition: border-color 0.15s, background 0.15s;
+    background: var(--accent-soft);
+    border: 1px dashed var(--accent-2);
+    color: var(--accent-ink);
   }
 
   .onb-card .conn-upload:hover {
-    border-color: var(--accent-2);
-    background: var(--accent-alpha-05);
+    border-color: var(--accent);
+    background: var(--accent-muted);
   }
 
   .onb-card .conn-upload[aria-busy="true"] {
     cursor: progress;
   }
 
-  .onb-card .conn-upload .t {
-    font-size: 12.5px;
-    font-weight: 500;
+  /* The glyph sits in the logo's slot, so it lines up with the logos beside
+     it rather than floating at its own size. */
+  .onb-card .conn-upload .conn-logo {
+    width: 18px;
+    height: 18px;
+    color: var(--accent-ink);
   }
 
-  .onb-card .conn-upload .s {
+  .onb-card .conn-upload .conn-name {
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+
+  /* THE PASTE BOX. Only on a shelf with no connector to offer, where the
+     PM's own notes are the whole point — so it is given room rather than
+     tucked under the tile as an afterthought. */
+  .onb-card .conn-paste {
+    margin-top: 12px;
+  }
+
+  .onb-card .conn-paste-label {
+    display: block;
+    margin-bottom: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--ink-2);
+  }
+
+  .onb-card .conn-paste-box {
+    display: block;
+    width: 100%;
+    padding: 11px 13px;
+    border: 1px solid var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: var(--surface-2);
+    color: var(--ink);
+    font: inherit;
+    font-size: 12.5px;
+    line-height: 1.55;
+    /* Vertical only: a textarea the reader can drag wider than its column
+       breaks the card's layout, and there is nothing to gain from it. */
+    resize: vertical;
+    min-height: 96px;
+  }
+
+  .onb-card .conn-paste-box:focus {
+    outline: none;
+    border-color: var(--accent);
+    background: var(--surface);
+  }
+
+  .onb-card .conn-paste-box::placeholder {
+    color: var(--ink-3);
+  }
+
+  .onb-card .conn-paste-foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-top: 8px;
+  }
+
+  .onb-card .conn-paste-hint {
     font-size: 11.5px;
     color: var(--ink-3);
+  }
+
+  .onb-card .conn-paste-save {
+    flex: none;
+  }
+
+  /* WHAT LANDED. One row per file, under the grid, in the upload tile's own
+     green so the two read as one thing: the tile is where files go in and this
+     is what went. A list rather than a sentence because the reader's question
+     after a multi-file pick is "which ones", and a count cannot answer it. */
+  .onb-card .conn-uploaded {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    margin: 10px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  .onb-card .conn-uploaded-row {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 10px;
+    border: 1px solid var(--accent-2);
+    border-radius: var(--radius-sm);
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    font-size: 12px;
+  }
+
+  .onb-card .conn-uploaded-tick {
+    flex: none;
+  }
+
+  /* A long filename truncates rather than wrapping the row to two lines —
+     the full name is in the row's `title`. */
+  .onb-card .conn-uploaded-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .onb-card .conn-step-body {
@@ -20636,13 +21287,6 @@
   .onb-card .conn.on .check {
     opacity: 1;
     transform: scale(1);
-  }
-
-  .onb-card .conn-note {
-    margin-top: 14px;
-    font-size: 11.5px;
-    color: var(--ink-3);
-    line-height: 1.5;
   }
 
   /* "Connect later" link in the footer meta strip. */
@@ -21716,7 +22360,7 @@
     flex-shrink: 0;
   }
 
-  /* ── Bottom chat bar (Proposed tab) ── */
+  /* ── Bottom action bar (Proposed tab) ── */
   .bl-chat-bar {
     flex-shrink: 0;
     padding: 18px 44px 17px;
@@ -21725,61 +22369,17 @@
     margin: 0 auto;
   }
 
-  .bl-chat-form {
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    background: #fff;
-    overflow: hidden;
-    transition: box-shadow 0.15s;
-  }
-
-  .bl-chat-form:focus-within {
-    box-shadow: 0 0 0 2px #17191A26;
-    border-color: var(--accent);
-  }
-
-  .bl-chat-input {
-    width: 100%;
-    border: none;
-    outline: none;
-    resize: none;
-    font-size: 13px;
-    color: var(--ink);
-    background: transparent;
-    padding: 12px 14px 4px;
-    font-family: inherit;
-    line-height: 1.5;
-    display: block;
-  }
-
-  .bl-chat-input::placeholder {
-    color: var(--ink-4);
-  }
-
-  .bl-chat-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 4px 8px 6px;
-  }
-
-  .bl-chat-footer-left {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-
   .bl-chat-action-btn {
-    display: flex;
+    display: inline-flex;
     align-items: center;
     gap: 5px;
+    border: 1px solid var(--line);
+    background: #fff;
     font-size: 12px;
     font-weight: 500;
     color: var(--ink-3);
-    background: none;
-    border: none;
     border-radius: 6px;
-    padding: 4px 8px;
+    padding: 6px 10px;
     cursor: pointer;
     transition: background 0.12s, color 0.12s;
     font-family: inherit;
@@ -21788,30 +22388,6 @@
   .bl-chat-action-btn:hover {
     background: var(--surface-3);
     color: var(--ink);
-  }
-
-  .bl-chat-send {
-    width: 30px;
-    height: 30px;
-    border-radius: 8px;
-    border: none;
-    background: var(--accent);
-    color: #fff;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    cursor: pointer;
-    transition: opacity 0.12s;
-    flex-shrink: 0;
-  }
-
-  .bl-chat-send:disabled {
-    opacity: 0.35;
-    cursor: default;
-  }
-
-  .bl-chat-send:not(:disabled):hover {
-    opacity: 0.85;
   }
 
   /* ── Responsive ── */
@@ -23667,18 +24243,22 @@
 }
 .tkv2 *, .tkv2 *::before, .tkv2 *::after { box-sizing: border-box; }
 
+/* Type here sits on the app's scale (14 body / 13 secondary / 12.5 meta), not
+   its own. The list shipped 1-3px hotter than everything around it, so the
+   tickets panel read as a different product beside the chat column it docks
+   against — the detail view below was always on-scale. */
 /* ── list: header block ── */
 .tkv2-topbar { background: var(--panel); border-radius: 12px; padding: 22px 26px; }
 .tkv2-topbar h2 {
-  font-family: var(--font-serif); font-weight: 500; font-size: 24px;
+  font-family: var(--font-serif); font-weight: 500; font-size: 20px;
   color: var(--ink); line-height: 1.3; margin: 0;
 }
 .tkv2-topbar h2 em { font-style: italic; font-weight: 600; color: var(--green-title); }
-.tkv2-sub { font-size: 14px; color: var(--soft); margin-top: 4px; }
+.tkv2-sub { font-size: 13px; color: var(--soft); margin-top: 4px; }
 .tkv2-hactions { display: flex; gap: 16px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
 .tkv2-btn {
-  display: inline-flex; align-items: center; gap: 8px; font-size: 15px;
-  font-weight: 600; border-radius: 10px; padding: 11px 20px; cursor: pointer;
+  display: inline-flex; align-items: center; gap: 8px; font-size: 12.5px;
+  font-weight: 600; border-radius: 10px; padding: 9px 16px; cursor: pointer;
   border: none; font-family: var(--font-body);
 }
 .tkv2-btn:disabled { opacity: .55; cursor: default; }
@@ -23701,7 +24281,7 @@
 @keyframes tkv2-rotate { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .tkv2-intro {
   display: flex; gap: 12px; background: var(--green-s); border-radius: 12px;
-  padding: 17px 20px; font-size: 15.5px; color: var(--ink); line-height: 1.6; margin-top: 16px;
+  padding: 15px 18px; font-size: 13.5px; color: var(--ink); line-height: 1.6; margin-top: 16px;
 }
 .tkv2-intro em { font-style: italic; } .tkv2-intro b { font-weight: 700; }
 .tkv2-spark { color: var(--green); flex-shrink: 0; margin-top: 2px; font-size: 16px; }
@@ -23723,9 +24303,9 @@
   padding: 5px 11px; height: fit-content; flex-shrink: 0;
 }
 .tkv2-card-main { flex: 1; min-width: 0; }
-.tkv2-card-title { font-size: 16.5px; font-weight: 700; margin-bottom: 5px; color: var(--ink); }
+.tkv2-card-title { font-size: 14px; font-weight: 700; margin-bottom: 5px; color: var(--ink); }
 .tkv2-story {
-  font-size: 14.5px; color: var(--soft); line-height: 1.6; display: -webkit-box;
+  font-size: 13px; color: var(--soft); line-height: 1.6; display: -webkit-box;
   -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
 .tkv2-story .ctx { color: var(--ink2); }
@@ -23754,7 +24334,7 @@
 }
 .tkv2-typechip--decision { background: var(--high-b); color: var(--high); border-color: var(--high-br); }
 .tkv2-typechip--spike { background: var(--normal-b); color: var(--normal); border-color: var(--normal-br); }
-.tkv2-foot { font-size: 13.5px; color: var(--soft); text-align: center; padding: 16px 0 0; }
+.tkv2-foot { font-size: 12.5px; color: var(--soft); text-align: center; padding: 16px 0 0; }
 
 /* ── detail: shell ── */
 .tkv2-detail { border: 1px solid var(--line); border-radius: 14px; overflow: hidden; background: var(--paper); }
@@ -25455,6 +26035,33 @@
 .ga-finding-rec { margin: 6px 0 8px; }
 .ga-finding-rec p { margin: 0; line-height: 1.55; }
 .ga-finding-rec-why { opacity: 0.8; margin-top: 2px !important; }
+/* The appendix: found and ranked like the rest, set aside for THIS goal. */
+.ga-doc-aside { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--border, #e5e5e5); }
+.ga-doc-aside-list { margin: 8px 0 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 5px; }
+.ga-doc-aside-list li { line-height: 1.5; opacity: 0.85; }
+/* The scoring table. Wide content scrolls in its own box, never the page. */
+.ga-rice-scroll { overflow-x: auto; margin-top: 8px; }
+.ga-rice { border-collapse: collapse; width: 100%; font-size: 13px; }
+.ga-rice th, .ga-rice td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border, #e5e5e5); }
+.ga-rice th { font-weight: 600; opacity: 0.7; white-space: nowrap; }
+.ga-rice td { vertical-align: top; }
+/* The gate's questions it cannot answer for itself. */
+.ga-plan-ask { display: block; margin-top: 10px; }
+.ga-plan-ask > span { display: block; font-weight: 500; margin-bottom: 3px; }
+.ga-plan-ask > input {
+  width: 100%; padding: 7px 10px; font: inherit;
+  border: 1px solid var(--border, #e5e5e5); border-radius: 6px;
+  background: var(--surface, transparent); color: inherit;
+}
+.ga-plan-ask > em { display: block; margin-top: 3px; opacity: 0.7; font-size: 12.5px; }
+/* The headline numbers, on one line. Wraps rather than scrolls — a strip that
+   scrolls hides the cells at its end, which are the ones a reader least
+   expects to be missing. */
+.ga-strip { display: flex; flex-wrap: wrap; gap: 18px 26px; padding: 10px 0;
+  border-top: 1px solid var(--border, #e5e5e5); border-bottom: 1px solid var(--border, #e5e5e5); }
+.ga-strip-cell { display: flex; flex-direction: column; min-width: 88px; }
+.ga-strip-cell > strong { font-size: 19px; line-height: 1.2; }
+.ga-strip-cell > span { font-size: 11.5px; letter-spacing: 0.02em; text-transform: uppercase; opacity: 0.6; margin-top: 2px; }
 .ga-plan-approach { padding-bottom: 4px; }
 /* THE HANDOFF LINE. Where the answer went, said in the thread rather than
    left for the reader to infer from a panel that opened by itself. Separated
@@ -25645,6 +26252,444 @@
 .ga-plan-source input { margin-top: 3px; }
 .ga-plan-witness { font-size: 12px; opacity: 0.68; }
 
+/* ── Settings → Billing ───────────────────────────────────────────────────
+   Plan, credits, top-ups, referrals. Payment method / invoices / cancellation
+   are deliberately absent: they live in Stripe's hosted portal, one button
+   away, rather than being rebuilt inside a static export. */
+
+.bill-inert {
+  margin-bottom: 14px;
+}
+
+/* ON TRIAL. The plan name alone is a half-truth while a trial runs — it says
+   Starter and says nothing about nobody having been charged yet, or when that
+   changes. Deliberately NOT a warning colour: a trial is the good state, and
+   painting it amber makes a working account look broken. */
+.bill-trial {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}
+
+.bill-trial-chip {
+  flex: none;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--ink);
+  color: var(--surface-2, #fff);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+}
+
+.bill-trial-copy {
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.bill-trial-copy strong {
+  color: var(--ink);
+}
+
+.bill-hero {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 28px;
+  padding: 16px 0 4px;
+}
+
+.bill-hero-plan,
+.bill-hero-credits {
+  flex: 1;
+  min-width: 190px;
+}
+
+.bill-hero-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink-3);
+}
+
+.bill-hero-name {
+  display: block;
+  font-size: 22px;
+  font-weight: 600;
+  color: var(--ink);
+  margin-top: 4px;
+}
+
+.bill-hero-of {
+  font-size: 15px;
+  font-weight: 400;
+  color: var(--ink-3);
+}
+
+.bill-hero-meta {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 4px;
+}
+
+/* Magnitude, not identity — one hue, no categorical palette. */
+.bill-meter {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(18, 32, 26, 0.07));
+  margin-top: 8px;
+  overflow: hidden;
+}
+
+.bill-meter-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: var(--accent);
+  transition: width 240ms ease;
+}
+
+.bill-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.bill-actions-hint,
+.bill-refund {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-refund {
+  margin-top: 12px;
+  line-height: 1.5;
+}
+
+/* ── Plans ── */
+
+.bill-interval {
+  display: inline-flex;
+  gap: 4px;
+  padding: 3px;
+  border-radius: var(--radius-sm);
+  background: var(--surface-3, rgba(18, 32, 26, 0.05));
+  margin-bottom: 16px;
+}
+
+.bill-interval-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.bill-interval-tab.on {
+  background: var(--surface-2);
+  color: var(--ink);
+  font-weight: 500;
+}
+
+.bill-save {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--accent);
+}
+
+.bill-plans {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.bill-plan {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 18px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.bill-plan.featured {
+  border-color: var(--accent);
+}
+
+.bill-plan.current {
+  background: var(--surface-3, rgba(18, 32, 26, 0.03));
+}
+
+.bill-plan-tag {
+  position: absolute;
+  top: -8px;
+  left: 16px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.bill-plan-name {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0;
+}
+
+.bill-plan-price .amt {
+  font-size: 24px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bill-plan-price .per {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.bill-plan-blurb {
+  font-size: 12px;
+  color: var(--ink-3);
+  line-height: 1.45;
+  margin: 0;
+}
+
+.bill-plan-credits {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--ink-2);
+  margin: 0 0 6px;
+}
+
+.bill-plan .btn {
+  width: 100%;
+  justify-content: center;
+  margin-top: auto;
+}
+
+.bill-code-hint {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 14px;
+}
+
+/* ── Top-ups ── */
+
+.bill-topups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.bill-topup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 18px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.bill-topup:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+.bill-topup:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.bill-topup-amt {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.bill-topup-credits {
+  font-size: 11px;
+  color: var(--ink-3);
+}
+
+.bill-topup-custom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.bill-topup-custom label {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-topup-custom input {
+  width: 110px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+/* ── Referrals ── */
+
+.bill-referral-copy {
+  font-size: 13px;
+  color: var(--ink-2);
+  line-height: 1.5;
+  margin: 0 0 14px;
+}
+
+.bill-invite {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.bill-invite input {
+  flex: 1;
+  min-width: 200px;
+  padding: 8px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.bill-invite-left {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+.bill-referrals {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+}
+
+.bill-referral {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+}
+
+.bill-referral:last-child {
+  border-bottom: none;
+}
+
+.bill-referral-email {
+  font-size: 13px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.bill-referral-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--surface-3, rgba(18, 32, 26, 0.06));
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.bill-referral-status.s-rewarded {
+  background: var(--accent-soft, rgba(23, 148, 99, 0.12));
+  color: var(--accent-ink, var(--accent));
+  font-weight: 500;
+}
+
+/* ── History ── */
+
+.bill-history {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bill-history-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.bill-history-row:last-child {
+  border-bottom: none;
+}
+
+.bill-history-what {
+  flex: 1;
+}
+
+.bill-history-when {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+.bill-history-delta {
+  min-width: 62px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
+.bill-history-delta.in {
+  color: var(--accent);
+}
+
+.bill-history-delta.out {
+  color: var(--ink-3);
+}
+
+.bill-referral-link {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  font-family: var(--font-mono);
+  color: var(--ink-2);
+  background: var(--surface-3, rgba(18, 32, 26, 0.04));
+}
+
 /* The run narrating itself while it works — see GoalRunNarration.tsx. Reads as
    a funnel, so the nesting is the point: each rule's count sits under the step
    that applied it. */
@@ -25658,3 +26703,394 @@
 .ga-narration-recap > summary { cursor: pointer; font-size: 12.5px; opacity: 0.72; }
 .ga-narration-recap > summary:hover { opacity: 1; }
 .ga-narration-recap .ga-narration { margin-top: 10px; }
+
+/* ── Settings pane nav ────────────────────────────────────────────────────
+   Lifted from feat/billing/stripe-subscriptions-and-credits, where it was
+   built so a six-card Billing pane stopped being a long scroll. The settings
+   NAV had the same disease — fifteen rows — so the primitive comes to main
+   ahead of that branch and is used to fold six of them away. Kept byte-for-
+   byte apart from this note, so the merge with that branch is a no-op. */
+/* The views run ACROSS THE TOP of the pane, under its header. `.pset-body`
+   caps a pane at 860px, which is the right measure for the card and for the
+   row above it too - so unlike the old right-hand rail this needs no opt-out
+   of that cap. */
+.setpane-shell {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.setpane-main {
+  min-width: 0;
+}
+
+/* PLAIN LABELS ON A RULE, not buttons in boxes. Six outlined pills read as six
+   things to press, which is a lot of chrome for what is really one question -
+   which view am I looking at - and the boxes competed with the actual buttons
+   on the card below. The labels carry themselves; only the current one is
+   marked, by weight and a rule under it that sits ON the row's own border.
+
+   Nothing wraps: six items reflowing to a second line stop reading as one set
+   of views, so the row scrolls instead. */
+.setpane-nav {
+  display: flex;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 22px;
+  margin: 0 0 22px;
+  padding: 0;
+  border-bottom: 1px solid var(--line);
+  overflow-x: auto;
+  /* The scroll is a fallback for a narrow pane, not a feature to decorate. */
+  scrollbar-width: none;
+}
+
+.setpane-nav::-webkit-scrollbar {
+  display: none;
+}
+
+.setpane-nav-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  /* The bottom padding is what puts the active rule on the nav's own border
+     rather than floating above it. */
+  padding: 0 0 12px;
+  border: none;
+  border-radius: 0;
+  background: none;
+  color: var(--ink-3);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.2;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s, box-shadow 0.12s;
+}
+
+.setpane-nav-item:hover {
+  color: var(--ink);
+}
+
+/* `inset` box-shadow rather than a border, so the marked item does not grow
+   2px taller than the rest and shunt the row. */
+.setpane-nav-item.active {
+  color: var(--ink);
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ink);
+}
+
+/* The one number each section is about, readable without opening it. */
+.setpane-nav-hint {
+  font-size: 11px;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.setpane-nav-item:hover .setpane-nav-hint,
+.setpane-nav-item.active .setpane-nav-hint {
+  color: var(--ink-3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .setpane-nav-item {
+    transition: none;
+  }
+}
+
+/* Cancellation lives on the Billing card, not behind the Stripe portal — the
+   user should not have to leave the product to leave the product. */
+
+/* Deliberately quiet: a destructive action people rarely want should not
+   compete with the plan buttons above it. */
+.bill-cancel-link {
+  margin-top: 16px;
+  padding: 0;
+  border: none;
+  background: none;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.bill-cancel-link:hover:not(:disabled) {
+  color: var(--urgent, #c63f35);
+}
+
+.bill-ending {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  margin-top: 16px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-3, rgba(18, 32, 26, 0.03));
+}
+
+.bill-ending-copy {
+  flex: 1;
+  min-width: 240px;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.bill-ending-copy strong {
+  color: var(--ink);
+}
+
+.bill-ending-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* The confirm itself is the only red thing on the pane. */
+.bill-cancel-confirm {
+  padding: 7px 14px;
+  border: 1px solid var(--urgent-br, #f2cfc9);
+  border-radius: var(--radius-sm);
+  background: var(--urgent-b, #fcebe8);
+  color: var(--urgent, #c63f35);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.bill-cancel-confirm:hover:not(:disabled) {
+  background: var(--urgent, #c63f35);
+  border-color: var(--urgent, #c63f35);
+  color: #fff;
+}
+
+.bill-cancel-confirm:disabled,
+.bill-cancel-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* ── Payment required (402) ───────────────────────────────────────────────
+   Every billable route can return one, and until now none of them said so:
+   the structured body the backend sends was thrown away and each surface
+   rendered its own generic failure. Deliberately a modal — a lapsed
+   subscription is not a toast you scroll past, it is the reason the thing you
+   just clicked did nothing. */
+.pay-req-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(18, 32, 26, 0.32);
+}
+
+.pay-req {
+  width: min(420px, 100%);
+  padding: 22px 24px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: var(--shadow-lg, 0 12px 40px rgba(18, 32, 26, 0.18));
+}
+
+.pay-req-title {
+  font-family: var(--font-display);
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  margin: 0 0 8px;
+}
+
+.pay-req-body {
+  font-size: 13.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  margin: 0;
+}
+
+.pay-req-nums {
+  font-size: 12.5px;
+  color: var(--ink-3);
+  margin: 10px 0 0;
+}
+
+.pay-req-nums strong {
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The fix is the primary action and sits last, where the eye lands. */
+.pay-req-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+/* The action inside a status banner. A link, not a button-shaped control: it
+   sits mid-sentence and a filled button there would out-shout the sentence
+   explaining why it is needed. */
+.bill-subscribe-link {
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.bill-subscribe-link:hover {
+  text-decoration-thickness: 2px;
+}
+
+/* ── Subscriptions (the money record) ────────────────────────────────────
+   One row per payment. Four columns that stay aligned down the list: what it
+   was for, the period it covers, the amount, and the PDF. Grid rather than
+   flex so the amounts line up in a column the eye can scan. */
+.bill-invoices {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.bill-invoice {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto auto;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-invoice:last-child {
+  border-bottom: none;
+}
+
+.bill-invoice-plan {
+  color: var(--ink);
+  font-weight: 500;
+  min-width: 0;
+}
+
+/* The invoice number is reference data, not the headline. */
+.bill-invoice-num {
+  margin-left: 8px;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-4);
+  font-variant-numeric: tabular-nums;
+}
+
+.bill-invoice-period {
+  color: var(--ink-3);
+  font-size: 12.5px;
+  min-width: 0;
+}
+
+.bill-invoice-amount {
+  color: var(--ink);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.bill-invoice-pdf {
+  min-width: 30px;
+  text-align: right;
+  font-size: 12px;
+  color: var(--ink-3);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.bill-invoice-pdf:hover {
+  color: var(--ink);
+}
+
+@media (max-width: 620px) {
+  /* Amount and PDF stay on the first line with the plan; the period drops
+     under them rather than squeezing every column to nothing. */
+  .bill-invoice {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .bill-invoice-period {
+    grid-column: 1 / -1;
+  }
+}
+
+/* ── The referral link ────────────────────────────────────────────────────
+   One permanent link, not a form. The input is readonly and selects on focus
+   so it stays copyable when the clipboard API is blocked — which it is in
+   plenty of browsers and contexts, and a Copy button that silently does
+   nothing is worse than no button. */
+.bill-reflink {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 14px 0 18px;
+}
+
+.bill-reflink-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--ink-2);
+  font-size: 12.5px;
+  font-family: var(--ff-mono, ui-monospace, monospace);
+}
+
+.bill-reflink-input:focus {
+  outline: 2px solid var(--line-strong);
+  outline-offset: -1px;
+}
+
+/* Who has arrived. No email column — nobody types an address any more, so a
+   row carries a date and whether it converted. */
+.bill-referral {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 0;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+
+.bill-referral:last-child {
+  border-bottom: none;
+}
+
+.bill-referral-when {
+  color: var(--ink-2);
+}
+
+.bill-referral-status {
+  font-size: 12px;
+  color: var(--ink-3);
+  white-space: nowrap;
+}
+
+/* The converted state is the only one worth colouring — it is the one the
+   reader is looking for. */
+.bill-referral-status.s-rewarded {
+  color: var(--accent-ink, var(--ink));
+  font-weight: 600;
+}

@@ -384,15 +384,19 @@ in it.
 with the headline number immediately after.
 - Use a `## Finding` heading for the bottom-line statement followed by 2–5 \
 sentences of context.
-- For quantitative cuts, embed a `chart` fenced block (schema below). Group \
-2–4 charts under a `## Data science analysis` heading when the question \
-warrants it. Each chart's title is a complete-sentence takeaway, not a \
-label. Pick the kind to match the data shape (`bar` = category comparison, \
-`line` = time series, `pie` = share-of-whole ~100, `stat` = 2–4 hero \
-numbers). Mix kinds so the page stays visually distinct.
-- Use markdown tables for methodology grids (`how we isolated X as causal, \
-not correlational`) and for flat cross-cuts (metric × cohort) when no chart \
-helps.
+- For quantitative cuts, embed a `chart` fenced block (schema below). Group \n2-4 charts under a `## Data science analysis` heading when the question \nwarrants it. Each chart's title is a complete-sentence takeaway, not a \nlabel.
+- **THE SHAPE OF THE ANSWER PICKS THE CHART, and these are not optional.** \nAsked "what share of our tickets sits in each status", the answer is a \n`pie`. A markdown table of counts and percentages answers a different \nquestion, and shipping one instead is the most common way this goes wrong.
+
+  | The reader wants | Kind | Looks like |
+  | --- | --- | --- |
+  | to COMPARE things | `bar` | tickets per assignee, slices per feature, mentions per theme |
+  | to see CHANGE over time | `line` | weekly hypotheses, complaints per week, velocity by sprint |
+  | a SHARE of one whole (parts summing to ~100%) | `pie`, or `donut` when one slice is the point | tickets by status, spend by connector, calls by outcome |
+  | 2-4 HEADLINE numbers, no comparison | `stat` | nodes, timeout days, threshold |
+  | ONE number against a target or ceiling | `gauge` | progress to the north star, budget used, coverage |
+
+- Mix kinds across an answer so it does not read as five bars. If two cuts \nof the same data both want `bar`, one is usually a `line` (over time) or a \n`stat` (a single figure); if neither is, ship one chart and put the other \ncut in prose.
+- Use markdown tables for methodology grids (`how we isolated X as causal, \nnot correlational`) and for cross-cuts with TWO dimensions (metric by \ncohort) that one chart cannot carry. A one-dimensional breakdown - one \nlabel, one number per row - is a chart, not a table, however many rows it \nhas.
 - Use a `## User signal` heading with `> blockquotes` for customer voice \
 when the corpus has quotes — each blockquote attributed by channel, never \
 invented.
@@ -632,6 +636,32 @@ You also have a "THIS WORKSPACE'S PROJECTS" section: what a project is in Sprntl
 3. An empty list is a real, ordinary state. Say they have none yet, say in one sentence what a project is for, and offer to create one — do not treat it as a failure or suggest something is broken.
 4. Sprntly can CREATE a project from this chat. If they ask for one, that is an action the product takes, not advice about clicking through the UI — but never claim a project was created unless the product tells you it was."""
 
+
+# ── Ask × the backlog (app.backlog_context) ─────────────────────────────────
+# Same family as the library / team / projects addenda above, and appended on
+# the same condition: the block is present. The failure it closes is the one
+# those three share — the chat did not know the surface existed, so a question
+# about "the backlog" was answered out of the knowledge graph, where the
+# nearest thing is a synced Jira board belonging to somebody else.
+ASK_SYSTEM_BACKLOG_ADDENDUM = """
+You also have a "THIS COMPANY'S BACKLOG" section: what the backlog is in Sprntly, and the complete list of the ideas currently on it, read just now, in rank order.
+
+1. The backlog is the Sprntly pool of product ideas described in that section — never a Jira backlog, a sprint board, or a queue in a connected tool, and never this workspace's tickets (those are generated from a PRD). If the question is about one of those, say which you are answering about.
+2. The list is EXHAUSTIVE for what is visible. Completed and dismissed ideas are deliberately absent, so do not hint at a longer hidden list, and never name a backlog idea that is not listed.
+3. Rank is priority and lower is higher: "#1" is the top idea. When asked what to work on next, answer from the ranking rather than re-deriving one, and say when two ideas are close.
+4. An empty backlog is a real, ordinary state — normal before the first Top Insights brief, because the pool is the remainder of that brief's ranking. Say so, say in one sentence what the backlog is for, and offer to add an idea.
+5. Sprntly can ADD an idea, MARK one done or in progress, and RE-SEQUENCE the backlog from this chat. Those are actions the product takes, not advice about clicking through the UI — but never claim one happened unless the product tells you it did."""
+
+
+
+ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM = """
+You also have a "WHAT SPRNTLY HAS LEARNED FOR THIS COMPANY" section: what this workspace's product memory is, and exactly how much is in it, counted just now.
+
+1. That section is the answer to any question about what Sprntly knows, remembers or has learned — however the reader names it. Some ask about their "knowledge graph", "KG", "knowledge base", "memory", "brain", or "what you know about us"; all of those are this one thing, and a question about it is a fair question with a real answer, never one to deflect.
+2. Answer in THEIR words but describe it as their product memory, or what Sprntly has learned from their sources. Do not explain Sprntly's internals and do not adopt our architecture vocabulary just because they used it — the reader runs product, and the useful answer is what is in there and where it came from.
+3. The numbers in that section are exact and were read for this question. Use them; never estimate, never round to something you were not given, and never describe contents beyond what your context actually shows.
+4. An empty memory is a real, ordinary state for a new workspace — say so plainly, say what fills it (connecting their tools under Sources), and do not describe contents that are not there.
+5. It grows from the sources this company connected and from what this product generates. Reading it is not a live search of those tools: it reflects what has been synced, so never claim you just checked a connected tool because this section held something."""
 
 
 # ── Ask × open PRD (PRD-tab chat grounding) ─────────────────────────────────

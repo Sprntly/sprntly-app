@@ -285,6 +285,23 @@ list. A category with nothing genuinely present in the excerpt simply \
 contributes nothing; do not manufacture a status or an assignment to check \
 a box.
 
+A request or instruction is NOT automatically a settled assignment or \
+decision. Promote an assignment or decision only when the excerpt confirms \
+it is settled — actually happened, agreed, or in effect — not merely asked \
+for. A bare request or instruction ("assign the auth ticket to David", \
+"have Ada look into X", "have Z do W") whose fulfilment the excerpt does \
+NOT confirm is NOT a durable fact — set action to "none" for these — \
+ESPECIALLY when Sprntly's own reply indicates the action did not or could \
+not happen (the ticket, person, or artifact named doesn't exist, or the \
+request was declined). "David asked to assign the ticket" or "please \
+assign it to David" is a DIFFERENT fact from "the ticket is assigned to \
+David" — only promote the latter, and only when the excerpt itself \
+confirms it happened. This exclusion is narrow: it targets requests the \
+excerpt does not confirm or that Sprntly's reply refutes, never imperative \
+phrasing itself — a plainly stated, confirmed assignment or decision \
+("we'll ship without SSO", "assign the migration to Ada" when the reply \
+confirms it) still promotes exactly as the categories above describe.
+
 Sprntly's OWN descriptions of what IT can do, what Sprntly the product can \
 do, or its role/capabilities/meta-behaviour — for example "I'm your project \
 agent", "I can edit the PRD", "here's what I can do", "I can read your \

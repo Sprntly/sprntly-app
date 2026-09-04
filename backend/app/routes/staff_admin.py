@@ -30,12 +30,16 @@ their company (require_company, NOT staff):
 """
 from __future__ import annotations
 
+import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 
 from app import llm_keys
+from app.billing import credits, plans, stripe_client
+from app.db import billing as billing_db
 from app import team_email as team_email_mod
 from app.db import authcache
 from app.auth import (
@@ -62,6 +66,8 @@ from app.db.org_invites import (
     revoke_org_invite,
 )
 from app.team_email import send_invite_email
+
+logger = logging.getLogger(__name__)
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
@@ -186,6 +192,142 @@ def staff_patch_company(
             # watch it stay on for the rest of the TTL.
             authcache.invalidate_feature_flags(company_id)
     return get_company_entitlements(company_id)
+
+
+# ---------------------------------------------------------------------------
+# Billing — refunds and manual credit adjustments
+# ---------------------------------------------------------------------------
+#
+# Refunds are STAFF-APPROVED, never automatic (owner decision, 2026-08-21).
+# Cancelling is self-serve in the Stripe portal; refunding is not, because an
+# automatic refund on cancel is trivially farmed — spend the month's credits on
+# day one, cancel on day six, keep both the output and the money. A person
+# looks at `credits_used` below and decides.
+
+
+class StaffRefundIn(BaseModel):
+    """`cancel` also ends the subscription. Refunding the money while leaving
+    the service running is almost never what is meant, so it defaults on."""
+
+    cancel: bool = True
+
+
+@router.get("/companies/{company_id}/billing")
+def staff_get_billing(company_id: str, _: dict = Depends(require_staff)):
+    """Billing state plus the one number a refund decision turns on: how much
+    of the plan's allowance this company has actually consumed."""
+    row = billing_db.get_billing(company_id)
+    if not row:
+        raise HTTPException(404, "Company not found")
+
+    plan = plans.resolve_plan(row.get("plan"))
+    allowance = plans.monthly_credits(plan)
+    balance = int(row.get("credit_balance") or 0)
+    within_window = _within_refund_window(row.get("first_paid_at"))
+
+    return {
+        **row,
+        "plan": plan,
+        "plan_label": plans.plan_label(plan),
+        "monthly_credits": None if allowance == plans.UNLIMITED else allowance,
+        # READ OFF THE LEDGER, not inferred from the balance. `allowance -
+        # balance` reported a full allowance as consumed whenever a grant had
+        # not landed, reported zero for anyone who had topped up, and moved
+        # under every past customer whenever a plan was repriced. A refund
+        # decision turns on this number, so it has to be the real one.
+        "credits_used": (
+            None
+            if allowance == plans.UNLIMITED
+            else credits.spent_since(company_id, row.get("credits_granted_for"))
+        ),
+        "within_refund_window": within_window,
+        "refund_window_days": plans.REFUND_WINDOW_DAYS,
+        "ledger": credits.history(company_id, limit=100),
+    }
+
+
+def _within_refund_window(first_paid_at: str | None) -> bool:
+    if not first_paid_at:
+        return False
+    try:
+        paid = datetime.fromisoformat(str(first_paid_at).replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if paid.tzinfo is None:
+        paid = paid.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - paid <= timedelta(
+        days=plans.REFUND_WINDOW_DAYS
+    )
+
+
+@router.post("/companies/{company_id}/billing/refund")
+def staff_refund(
+    company_id: str, body: StaffRefundIn, _: dict = Depends(require_staff)
+):
+    """Refund the latest invoice, and by default cancel the subscription.
+
+    Outside the window is allowed but reported, so a goodwill refund is
+    possible without the endpoint pretending the policy was met.
+    """
+    row = billing_db.get_billing(company_id)
+    if not row:
+        raise HTTPException(404, "Company not found")
+    subscription_id = row.get("stripe_subscription_id")
+    if not subscription_id:
+        raise HTTPException(400, "This company has no Stripe subscription")
+    if not stripe_client.configured():
+        raise HTTPException(503, "Billing is not configured in this environment")
+
+    refund_id = stripe_client.refund_latest_payment(subscription_id=subscription_id)
+    if body.cancel:
+        stripe_client.cancel_subscription(subscription_id)
+        billing_db.set_billing(company_id, {"subscription_status": "canceled"})
+
+    logger.info(
+        "staff_refund company=%s refund=%s cancelled=%s",
+        company_id,
+        refund_id,
+        body.cancel,
+    )
+    return {
+        "refund_id": refund_id,
+        "cancelled": body.cancel,
+        "within_refund_window": _within_refund_window(row.get("first_paid_at")),
+    }
+
+
+class StaffCreditAdjustIn(BaseModel):
+    """Positive only. Taking credits away by hand is not offered: every real
+    reason to reduce a balance (a spend, a plan change) already has a path that
+    writes a ledger row explaining itself."""
+
+    credits: int = Field(gt=0, le=100_000)
+    note: str = ""
+
+
+@router.post("/companies/{company_id}/billing/credits")
+def staff_grant_credits(
+    company_id: str, body: StaffCreditAdjustIn, _: dict = Depends(require_staff)
+):
+    """Hand a company credits — goodwill, a failed generation, a support fix.
+
+    Lands in the same ledger as everything else, tagged `adjustment`, so the
+    Billing screen explains where they came from rather than showing a balance
+    that silently changed.
+    """
+    if not billing_db.get_billing(company_id):
+        raise HTTPException(404, "Company not found")
+
+    balance = credits.grant(
+        company_id,
+        body.credits,
+        reason="adjustment",
+        ref_id=credits.new_ref(),
+    )
+    logger.info(
+        "staff_credit_grant company=%s credits=%s", company_id, body.credits
+    )
+    return {"credit_balance": balance}
 
 
 @router.get("/invites")

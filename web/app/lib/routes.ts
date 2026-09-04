@@ -52,27 +52,29 @@ export const PROJECTS_PATH = "/projects"
  *  which chat tab to land on (`"individual"` for the fork-to-private-chat
  *  nav; `"group"` for parity) — but ONLY when a project id is present; with
  *  no id, `chat` is ignored (there is no detail view to select a tab on).
- *  The no-`opts` call is byte-identical to the base single-arg form — every
- *  existing caller is unaffected. Pure → unit-testable. */
+ *  `opts.prd` additionally appends `&prd=<id>` — the PRD to land the
+ *  project's content panel on, consumed by `ProjectDetailScreen`'s one-shot
+ *  `?prd=` restore effect (accepts a bare `prd_id`; the same param also
+ *  accepts a `public_id` uuid when built elsewhere, but this helper always
+ *  threads whichever value the caller passes through verbatim). Ignored
+ *  when there is no project id, same as `chat`. The no-`opts` call and the
+ *  `chat`-only call are byte-identical to the base forms — every existing
+ *  caller is unaffected. Pure → unit-testable. */
 export function projectPath(
   projectId?: number | string | null,
-  opts?: { chat?: "group" | "individual" },
+  opts?: { chat?: "group" | "individual"; prd?: number | string | null },
 ): string {
   if (projectId == null || projectId === "") return PROJECTS_PATH
-  const base = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
-  return opts?.chat ? `${base}&chat=${opts.chat}` : base
+  let path = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+  if (opts?.chat) path += `&chat=${opts.chat}`
+  if (opts?.prd != null && opts.prd !== "") path += `&prd=${encodeURIComponent(String(opts.prd))}`
+  return path
 }
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
-  "ob-import-context": "/onboarding/import-context",
   "ob-connectors": "/onboarding/connectors",
-  "ob-api-key": "/onboarding/api-key",
-  "ob-workspace": "/onboarding/workspace",
-  "ob-product": "/onboarding/product",
-  "ob-metrics": "/onboarding/metrics",
-  "ob-invite": "/onboarding/invite",
   "ob-review": "/onboarding/review",
   "ob-personalize": "/onboarding/personalize",
   chat: "/",
@@ -95,9 +97,13 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   // `/prototype?prd=<id>`; bare `/prototype` with no `?prd=` shows an empty state
   // prompting the user to choose a PRD first.
   prototype: PROTOTYPE_PATH,
-  ideation: "/ideation",
-  templates: "/templates",
-  skills: "/skills",
+  ideation: "/backlog",
+  // Templates and Skills moved INTO Settings (2026-08-27), so their `?section=`
+  // link is the destination — same shape as `connectors` above. `/templates`
+  // and `/skills` still exist purely as redirects onto these (see each route's
+  // page.tsx); nothing in the app should route TO them.
+  templates: "/settings?section=templates",
+  skills: "/settings?section=skills",
   // Flat route + `?id=<id>` (AD-P14) — no per-id dynamic segment, exactly the
   // `/prototype?prd=<id>` pattern above. `ProjectsScreen` (list) renders when
   // there is no `id`; the `?id=<id>` → detail branch lands with a follow-up ticket.
@@ -120,9 +126,16 @@ const PATH_TO_SCREEN: Record<string, ScreenId> = {
   // stays highlighted. The PRD context rides as a `?prd=` query param, which
   // pathname-based screen derivation ignores — the path is always `/prototype`.
   [PROTOTYPE_PATH]: "prototype",
+  "/backlog": "ideation",
+  // The OLD path still resolves to the same screen. `/backlog/page.tsx`
+  // redirects it, but a race between that redirect and the shell's own
+  // `?company=` rewrite would otherwise leave the rail unhighlighted for a
+  // frame — and any code deriving the screen from the pathname must not read
+  // an old link as "no screen".
   "/ideation": "ideation",
-  "/templates": "templates",
-  "/skills": "skills",
+  // NO "/templates" or "/skills" ENTRIES. Both are redirect stubs now, not
+  // screens: a pathname-derived screen id for them would highlight a rail item
+  // that no longer exists, for the one frame before the redirect fires.
   // The `?id=` query param rides on top of this same path — pathname-based
   // screen derivation ignores it, same as `/prototype`'s `?prd=`.
   "/projects": "projects",

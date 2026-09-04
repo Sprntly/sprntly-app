@@ -345,6 +345,13 @@ describe("ChatScreen — clarifying questions as the dock's popup stepper", () =
     await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
     await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
 
+    // Nothing was answered, so the batch stops and asks before generating —
+    // the whole point of the gate. Saying yes here is what a user pressing
+    // "Generate now" used to get for free.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("question-popup-skip-all-yes"))
+    })
+
     await waitFor(() => expect(screen.getByTestId("clarify-questions-resolved")).toBeTruthy())
     const record = screen.getByTestId("clarify-questions-resolved")
     // Q1 carries a skip_default, so the assumption is named rather than implied.
@@ -379,6 +386,16 @@ describe("ChatScreen — clarifying questions as the dock's popup stepper", () =
 
     await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
     await act(async () => { fireEvent.click(screen.getByTestId("question-popup-skip")) })
+
+    // Skipping everything does NOT generate on its own any more.
+    expect(generateFromTask).not.toHaveBeenCalled()
+
+    // Nothing was answered, so the batch stops and asks before generating —
+    // the whole point of the gate. Saying yes here is what a user pressing
+    // "Generate now" used to get for free.
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("question-popup-skip-all-yes"))
+    })
 
     await waitFor(() => expect(generateFromTask).toHaveBeenCalledTimes(1))
     expect(generateFromTask.mock.calls[0][0]).toBe("dark mode on mobile")

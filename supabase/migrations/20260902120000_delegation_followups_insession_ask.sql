@@ -1,0 +1,22 @@
+-- delegation_followups.last_insession_ask_at — the throttle for the
+-- in-session "are you done?" check (context_assembler_project.py's
+-- `_insession_task_check_block`, request-time gated by
+-- INSESSION_TASK_CHECK_ENABLED).
+--
+-- WHY. The proactive ask is woven into the assignee's private-chat reply via
+-- an injected system instruction, computed fresh on every ask. Without a
+-- durable per-task marker of "we already asked about this one recently",
+-- every single message from an assignee with an open task would re-inject
+-- the ask instruction — a same-session nag, not a once-per-session nudge.
+--
+-- WHY THIS TABLE. `delegation_followups` is already the durable per-task
+-- cadence-scheduling row (one per `project_delegations.id`,
+-- 20260814140000_delegation_followups.sql) — inputs/facts only, never a
+-- derived status column (AD-P17). This is one more fact of the same shape:
+-- "when did we last do X for this task", sibling to `last_checked_in`.
+--
+-- Nullable, no default: a task that has never been asked about reads as
+-- NULL (always due), and adding a column with no volatile default is
+-- metadata-only — no rewrite of the live, prod-shared table.
+alter table delegation_followups
+  add column if not exists last_insession_ask_at timestamptz;

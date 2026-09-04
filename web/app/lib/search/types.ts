@@ -30,6 +30,9 @@ export type SearchItemAction =
   | { kind: "screen"; screen: ScreenId }
   /** Start a fresh chat (NavigationContext.goToNewChat). */
   | { kind: "new-chat" }
+  /** Open the feedback modal (NavigationContext.openFeedback). Not a path:
+   *  the modal has no route, and AppShell owns the one instance of it. */
+  | { kind: "feedback" }
   /** Resume a saved conversation — the ChatsScreen handoff pattern:
    *  write `sprntly_resume_conv` then land on the chat surface. */
   | { kind: "resume-chat"; dbId: number; title: string; prdId: number | null }

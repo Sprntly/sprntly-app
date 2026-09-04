@@ -1930,7 +1930,13 @@ _PROJECT_TOOL_DELEGATE_VERB = re.compile(
     r"\b(?:assign|hand(?:\s+off)?)\b[^.?!]{0,40}?\bto\b|"
     r"hand\s+off\b|"
     r"send\s+(?:this|that|it)\s+to|"
-    r"have\s+\w+\s+(?:do|handle|take|work\s+on|own)|"
+    # "have <someone-not-me> <verb>" — a causative hand-off with a bare
+    # infinitive, no "to" ("have David draft the export review"). Broadened
+    # past the original do/handle/take/work-on/own verb list to any verb, on
+    # the same reasoning as the "ask" branch below: a non-member destination
+    # ("have him do it") is re-resolved and declined gracefully downstream in
+    # `handle_delegate_task`, so admitting the shape is safe.
+    r"\bhave\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+\w+|"
     # "ask <someone-not-me> to <verb>" — a hand-off to a teammate ("ask Bob to
     # review the PRD by Friday"). Broadened past the original do/handle/take/own
     # verb list: any verb after "to" is a delegable action, and the assignee is
@@ -1939,6 +1945,13 @@ _PROJECT_TOOL_DELEGATE_VERB = re.compile(
     # and closes the gap where "ask <member> to <task>" fell through to an
     # out-of-scope refusal instead of delegating.
     r"ask\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+to\s+\w+|"
+    # "tell/get <someone-not-me> to <verb>" — the imperative hand-off shape
+    # this gate was missing entirely ("tell David to review the prd", "get
+    # David to look at the export"), same pronoun-object guard and downstream
+    # roster re-resolution as "ask" above — "tell me/us/him/her/them ..." is
+    # never a delegation (also already vetoed as a read by
+    # `_PROJECT_TOOL_MENTION_VETO`'s "tell me about" for the common case).
+    r"\b(?:tell|get)\s+(?!me\b|us\b|him\b|her\b|them\b)\w+\s+to\s+\w+|"
     r"give\s+(?:this|that|it)\s+to",
     re.I,
 )
@@ -1996,11 +2009,10 @@ def is_project_tool_request(question: str, history: list[dict] | None = None) ->
 #: "the review is done", "wrapped up the deck", "sent it over". First-person
 #: framing (the assignee signalling their OWN completion) so it does not fire
 #: on "is the review done?" (a question — vetoed below) or "mark X done"
-#: aimed at someone else's task. Currently unreferenced (its sole caller,
-#: `is_project_completion_request`, lost its only call site when the
-#: group-only `complete_task` admission path was removed) — kept, not
-#: deleted, per this ticket's comment-only scope for this file; flagged
-#: for a follow-up dead-code pass.
+#: aimed at someone else's task. Consumed by `is_project_completion_request`,
+#: which `qa_agent._try_scoped_tool_answer`'s admission ladder calls to route a
+#: completion claim to the deterministic `complete_task` tool (re-armed after
+#: the group surface — its original caller — was retired).
 _PROJECT_TOOL_COMPLETE_VERB = re.compile(
     r"\b(?:i'?m|i am|it'?s|its|that'?s|thats|this is|we'?re|we are|all)\s+"
     r"(?:now\s+)?(?:done|finished|complete|completed|wrapped\s+up|ready|good\s+to\s+go)\b"
@@ -2020,25 +2032,50 @@ _PROJECT_TOOL_COMPLETE_VERB = re.compile(
 )
 
 
+#: COMPLETION-ONLY question veto: a leading auxiliary/interrogative verb
+#: ("is the review complete?", "are we done with the deck?", "has David
+#: finished the review?", "did I finish that?"). `_PROJECT_TOOL_COMPLETE_VERB`
+#: matches third-person status claims ("<the deck> is done") that are
+#: lexically indistinguishable from a yes/no QUESTION with the same words in
+#: interrogative order — this leading-auxiliary anchor rejects the question
+#: form. Deliberately NOT folded into the shared `_PROJECT_TOOL_MENTION_VETO`:
+#: that veto also gates `is_project_tool_request`, where a leading auxiliary is
+#: a legitimate delegation lead ("can you ask Femi to take this", "have Fortune
+#: handle the deploy") — widening the shared veto would wrongly decline those.
+#: So this is completion-scoped. Over-vetoing is safe: any genuine completion
+#: this drops (e.g. a subject-less "have finished the deck") is still caught by
+#: the background `done_explicit` classifier path, which posts the assignee
+#: confirmation. A false negative degrades gracefully; a false positive
+#: (force-completing on a question) does not.
+_PROJECT_TOOL_COMPLETE_QUESTION_VETO = re.compile(
+    r"^\s*(?:is|are|was|were|has|have|had|did|do|does|can|could|will|would)\b",
+    re.I,
+)
+
+
 def is_project_completion_request(question: str, history: list[dict] | None = None) -> bool:
     """True when the speaker is reporting that a task assigned to THEM is
-    finished. Currently unreferenced — its sole call site was the
-    group-only `complete_task` admission path removed with the group
-    surface; kept, not deleted, per this ticket's comment-only scope for
-    this file (flagged for a follow-up dead-code pass).
+    finished. Called by `qa_agent._try_scoped_tool_answer`'s admission ladder
+    to route the turn to the deterministic `complete_task` tool (re-armed on
+    the project surface after the group surface — its original caller — was
+    retired).
 
     Sibling of `is_project_tool_request`: cheap regex, veto-set discipline.
-    The mention/interrogative veto is reused so "is the review done?" (a
-    status QUESTION) never trips it — only a first-person completion CLAIM
-    admits. A message this declines still falls through to the composer, and
-    the accept-with-nudge system prompt covers the residual gap; a false
-    positive is absorbed by `handle_complete_task`, which no-ops gracefully
-    when the speaker has no open task to close.
+    TWO vetoes fire before the completion verb is consulted: the shared
+    `_PROJECT_TOOL_MENTION_VETO` (wh-led / "status of …" reads) AND the
+    completion-only `_PROJECT_TOOL_COMPLETE_QUESTION_VETO` (a leading
+    auxiliary — "is the review done?", "has David finished?") — so a status
+    QUESTION never trips it; only a first-person or declarative completion
+    CLAIM admits. A message this declines still falls through to the composer,
+    and a false positive is absorbed by `handle_complete_task`, which no-ops
+    gracefully when the speaker has no open task to close.
 
     `history` is accepted for signature parity with its sibling gates but is
     not consulted in this v1 (the claim is judged on the message's own words)."""
     q = question or ""
     if _PROJECT_TOOL_MENTION_VETO.search(q):
+        return False
+    if _PROJECT_TOOL_COMPLETE_QUESTION_VETO.search(q):
         return False
     return bool(_PROJECT_TOOL_COMPLETE_VERB.search(q))
 

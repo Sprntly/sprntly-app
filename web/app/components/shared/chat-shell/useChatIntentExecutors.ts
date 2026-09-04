@@ -63,6 +63,10 @@ export function useChatIntentExecutors(
     // open (the brief chat, the AI bar) must fall through to its ask path
     // rather than silently swallowing a goal.
     onAnalyseGoal: adapter.onAnalyseGoal,
+    // OPTIONAL because the asking half needs a dock: a backlog change whose
+    // idea is ambiguous ends in a question card, and a surface that cannot
+    // show one must fall through to its ask rather than apply half a change.
+    onBacklogAction: adapter.onBacklogAction,
     onAnswer,
   }
 }

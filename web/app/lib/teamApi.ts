@@ -3,6 +3,7 @@
 // auto-accept) don't import a settings component. TeamSettings re-exports all
 // of this for compatibility.
 import { api } from "./api"
+import { JOB_ROLE_OPTIONS } from "./onboarding/types"
 
 export type TeamRole = "owner" | "admin" | "member" | "viewer"
 /** Roles a non-owner invite/edit can target. `owner` is reserved. */
@@ -92,4 +93,67 @@ export const teamApi = {
        *  accepter directly in that project's private chat. */
       project_id?: number | null
     }>("/v1/invites/accept"),
+}
+
+// ─────────────────────── Bulk invite parsing ───────────────────────
+// Pulled out of the retired onboarding InviteStep (2026-09-03) when its bulk
+// paste + CSV import moved to Settings → Team & roles — the only reason these
+// two are pure, exported functions rather than living inline in that pane.
+
+export type InviteRow = { email: string; jobRole: string; permission: InviteRole }
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+const PERMISSIONS: InviteRole[] = ["admin", "member", "viewer"]
+
+function asPermission(raw: string): InviteRole {
+  const v = raw.trim().toLowerCase()
+  return (PERMISSIONS as string[]).includes(v) ? (v as InviteRole) : "member"
+}
+
+/**
+ * Split a pasted blob into invite rows. Accepts commas, semicolons, newlines
+ * and whitespace as separators, since a paste out of Slack/email/a spreadsheet
+ * can carry any of them. Invalid and duplicate addresses are dropped silently —
+ * the point of the bulk field is speed, and a wrong row is one click to remove
+ * from the roster afterward (Settings → Team already lists every invite sent).
+ */
+export function parsePastedEmails(
+  raw: string,
+  existing: readonly InviteRow[] = [],
+): InviteRow[] {
+  const seen = new Set(
+    existing.map((r) => r.email.trim().toLowerCase()).filter(Boolean),
+  )
+  const rows: InviteRow[] = []
+  for (const token of raw.split(/[,;\s]+/)) {
+    const email = token.trim().toLowerCase()
+    if (!email || !EMAIL_RE.test(email)) continue
+    if (seen.has(email)) continue
+    seen.add(email)
+    rows.push({ email, jobRole: JOB_ROLE_OPTIONS[0], permission: "member" })
+  }
+  return rows
+}
+
+/**
+ * Parse an invites CSV: one teammate per line, `email[,job role[,permission]]`.
+ * A header row (first cell "email") is skipped; malformed / duplicate emails
+ * are dropped.
+ */
+export function parseInvitesCsv(text: string): InviteRow[] {
+  const rows: InviteRow[] = []
+  const seen = new Set<string>()
+  for (const line of text.split(/\r?\n/)) {
+    const cells = line.split(",").map((c) => c.trim().replace(/^"|"$/g, ""))
+    const email = (cells[0] ?? "").toLowerCase()
+    if (!email || email === "email" || !EMAIL_RE.test(email)) continue
+    if (seen.has(email)) continue
+    seen.add(email)
+    rows.push({
+      email,
+      jobRole: cells[1] || JOB_ROLE_OPTIONS[0],
+      permission: asPermission(cells[2] ?? ""),
+    })
+  }
+  return rows
 }

@@ -1,0 +1,338 @@
+/* The Goal Analysis memo, as a document.
+ *
+ * SERVER-APPLIED, over an empty <style> marker, exactly as
+ * `app.html_style.inject_canonical_css` already does for the PRD
+ * (`skills/prd-author/assets/prd.css`) and the evidence brief
+ * (`skills/evidence-brief/assets/evidence.css`). Same reason as there: the
+ * stored document stays self-contained, so the sandboxed iframe, print and
+ * export all work with nothing downstream knowing the CSS was injected.
+ *
+ * NOT UNDER `skills/`, and that is deliberate. `skills.loader.get_skill`
+ * requires a `SKILL.md` and the registry is a list of PROMPT-LAYER method
+ * specs the model follows. Goal Analysis has no method spec — it is a
+ * deterministic pipeline that goes out of its way not to ask a model for an
+ * opinion (I2) — so vendoring a fake skill to host a stylesheet would put a
+ * tenth entry in `list_skills()` that no prompt ever uses. The pattern is
+ * what matters, not the directory.
+ *
+ * IT STYLES A FRAGMENT IT DOES NOT CONTROL. The body comes from
+ * `report.render_report_html`, which is written for the SANITIZED
+ * custom-artifact path: headings, paragraphs, lists, blockquotes, tables, and
+ * a short list of class hooks that path strips and this one uses. So the
+ * selectors here are elements and those hooks, and nothing else exists to
+ * hang styling on. That is the constraint that keeps the two envelopes
+ * honest — there is one body, and this cannot change what it says.
+ *
+ * THE VISUAL LANGUAGE IS THE PRODUCT'S. Type scale, palette, rules, quote
+ * treatment, label rows and the appendix rule follow evidence.css and
+ * prd.css so a reader who has seen a brief or a PRD recognises this as the
+ * same family.
+ */
+@import url('https://fonts.googleapis.com/css2?family=Spectral:wght@500;600&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap');
+
+:root {
+  --ink: #1f241f;
+  --sub: #5b615b;
+  --page: #ffffff;
+  --rule: #e3e1d8;
+  --hair: #ece9e0;
+  --green: #1a6b47;
+  /* The convergence figure's tokens, named as evidence.css names them so the
+     component reads the same here as it does in a brief. */
+  --grid: #ece9e0;
+  --opp: #0f9d77;
+  --opp-soft: #d3efe5;
+  --serif: 'Spectral', 'Iowan Old Style', Palatino, Georgia, serif;
+  --sans: 'Inter', -apple-system, system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--page);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.55;
+  padding: 24px 16px 72px;
+  -webkit-font-smoothing: antialiased;
+}
+
+.frame { max-width: 780px; margin: 0 auto; }
+.page { position: relative; padding: 8px 4px 40px; }
+
+/* ── Type ───────────────────────────────────────────────────────────────
+   The goal is the title; h2 opens a section; h3 is either a write-up or an
+   appendix label. Serif for the two that carry an argument, the mono
+   uppercase eyebrow for the ones that carry a label — prd.css's split. */
+h1 {
+  font: 600 30px/1.2 var(--serif);
+  letter-spacing: -0.01em;
+  margin-bottom: 20px;
+  padding-bottom: 16px;
+  border-bottom: 1px solid var(--rule);
+}
+
+h2 {
+  font: 600 10.5px/1 var(--sans);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--green);
+  margin: 34px 0 10px;
+}
+
+/* THE APPENDIX RULE. prd.css opens its appendix on a heavy line so a reader
+   can see where the argument ends without reading a word of it. Everything
+   after this heading is method. */
+h2.appendix {
+  margin-top: 46px;
+  padding-top: 16px;
+  border-top: 2px solid var(--ink);
+  color: var(--ink);
+}
+
+/* A write-up's own heading is the one h3 that is a claim rather than a
+   label, so it is set as one. */
+h3.finding {
+  font: 600 19px/1.3 var(--serif);
+  letter-spacing: -0.005em;
+  margin: 26px 0 8px;
+}
+
+h3 {
+  font: 600 11px/1 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+  margin: 24px 0 6px;
+}
+
+h4 {
+  font: 500 11px/1 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--sub);
+  margin: 16px 0 6px;
+}
+
+/* RUNNING TEXT AT A READABLE MEASURE. The panel is ~700px and the sheet is
+   780px, so without this the prose runs at roughly 100 characters. */
+p { margin: 0 0 10px; max-width: 68ch; }
+p:last-child { margin-bottom: 0; }
+
+/* THE DECISION'S ONE RAISED VOICE — evidence.css's `.deck`, its cover line. */
+p.deck {
+  font: italic 17px/1.45 var(--serif);
+  color: #33363f;
+  margin-bottom: 12px;
+  max-width: 62ch;
+}
+
+/* The action a write-up recommends: the sentence the reader came for. */
+p.action {
+  font-size: 15.5px;
+  line-height: 1.5;
+  margin-bottom: 12px;
+}
+
+/* THE FACTS UNDER A CLAIM, AS A STRIP RATHER THAN A SENTENCE. Reach,
+   confidence, money named, claim and document counts. They used to run inside
+   the prose ("Measured at: 14 accounts · 64 claims · 1 source document"),
+   which put our bookkeeping in the middle of a paragraph about the reader's
+   business. Set quiet and small they are read at a glance and the sentence
+   above them can be about the finding. */
+p.chips {
+  font: 500 11px/1.5 var(--mono);
+  letter-spacing: 0.03em;
+  color: var(--sub);
+  margin: 0 0 12px;
+  max-width: none;
+}
+p.chips strong { color: var(--ink); }
+
+/* ── The answer, as a numbered screen ──────────────────────────────────
+   The first thing under the title: what to build, numbered, with the facts
+   under each. A table rather than an ordered list because the number needs
+   its own column — the reader is told to "do number one first" and has to
+   find number one without reading a word of the sentences. */
+table.opts { margin: 4px 0 18px; }
+table.opts td { border-bottom: 1px solid var(--hair); padding: 12px 0; }
+table.opts tr:last-child td { border-bottom: none; }
+table.opts td:first-child {
+  width: 1%;
+  padding-right: 16px;
+  font: 600 20px/1.25 var(--serif);
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+  vertical-align: top;
+}
+table.opts strong {
+  display: block;
+  font: 600 16.5px/1.4 var(--serif);
+  letter-spacing: -0.005em;
+}
+table.opts span {
+  display: block;
+  margin-top: 5px;
+  font: 500 11px/1.5 var(--mono);
+  letter-spacing: 0.03em;
+  color: var(--sub);
+}
+table.opts br { display: none; }
+
+ul { margin: 0 0 12px 0; padding-left: 18px; max-width: 68ch; }
+li { margin-bottom: 6px; line-height: 1.55; }
+li:last-child { margin-bottom: 0; }
+
+strong, b { font-weight: 600; }
+
+/* ── The customer's own words ───────────────────────────────────────────
+   evidence.css's `.q p`: serif italic, quiet rule, the one place the
+   document changes voice because it is the one place it is quoting somebody. */
+blockquote {
+  margin: 10px 0 14px;
+  padding: 2px 0 2px 16px;
+  border-left: 3px solid var(--green);
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 16px;
+  line-height: 1.5;
+  color: #33363f;
+  max-width: 62ch;
+}
+
+/* PROVENANCE RECEDES, AND SITS UNDER WHAT IT QUALIFIES. The cited claim
+   beside a change is where the change came from, not a second instruction,
+   so it drops a size and a shade — evidence.css's `.src`. The same treatment
+   carries the attribution line under a summarised example: the disclosure is
+   kept in full and set below the evidence rather than in front of it. */
+blockquote em.src { margin-top: 8px; font-family: var(--sans); }
+
+em.src {
+  display: block;
+  margin-top: 3px;
+  font-size: 12.5px;
+  font-style: normal;
+  color: var(--sub);
+}
+
+em { color: inherit; }
+
+/* ── Tables ─────────────────────────────────────────────────────────────
+   Five of them, all `<table>` to the sanitizer, told apart by the class
+   hooks the body carries. */
+table { border-collapse: collapse; width: 100%; margin: 6px 0 16px; }
+
+th {
+  font: 500 9.5px/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+  text-align: left;
+  padding: 8px 12px 8px 0;
+  border-bottom: 1px solid var(--rule);
+  white-space: nowrap;
+}
+
+td {
+  padding: 9px 12px 9px 0;
+  vertical-align: top;
+  font-size: 13.5px;
+  line-height: 1.5;
+  border-bottom: 1px solid var(--hair);
+}
+
+tr:last-child td { border-bottom: none; }
+
+/* The headline numbers: a strip across the cover, not a table of one row. */
+table.strip { margin: 0 0 22px; }
+table.strip td {
+  border: none;
+  padding: 0 26px 0 0;
+  font-size: 13px;
+  white-space: nowrap;
+}
+table.strip strong {
+  font: 600 22px/1.15 var(--serif);
+  font-variant-numeric: tabular-nums;
+}
+table.strip span {
+  display: block;
+  margin-top: 2px;
+  font: 500 9.5px/1.3 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--sub);
+  white-space: normal;
+}
+
+/* The funnel: a label, a bar, a number. Label/value rows in prd.css's
+   `.goal .row` idiom, with the count right-aligned so the stages line up. */
+table.chart { margin: 0 0 26px; }
+table.chart td { border: none; padding: 3px 12px 3px 0; font-size: 13px; }
+table.chart td:first-child { color: var(--sub); white-space: nowrap; width: 1%; }
+table.chart td:last-child {
+  text-align: right;
+  width: 1%;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+/* THE BAR. The body draws it in block characters with an inline colour,
+   because that is the only chart that survives the sanitized path AND
+   print, where backgrounds are dropped. Nothing here changes what it draws
+   — only how tightly it is set. */
+.bar { letter-spacing: -0.08em; font-family: var(--mono); }
+
+/* The ranking. Reach carries a number and a bar under it. */
+table.rank td { font-size: 13px; }
+table.rank td:first-child { font-weight: 500; padding-right: 18px; }
+
+/* The set-aside appendix: four columns of what was NOT the answer, so it is
+   set quieter than the ranking above it. */
+table.aside td { font-size: 12.5px; color: #3a3d47; }
+
+/* ── The convergence figure ───────────────────────────────────────────
+   The component from `skills/evidence-brief/references/component-reference
+   .html`, drawn from what the engine already computed. `svg` scales to the
+   column, so it reads at the ~700px panel and at full page width alike.
+
+   THE CAPTION IS NOT A CAPTION. On the sanitized custom-artifact path the
+   `<svg>` is dropped with its children and `<figure>` is unwrapped, so this
+   paragraph is all that survives — and it carries the same fact in words. It
+   is styled as a caption here and reads as a sentence there. */
+figure {
+  margin: 14px 0 18px;
+  padding: 16px 16px 12px;
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+figure svg { width: 100%; height: auto; display: block; }
+
+.blabel { font: 400 12px/1.3 var(--sans); }
+.vlabel { font: 500 13px/1.3 var(--mono); }
+
+p.convergence {
+  margin: 10px 0 0;
+  font: 400 11.5px/1.5 var(--mono);
+  color: var(--sub);
+  max-width: none;
+}
+
+/* ── Print ──────────────────────────────────────────────────────────────
+   The archival path is Chrome → Print → Save as PDF. Backgrounds are off by
+   default there, which is why every chart in this document is drawn in
+   characters rather than filled boxes. A write-up should not break across a
+   page if it can be helped. */
+@media print {
+  body { padding: 0; font-size: 11.5pt; }
+  .page { padding: 0; }
+  h2, h3 { break-after: avoid; }
+  figure { break-inside: avoid; border-color: #ccc; }
+  h3.finding { break-before: auto; }
+  table, blockquote { break-inside: avoid; }
+  a { text-decoration: none; color: inherit; }
+}

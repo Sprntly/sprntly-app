@@ -75,6 +75,20 @@ from app.kg_ingest.pullers.zoom import parse_vtt
 logger = logging.getLogger(__name__)
 
 _VOC_SKILL = "voice-of-customer-report"
+
+#: EVERY pipeline id whose turn ends up in this module's `answer` — and
+#: therefore every id whose report-vs-thread verdict is `is_voc_query`.
+#:
+#: There are two of them and that is the whole point of naming them here.
+#: "call-digest" is the machinery id the regex interceptor and the planner's
+#: calls-shaped pick use; `_VOC_SKILL` is the SKILL id the planner picks for a
+#: voice-of-customer question that never mentions calls ("a list of the
+#: features clients asked for, as a table"). Both run this code, so a caller
+#: reasoning about one and not the other gets the answer right half the time —
+#: which is exactly what `chat_intent._is_report_pipeline` did while it tested
+#: `pipeline_id == "call-digest"` literally: the answer path returned a query
+#: answer while the client opened, and kept, a Reports panel.
+VOC_PIPELINE_IDS: frozenset[str] = frozenset({"call-digest", _VOC_SKILL})
 ANSWER_MODEL = "claude-sonnet-4-6"
 _DEFAULT_WINDOW_DAYS = 7
 # When the question names NO explicit window ("recent feedback", bare "voice of
@@ -1082,7 +1096,14 @@ def build_kg_context(
         # most 80 candidate signals, cut to 2,200 tokens, with no count of the
         # remainder. "Show me all the customer feedback" was answered from
         # whatever fit in ~9k characters, and nothing downstream could tell.
-        bundle = _retrieve_kg_bundle(enterprise_id, question, scale=VOC_SCALE)
+        #
+        # content_leg=False: this widened retrieval's whole point is Legs A+B's
+        # exhaustive breadth for a calibrated feedback count — Leg C injecting
+        # content-matched signals would change what "all of it" means here. See
+        # `_retrieve_kg_bundle`'s docstring.
+        bundle = _retrieve_kg_bundle(
+            enterprise_id, question, scale=VOC_SCALE, content_leg=False,
+        )
         if not bundle:
             return KgContext()
 
@@ -1171,10 +1192,79 @@ def _plain_payload(answer: str, *, confidence: float = 0.0) -> dict:
 # comparative shapes divert to a direct answer. Mode selection is consulted
 # only after routing already picked the VoC surface.
 
-_VOC_REPORT_SHAPED = re.compile(
-    r"\b(?:summari[sz]e|recap|digest|rundown|round-?up|overview|report|"
-    r"themes?|takeaways?|voice\s+of(?:\s+the)?\s+customer|voc)\b"
+# ASKING FOR A SUMMARY IS NOT ASKING FOR A REPORT (owner's rule, 2026-09-03).
+# Reported against "Give me summary on last week's customer conversations": the
+# chat opened the Reports panel and showed report-generation copy for a question
+# that wanted a few paragraphs in the thread. "summarize" was in the
+# report-shaped set below, so a summary ask could only ever mean the
+# multi-minute VoC artifact.
+#
+# The set is now split by what the words actually NAME:
+#
+#   * `_VOC_ARTIFACT_NAMED` — the words naming the DOCUMENT ("report",
+#     "voice of customer", "write-up", "one-pager"). Only these mean "build me
+#     the artifact", and they still always win.
+#   * `_VOC_SUMMARY_SHAPED` — the words asking for the CONTENT summarized
+#     ("summarize", "summary", "recap", "overview", "rundown", "catch me up").
+#     These are a question about the calls, answered in the thread from the
+#     same corpus the report is built from.
+#
+# "themes" and "takeaways" moved to the summary side with them: "what were the
+# themes from last week's calls" is the same ask in different words, and nobody
+# typing it is asking for a document. Someone who wants the artifact has an
+# unambiguous way to say so, and it stays one sentence away.
+_VOC_ARTIFACT_NAMED = re.compile(
+    r"\b(?:report|digest|write-?up|one-?pager|deck"
+    r"|voice\s+of(?:\s+the)?\s+customer|voc)\b",
+    re.I,
+)
+
+_VOC_SUMMARY_SHAPED = re.compile(
+    r"\b(?:summari[sz]e[ds]?|summary|recap|rundown|round-?up|overview"
+    r"|themes?|takeaways?)\b"
     r"|\bcatch\s+me\s+up\b|\bbrief\s+me\b",
+    re.I,
+)
+
+# ASKING FOR A TABLE IS NOT ASKING FOR A REPORT EITHER (same rule, reported
+# 2026-09-03 against: "be a list of the product features that clients have
+# asked for in the last one month, show me the name of the company, the feature
+# they asked for and the problem they are trying to solve … and give me the
+# final output in a form of a table").
+#
+# That sentence names no artifact and no summary word, and none of the pointed
+# `_VOC_QUERY_SHAPES` fit it either — it is not "how many", not comparative,
+# not "which customers", not "what did X say" — so `is_voc_query` said no and
+# the whole thing became a multi-minute VoC document. But it is the most
+# specific kind of question there is: it names its columns.
+#
+# A request for a SHAPE the answer should take — a table, a list, a breakdown,
+# a spreadsheet — is a request for an ANSWER in that shape. It is never a
+# request for a report, because a report has its own shape and the asker just
+# said what they wanted instead.
+#
+# Bounded to an OUTPUT DIRECTIVE ("give me … as a table", "a list of …") rather
+# than the bare nouns, so a customer complaining about a slow table view does
+# not read as a formatting instruction. Over-matching here is mild in any case:
+# it biases toward answering in the thread, which is what the rule wants.
+_VOC_TABULAR_SHAPED = re.compile(
+    # "as a table", "in a table", "in a form of a table", "into a list"
+    r"\b(?:as|in|into)\s+(?:a|an|the)?\s*(?:form|format|shape)?\s*(?:of\s+)?"
+    r"(?:a|an|the)?\s*(?:table|list|spreadsheet|csv|matrix|grid)\b"
+    # "a list of …", "the breakdown of …"
+    r"|\b(?:a|an|the)\s+(?:list|table|breakdown|rundown\s+table)\s+of\b"
+    # "give me / show me / make it a table|list|columns|rows"
+    r"|\b(?:give|show|send|make|put|format|output|return|produce)\b"
+    r"[^.?!]{0,60}\b(?:table|list|spreadsheet|csv|columns?|rows?|breakdown)\b",
+    re.I,
+)
+
+#: Kept as the union of the two, because the eligibility rule below reads
+#: "report-shaped" as "not a pointed query" — and a summary is not one of those
+#: either. What changed is only which MODE a summary-shaped ask lands in,
+#: decided in `is_voc_query`.
+_VOC_REPORT_SHAPED = re.compile(
+    _VOC_ARTIFACT_NAMED.pattern + r"|" + _VOC_SUMMARY_SHAPED.pattern,
     re.I,
 )
 
@@ -1209,11 +1299,30 @@ _VOC_COMPARATIVE = re.compile(
 
 
 def is_voc_query(question: str) -> bool:
-    """True when the ask wants a computed answer from the corpus rather than
-    the report artifact. Report-shaped language always wins ("summarize…",
-    "…report", "themes") so the artifact stays one sentence away."""
-    if _VOC_REPORT_SHAPED.search(question):
+    """True when the ask wants an answer in the THREAD rather than the report
+    artifact.
+
+    Three rules, in order:
+
+      1. NAMING THE DOCUMENT WINS. "give me a voice-of-customer report",
+         "write this up as a one-pager" — the artifact is what was asked for,
+         so the report path runs.
+      2. ASKING FOR A SUMMARY DOES NOT. "summarize last week's calls", "recap
+         the customer conversations", "what were the themes" want the content
+         summarized in the chat, not a multi-minute document and a panel. This
+         is the owner's rule (2026-09-03), and it reverses the previous
+         behaviour, where "summarize" was read as naming the report.
+      3. NEITHER DOES ASKING FOR A TABLE. "give me a list of the features
+         clients asked for … as a table" names the columns it wants; a report
+         is not one of the shapes on offer.
+      4. Otherwise the pointed-query shapes decide, unchanged.
+    """
+    if _VOC_ARTIFACT_NAMED.search(question):
         return False
+    if _VOC_SUMMARY_SHAPED.search(question):
+        return True
+    if _VOC_TABULAR_SHAPED.search(question):
+        return True
     return any(p.search(question) for p in _VOC_QUERY_SHAPES)
 
 
@@ -2224,6 +2333,7 @@ def answer(
     on_delta=None,
     constraints: dict | None = None,
     on_phase: Callable[[str], None] | None = None,
+    wants_report: bool | None = None,
 ) -> dict:
     """Run the on-demand voice-of-customer pass and return an Ask-shaped payload.
 
@@ -2261,7 +2371,25 @@ def answer(
     already do inside `build_corpus`: an empty KG still answers from calls, and
     calls that could not be fetched still answer from the KG — saying so."""
     window = _planned_window(constraints) or parse_window(question)
-    query_mode = is_voc_query(question)
+    # DOCUMENT OR ANSWER — the planner's verdict when it has one, this
+    # module's regex when it does not.
+    #
+    # `wants_report` is `ask_planner.Plan.wants_report`: the model was asked
+    # outright whether the user requested a DOCUMENT, having read the whole
+    # sentence. `is_voc_query` is the same decision inferred from surface
+    # words, and it is kept — unchanged — for every caller with no plan (the
+    # regex ladder in `qa_agent.answer`, the scheduled runs, the tests). What
+    # it cannot do is generalise: each phrasing that means "answer me" had to
+    # be found and added, and until it was, the default was a multi-minute
+    # document. Two were added on 2026-09-03 alone (a summary ask, then a
+    # table ask), each after a reader watched a Reports panel fill with
+    # something they had not asked for.
+    #
+    # The two agree on the ordinary cases; where they disagree the plan wins,
+    # because it read the sentence and this reads its words.
+    query_mode = (
+        not wants_report if wants_report is not None else is_voc_query(question)
+    )
     compare_boundary: str | None = None
     if query_mode and _VOC_COMPARATIVE.search(question):
         # A trend/comparison needs the PRIOR period too: extend the fetch
