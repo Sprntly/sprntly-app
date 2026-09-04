@@ -168,7 +168,32 @@ def get_run(run_id: int, company: WorkspaceContext = Depends(require_crucible_mo
         # indistinguishable from "does not exist".
         raise HTTPException(404, "Run not found")
     findings, ledger = runs_db.load_findings(run_id, company.company_id)
-    return {**_public(row), "findings": findings, "considered": ledger}
+    # THE REPORT, RENDERED SERVER-SIDE, IN THE SAME RESPONSE.
+    #
+    # The panel used to rebuild this document in React from the rows below —
+    # a second renderer of the same report, which is how it came to be missing
+    # the decision box and the grounded-money line the exported document had,
+    # and why every ordering rule had to be written twice and kept in step by
+    # hand. It now displays what the server produces, so there is one place a
+    # rule about this document can live.
+    #
+    # IN THIS RESPONSE RATHER THAN BEHIND ITS OWN ENDPOINT: it is derived
+    # purely from `row` and the rows already loaded here, so a second call
+    # would re-query for nothing and open a window where the panel holds a
+    # report and a run that disagree. It is string assembly over data already
+    # in memory.
+    #
+    # `findings` may be empty mid-run; the renderer handles that and returns
+    # the document it can honestly produce, which is what the panel should
+    # show while the rest is still generating.
+    from app.crucible.report import render_report_document
+
+    return {
+        **_public(row),
+        "findings": findings,
+        "considered": ledger,
+        "report_html": render_report_document(row, findings, ledger),
+    }
 
 
 @router.post("/{run_id}/confirm")
@@ -1662,6 +1687,39 @@ def _run_enrichment(
             "claim_types": sorted({
                 claims_by_id[cid].type for cid in f.claim_ids
                 if cid in claims_by_id
+            }),
+            # WHICH SOURCE TYPES INDEPENDENTLY CARRY THIS FINDING, and how
+            # many claims each contributes. Carried here for the same reason
+            # as `claim_types` above: a column would mean a migration against
+            # the shared Supabase.
+            #
+            # `Claim.source_id` IS the source type despite the name —
+            # `project_signal` assigns `source_id=source_type`, which is why
+            # the authority check can key on it at all (see `types.Claim`).
+            # So this is `customer_voice` / `project_mgmt` / …, the same
+            # vocabulary the rest of the run reports sources in.
+            #
+            # COUNTED, NEVER CHARACTERISED. The renderer draws a convergence
+            # figure from this and states the counts; nothing here decides
+            # whether the agreement is strong, and no model is asked (I2).
+            "source_types": {
+                st: sum(
+                    1 for cid in f.claim_ids
+                    if cid in claims_by_id and claims_by_id[cid].source_id == st
+                )
+                for st in sorted({
+                    claims_by_id[cid].source_id for cid in f.claim_ids
+                    if cid in claims_by_id
+                })
+            },
+            # The one term in `scoring.py` that earns a corroboration bonus,
+            # recomputed here over the claims this call was given. Distinct
+            # AUTHORITATIVE source types — a subset of the keys above, so the
+            # figure can say how many of the converging sources are ones the
+            # registry treats as able to speak to this.
+            "authoritative_source_types": len({
+                claims_by_id[cid].source_id for cid in f.claim_ids
+                if cid in claims_by_id and claims_by_id[cid].authoritative
             }),
             **({"recommendation": {
                 "action": recs[f.id].action, "because": recs[f.id].because,

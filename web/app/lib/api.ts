@@ -943,6 +943,21 @@ export type GoalRunProgress = {
 export type GoalRunDetail = GoalRun & {
   findings: GoalFinding[]
   considered: GoalRejection[]
+  /** The finished report as a SELF-CONTAINED HTML DOCUMENT, rendered by the
+   *  server (`backend/app/crucible/report.render_report_document`) and shown
+   *  in a sandboxed iframe, the same way the PRD, the evidence brief and
+   *  chat's report replies are.
+   *
+   *  THIS IS WHY `findings` IS NO LONGER THE PANEL'S RENDERING INPUT. The
+   *  panel used to rebuild the whole document from the rows above, which made
+   *  it a second renderer of one report: it drifted, it was missing sections
+   *  the exported document had, and every ordering and honesty rule had to be
+   *  written twice. `findings` and `considered` stay in the payload because
+   *  other surfaces read them as DATA — this is the report as a DOCUMENT.
+   *
+   *  Optional so a client that predates it, or a run rendered before the
+   *  field existed, degrades to "no report yet" rather than crashing. */
+  report_html?: string
   /** Stage 0's question and its prefilled proposal, when the run is waiting —
    *  and, once a definition is locked, the plan the user is asked to approve.
    *  The plan SURVIVES into `ready`: it is the only record of what was read,
