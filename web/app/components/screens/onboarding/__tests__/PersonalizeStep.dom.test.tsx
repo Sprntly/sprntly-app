@@ -86,11 +86,16 @@ function analyticsConnected() {
 }
 
 /** A live, personally-installed Slack connection (delivery reads THIS, not the
- *  company-shared row — see PersonalizeStep's own `slack` memo). */
+ *  company-shared row — see PersonalizeStep's own `slack` memo).
+ *
+ *  RETURNS THE PROMISE, so a test can wait for the list to be IN STATE rather
+ *  than merely requested — see the click-ordering note in the test below. */
 function slackConnected() {
-  connectorsListMock.mockResolvedValue({
+  const listed = Promise.resolve({
     connections: [{ provider: "slack", status: "active", types: [] }],
   })
+  connectorsListMock.mockReturnValue(listed)
+  return listed
 }
 
 function mount(workspace = makeWorkspace({ onboarding_step: 9 })) {
@@ -192,6 +197,10 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
   })
 
   it("picking Slack while it isn't connected opens the connect modal", async () => {
+    // No wait for the list here, deliberately: this expectation holds whether
+    // or not it has landed, because Slack is absent from it either way. Only
+    // the test below — which needs a connection to be VISIBLE before it clicks
+    // — has an ordering to get wrong.
     analyticsConnected() // no Slack connection in the connector list
     mount()
     fireEvent.click(chip("Slack"))
@@ -207,9 +216,22 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
   })
 
   it("picking Slack while it IS connected shows the channel picker, no modal", async () => {
-    slackConnected()
+    // THE CLICK HAS TO LAND AFTER THE CONNECTIONS DO, and this used to wait
+    // for the wrong thing. `toHaveBeenCalled()` is satisfied the moment the
+    // request STARTS; the component only knows Slack is connected once that
+    // promise resolves and `setConnections` runs. On a loaded CI runner the
+    // click won that race, the step read Slack as unconnected, and it opened
+    // the connect modal — a failure that never reproduced locally, where the
+    // already-resolved mock always won.
+    //
+    // Awaiting the promise itself inside `act` is deterministic: it flushes
+    // the resolution AND the React update it schedules, so there is no race
+    // left to lose rather than a wider window to lose it in.
+    const listed = slackConnected()
     mount()
-    await waitFor(() => expect(connectorsListMock).toHaveBeenCalled())
+    await act(async () => {
+      await listed
+    })
     fireEvent.click(chip("Slack"))
 
     expect(screen.getByTestId("slack-picker")).not.toBeNull()
