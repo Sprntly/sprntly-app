@@ -2235,7 +2235,12 @@ MAX_RENDERED_SOURCES = 5
 MAX_OVERFLOW_ROWS = 1_000
 
 #: The ledger and the limits section — neither is reachable by the ladder.
-MAX_LEDGER_ROWS = 300
+#: How many rejected candidates are NAMED. Every rejection is still COUNTED —
+#: the per-reason totals below are computed over the whole ledger — but a
+#: reader asked for "10 to 20, not an exhaustive list", and a hundred names
+#: teaches nothing a grouped count does not. Examples are spread across the
+#: reasons so no single cause swallows the allowance.
+MAX_LEDGER_ROWS = 20
 MAX_LEDGER_LABEL_CHARS = 200
 MAX_LEDGER_REASON_CHARS = 400
 MAX_GAPS = 40
@@ -2901,7 +2906,10 @@ def _ledger_section(ledger: list[dict]) -> str:
     # to be clipped for `statement` — and the shed ladder cannot rescue this
     # section, because it sheds findings only. 102 rows at 4,000-char labels
     # rendered 828,071 characters, over the limit at every rung.
-    shown = ledger[:MAX_LEDGER_ROWS]
+    # COUNTED IN FULL, NAMED IN PART. Grouping over a truncated slice would
+    # turn "49 died with no authoritative source" into "3 died", which is the
+    # one number in this section a reader actually uses.
+    shown = ledger
     # ALWAYS EXPANDED HERE, unlike the panel, which folds a long ledger behind
     # a `<details>`. `<details>` is not on the artifact allowlist and would be
     # unwrapped into a permanently-open list anyway.
@@ -2937,7 +2945,7 @@ def _ledger_section(ledger: list[dict]) -> str:
     # a section that reordered itself would undermine that everywhere else).
     ordered = sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0]))
 
-    out = [f"<h2>Considered and ruled out ({len(shown)})</h2>"]
+    out = [f"<h2>Considered and ruled out ({len(ledger)})</h2>"]
     out.append(_p(
         "A ranking whose rejections are invisible is a ranking you have to "
         "take on faith. Each of these was a candidate and each one died for a "
@@ -2959,6 +2967,12 @@ def _ledger_section(ledger: list[dict]) -> str:
             )
         )
         out.append(_p(head))
+        # AN ALLOWANCE PER REASON, not a global truncation. A flat cut would
+        # spend every name on the biggest group and leave the smaller causes
+        # unnamed, which is the opposite of useful: the rare rejection is the
+        # one a reader wants to see an example of.
+        per_reason = max(1, MAX_LEDGER_ROWS // max(1, len(ordered)))
+        named = rows[:per_reason]
         out.append(_ul(
             f"<strong>{_esc_clipped(r.get('label'), MAX_LEDGER_LABEL_CHARS)}"
             f"</strong>"
@@ -2967,8 +2981,13 @@ def _ledger_section(ledger: list[dict]) -> str:
                 f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
-            for r in rows
+            for r in named
         ))
+        if len(rows) > len(named):
+            out.append(_p(
+                f"<em class=\"src\">and {len(rows) - len(named)} more for the "
+                f"same reason, counted above and not named here.</em>"
+            ))
     # THE BOOKKEEPING, SAID AS BOOKKEEPING. These rows carry numbers the reader
     # needs — how many candidates the list could not hold, how many signals
     # could not be grouped at all — and burying them among the candidates is
