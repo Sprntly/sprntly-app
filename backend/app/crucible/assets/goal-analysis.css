@@ -37,6 +37,11 @@
   --rule: #e3e1d8;
   --hair: #ece9e0;
   --green: #1a6b47;
+  /* The convergence figure's tokens, named as evidence.css names them so the
+     component reads the same here as it does in a brief. */
+  --grid: #ece9e0;
+  --opp: #0f9d77;
+  --opp-soft: #d3efe5;
   --serif: 'Spectral', 'Iowan Old Style', Palatino, Georgia, serif;
   --sans: 'Inter', -apple-system, system-ui, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -274,6 +279,35 @@ table.cols > tbody > tr > td:last-child blockquote { font-size: 14.5px; }
   }
 }
 
+/* ── The convergence figure ───────────────────────────────────────────
+   The component from `skills/evidence-brief/references/component-reference
+   .html`, drawn from what the engine already computed. `svg` scales to the
+   column, so it reads at the ~700px panel and at full page width alike.
+
+   THE CAPTION IS NOT A CAPTION. On the sanitized custom-artifact path the
+   `<svg>` is dropped with its children and `<figure>` is unwrapped, so this
+   paragraph is all that survives — and it carries the same fact in words. It
+   is styled as a caption here and reads as a sentence there. */
+figure {
+  margin: 14px 0 18px;
+  padding: 16px 16px 12px;
+  background: #fff;
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+}
+
+figure svg { width: 100%; height: auto; display: block; }
+
+.blabel { font: 400 12px/1.3 var(--sans); }
+.vlabel { font: 500 13px/1.3 var(--mono); }
+
+p.convergence {
+  margin: 10px 0 0;
+  font: 400 11.5px/1.5 var(--mono);
+  color: var(--sub);
+  max-width: none;
+}
+
 /* ── Print ──────────────────────────────────────────────────────────────
    The archival path is Chrome → Print → Save as PDF. Backgrounds are off by
    default there, which is why every chart in this document is drawn in
@@ -283,6 +317,7 @@ table.cols > tbody > tr > td:last-child blockquote { font-size: 14.5px; }
   body { padding: 0; font-size: 11.5pt; }
   .page { padding: 0; }
   h2, h3 { break-after: avoid; }
+  figure { break-inside: avoid; border-color: #ccc; }
   h3.finding { break-before: auto; }
   table, blockquote { break-inside: avoid; }
   a { text-decoration: none; color: inherit; }

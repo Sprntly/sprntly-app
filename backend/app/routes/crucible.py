@@ -1688,6 +1688,39 @@ def _run_enrichment(
                 claims_by_id[cid].type for cid in f.claim_ids
                 if cid in claims_by_id
             }),
+            # WHICH SOURCE TYPES INDEPENDENTLY CARRY THIS FINDING, and how
+            # many claims each contributes. Carried here for the same reason
+            # as `claim_types` above: a column would mean a migration against
+            # the shared Supabase.
+            #
+            # `Claim.source_id` IS the source type despite the name —
+            # `project_signal` assigns `source_id=source_type`, which is why
+            # the authority check can key on it at all (see `types.Claim`).
+            # So this is `customer_voice` / `project_mgmt` / …, the same
+            # vocabulary the rest of the run reports sources in.
+            #
+            # COUNTED, NEVER CHARACTERISED. The renderer draws a convergence
+            # figure from this and states the counts; nothing here decides
+            # whether the agreement is strong, and no model is asked (I2).
+            "source_types": {
+                st: sum(
+                    1 for cid in f.claim_ids
+                    if cid in claims_by_id and claims_by_id[cid].source_id == st
+                )
+                for st in sorted({
+                    claims_by_id[cid].source_id for cid in f.claim_ids
+                    if cid in claims_by_id
+                })
+            },
+            # The one term in `scoring.py` that earns a corroboration bonus,
+            # recomputed here over the claims this call was given. Distinct
+            # AUTHORITATIVE source types — a subset of the keys above, so the
+            # figure can say how many of the converging sources are ones the
+            # registry treats as able to speak to this.
+            "authoritative_source_types": len({
+                claims_by_id[cid].source_id for cid in f.claim_ids
+                if cid in claims_by_id and claims_by_id[cid].authoritative
+            }),
             **({"recommendation": {
                 "action": recs[f.id].action, "because": recs[f.id].because,
             }} if f.id in recs else {}),

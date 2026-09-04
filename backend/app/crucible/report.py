@@ -1411,6 +1411,221 @@ def _finding_money_estimate(reach: float, account_value: Any) -> Optional[str]:
     )
 
 
+#: How many source nodes the convergence figure draws. Beyond this the
+#: remainder is COUNTED in the sentence beneath it, the way every other cap in
+#: this file states its own overflow — a diagram that silently stops at four
+#: would understate corroboration, which is the one direction this figure must
+#: never err in.
+MAX_CONVERGENCE_NODES = 4
+
+#: The figure only exists above this many distinct source types.
+#:
+#: A CONVERGENCE DIAGRAM WITH ONE NODE IS NOT ONE. It draws a single box with
+#: a single line into an outcome and reads as triangulation, which is a claim
+#: about independent agreement that a single-source finding has not earned —
+#: worse than showing nothing, because the picture is more persuasive than the
+#: sentence it replaces. On a corpus that is overwhelmingly one source type
+#: this figure simply never appears, and that is the correct behaviour rather
+#: than a gap to fill.
+MIN_CONVERGENCE_SOURCES = 2
+
+#: SVG text does not wrap, so every string in the figure is cut to fit its box
+#: rather than trusted to.
+#: Sized against the boxes they sit in at the figure's own scale: a 200-unit
+#: node box holds about 26 characters of the 12px sans, and a 282-unit outcome
+#: box about 32 of the 13px mono. Erring short, because an overflowing label
+#: in SVG does not clip — it runs out over whatever is beside it.
+MAX_NODE_LABEL_CHARS = 26
+MAX_OUTCOME_LINE_CHARS = 32
+
+
+def _svg_lines(text: str, limit: int, max_lines: int) -> list[str]:
+    """`text` broken on word boundaries into at most `max_lines` of `limit`.
+
+    SVG has no line box: a `<text>` runs straight out of its rect and over
+    whatever is beside it. Everything drawn here is therefore wrapped by this
+    function or clipped by `_clip`, never left to the renderer.
+    """
+    words = (text or "").split()
+    lines: list[str] = []
+    current = ""
+    for word in words:
+        candidate = f"{current} {word}".strip()
+        if len(candidate) <= limit:
+            current = candidate
+            continue
+        if current:
+            lines.append(current)
+        if len(lines) == max_lines:
+            break
+        current = word
+    if current and len(lines) < max_lines:
+        lines.append(current)
+    if not lines:
+        return []
+    # The cut is stated, not silent — the same rule `_clip` follows.
+    consumed = len(" ".join(lines))
+    if consumed < len(" ".join(words)):
+        lines[-1] = _clip(lines[-1] + " …", limit + 2)
+    return lines
+
+
+def _convergence_figure(finding: dict) -> str:
+    """Which source types independently carry this finding, drawn and stated.
+
+    THE COMPONENT IS NOT INVENTED HERE. It follows the convergence diagram in
+    `backend/skills/evidence-brief/references/component-reference.html` —
+    source boxes on the left, curved paths converging, one outcome box on the
+    right, a caption — using the same token names the evidence brief's
+    stylesheet defines (`--hair`, `--grid`, `--opp`, `--opp-soft`) and the same
+    `.blabel` / `.vlabel` text classes.
+
+    EVERY SLOT IS SOMETHING THE ENGINE ALREADY COMPUTED. The nodes are the
+    distinct `source_type`s behind this finding's claims and how many claims
+    each contributed; the outcome is the finding's own recommended action, or
+    its own label when it has no recommendation; the caption counts how many
+    of the converging types are authoritative. No extraction, no model, no
+    narration (I2).
+
+    THERE IS NO FORECAST LINE. The reference component ends its outcome box
+    with a supporting line, and the example filling it reads "→ 3-5 Tier 1
+    design-partner closes" — a projection of an outcome. This corpus cannot
+    produce one and the engine is built not to try, so the line under the
+    outcome box carries what the finding actually measured: its reach, or its
+    claim count when nothing could be sized. An unsized finding says so rather
+    than borrowing a number.
+
+    BOTH PATHS KEEP THE INFORMATION. `custom_artifact_html.py` drops `svg`
+    WITH ITS CHILDREN, so on the saved-document path the drawing disappears
+    entirely. The sentence beneath it is therefore not a caption for the
+    picture — it is the same fact in words, and it is what that path keeps.
+    One string, written once, doing both jobs.
+    """
+    types = _as_dict(finding.get("source_types"))
+    counted = sorted(
+        ((str(k), int(v)) for k, v in types.items() if isinstance(v, (int, float))),
+        key=lambda kv: (-kv[1], kv[0]),
+    )
+    if len(counted) < MIN_CONVERGENCE_SOURCES:
+        # NOT SILENCE. A single-source finding has a composition too, and it
+        # is the more important one to state: a reader who sees no figure
+        # should be told the reason is that there was nothing to converge.
+        if counted:
+            name, n = counted[0]
+            return _p(
+                f"<em>Rests on {n} claim{'' if n == 1 else 's'} from one "
+                f"source type ({_human_source(name)}) — nothing here is "
+                f"independently corroborated.</em>"
+            )
+        return ""
+
+    shown = counted[:MAX_CONVERGENCE_NODES]
+    beyond = len(counted) - len(shown)
+    authoritative = finding.get("authoritative_source_types")
+    authoritative = (
+        int(authoritative) if isinstance(authoritative, (int, float)) else None
+    )
+
+    # THE OUTCOME IS WHAT THIS FINDING ASKS FOR, or what it is. Never a
+    # synthesis of the two, and never a sentence written for the box.
+    outcome = (
+        (_as_dict(finding.get("deep_recommendation")).get("action") or "").strip()
+        or (_as_dict(finding.get("recommendation")).get("action") or "").strip()
+        or (finding.get("label") or "").strip()
+        or _statement_text(finding)
+    )
+
+    # ── Geometry. Every drawn shape carries an explicit fill, and the viewBox
+    #    is sized to the outermost label rather than to the boxes, so nothing
+    #    is clipped at the edge when the sheet scales the figure down.
+    node_h, gap = 46, 30
+    pitch = node_h + gap
+    top = 14
+    height = top * 2 + len(shown) * pitch - gap
+    mid = height / 2
+    box_x, box_w = 8, 200
+    out_x, out_w = 430, 282
+    out_h = 76
+    out_y = mid - out_h / 2
+
+    nodes: list[str] = []
+    paths: list[str] = []
+    for i, (name, n) in enumerate(shown):
+        y = top + i * pitch
+        cy = y + node_h / 2
+        label = _esc(_clip(_human_source(name).strip() or "source", MAX_NODE_LABEL_CHARS))
+        nodes.append(
+            f'<rect x="{box_x}" y="{y:g}" width="{box_w}" height="{node_h}" '
+            f'rx="3" fill="#ffffff" stroke="var(--hair)"/>'
+            f'<text x="{box_x + box_w / 2:g}" y="{cy - 3:g}" text-anchor="middle" '
+            f'class="blabel" fill="var(--ink)">{label}</text>'
+            f'<text x="{box_x + box_w / 2:g}" y="{cy + 13:g}" text-anchor="middle" '
+            f'class="blabel" fill="var(--sub)">{n} claim{"" if n == 1 else "s"}</text>'
+        )
+        # A straight line when the node is already level with the outcome,
+        # a curve otherwise — the reference's own two cases.
+        if abs(cy - mid) < 0.5:
+            paths.append(f'<path d="M{box_x + box_w} {cy:g} L{out_x} {mid:g}" fill="none"/>')
+        else:
+            paths.append(
+                f'<path d="M{box_x + box_w} {cy:g} '
+                f'C {box_x + box_w + 90} {cy:g}, {out_x - 110} {mid:g}, '
+                f'{out_x} {mid:g}" fill="none"/>'
+            )
+
+    out_lines = _svg_lines(outcome, MAX_OUTCOME_LINE_CHARS, 2)
+    line_y = out_y + (26 if len(out_lines) > 1 else 34)
+    outcome_text = "".join(
+        f'<text x="{out_x + out_w / 2:g}" y="{line_y + i * 17:g}" '
+        f'text-anchor="middle" class="vlabel" fill="var(--opp)">'
+        f"{_esc(line)}</text>"
+        for i, line in enumerate(out_lines)
+    )
+    # WHAT THIS MEASURED — NOT WHAT IT WOULD ACHIEVE. See the docstring.
+    if finding.get("impact_value") is not None:
+        support = _reach(finding)
+    else:
+        claims = len(_as_list(finding.get("claim_ids")))
+        support = (
+            f"{claims} claim{'' if claims == 1 else 's'}; size not measured"
+            if claims else "size not measured"
+        )
+
+    svg = (
+        f'<svg viewBox="0 0 720 {height:g}" role="img" '
+        f'aria-label="Diagram: {len(shown)} independent source types '
+        f'converging on one finding">'
+        f'<g>{"".join(nodes)}</g>'
+        f'<g stroke="var(--grid)" stroke-width="2" fill="none">{"".join(paths)}</g>'
+        f'<rect x="{out_x}" y="{out_y:g}" width="{out_w}" height="{out_h}" rx="3" '
+        f'fill="var(--opp-soft)" stroke="var(--opp)"/>'
+        f"{outcome_text}"
+        f'<text x="{out_x + out_w / 2:g}" y="{out_y + out_h - 14:g}" '
+        f'text-anchor="middle" class="blabel" fill="var(--sub)">'
+        f"{_esc(support)}</text>"
+        "</svg>"
+    )
+
+    # THE SENTENCE THE SANITIZED PATH KEEPS. Says the same thing the picture
+    # does, in the same order, and states the count without characterising it.
+    named = ", ".join(
+        f"{_human_source(name)} ({n} claim{'' if n == 1 else 's'})"
+        for name, n in shown
+    )
+    caption = (
+        f"{len(counted)} source types independently carry this: {named}"
+        + (f", and {beyond} more" if beyond else "")
+        + "."
+    )
+    if authoritative is not None:
+        caption += (
+            f" {authoritative} of them "
+            f"{'is a source' if authoritative == 1 else 'are sources'} the "
+            f"registry treats as able to speak to this."
+        )
+    return f'<figure>{svg}<p class="convergence">{caption}</p></figure>'
+
+
 def _finding_block(
     finding: dict, rank: int, *,
     shared_weakest: bool = False, shared_cap: bool = False,
@@ -1768,8 +1983,12 @@ def _finding_block(
         # No recommendation on this finding, so there is no left-hand column
         # and nothing to sit beside. One column, full width.
         out.extend(evidence)
+    # THE COMPOSITION OF THE EVIDENCE, FULL WIDTH UNDER BOTH COLUMNS.
+    # Suppressed to a single sentence when there is nothing to converge — see
+    # `_convergence_figure`.
+    out.append(_convergence_figure(finding))
     out.extend(tail)
-    return "".join(out)
+    return "".join(p for p in out if p)
 
 
 #: How many findings get a full block in the document.
