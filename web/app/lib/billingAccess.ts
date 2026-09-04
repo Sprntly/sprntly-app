@@ -14,32 +14,36 @@
  */
 
 /**
- * PAYMENTS ARE HIDDEN. The one switch, and the whole of it.
+ * PAYMENTS ARE LIVE. The one switch, and the whole of it.
  *
- * Nothing below is deleted and no billing file was removed — the plan screen,
- * the Billing pane, the trial pill, the Stripe client and the credit ledger
- * are all still here, exactly as they were. While this is false every gate in
- * this module simply answers "yes, carry on": nothing is ever refused, no
- * subscription can lapse, and no balance can run out.
+ * Nothing below was ever deleted and no billing file was removed — the plan
+ * screen, the Billing pane, the trial pill, the Stripe client and the credit
+ * ledger stayed exactly as they were through the period this was false. While
+ * it was false every gate in this module simply answered "yes, carry on":
+ * nothing was refused, no subscription could lapse, no balance could run out.
+ * With it true they all mean what they always meant.
  *
- * WHAT IS HIDDEN IS THE COMPULSION, NOT THE SCREENS (owner decision). Settings
- * still shows Billing and a curious user can read it and even start a checkout
- * — it is only that nothing they see there stands between them and the
- * product. The two places that DID stand in the way are gone with the gates:
- * the onboarding plan step, which is reached only by a guard redirect, and the
+ * WHAT WAS HIDDEN WAS THE COMPULSION, NOT THE SCREENS (owner decision).
+ * Settings showed Billing throughout, and a curious user could read it and
+ * even start a checkout — it was only that nothing there stood between them
+ * and the product. The two places that DID stand in the way come back with the
+ * gates: the onboarding plan step, reached only by a guard redirect, and the
  * sidebar trial countdown, which checks this flag at its call site along with
- * the product-tour step anchored to it. `trialDaysLeft` itself stays honest —
- * the Billing pane still has to report a trial Stripe really did record.
+ * the product-tour step anchored to it. `trialDaysLeft` stayed honest the
+ * whole time, so the countdown reads correctly the moment it reappears.
  *
- * TO BRING PAYMENTS BACK: set this to true, and its backend mirror
- * `BILLING_ENABLED` in `backend/app/billing/enforce.py` to True. That is the
- * entire revert — two constants, no other edit, no behaviour lost in between.
+ * TO HIDE PAYMENTS AGAIN: set this to false, and its backend mirror
+ * `BILLING_ENABLED` in `backend/app/billing/plans.py` to False. That is the
+ * entire switch — two constants, no other edit, no behaviour lost either way.
+ * The paywall's test coverage rides the same flag (`describe.skipIf` /
+ * `runIf`), so whichever way it points, the suite asserts the behaviour that
+ * is actually shipping.
  *
  * A constant rather than a `NEXT_PUBLIC_*` env var on purpose: web is a static
  * export, so an env var is inlined at build time anyway and buys nothing but a
  * second place for the two sides to disagree.
  */
-export const BILLING_ENABLED = false
+export const BILLING_ENABLED = true
 
 /** Stripe's vocabulary, stored verbatim. `past_due` still grants access —
  *  cutting a paying customer off while Smart Retries work the card is how a

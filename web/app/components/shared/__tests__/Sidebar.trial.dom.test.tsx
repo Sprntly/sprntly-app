@@ -123,7 +123,7 @@ describe.skipIf(!BILLING_ENABLED)("the trial countdown", () => {
   })
 })
 
-describe("payments hidden", () => {
+describe.skipIf(BILLING_ENABLED)("payments hidden", () => {
   it("renders no pill at all, mid-trial or not", () => {
     // The rail is the one place a trial followed you around. With nothing to
     // pay and nothing to lapse, a countdown is a question with no answer —
