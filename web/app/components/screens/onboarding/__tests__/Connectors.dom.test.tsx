@@ -12,7 +12,7 @@
 //     entirely — there are no locked placeholder rows.
 //   - the FOOTER drives it: Skip/Continue complete the open category and
 //     reveal the next; only when none are left does Continue leave the step,
-//     relabelled "Continue to your key"
+//     relabelled "See what we learned" — the review step's own headline
 //   - a reviewed category collapses to a "Connected" row (there is no
 //     "Skipped" variant) and stays re-openable; the "N of M reviewed" counter
 //     + progress bar track position
@@ -252,7 +252,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(docs.querySelector(".conn-upload")).toBeNull()
   })
 
-  it("relabels Continue to 'Continue to your key' only on the final category", () => {
+  it("relabels Continue to name the NEXT SCREEN, only on the final category", () => {
     const { container } = mountLoaded()
     // Categories remain → the footer just advances the accordion.
     expect(footerContinue(container).textContent).toMatch(/^Continue/)
@@ -260,7 +260,12 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(footerSkip(container).textContent?.trim()).toBe("Skip")
     // On the last one, completing it leaves nothing incomplete → it leaves.
     advanceToLastCategory(container)
-    expect(footerContinue(container).textContent).toMatch(/Continue to your key/)
+    // The step this leaves for is `/onboarding/review`, and the label says so
+    // in that screen's own words. It used to promise an api-key step that was
+    // removed from the flow, which sent the reader looking for a key that was
+    // never coming.
+    expect(footerContinue(container).textContent).toMatch(/See what we learned/)
+    expect(footerContinue(container).textContent).not.toMatch(/key/i)
   })
 
   it("tracks position with the 'N of M reviewed' counter and the progress bar", () => {

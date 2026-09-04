@@ -39,8 +39,9 @@ import {
  *
  * The FOOTER drives it: Skip / Continue complete the open category, collapse
  * it, and reveal the next. Once none are left Continue leaves the step,
- * relabelled "Continue to your key". A progress bar + "N of M reviewed"
- * counter track position within the step.
+ * relabelled "See what we learned" — the review step's own headline, since
+ * the api-key step this used to name is gone. A progress bar + "N of M
+ * reviewed" counter track position within the step.
  *
  * WHY THIS SITS AT STEP 3, right after the context import: this step and the
  * api-key step that used to follow it were the two the (now removed) context
@@ -455,7 +456,13 @@ export function Connectors() {
       onBack={() => router.push("/onboarding/company")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
-      continueLabel={leavesStep ? "Continue to your key" : "Continue"}
+      // NAMES THE NEXT SCREEN, and that screen changed underneath this label.
+      // The api-key step it promised was removed from the flow; leaving here
+      // goes to `/onboarding/review`, whose own heading is "Here's what we
+      // learned." So the button says that — a Continue that names a step the
+      // product no longer has is worse than a bare "Continue", because the
+      // reader spends the next screen looking for the key it promised.
+      continueLabel={leavesStep ? "See what we learned" : "Continue"}
       continueDisabled={saving}
       loading={saving}
     >
