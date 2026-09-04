@@ -6449,7 +6449,18 @@ export function ChatScreen() {
                     key={tab.id}
                     className="chat-tab"
                     data-tab-active={isActive ? "true" : undefined}
-                    onClick={() => { setActiveTabId(tab.id); setDraft(""); focusComposerNextFrame() }}
+                    /* The composer is ONE instance for every tab, so what is
+                       in it belongs to whichever tab you are looking at. The
+                       draft has always been cleared here; the attachment was
+                       not, so a file picked on one tab followed the reader to
+                       the next and looked like it had been sent there. Both go
+                       together now — they are two halves of the same message. */
+                    onClick={() => {
+                      setActiveTabId(tab.id)
+                      setDraft("")
+                      setAttachments([])
+                      focusComposerNextFrame()
+                    }}
                     style={{
                       // Positioned so the separator / shoulder pseudo-elements
                       // anchor to it; raised when active so its shoulders, which
