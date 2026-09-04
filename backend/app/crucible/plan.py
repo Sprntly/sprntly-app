@@ -22,9 +22,17 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from app.crucible.claims import AUTHORITATIVE_FOR
+
+if TYPE_CHECKING:  # imported for annotations only — `planner` imports
+    # `primitives`, which imports nothing from here, so a runtime import
+    # would not actually be circular; it is deferred anyway because building
+    # a plan without steps (every existing caller, every stored plan) must
+    # not pay for loading the planner.
+    from app.crucible.planner import PlanStep
+    from app.crucible.recon import Observation
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +107,31 @@ class PlanQuestion:
     id: str
     prompt: str
     why: str
+    #: ── WHAT A DERIVED QUESTION CARRIES THAT A FIXED ONE DID NOT. ───────
+    #:
+    #: The old three were asked unconditionally, so there was nothing to say
+    #: about WHY THIS RUN in particular is asking. A question derived from
+    #: something the reconnaissance pass actually saw can say it, and has to:
+    #: a reader who is told "your contracts carry two different account
+    #: values and they differ on 13 rows" can answer in seconds, where the
+    #: same question asked cold reads as the engine being unsure of itself.
+    #:
+    #: All default to empty so every existing construction, and every plan
+    #: stored before this shipped, is unchanged.
+    #:
+    #: What the run saw that prompted the question, with the numbers.
+    what_i_saw: str = ""
+    #: What the answer changes, said as the thing at stake rather than the
+    #: field name it lands in.
+    affects: str = ""
+    #: What happens if it is left blank. NEVER "we will guess": every default
+    #: here is a stated, conservative behaviour the run will carry out and
+    #: disclose, which is the difference between a default and an invention.
+    default_if_skipped: str = ""
+    #: A closed set of answers where one exists. Empty means free text — right
+    #: for a person's name or a date, wrong for "which of these two columns is
+    #: your book", where the options ARE the answer and typing invites a third.
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,6 +224,36 @@ class RunPlan:
     #: When the decision is needed. Free text on purpose — "before the Q3 QBR"
     #: is a real answer and a date picker would refuse it.
     needed_by: str = ""
+    #: ── THE METHOD, AND WHAT IT WAS DERIVED FROM. ───────────────────────
+    #:
+    #: `steps` is the numbered sequence this run will carry out, each naming a
+    #: registered primitive (`app.crucible.planner`). `observations` is what
+    #: the reconnaissance pass saw in the evidence (`app.crucible.recon`) —
+    #: carried on the plan because it is BOTH the input the steps were
+    #: composed from and the check every figure in them was verified against,
+    #: so a stored plan can be re-verified without re-reading the corpus.
+    #:
+    #: ADDITIVE WITH DEFAULTS, AND THAT IS LOAD-BEARING. `crucible_runs.
+    #: prioritisation` is a single JSONB blob with no version field and every
+    #: reader guards with `.get()`; a rename or a required field would strand
+    #: every plan already stored. Empty tuples are exactly what a plan built
+    #: before this existed reads back as, which renders as the old document.
+    steps: tuple["PlanStep", ...] = ()
+    observations: tuple["Observation", ...] = ()
+    #: WHAT ONE ACCOUNT IS WORTH, TAKEN FROM THE EVIDENCE RATHER THAN ASKED.
+    #:
+    #: DELIBERATELY NOT `account_value`. That field is the reader's own
+    #: estimate and `report.py` renders it with the words "which is an
+    #: estimate you gave rather than something measured" — true of a typed
+    #: number and false of one read off the contracts, so writing a derived
+    #: figure there would make the finished document misattribute measured
+    #: data to the reader. A separate field keeps that attribution correct;
+    #: rendering this one is a change to the report, not to the plan.
+    account_value_derived: Optional[float] = None
+    #: How it was derived, in one sentence, so the suppression of the question
+    #: is visible rather than silent — a question that stops being asked with
+    #: no explanation reads as a feature that broke.
+    account_value_derived_note: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -213,6 +276,10 @@ class RunPlan:
             "account_value": self.account_value,
             "decision_owner": self.decision_owner,
             "needed_by": self.needed_by,
+            "steps": [st.to_json() for st in self.steps],
+            "observations": [o.to_json() for o in self.observations],
+            "account_value_derived": self.account_value_derived,
+            "account_value_derived_note": self.account_value_derived_note,
         }
 
 
@@ -392,9 +459,21 @@ def build_plan(
     account_value: Optional[float] = None,
     decision_owner: str = "",
     needed_by: str = "",
+    #: WHAT THE RECONNAISSANCE PASS SAW, when one has been run. `None` — the
+    #: default, and every existing caller — produces exactly the plan this
+    #: function has always produced, with no steps and no observations. That
+    #: matters beyond backwards compatibility: the pass reads content, and
+    #: whether a given entry point can afford to is the CALLER's decision,
+    #: not this function's.
+    recon_report: "Optional[object]" = None,
+    #: The run's own `prioritisation` blob, for the draw-once read-back. A
+    #: plan whose steps were already composed is READ, never re-composed —
+    #: see `app.crucible.planner.build_steps`.
+    run_meta: "Optional[dict]" = None,
+    enterprise_id: str = "",
 ) -> RunPlan:
-    """What this run will try to establish, where it will look, and what it
-    will not be able to tell you."""
+    """What this run will try to establish, HOW, where it will look, and what
+    it will not be able to tell you."""
     sources, total = source_inventory(company_id)
     kept = tuple(s for s in sources if s.source_type not in excluded_sources)
 
@@ -422,6 +501,31 @@ def build_plan(
         choice = select_framework(kept, declared)
 
     gaps, produce = derive_gaps_and_promises(kept, hypotheses, framework_choice=choice)
+
+    # ── THE METHOD, WHEN THERE IS EVIDENCE TO DERIVE IT FROM. ──────────────
+    # Local imports, and unconditionally cheap when `recon_report` is None:
+    # `planner` pulls in the primitive registry, which nothing else on this
+    # path needs.
+    observations: tuple = ()
+    steps: tuple = ()
+    derived_value: Optional[float] = None
+    derived_note = ""
+    if recon_report is not None:
+        from app.crucible.framework import derived_account_value
+        from app.crucible.planner import build_steps
+
+        observations = tuple(getattr(recon_report, "observations", ()) or ())
+        derived_value, derived_note = derived_account_value(observations)
+        steps = build_steps(
+            enterprise_id=enterprise_id or company_id,
+            goal_text=goal_text,
+            definition_text=definition_text,
+            currency=currency,
+            report=recon_report,
+            source_types=tuple(sv.source_type for sv in kept),
+            run_meta=run_meta,
+        )
+
     return RunPlan(
         goal_text=goal_text,
         asked_text=asked_text,
@@ -438,8 +542,12 @@ def build_plan(
         definition_adopted=definition_adopted,
         framework=choice.framework,
         framework_reason=choice.reason,
-        questions=questions_for(choice.framework),
+        questions=questions_for(choice.framework, observations),
         account_value=account_value,
         decision_owner=decision_owner,
         needed_by=needed_by,
+        steps=steps,
+        observations=observations,
+        account_value_derived=derived_value,
+        account_value_derived_note=derived_note,
     )

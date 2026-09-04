@@ -1016,6 +1016,13 @@ def execute_run(
                 definition_source=definition_source,
                 definition_note=_PROCESS_NOTE,
                 definition_adopted=definition_adopted,
+                # THE METHOD. Read once, here, on the one pass through this
+                # branch a run ever makes — `build_plan` only runs when the
+                # run is NOT yet approved, so the steps are composed exactly
+                # once and every later read comes off the stored plan.
+                recon_report=_recon_report(company_id),
+                run_meta=_meta_of(run_id, company_id),
+                enterprise_id=company_id,
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()
@@ -1124,9 +1131,23 @@ def execute_run(
                 choice = select_framework(kept_inventory, declared)
                 plan_json["framework"] = choice.framework
                 plan_json["framework_reason"] = choice.reason
+                # RE-DERIVED FROM THE STORED OBSERVATIONS, NEVER FROM A FRESH
+                # RECONNAISSANCE PASS. The framework can change here (a reader
+                # who unticks the only numeric source), so the question set
+                # has to be recomputed — but recomputing it from a second read
+                # of the corpus would make the questions a function of when
+                # the reader clicked approve. The observations are a fact
+                # already on the plan; they are read, not re-taken. Same
+                # discipline the steps follow, one field over.
+                from app.crucible.recon import observations_from_json
+
+                stored_obs = observations_from_json(plan_json.get("observations"))
                 plan_json["questions"] = [
-                    {"id": q.id, "prompt": q.prompt, "why": q.why}
-                    for q in questions_for(choice.framework)
+                    {"id": q.id, "prompt": q.prompt, "why": q.why,
+                     "what_i_saw": q.what_i_saw, "affects": q.affects,
+                     "default_if_skipped": q.default_if_skipped,
+                     "options": list(q.options)}
+                    for q in questions_for(choice.framework, stored_obs)
                 ]
 
                 gaps, produce = derive_gaps_and_promises(
@@ -2345,6 +2366,49 @@ def _signal_page(client, company_id: str, page: int) -> list[dict]:
         if len(slice_) < _PAGE_RETRY:
             break
     return out
+
+
+#: Signal pages the reconnaissance pass may read at PLAN time.
+#:
+#: THE PLAN GATE USED TO READ NO CONTENT AT ALL, and that was a deliberate,
+#: documented property: "a plan that had to read the corpus to describe it
+#: would be the expensive thing it exists to gate." A plan that names its
+#: method has to look at the evidence, so that property is now traded away —
+#: but only for a bounded slice, and only over the STRUCTURED signals whose
+#: `properties` carry numbers. Four pages is one query per page against the
+#: same index `_load_signals` already uses, not the whole corpus.
+#:
+#: FAILING OPEN IS THE WHOLE SAFETY PROPERTY. If this read is slow, errors, or
+#: returns nothing usable, the plan is built exactly as it was before any of
+#: this existed: an inventory, with no steps. A gate that cannot render
+#: because reconnaissance struggled would be a far worse regression than a
+#: plan without a method section.
+_RECON_PAGES = 4
+
+
+def _recon_report(company_id: str):
+    """What the evidence looks like structurally, or an empty report.
+
+    Total: never raises, never blocks a plan.
+    """
+    from app.crucible.recon import ReconReport, observe, tables_from_signals
+
+    try:
+        from app.db.client import require_client
+
+        client = require_client()
+        rows: list[dict] = []
+        for page in range(_RECON_PAGES):
+            chunk = _signal_page(client, company_id, page)
+            rows.extend(chunk)
+            if len(chunk) < _PAGE:
+                break
+        return observe(tables_from_signals(rows))
+    except Exception:  # noqa: BLE001 — see the constant above
+        logger.warning("crucible: reconnaissance pass failed for %s; the plan "
+                       "will be built without a method section", company_id,
+                       exc_info=True)
+        return ReconReport()
 
 
 def _load_signals(company_id: str) -> list[dict]:
