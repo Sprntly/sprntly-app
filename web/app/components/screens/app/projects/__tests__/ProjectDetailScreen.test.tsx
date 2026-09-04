@@ -694,15 +694,18 @@ describe("ProjectDetailScreen — data fetch", () => {
     })
     await waitFor(() => expect(screen.getByTestId("topbar-artifacts")).toBeTruthy())
 
-    // Open the artifacts drawer — the LIST view, with its in-drawer "Add" control.
+    // Open the artifacts drawer — the LIST view, with its in-drawer "+ Add"
+    // split-menu control.
     fireEvent.click(screen.getByTestId("topbar-artifacts"))
     await waitFor(() => expect(screen.getByTestId("artifacts-drawer-add")).toBeTruthy())
     expect(screen.getByTestId("artifacts-drawer-body")).toBeTruthy()
 
-    // The drawer swaps its internal view list → add IN PLACE: the folded
-    // AddArtifactPanel renders under an add-host with a "← Back" control, the
-    // list body/add button are gone, and NO separate add dialog is mounted.
+    // The "+ Add" control opens a menu; "Add existing artifact" swaps the
+    // drawer's internal view list → add IN PLACE: the folded AddArtifactPanel
+    // renders under an add-host with a "← Back" control, the list body is gone,
+    // and NO separate add dialog is mounted.
     fireEvent.click(screen.getByTestId("artifacts-drawer-add"))
+    fireEvent.click(screen.getByTestId("artifacts-drawer-menu-existing"))
     await waitFor(() => expect(screen.getByTestId("artifacts-drawer-add-host")).toBeTruthy())
     expect(screen.getByTestId("artifacts-drawer-back")).toBeTruthy()
     expect(screen.queryByTestId("artifacts-drawer-body")).toBeNull()
