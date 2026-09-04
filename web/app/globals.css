@@ -19729,13 +19729,6 @@
     flex: 1;
   }
 
-  .onb-foot-meta {
-    margin-top: 34px;
-    font-size: 11px;
-    color: var(--ink-4);
-    text-align: center;
-  }
-
   /* Form primitives — scoped to the onboarding card/footer. */
   .onb-card .form-grid {
     display: grid;
@@ -21081,13 +21074,6 @@
   .onb-card .conn.on .check {
     opacity: 1;
     transform: scale(1);
-  }
-
-  .onb-card .conn-note {
-    margin-top: 14px;
-    font-size: 11.5px;
-    color: var(--ink-3);
-    line-height: 1.5;
   }
 
   /* "Connect later" link in the footer meta strip. */
