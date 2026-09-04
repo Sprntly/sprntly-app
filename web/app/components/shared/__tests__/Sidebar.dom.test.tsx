@@ -520,11 +520,36 @@ describe("Sidebar — the threads themselves are in the nav", () => {
     }
   })
 
-  it("keeps one row for the rest, and it is the history screen", async () => {
+  it("keeps a way to the rest, and it is the history screen", async () => {
     conversations = seed(25)
     await openExpanded()
     fireEvent.click(screen.getByTestId("sidebar-view-all-chats"))
     expect(goTo).toHaveBeenCalledWith("chats")
+  })
+
+  it("puts that way in the HEADER, not under the list", async () => {
+    // It used to be a row at the bottom, which put the control for "the
+    // threads that are not here" behind a scroll past all twenty that are.
+    // The list is capped at twenty precisely because that is where it stops
+    // being scannable, so the door cannot live at the end of it.
+    conversations = seed(25)
+    const section = await openExpanded()
+    const head = section.querySelector(".sb-chats-head")
+    expect(head).toBeTruthy()
+    expect(head!.querySelector('[data-testid="sidebar-view-all-chats"]')).toBeTruthy()
+    // …and it is not also still under the list.
+    expect(section.querySelectorAll('[data-testid="sidebar-view-all-chats"]'))
+      .toHaveLength(1)
+  })
+
+  it("labels it in words rather than an icon", async () => {
+    // An arrow in this corner is a guess the reader has to make — expand?
+    // collapse? new? — and two words cost less than the guess.
+    conversations = seed(3)
+    await openExpanded()
+    const link = screen.getByTestId("sidebar-view-all-chats")
+    expect(link.textContent?.trim()).toBe("Chat history")
+    expect(link.querySelector("svg")).toBeNull()
   })
 
   it("says nothing at all when there are no threads", async () => {
