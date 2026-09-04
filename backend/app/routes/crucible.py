@@ -1487,19 +1487,63 @@ def _run_enrichment(
     # still rendered; a set-aside one moves to an appendix carrying the
     # reason. Storing only the survivors would destroy the record a wrong
     # verdict has to be recoverable from.
+    #
+    # AND IT IS JUDGED ONCE PER RUN, NOT ONCE PER PASS. The gate is a model
+    # call, and a model call is a draw: two runs over an identical corpus —
+    # same goal, same definition, the same 60 findings — kept 38 and 49, an
+    # eleven-finding swing in what the customer is told bears on their goal.
+    # Everything deterministic reproduced exactly; this was the only stage
+    # that could not. So the verdict is drawn once and stored on the run, and
+    # this function — which the stalled-enrichment sweep also calls, for a run
+    # that may already have been judged — hands `judge_relevance` the run's
+    # blob so it reads the answer back rather than taking a second sample. A
+    # genuinely new run has an empty `prioritisation` and still draws fresh.
     _progress(run_id, company_id, enrichment_step="judging_relevance")
     set_aside_by_rank: list = [None] * len(findings)
     relevance_gate_ran = False
     relevance_judged_info: dict = {}
+    relevance_verdicts_meta: dict = {}
     try:
-        from app.crucible.relevance import judge_relevance, partition
+        from app.crucible.relevance import (
+            VERDICTS_KEY, dump_verdicts, judge_relevance,
+            load_verdicts, partition,
+        )
 
+        # THE RUN'S OWN BLOB, READ ONCE and used for both halves of the
+        # decision: `judge_relevance` reads any verdicts already drawn for
+        # this run out of it instead of drawing again, and `already_judged`
+        # is how this function knows whether what came back is a fresh draw
+        # worth storing or the stored one coming home.
+        run_meta_now = _meta_of(run_id, company_id)
+        already_judged = load_verdicts(run_meta_now) is not None
         verdicts = judge_relevance(
             enterprise_id=company_id,
             goal_text=goal_text,
             definition_text=definition_text,
             findings=findings,
+            run_meta=run_meta_now,
         )
+        # PERSISTED ONLY ON A FRESH DRAW THAT PRODUCED SOMETHING, and only
+        # from inside the `try`. Three conditions, each earning its place:
+        #
+        #   * a gate that RAISED never reaches this line, so nothing is
+        #     stored and the next attempt draws for the first time;
+        #   * a pass that READ THE VERDICTS BACK writes nothing, so the
+        #     stored answer is the first one and stays the first one;
+        #   * a draw that returned NOTHING is not stored either. Every chunk
+        #     failing is the case the stalled-enrichment sweep exists to
+        #     recover, and freezing "judged nothing" onto the run would make
+        #     that recovery impossible. It also cannot cause the divergence
+        #     this whole change is about: an empty verdict set sets nothing
+        #     aside, so there is no selection to be inconsistent about.
+        #
+        # Written into the dict this function RETURNS rather than straight to
+        # the row, for the reason the docstring gives: the caller owns the
+        # write, so a concurrent `_progress` cannot be clobbered here.
+        if not already_judged and verdicts:
+            relevance_verdicts_meta = {
+                VERDICTS_KEY: dump_verdicts(verdicts),
+            }
         _, aside = partition(findings, verdicts)
         reason_of = {f.id: reason for f, reason in aside}
         set_aside_by_rank = [reason_of.get(f.id) for f in findings]
@@ -1774,6 +1818,11 @@ def _run_enrichment(
         # everything" from "no gate ever touched this run" — see
         # `report.py`'s `_definition_section`/`_limits_section`.
         "relevance_gate_ran": relevance_gate_ran,
+        # THE VERDICTS THEMSELVES, so this run never draws them twice. Merged
+        # rather than set: empty on a pass that read them back (or on one
+        # where the gate failed), and `**` of an empty dict adds no key, so a
+        # re-enrichment cannot blank the verdicts a first pass stored.
+        **relevance_verdicts_meta,
         # How many of the found themes the gate actually judged, so a
         # truncated pass says so rather than looking like a complete one.
         # Empty when the gate did not run at all.
