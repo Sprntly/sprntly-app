@@ -136,6 +136,32 @@ def test_project_content_read_phrasings_match():
         assert is_project_content_request(q) is True, q
 
 
+def test_explain_describe_walkthrough_admit_project_context():
+    # Fix B1: the "explain this project" class — an explain/describe/walk-me-
+    # through verb (lifted verbatim from `_DOCUMENT_READ_VERB`) plus the
+    # `this project` noun now matches, so the ask enters the read-tool loop
+    # instead of being answered from workspace breadth.
+    for q in (
+        "explain this project",
+        "describe this project",
+        "walk me through this project",
+        "give me an overview of this project",
+        "brief me on this project",
+    ):
+        assert is_project_content_request(q) is True, q
+
+
+def test_explain_without_project_noun_stays_declined():
+    # The new intent verbs must NOT overbroaden: an "explain"/"describe" of a
+    # non-project subject still has no project NOUN, so the gate declines it.
+    for q in (
+        "explain the weather",
+        "describe the capital of France",
+        "walk me through how a div is centered",
+    ):
+        assert is_project_content_request(q) is False, q
+
+
 def test_project_content_gate_vetoes_non_project():
     for q in (
         "what's the capital of France",

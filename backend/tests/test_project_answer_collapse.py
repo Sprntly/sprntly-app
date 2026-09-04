@@ -2243,6 +2243,79 @@ def test_ledger_reply_grounded_in_real_tool_return_not_model_free_text():
     assert "3 open tasks" not in out["answer"]
 
 
+# ── Fix A1: context answers keep the model's synthesis when content was read ──
+
+
+def _content_and_ledger_dispatch(name, ti, **kw):
+    """Fake `dispatch_read_tool`: project memory returns real context; the
+    ledger returns the empty-ledger string that used to clobber it."""
+    if name == "get_project_memory":
+        return "Project memory summary: migrating billing to Stripe; goal is Q3 launch."
+    if name == "get_task_ledger":
+        return "This project has no delegated tasks yet."
+    return None
+
+
+def test_context_answer_keeps_synthesis_when_memory_also_read():
+    """Fix A1 (the staging failure). A context ask reads BOTH `get_project_
+    memory` and `get_task_ledger`; the model synthesizes an answer from the
+    memory. The ledger override must be SKIPPED (`content_read` True) so the
+    synthesized answer survives — not replaced by the raw empty-ledger string.
+
+    Mutation proof: removing `and not content_read` from the override in
+    `_try_scoped_tool_answer` makes THIS test go red (the answer becomes
+    "This project has no delegated tasks yet.")."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("get_project_memory", {})
+        dispatch("get_task_ledger", {})
+        return "This project is about migrating billing to Stripe, aiming for a Q3 launch."
+
+    import app.llm
+    from unittest.mock import patch
+
+    with patch.object(app.llm, "run_tool_loop", _fake_loop), \
+         patch("app.project_group_context.dispatch_read_tool", _content_and_ledger_dispatch):
+        scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+        out = qa.answer(
+            enterprise_id="c1", question="what is the context of this project?",
+            dataset="d", scope=scope,
+        )
+
+    assert out["answer"] == "This project is about migrating billing to Stripe, aiming for a Q3 launch."
+    assert "no delegated tasks" not in out["answer"]
+
+
+def test_pure_task_question_still_grounded_in_ledger_when_no_content_read():
+    """The hard guard A1 must preserve: a genuine TASK question reads ONLY the
+    ledger (`content_read` stays False), so the override STILL fires and the
+    model's free text is replaced by the grounded ledger return — the anti-
+    fabrication behavior from the original fix is unchanged."""
+    def _fake_loop(*, dispatch, **kw):
+        dispatch("get_task_ledger", {})
+        # Model's own fabricated free text — must NOT win.
+        return "You have 3 open tasks, all assigned to yourself."
+
+    import app.llm
+    from unittest.mock import patch
+
+    with patch.object(app.llm, "run_tool_loop", _fake_loop), \
+         patch(
+             "app.project_group_context.dispatch_read_tool",
+             lambda name, ti, **kw: (
+                 "- #1: Draft the export review — assigned to Fortune by Priya (open)"
+                 if name == "get_task_ledger" else None
+             ),
+         ):
+        scope = _build_private_scope_via_assembler(project_id=9, conversation_id=None, user_id="u1")
+        out = qa.answer(
+            enterprise_id="c1", question="what's open on this project?",
+            dataset="d", scope=scope,
+        )
+
+    assert out["answer"] == "- #1: Draft the export review — assigned to Fortune by Priya (open)"
+    assert "3 open tasks" not in out["answer"]
+
+
 # ── Delegation-confabulation fix: forcing-pass past-tense backstop (fix 4) ─
 
 

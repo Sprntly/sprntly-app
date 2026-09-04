@@ -348,13 +348,21 @@ def test_tool_descriptions_map_documents_to_custom_artifact():
 # ── Routing: document-aware admission + connector-skip (slice 2) ─────────────
 
 
-def _project_scope(*, has_docs: bool, with_tools: bool = False):
+def _project_scope(*, has_docs: bool, with_tools: bool = False, has_context: bool | None = None):
     from app.surface_scope import Surface, SurfaceScope
 
+    # A project with an uploaded document also HAS readable context (a
+    # `custom_artifact` is one of the readable-context types), so `has_context`
+    # defaults to `has_docs` — the substantive-question admission disjunct now
+    # keys on `has_project_context`. Callers exercising a context-only project
+    # (a PRD/memory but no uploaded doc) pass `has_context=True, has_docs=False`.
+    if has_context is None:
+        has_context = has_docs
     return SurfaceScope(
         surface=Surface.project_private,
         project_id=1,
         has_project_documents=has_docs,
+        has_project_context=has_context,
         extra_tools=({"name": "get_project_memory"},) if with_tools else (),
     )
 
@@ -485,6 +493,106 @@ def test_bare_factual_question_does_not_reach_loop_without_docs(monkeypatch):
     # Fell through to the composer (the loop's `_try_scoped_tool_answer` above
     # would have raised had the gate admitted).
     assert out.get("answer") == "composed", out
+
+
+# ── Fix B2: substantive/context admission generalizes to has_project_context ──
+
+
+def test_context_question_reaches_loop_in_prd_only_project(monkeypatch):
+    """A SUBSTANTIVE context ask that names NO project noun (so it can ONLY be
+    admitted via the `has_project_context` disjunct, not `is_project_content_
+    request`) reaches the read-tool loop in a project with a PRD (or thin
+    memory) but NO uploaded document — the generalized gate, not the doc-only
+    `has_project_documents` one.
+
+    Mutation proof: reverting the disjunct to `scope.has_project_documents`
+    makes THIS test go red (a PRD-only project has has_project_documents False,
+    so a no-noun substantive ask is no longer admitted)."""
+    import app.qa_agent as qa
+
+    monkeypatch.setattr(
+        qa, "_try_scoped_tool_answer",
+        lambda **kw: {"answer": "from-the-prd", "_skill_source": "project-tools"},
+    )
+    out = qa.answer(
+        enterprise_id="ent",
+        # No project noun → declined by is_project_content_request; substantive →
+        # admission rides solely on has_project_context.
+        question="catch me up on where everything stands here",
+        dataset="acme",
+        # PRD-only project: no uploaded doc, but it HAS readable context.
+        scope=_project_scope(has_docs=False, has_context=True, with_tools=True),
+        history=None,
+    )
+    assert out.get("_skill_source") == "project-tools", out
+
+
+def test_explain_this_project_reaches_loop_via_content_gate(monkeypatch):
+    """Failure B, literal phrasing: 'explain this project' carries the `this
+    project` noun, so Fix B1 makes `is_project_content_request` admit it into
+    the read-tool loop (where the model reads the PRD/memory) instead of
+    answering from workspace breadth — admitted via the content gate, so it
+    does not even depend on the has_project_context disjunct."""
+    import app.qa_agent as qa
+
+    monkeypatch.setattr(
+        qa, "_try_scoped_tool_answer",
+        lambda **kw: {"answer": "from-the-prd", "_skill_source": "project-tools"},
+    )
+    out = qa.answer(
+        enterprise_id="ent",
+        question="explain this project",
+        dataset="acme",
+        scope=_project_scope(has_docs=False, has_context=True, with_tools=True),
+        history=None,
+    )
+    assert out.get("_skill_source") == "project-tools", out
+
+
+def test_context_question_does_not_reach_loop_in_empty_project(monkeypatch):
+    """The empty-project guard: no memory, no readable artifact →
+    `has_project_context` False → the substantive/context disjunct admits
+    NOTHING extra, and a context ask that names no project noun falls through
+    to the composer byte-identically."""
+    import app.qa_agent as qa
+    from types import SimpleNamespace
+
+    def _must_not_run(**kw):
+        raise AssertionError("empty project must not enter the project tool loop")
+
+    monkeypatch.setattr(qa, "_try_scoped_tool_answer", _must_not_run)
+    monkeypatch.setattr(
+        qa, "llm_call",
+        lambda **k: SimpleNamespace(output={"skill_id": None, "confidence": 0.0, "action": None}),
+    )
+
+    def _fake_compose(dataset, q, *, enterprise_id, prd_context="", history=None, on_delta=None, **k):
+        return {"answer": "composed", "key_points": [], "citations": [], "confidence": 0.5, "unanswered": ""}
+
+    monkeypatch.setattr(qa, "compose_ask_answer", _fake_compose)
+
+    out = qa.answer(
+        enterprise_id="ent",
+        # Substantive, but NAMES no project noun — only the has_project_context
+        # disjunct could admit it, and on an empty project it must not.
+        question="catch me up on where everything stands here",
+        dataset="acme",
+        scope=_project_scope(has_docs=False, has_context=False, with_tools=True),
+        history=None,
+    )
+    assert out.get("answer") == "composed", out
+
+
+def test_has_project_context_field_defaults_false():
+    """Main/workspace scopes and pre-existing callers carry False — the
+    generalized admission disjunct is inert unless a project surface sets it."""
+    from app.surface_scope import Surface, SurfaceScope
+
+    assert SurfaceScope(surface=Surface.main).has_project_context is False
+    assert (
+        SurfaceScope(surface=Surface.project_private, project_id=1).has_project_context
+        is False
+    )
 
 
 def test_has_project_documents_field_defaults_false():
