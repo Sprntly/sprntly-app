@@ -136,6 +136,51 @@ p.action {
   margin-bottom: 12px;
 }
 
+/* THE FACTS UNDER A CLAIM, AS A STRIP RATHER THAN A SENTENCE. Reach,
+   confidence, money named, claim and document counts. They used to run inside
+   the prose ("Measured at: 14 accounts · 64 claims · 1 source document"),
+   which put our bookkeeping in the middle of a paragraph about the reader's
+   business. Set quiet and small they are read at a glance and the sentence
+   above them can be about the finding. */
+p.chips {
+  font: 500 11px/1.5 var(--mono);
+  letter-spacing: 0.03em;
+  color: var(--sub);
+  margin: 0 0 12px;
+  max-width: none;
+}
+p.chips strong { color: var(--ink); }
+
+/* ── The answer, as a numbered screen ──────────────────────────────────
+   The first thing under the title: what to build, numbered, with the facts
+   under each. A table rather than an ordered list because the number needs
+   its own column — the reader is told to "do number one first" and has to
+   find number one without reading a word of the sentences. */
+table.opts { margin: 4px 0 18px; }
+table.opts td { border-bottom: 1px solid var(--hair); padding: 12px 0; }
+table.opts tr:last-child td { border-bottom: none; }
+table.opts td:first-child {
+  width: 1%;
+  padding-right: 16px;
+  font: 600 20px/1.25 var(--serif);
+  color: var(--green);
+  font-variant-numeric: tabular-nums;
+  vertical-align: top;
+}
+table.opts strong {
+  display: block;
+  font: 600 16.5px/1.4 var(--serif);
+  letter-spacing: -0.005em;
+}
+table.opts span {
+  display: block;
+  margin-top: 5px;
+  font: 500 11px/1.5 var(--mono);
+  letter-spacing: 0.03em;
+  color: var(--sub);
+}
+table.opts br { display: none; }
+
 ul { margin: 0 0 12px 0; padding-left: 18px; max-width: 68ch; }
 li { margin-bottom: 6px; line-height: 1.55; }
 li:last-child { margin-bottom: 0; }
@@ -157,9 +202,13 @@ blockquote {
   max-width: 62ch;
 }
 
-/* PROVENANCE RECEDES. The cited claim beside a change is where the change
-   came from, not a second instruction, so it drops a size and a shade —
-   evidence.css's `.src`. */
+/* PROVENANCE RECEDES, AND SITS UNDER WHAT IT QUALIFIES. The cited claim
+   beside a change is where the change came from, not a second instruction,
+   so it drops a size and a shade — evidence.css's `.src`. The same treatment
+   carries the attribution line under a summarised example: the disclosure is
+   kept in full and set below the evidence rather than in front of it. */
+blockquote em.src { margin-top: 8px; font-family: var(--sans); }
+
 em.src {
   display: block;
   margin-top: 3px;
@@ -243,41 +292,6 @@ table.rank td:first-child { font-weight: 500; padding-right: 18px; }
 /* The set-aside appendix: four columns of what was NOT the answer, so it is
    set quieter than the ranking above it. */
 table.aside td { font-size: 12.5px; color: #3a3d47; }
-
-/* ── The write-up's two columns ────────────────────────────────────────
-   The body builds these as a table row because the sanitized path keeps no
-   grid or flex CSS. Here they can be given a real ratio: the argument is the
-   only running text on the card and needs the measure; what it rests on is
-   pairs, counts and a quotation, and does not.
-
-   COLLAPSES ON A NARROW PAGE. In the ~700px side panel the sheet is already
-   tight, and two columns inside it would put the prose back at the measure
-   this whole pass exists to fix. Below 720px they stack, argument first. */
-table.cols { margin: 0 0 10px; table-layout: fixed; }
-table.cols > tbody > tr > td { border: none; padding: 0; vertical-align: top; }
-table.cols > tbody > tr > td:first-child { width: 62%; padding-right: 34px; }
-table.cols > tbody > tr > td:last-child {
-  padding-top: 4px;
-  border-left: 1px solid var(--hair);
-  padding-left: 22px;
-  font-size: 13px;
-  color: #3a3d47;
-}
-table.cols > tbody > tr > td:last-child p { max-width: none; }
-table.cols > tbody > tr > td:last-child blockquote { font-size: 14.5px; }
-
-@media (max-width: 720px) {
-  table.cols, table.cols > tbody, table.cols > tbody > tr { display: block; }
-  table.cols > tbody > tr > td { display: block; width: auto; }
-  table.cols > tbody > tr > td:first-child { width: auto; padding-right: 0; }
-  table.cols > tbody > tr > td:last-child {
-    border-left: none;
-    border-top: 1px solid var(--hair);
-    padding-left: 0;
-    margin-top: 14px;
-    padding-top: 12px;
-  }
-}
 
 /* ── The convergence figure ───────────────────────────────────────────
    The component from `skills/evidence-brief/references/component-reference
