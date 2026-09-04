@@ -1830,7 +1830,7 @@ CREATE TABLE project_members (
 CREATE TABLE project_artifacts (
     project_id    INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     artifact_type TEXT NOT NULL
-                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set')),
+                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set', 'custom_artifact')),
     artifact_id   INTEGER NOT NULL,
     added_at      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, artifact_type, artifact_id)
