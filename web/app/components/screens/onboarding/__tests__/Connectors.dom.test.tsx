@@ -462,6 +462,85 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(container.querySelector(".conn-uploaded")).toBeNull()
   })
 
+  it("offers a paste box on the shelf with no connector, and nowhere else", () => {
+    // Research has nothing to connect (Marvin is coming-soon) and is kept
+    // alive by `keepWhenEmpty` because what onboarding wants from it is the
+    // PM's own material. A lone upload tile asks them to make a file out of
+    // something they can already read on screen.
+    const { container } = mountLoaded()
+    // Analytics has connectors, so it gets the tile and no box.
+    expect(container.querySelector(".conn-step.open .conn-paste")).toBeNull()
+
+    fireEvent.click(footerContinue(container)) // → voice
+    fireEvent.click(footerContinue(container)) // → research
+    const research = container.querySelector(".conn-step.open") as HTMLElement
+    expect(research.getAttribute("data-conn")).toBe("research")
+    expect(research.querySelector(".conn-paste")).not.toBeNull()
+    // Both ways in, on the same shelf.
+    expect(research.querySelector(".conn-upload")).not.toBeNull()
+  })
+
+  it("saves pasted text the same way a file is saved", async () => {
+    const { container } = mountLoaded()
+    fireEvent.click(footerContinue(container))
+    fireEvent.click(footerContinue(container))
+    const box = screen.getByTestId("conn-paste-research") as HTMLTextAreaElement
+    const save = () => screen.getByTestId("conn-paste-save-research") as HTMLButtonElement
+
+    // Nothing typed: nothing to save.
+    expect(save().disabled).toBe(true)
+
+    uploadFilesMock.mockImplementation(async (_slug: string, files: File[]) => ({
+      ingested: [{ filename: files[0].name }],
+      errors: [],
+    }))
+    fireEvent.change(box, { target: { value: "  Users kept asking for CSV export.  " } })
+    expect(save().disabled).toBe(false)
+    fireEvent.click(save())
+
+    await waitFor(() => expect(uploadFilesMock).toHaveBeenCalled())
+    // THE SAME ENDPOINT, with the text as a `.md` file — which the ingester
+    // passes through untouched, so a paste and a dropped file land
+    // identically. A second endpoint would be a second ingestion path to keep
+    // in step for no gain.
+    const [, files] = uploadFilesMock.mock.calls[0] as [string, File[]]
+    expect(files).toHaveLength(1)
+    expect(files[0].name).toMatch(/^pasted-notes-research-.*\.md$/)
+    expect(files[0].type).toBe("text/markdown")
+    // jsdom's File has no `.text()`, so read it the way the platform did
+    // before that landed — this is about the CONTENT reaching the wire, not
+    // about which reader the test uses.
+    const body = await new Promise<string>((resolve) => {
+      const r = new FileReader()
+      r.onload = () => resolve(String(r.result))
+      r.readAsText(files[0])
+    })
+    expect(body).toBe("Users kept asking for CSV export.")
+
+    // …and it is confirmed the way an upload is: listed by name, box emptied.
+    await waitFor(() =>
+      expect(screen.getByTestId("conn-uploaded-research").textContent)
+        .toContain("pasted-notes-research"),
+    )
+    expect(box.value).toBe("")
+  })
+
+  it("keeps what was typed when the save fails", async () => {
+    // Emptying the box on a failure would take the reader's own words with
+    // it — the one thing this box must never do.
+    const { container } = mountLoaded()
+    fireEvent.click(footerContinue(container))
+    fireEvent.click(footerContinue(container))
+    const box = screen.getByTestId("conn-paste-research") as HTMLTextAreaElement
+
+    uploadFilesMock.mockRejectedValue(new Error("network is down"))
+    fireEvent.change(box, { target: { value: "Notes worth keeping." } })
+    fireEvent.click(screen.getByTestId("conn-paste-save-research"))
+
+    await waitFor(() => expect(screen.getByText(/network is down/)).not.toBeNull())
+    expect(box.value).toBe("Notes worth keeping.")
+  })
+
   it("hides the upload fallback on categories that opt out in the catalog", () => {
     const { container } = mountLoaded()
     // Company documentation (docs) is the wizard's last step and sets

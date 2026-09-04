@@ -226,6 +226,10 @@ export function Connectors() {
   const [modalProvider, setModalProvider] = useState<string | null>(null)
   const [planned, setPlanned] = useState<Set<string>>(new Set())
   const [saving, setSaving] = useState(false)
+  // The paste box's text, per category. Kept here rather than in the box so
+  // switching categories and coming back does not lose what was typed — the
+  // accordion unmounts the closed one.
+  const [pasted, setPasted] = useState<Record<string, string>>({})
   // What was uploaded, per category, this session. The names are kept — not
   // just a count — because "3 files uploaded." leaves the reader to remember
   // WHICH three, on the one step where the whole question is what data got in.
@@ -322,8 +326,11 @@ export function Connectors() {
    * Settings → Connectors), and mark the category as reviewed-with-evidence
    * so its summary row reads Connected rather than Skipped.
    */
-  async function onUploadFiles(categoryKey: string, picked: FileList | null) {
-    if (!picked || picked.length === 0 || !workspace) return
+  async function onUploadFiles(
+    categoryKey: string,
+    picked: FileList | File[] | null,
+  ): Promise<boolean> {
+    if (!picked || picked.length === 0 || !workspace) return false
     const list = Array.from(picked)
     setUploadingCat(categoryKey)
     setUploadNotice(null)
@@ -350,11 +357,37 @@ export function Connectors() {
           r.errors.map((e) => `${e.filename}: ${e.error}`).join("; "),
         )
       }
+      return r.ingested.length > 0
     } catch (e) {
       setUploadNotice(e instanceof Error ? e.message : String(e))
+      return false
     } finally {
       setUploadingCat(null)
     }
+  }
+
+  /**
+   * Save pasted text. IT IS AN UPLOAD — the same endpoint, the same ingestion,
+   * the same row in the same table as a dropped file. The text is wrapped in a
+   * `.md` File and posted through `companiesApi.uploadFiles`, because `.md`
+   * passes through `ingest.convert` untouched (`_SUFFIX_TO_CONVERTER`), so a
+   * paste and a file land identically. A second endpoint would have been a
+   * second ingestion path to keep in step for no gain.
+   *
+   * The name carries the minute, so pasting twice in one session files two
+   * sources rather than silently replacing the first.
+   */
+  async function onSavePasted(categoryKey: string) {
+    const text = (pasted[categoryKey] ?? "").trim()
+    if (!text || !workspace) return
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[-:]/g, "").replace("T", "-")
+    const file = new File([text], `pasted-notes-${categoryKey}-${stamp}.md`, {
+      type: "text/markdown",
+    })
+    // Clear on success only, inside the shared handler — a failed save that
+    // emptied the box would take the reader's typing with it.
+    const ok = await onUploadFiles(categoryKey, [file])
+    if (ok) setPasted((prev) => ({ ...prev, [categoryKey]: "" }))
   }
 
   /**
@@ -591,6 +624,61 @@ export function Connectors() {
                       )
                     })}
                   </div>
+                  {/* PASTE, for a shelf with nothing to connect. Research has
+                      no connector today (Marvin is coming-soon) and is kept
+                      alive by `keepWhenEmpty` precisely because what onboarding
+                      wants from it is the PM's own material — interview notes,
+                      survey answers, quotes. A lone upload tile asks them to go
+                      and make a file out of something they can already read on
+                      screen; a box takes it as it is.
+
+                      Gated on having NO connector rather than on the category
+                      being named "research": the reason is the empty shelf, so
+                      the condition is the empty shelf. A category that gains a
+                      connector loses the box, which is the right outcome — the
+                      connector is the better answer whenever there is one. */}
+                  {cat.items.length === 0 && cat.allowsManualUpload !== false && (
+                    <div className="conn-paste">
+                      <label
+                        className="conn-paste-label"
+                        htmlFor={`conn-paste-${cat.key}`}
+                      >
+                        Or paste it here
+                      </label>
+                      <textarea
+                        id={`conn-paste-${cat.key}`}
+                        className="conn-paste-box"
+                        data-testid={`conn-paste-${cat.key}`}
+                        rows={5}
+                        placeholder="Paste interview notes, survey answers, user quotes — anything you already have written down."
+                        value={pasted[cat.key] ?? ""}
+                        onChange={(e) =>
+                          setPasted((prev) => ({ ...prev, [cat.key]: e.target.value }))
+                        }
+                        disabled={uploadingCat !== null}
+                      />
+                      <div className="conn-paste-foot">
+                        {/* SAYS WHERE IT GOES. "Save" alone leaves the reader
+                            wondering whether this is a scratchpad; it is the
+                            same destination a dropped file has. */}
+                        <span className="conn-paste-hint">
+                          Saved with your uploads, and read the same way.
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-secondary conn-paste-save"
+                          data-testid={`conn-paste-save-${cat.key}`}
+                          disabled={
+                            uploadingCat !== null
+                            || (pasted[cat.key] ?? "").trim().length === 0
+                          }
+                          onClick={() => void onSavePasted(cat.key)}
+                        >
+                          {uploadingCat === cat.key ? "Saving…" : "Save notes"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                   {/* WHAT LANDED, listed. Scoped to this category — the
                       state is keyed by it — so a file dropped on Analytics is
                       not confirmed under Voice. `role="status"` so a screen
