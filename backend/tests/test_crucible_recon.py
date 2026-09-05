@@ -514,3 +514,20 @@ def test_the_gate_reads_shape_rather_than_column_names():
     assert any(recon._looks_monetary(c) or recon._looks_like_account(c)
                for c in money_named.columns)
     assert recon.is_rectangular(money_named) is False
+
+
+def test_the_payload_reads_the_way_the_card_writes_numbers():
+    """The sentence that reaches the reader, checked as a sentence. It shipped
+    as "4 of 1275 signals (0.3%) names an account" — subject/verb disagreement,
+    and a bare 1275 in a document that writes 1,275 everywhere else."""
+    signals = fx.kg_signals(n=300)
+    o = _only([], "account_attribution_gap", signals=signals)
+    # The percentage sits between the noun and the verb, so the agreement is
+    # asserted where it actually appears.
+    assert ") name an account" in o.what
+    assert "names an account" not in o.what
+    assert "of 300 signals" in o.what
+
+    with_commas = _only([], "account_attribution_gap",
+                        signals=fx.kg_signals(n=1275))
+    assert "of 1,275 signals" in with_commas.what

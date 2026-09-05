@@ -479,3 +479,97 @@ def test_a_prose_plan_validates_and_names_only_implemented_operations():
     assert planner.verify(
         steps, report.observations, inventory=report.inventory_figures(),
     )[1] == []
+
+
+# ─── A step drawn from a measurement has to report it ─────────────────────
+#
+# THE GATE WAS ONE-DIRECTIONAL. It punished a step for citing a figure it could
+# not support and nothing punished a step for withholding one it was handed, so
+# a step derived from "4 of 1,275 signals name an account" could say "very few"
+# and pass. Measured against the real model over a real run's six observations:
+# eleven observation-backed steps, not one figure among them.
+#
+# The prompt is what stopped that happening — the gate runs after generation and
+# the model never sees it. These are what stop it SHIPPING if the prompt drifts.
+
+
+def _obs_step(primitive: str, why: str, obs_id: str,
+              **params) -> planner.PlanStep:
+    """A step that is valid in every OTHER respect, so the citation gate is the
+    only thing that can reject it. Registry validation runs first, so a missing
+    required parameter would fail these for the wrong reason."""
+    return planner.PlanStep(
+        n=1, part=planner.PARTS[0], primitive=primitive, params=params,
+        what="Check something", why=why, observations=(obs_id,))
+
+
+def test_a_step_that_hedges_where_it_has_the_number_is_dropped():
+    report = _prose_report()
+    o = report.of_kind("account_attribution_gap")[0]
+    step = _obs_step(
+        "audit_signal_field_coverage",
+        "With very few signals naming an account, themes can only be counted.",
+        o.id, field="properties.account")
+    kept, dropped = planner.verify([step], report.observations)
+    assert kept == []
+    assert "quotes none of its figures" in dropped[0]
+
+
+def test_the_same_step_passes_once_it_quotes_the_measurement():
+    report = _prose_report()
+    o = report.of_kind("account_attribution_gap")[0]
+    step = _obs_step(
+        "audit_signal_field_coverage",
+        f"Only {o.figures['present']:,.0f} of {o.figures['signals']:,.0f} "
+        f"signals name an account, so themes can only be counted.",
+        o.id, field="properties.account")
+    kept, dropped = planner.verify([step], report.observations)
+    assert len(kept) == 1 and dropped == []
+
+
+def test_a_figure_that_is_not_the_observation_s_does_not_count_as_citing_it():
+    """Otherwise a step could satisfy the citation half by inventing a number
+    that the traceability half would then reject — two gates cancelling out."""
+    report = _prose_report()
+    o = report.of_kind("account_attribution_gap")[0]
+    assert planner.cites_a_figure("this reaches 63% of accounts", [o]) is False
+    assert planner.cites_a_figure(
+        f"{o.figures['signals']:,.0f} signals", [o]) is True
+
+
+def test_a_spine_step_resting_on_no_observation_is_untouched():
+    """Most of the method states a RULE, not a quantity. Requiring a figure of
+    those would delete the refutation rules and the ranking."""
+    report = _prose_report()
+    step = planner.PlanStep(
+        n=1, part=planner.PARTS[3], primitive="refute_anecdote",
+        what="Drop anything resting on a single mention",
+        why="One person saying something once is not a pattern.")
+    kept, dropped = planner.verify([step], report.observations)
+    assert len(kept) == 1 and dropped == []
+
+
+def test_every_observation_backed_step_the_deterministic_plan_writes_cites_one():
+    """The fallback has to satisfy the gate it is the floor for — otherwise a
+    rejected draw falls through to a plan that is itself rejected."""
+    report, steps = _prose_plan()
+    backed = [s for s in steps if s.observations]
+    assert backed, "this test is vacuous with no observation-backed steps"
+    by_id = {o.id: o for o in report.observations}
+    for step in backed:
+        cited = [by_id[i] for i in step.observations]
+        assert planner.cites_a_figure(f"{step.what} {step.why}", cited), (
+            f"step {step.n} ({step.primitive}) rests on a measurement and "
+            f"quotes none of it")
+
+
+def test_the_prompt_asks_for_the_figure_rather_than_only_forbidding_others():
+    """THE ACTUAL FIX. Naming figures only under "what you must not do", with a
+    discard threat attached, produced 0 citations in 11 backed steps against
+    the real model; requiring citation produced 15 in 15. The gate above cannot
+    have caused either — it runs after generation."""
+    assert "CITE THE NUMBER" in planner._SYSTEM
+    assert "MUST quote at least one of that observation's figures" in planner._SYSTEM
+    # And the hedges it has to name to rule out.
+    for hedge in ('"very few"', '"a large share"'):
+        assert hedge in planner._SYSTEM

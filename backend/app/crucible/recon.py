@@ -1345,7 +1345,7 @@ def _observe_attribution(signals: Sequence[Mapping[str, Any]]) -> list[Observati
     """
     out: list[Observation] = []
     for path, kind, noun, consequence in (
-        (("properties", "account"), "account_attribution_gap", "names an account",
+        (("properties", "account"), "account_attribution_gap", "name an account",
          "themes can only be counted, never weighted by the revenue behind "
          "them — and the report will say that is what happened"),
         (("properties", "amount"), "monetary_coverage_gap", "carry a figure",
@@ -1362,8 +1362,8 @@ def _observe_attribution(signals: Sequence[Mapping[str, Any]]) -> list[Observati
             source="knowledge graph",
             fields=(p.field_path,),
             what=(
-                f"{p.present} of {p.signals} signals ({_pct(p.share)}) "
-                f"{noun}. At that coverage {consequence}."
+                f"{p.present:,.0f} of {p.signals:,.0f} signals "
+                f"({_pct(p.share)}) {noun}. At that coverage {consequence}."
             ),
             figures={
                 "signals": float(p.signals),

@@ -277,6 +277,28 @@ def untraceable_figures(
     return tuple(bad)
 
 
+def cites_a_figure(text: str, observations: Sequence[Observation]) -> bool:
+    """Does `text` quote at least one figure from these observations?
+
+    THE OTHER HALF OF THE GATE. `untraceable_figures` punishes a step for
+    citing a number it cannot support, and for a long time nothing punished a
+    step for omitting a number it was handed — so a step derived from "4 of
+    1,275 signals name an account" could say "very few" and pass. Measured
+    against the real model, every one of eleven observation-backed steps did
+    exactly that.
+
+    The prompt is what stopped it happening; this is what stops it shipping if
+    the prompt ever drifts, and it is deliberately the same comparison run the
+    other way: a figure counts as cited when it MATCHES one the observation
+    actually carries, so a step cannot satisfy this by inventing a number that
+    the traceability half would then reject.
+    """
+    allowed = [float(v) for o in observations for v in o.figures.values()]
+    if not allowed:
+        return True
+    return any(_matches(x, allowed) for x in _numbers_in(text))
+
+
 def verify(
     steps: Sequence[PlanStep],
     observations: Sequence[Observation],
@@ -331,6 +353,18 @@ def verify(
             dropped.append(
                 f"step {i + 1} ({step.primitive}): states "
                 f"{', '.join(bad)}, which is not in any observation"
+            )
+            continue
+        # A STEP DRAWN FROM A MEASUREMENT HAS TO REPORT IT. Both directions of
+        # the same gate: a step may not state a figure it cannot support, and
+        # may not withhold one it was given. Spine steps that rest on no
+        # observation state a rule rather than a quantity and are untouched.
+        cited = [obs_by_id[oid] for oid in step.observations]
+        if cited and not cites_a_figure(f"{step.what} {step.why}", cited):
+            dropped.append(
+                f"step {i + 1} ({step.primitive}): rests on "
+                f"{', '.join(step.observations)} and quotes none of its "
+                f"figures, so it hedges where it has the answer"
             )
             continue
         kept.append(step)
@@ -601,9 +635,11 @@ def minimal_plan(
         steps.append(_obs_step(
             "prefer_field", o,
             f"Use {total} and record that {base} was set aside",
-            f"One of the two has to win, and it should be the complete one. "
-            f"Saying which was dropped is what lets you check this against "
-            f"your own reporting rather than wonder why the totals differ.",
+            f"One of the two has to win, and it should be the complete one — "
+            f"the {o.figures['gap_total']:,.0f} difference is real money that "
+            f"the smaller column simply does not carry. Saying which was "
+            f"dropped is what lets you check this against your own reporting "
+            f"rather than wonder why the totals differ.",
             params={"source": o.source, "prefer": total, "over": base},
             part=PARTS[1],
         ))
@@ -842,6 +878,31 @@ PLAN_SCHEMA: dict = {
     },
 }
 
+#: THE PROMPT IS THE FIX, AND THE GATE IS THE GUARANTEE — in that order, and
+#: it took a measurement to see why.
+#:
+#: The first version of this named figures ONLY under "what you must not do",
+#: with a discard threat attached. Driven against the real model over a real
+#: run's six observations, it produced ELEVEN observation-backed steps and not
+#: one figure among them: "very few signals naming an account" where the run
+#: had computed 4 of 1,275; "a very short window of import time" where it had
+#: 100.0% within 120 seconds; "a large share… from a small number of documents"
+#: where it had 18.4% and eleven. A plan that hedges where it holds the number
+#: reads as generated, which is the exact impression this stage exists to
+#: remove — and it is strictly worse than saying nothing, because the reader
+#: cannot tell the model was not guessing.
+#:
+#: THE GATE CANNOT HAVE CAUSED THAT, and this is the part worth remembering:
+#: `verify` runs after generation and the model never sees it. The only channel
+#: from the gate to the output is the SENTENCE describing it, and that sentence
+#: was a prohibition. Requiring citation in the gate without changing the
+#: prompt would have rejected every draw, regenerated once, rejected again and
+#: shipped the deterministic plan on every run — the composition silently lost
+#: while everything appeared to work.
+#:
+#: Same observations, same model, citation required instead of merely
+#: permitted: fifteen backed steps, fifteen carrying a figure, and the existing
+#: traceability gate dropped none of them.
 _SYSTEM = """You compose an analysis plan for a product decision, and you write \
 it in the reader's language.
 
@@ -850,13 +911,26 @@ put them in a sensible order under the given parts, and write two sentences for 
 each — one saying what is being done, one saying what it gets the reader and why \
 it matters to THIS decision.
 
+CITE THE NUMBER. THIS IS THE MOST IMPORTANT RULE HERE.
+Every OBSERVATION below carries measured figures. When you draw a step from an \
+observation, its `why` MUST quote at least one of that observation's figures, \
+written out exactly as given. Do not paraphrase a measurement into a quantity \
+word. "very few", "a small number", "a large share", "a short window" are \
+FAILURES when the figure is sitting in front of you: write "4 of 1275", \
+"0.3%", "100.0%", "18.4%". A reader who is told "very few" when the run knows \
+the answer is 4 stops trusting the document, and they are right to.
+
+KEEP `what` SHORT. It is one action phrase, under about 120 characters, and it \
+is what the reader scans down the page. Lists, examples and enumerations of \
+sources or record types belong in `why`, never in `what`.
+
 WHAT YOU MUST NOT DO:
 - Do not invent an operation. You may only name a primitive from the catalogue.
-- Do not state ANY number that is not given to you in an OBSERVATION below. No \
-scores, no rankings, no thresholds, no estimates, no percentages you worked out \
-yourself, no dates. Every figure you write will be checked against the \
-observations and any step containing an unverifiable number is discarded.
-- Do not promise a result. A step says what will be done, never what will be found.
+- Do not state a number that is NOT in an observation below. No scores, no \
+rankings, no thresholds, no estimates you worked out yourself, no dates. The \
+observations are the source of every figure you write; nothing else is.
+- Do not promise a result. A step says what will be done, never what will be \
+found.
 
 VOICE: a colleague explaining the approach to the person who has to act on it. \
 "See whether the accounts you won last year are growing or shrinking", not \
@@ -1039,7 +1113,7 @@ def build_steps(
                 enterprise_id=enterprise_id,
                 agent="crucible",
                 purpose="compose_run_plan",
-                prompt_version="crucible-planner-v1",
+                prompt_version="crucible-planner-v2",
                 system=_SYSTEM,
                 input=prompt,
                 json_schema=PLAN_SCHEMA,
