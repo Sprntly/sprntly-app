@@ -1267,6 +1267,29 @@ def today_line(now=None) -> str:
 # routing failure, and a PM acting on either would go configure something they
 # already have. Stating the inventory is what makes "what is missing" a fact
 # rather than an inference.
+def ask_system_suffix(company_id) -> str:
+    """Every per-company fact the answer prompt has to carry, in one call.
+
+    THE REASON THIS EXISTS IS A BUG IT WOULD HAVE PREVENTED. `open_goal_gate_line`
+    was added to three `ASK_SYSTEM` assemblies in `ask_runner`, which looked like
+    all of them. There are SEVEN across two files, and the three that were missed
+    included every one `qa_agent.answer` builds — the agentic ladder main chat
+    actually answers through. So a run waiting for approval was announced to the
+    paths nobody used, and the answer that invented a plan never saw the line
+    telling it not to.
+
+    The failure was not carelessness, it was that the composition was open-coded
+    seven times: nothing named the set, so nothing could be complete. Adding the
+    next fact to this function is now the whole change.
+
+    ORDER IS PRESERVED EXACTLY as the sites had it — date, then connected
+    sources, then the open gate — because these are appended to a cached prompt
+    prefix and reordering them would cost every warm cache for no gain.
+    """
+    return (today_line() + connected_sources_line(company_id)
+            + open_goal_gate_line(company_id))
+
+
 def open_goal_gate_line(company_id) -> str:
     """Say, as a fact, that a Goal Analysis in THIS conversation is waiting for
     the user to approve its plan — and that this path cannot approve it.

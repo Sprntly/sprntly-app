@@ -68,7 +68,7 @@ from app.prompt_history import render_history_block
 from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
-    open_goal_gate_line,
+    ask_system_suffix,
     ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
@@ -1000,9 +1000,7 @@ def _answer_single_shot(
     docs_block, documents = document_grounding(enterprise_id, question)
     system = (
         ASK_SYSTEM
-        + today_line()
-        + connected_sources_line(enterprise_id)
-        + open_goal_gate_line(enterprise_id)
+        + ask_system_suffix(enterprise_id)
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         # skill_spec is not None ⇔ the method text is a company upload, not a
@@ -1157,9 +1155,7 @@ def _answer_voc_report(
     corpus_text = render_context_section(bundle)
     _voc_system = (
         ASK_SYSTEM
-        + today_line()
-        + connected_sources_line(enterprise_id)
-        + open_goal_gate_line(enterprise_id)
+        + ask_system_suffix(enterprise_id)
         + "\n\n"
         + _VOC_KG_SYSTEM
     )
@@ -1208,9 +1204,7 @@ def _answer_voc_report(
             # added for, and this path is a VoC answer).
             system=(
                 ASK_SYSTEM
-                + today_line()
-                + connected_sources_line(enterprise_id)
-        + open_goal_gate_line(enterprise_id)
+                + ask_system_suffix(enterprise_id)
                 + "\n\n"
                 + _VOC_KG_SYSTEM
             ),

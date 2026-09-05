@@ -50,7 +50,7 @@ from app.prompts import (
     ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM,
     ASK_SYSTEM_PROJECTS_ADDENDUM,
     ASK_SYSTEM_TEAM_ADDENDUM,
-    open_goal_gate_line,
+    ask_system_suffix,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -1804,9 +1804,7 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
         feature=Feature.ASK, operation="warm"
     ):
         return call_json(
-            system=ASK_SYSTEM + today_line()
-            + connected_sources_line(company_id)
-            + open_goal_gate_line(company_id),
+            system=ASK_SYSTEM + ask_system_suffix(company_id),
             user=user,
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,
@@ -2368,8 +2366,7 @@ def compose_ask_answer(
                   + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
                   + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
                      if knowledge_base_context else "")
-                  + today_line() + connected_sources_line(enterprise_id)
-                  + open_goal_gate_line(enterprise_id))
+                  + ask_system_suffix(enterprise_id))
         own_records = "\n\n---\n\n".join(
             p for p in (library_context, team_context, projects_context,
                         backlog_context, knowledge_base_context)
@@ -2437,15 +2434,12 @@ def compose_ask_answer(
                       + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
                       + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
                          if knowledge_base_context else "")
-                      + today_line() + connected_sources_line(enterprise_id)
-                  + open_goal_gate_line(enterprise_id))
+                      + ask_system_suffix(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question
             )
         else:
-            system = (ASK_SYSTEM + today_line()
-                      + connected_sources_line(enterprise_id)
-                      + open_goal_gate_line(enterprise_id))
+            system = (ASK_SYSTEM + ask_system_suffix(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once
