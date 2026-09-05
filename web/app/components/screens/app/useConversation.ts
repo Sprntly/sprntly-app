@@ -42,7 +42,9 @@ import {
 } from "../../../lib/api"
 import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
-import { resolveAttachmentRefs, spliceSkill } from "../../shared/chatComposerController"
+import {
+  resolveAttachmentRefs, spliceSkill, uploadAttachmentKeys,
+} from "../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 // Highlight-to-reply: the send appends the parked quote as a trailing
 // blockquote (AFTER the pinned-skill splice, so the slash trigger stays the
@@ -127,7 +129,13 @@ export interface MainConversationAdapter {
    *  a goal falls through to the ask path rather than vanishing. */
   /** `(extracted goal, what the user actually typed)`. The run works from
    *  the first; the thread shows the second. */
-  startGoalAnalysis?: (goalText: string, saidText?: string) => void | Promise<void>
+  startGoalAnalysis?: (
+    goalText: string,
+    saidText?: string,
+    /** The message's attached files, staging in the background — see the
+     *  dispatch site below for why this is a promise and not a list. */
+    attachments?: Promise<{ key: string; name: string }[]>,
+  ) => void | Promise<void>
   openArtifactInPanel: (candidate: OpenArtifactCandidate, seedQuery?: string) => boolean
   postOpenArtifactReply: (seedQuery: string, answer: string, candidates: OpenArtifactCandidate[]) => void
   markTicketSetAutoOpened: (key: string) => void
@@ -799,8 +807,22 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
                 // `trimmed` is what the reader typed; `goalText` is what the
                 // planner extracted from it. Both, so the run works from the
                 // goal and the thread shows the sentence.
+                //
+                // AND THE FILES. A handled intent RETURNS from this function
+                // (see the dispatch below), several hundred lines before the
+                // ask path stages attachments — so a goal asked WITH a pack of
+                // spreadsheets attached uploaded nothing at all, and the run
+                // was planned over the connected corpus as though the reader
+                // had attached nothing. Staged here, on the branch that
+                // actually runs, and handed over UNRESOLVED so the analysis
+                // turn still appears the instant it is dispatched.
                 ? { onAnalyseGoal: (goalText: string) =>
-                      void startGoalAnalysis(goalText, trimmed) }
+                      void startGoalAnalysis(
+                        goalText, trimmed,
+                        hasAttachments
+                          ? uploadAttachmentKeys(sentAttachments)
+                          : undefined,
+                      ) }
                 : {}),
               onGenerateTickets: (env) => {
                 if (docFile) {

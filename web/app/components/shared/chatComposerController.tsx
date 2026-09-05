@@ -100,6 +100,42 @@ export async function resolveAttachmentRefs(
   )
 }
 
+/** One attached file, reduced to what a RUN needs: where the bytes are, and
+ *  what the reader called it. */
+export type AttachmentKeyRef = { key: string; name: string }
+
+/**
+ * Stage the ORIGINAL files and return their storage keys. No text extraction.
+ *
+ * WHY THIS EXISTS BESIDE `resolveAttachmentRefs`. That function does two jobs
+ * — extract text for a prompt, and stash the original — and the extraction is
+ * the expensive half: a server-side parse per document, clamped to 50k of
+ * markdown. A Goal Analysis run wants neither the markdown nor the clamp. It
+ * reads the WORKBOOK, with its dtypes and its empty cells intact, because the
+ * structure is the finding; text extracted from a spreadsheet is exactly the
+ * information it needs thrown away. So this stages and stops.
+ *
+ * Best-effort per file, like the upload half of `resolveAttachmentRefs`: a
+ * file that fails to stage is dropped from the result rather than failing the
+ * send, because a goal that reached the planner should still get a plan.
+ */
+export async function uploadAttachmentKeys(
+  items: AttachmentInput[],
+): Promise<AttachmentKeyRef[]> {
+  if (!items.length) return []
+  const staged = await Promise.all(
+    items.map((a) =>
+      a.file
+        ? Promise.resolve()
+            .then(() => attachmentsApi.upload(a.file!))
+            .then((r) => ({ key: r.key, name: a.name }))
+            .catch(() => null)
+        : Promise.resolve(null),
+    ),
+  )
+  return staged.filter((x): x is AttachmentKeyRef => x != null)
+}
+
 // ── The send-command producer ────────────────────────────────────────────────
 
 /** Builds the normalized `SendCommand` (plus a convenience `.riddenText`) that a

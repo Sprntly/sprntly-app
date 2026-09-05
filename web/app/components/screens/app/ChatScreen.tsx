@@ -4074,7 +4074,11 @@ export function ChatScreen() {
   // dispatcher always calls the current closure rather than the first one.
   const startGoalAnalysisRef =
     useRef<
-      ((goalText: string, saidText?: string) => void | Promise<void>) | null
+      ((
+        goalText: string,
+        saidText?: string,
+        attachments?: Promise<{ key: string; name: string }[]>,
+      ) => void | Promise<void>) | null
     >(null)
 
 
@@ -4107,8 +4111,12 @@ export function ChatScreen() {
       // because the only path a test drives (the `+` menu) sends one argument
       // anyway. A forwarder that silently narrows its own signature is the
       // same shape of bug as an intent missing from `_CLIENT_INTENTS`.
-      startGoalAnalysis: (goalText: string, saidText?: string) => {
-        startGoalAnalysisRef.current?.(goalText, saidText)
+      startGoalAnalysis: (
+        goalText: string,
+        saidText?: string,
+        attachments?: Promise<{ key: string; name: string }[]>,
+      ) => {
+        startGoalAnalysisRef.current?.(goalText, saidText, attachments)
       },
       tabsRef,
       activeTabId,
@@ -5536,6 +5544,18 @@ export function ChatScreen() {
      *  sentence. Falls back to the extraction for callers that have no raw text
      *  (the `+` menu, where the two are the same thing). */
     saidText?: string,
+    /** THE ATTACHED FILES, STILL UPLOADING.
+     *
+     *  A PROMISE, not a list, and the shape is the point. The turn below goes
+     *  on screen before any network call — that ordering is load-bearing and
+     *  documented there — so awaiting a dozen uploads before emitting it would
+     *  put the reader in front of an empty thread for as long as their pack
+     *  takes to stage. Handed over unresolved, the staging overlaps with the
+     *  conversation-row wait that already happens on this path, and costs the
+     *  reader nothing on the ordinary route.
+     *
+     *  Undefined when the message carried no files. */
+    attachments?: Promise<{ key: string; name: string }[]>,
   ) => {
     const turnId = `goal-${Date.now()}`
     // THE TURN GOES UP FIRST, before the network call. The dispatcher reports
@@ -5599,6 +5619,15 @@ export function ChatScreen() {
           + "find its way back here. Ask again in a moment.")
         return
       }
+      // The uploads, now that the turn is up and the conversation row has
+      // landed. Best-effort by construction (`uploadAttachmentKeys` drops what
+      // it could not stage) and defended again here: a run that reads the
+      // connected corpus and none of the attachments is a worse answer, but a
+      // goal that never starts because a file failed to upload is not an
+      // answer at all.
+      const attachmentRefs = attachments
+        ? await attachments.catch(() => [])
+        : []
       const run = await goalAnalysisApi.start(goalText, {
         ...(convId != null ? { conversation_id: convId } : {}),
         // THE READER'S OWN SENTENCE, sent to the run — not only to this
@@ -5607,6 +5636,7 @@ export function ChatScreen() {
         // else: `goalText` is the planner's extraction, and the run started
         // from it alone had no way to see a count the extraction dropped.
         ...(saidText && saidText.trim() ? { asked_text: saidText.trim() } : {}),
+        ...(attachmentRefs.length ? { attachments: attachmentRefs } : {}),
       })
       goalRunRef.current = run.id
       // A run is born `resolving_goal` and reaches A GATE a moment later —

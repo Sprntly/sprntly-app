@@ -579,11 +579,21 @@ function PlanBody({
 }) {
   const coverage = plan.coverage
   const gaps = plan.cannot_answer ?? []
+  //: Files attached to the message, as the server reported actually READING
+  //  them. Not filtered by `effectiveExcluded`: exclusion is keyed on
+  //  `source_type`, which an upload deliberately does not have.
+  const uploads = plan.uploads ?? []
 
   // THE VERDICT, IN A SENTENCE, BEFORE ANY NUMBER. A reader arriving at a plan
   // asks whether this can be answered at all; the strip below answers "off how
   // much" and cannot answer the first question.
-  const verdict = !plan.sources.length
+  //
+  // AN UPLOAD COUNTS TOWARDS "IS THERE ANYTHING TO READ". A workspace with no
+  // connectors is exactly the workspace most likely to attach a spreadsheet,
+  // and telling that reader "nothing is connected for this to read" over a
+  // plan that goes on to list the twelve files it read would be the screen
+  // contradicting itself in its own first sentence.
+  const verdict = !plan.sources.length && !uploads.length
     ? "Nothing is connected for this to read."
     : gaps.length
       ? `I can answer this from what you have connected, with ${gaps.length} ` +
@@ -901,11 +911,55 @@ function PlanBody({
               </button>
             )}
           </>
-        ) : (
+        ) : uploads.length ? null : (
           <p className="ga-empty" data-testid="goal-plan-no-sources">
             Nothing is connected for this to read.
           </p>
         )}
+
+        {/* ── FILES ATTACHED TO THIS MESSAGE. ─────────────────────────────
+            ITS OWN BLOCK, NOT A ROW IN THE LIST ABOVE, and the separation is
+            the disclosure. Everything above is a standing connection: it was
+            there before this question and it will be there after, and a
+            figure traced to it can be traced again. An upload is true for one
+            run — nothing is written to the knowledge graph, so the same
+            question asked tomorrow without the file gets a different answer.
+            Presented as another tick in the same list, that difference would
+            be invisible at precisely the moment the reader is being asked to
+            approve the method.
+
+            No checkbox, either. Dropping a connected source is a change to
+            the plan; "dropping" an upload means detaching it from the message,
+            which is a different act in a different place — a control here
+            would imply this screen could undo it. */}
+        {uploads.length ? (
+          <div className={s.uploads} data-testid="goal-plan-uploads">
+            <div className={s.roleHead}>
+              <span className={s.rolePill}>Attached to this message</span>
+              <span className={s.roleNote}>
+                Read for this analysis only — not added to your knowledge graph
+              </span>
+            </div>
+            <ul className={s.tickList}>
+              {uploads.map((u) => (
+                <li key={u.name} className={s.tickRow} data-testid="goal-plan-upload">
+                  <span className={s.tick} aria-hidden>
+                    {"\u2713"}
+                  </span>
+                  <span>
+                    <b>{u.name}</b>{" "}
+                    <span className="ga-doc-source-count">
+                      {u.records.toLocaleString()}
+                    </span>
+                  </span>
+                  <span className={s.tickWitness}>
+                    {u.tables === 1 ? "1 table" : `${u.tables} tables`}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </section>
 
       {/* WHAT THE PLAN STILL NEEDS — a forward reference, not the questions

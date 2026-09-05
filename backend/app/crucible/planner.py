@@ -469,10 +469,18 @@ def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
     connected. Falls back to the source types when nothing was read
     structurally, which is every prose-only tenant.
     """
+    from app.crucible.recon import UPLOAD_SOURCE_TYPE
+
     origins: list[str] = []
+    #: Origins that came from a file attached to the message, not from a
+    #: connected source — tracked separately because the sentence has to say
+    #: so. See the closing clause below.
+    uploaded: list[str] = []
     for s in report.sources:
         if s.origin and s.origin not in origins:
             origins.append(s.origin)
+            if s.source_type == UPLOAD_SOURCE_TYPE:
+                uploaded.append(s.origin)
     if not origins:
         origins = [str(t).replace("_", " ") for t in source_types]
 
@@ -491,9 +499,38 @@ def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
              if tables > len(origins) else
              f"{len(origins)} source{'s' if len(origins) != 1 else ''}")
 
+    # ── WHERE THE EVIDENCE CAME FROM, WHEN SOME OF IT CAME FROM THE READER. ──
+    #
+    # "traced back to something you connected" is FALSE about an attached
+    # file, and falsest exactly where it matters: the reader is being asked to
+    # approve a method, and the first sentence of it would be telling them
+    # their upload is part of their connected corpus. It is not — it is read
+    # for this run and nothing is written to the knowledge graph on its
+    # account — and that is a fact they can only act on if they are told it
+    # BEFORE they approve. So the files are named, and the scoping is stated
+    # in the same breath rather than left to a footnote.
+    if not uploaded:
+        return (f"Everything below is computed over {scope} — {named} — and "
+                f"nothing else, so a figure in the finished document can always "
+                f"be traced back to something you connected.")
+
+    up_shown = uploaded[:MAX_NAMED_SOURCES]
+    up_named = ", ".join(up_shown[:-1]) + (
+        " and " + up_shown[-1] if len(up_shown) > 1 else up_shown[0])
+    if len(uploaded) > MAX_NAMED_SOURCES:
+        up_named += f", and {len(uploaded) - MAX_NAMED_SOURCES} more"
+    files_word = "file" if len(uploaded) == 1 else "files"
+    verb = "is a file" if len(uploaded) == 1 else "are files"
+    which = (up_named if len(uploaded) == len(origins)
+             else f"{up_named} of those")
+
     return (f"Everything below is computed over {scope} — {named} — and "
             f"nothing else, so a figure in the finished document can always "
-            f"be traced back to something you connected.")
+            f"be traced back to one of them. {which} {verb} you attached to "
+            f"this message: I am reading {'it' if len(uploaded) == 1 else 'them'} "
+            f"for this analysis only, and {'it is' if len(uploaded) == 1 else 'they are'} "
+            f"not added to your knowledge graph. Detach the {files_word} and "
+            f"this run reads your connected sources alone.")
 
 
 def _obs_step(

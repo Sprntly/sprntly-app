@@ -40,6 +40,12 @@ _MEDIA_TYPE_BY_EXT: dict[str, str] = {
     "doc": "application/msword",
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    #: Workbooks. Without these the raw-staging route refuses a spreadsheet
+    #: with a 422 before the bytes are ever written, so a person attaching an
+    #: export to a chat lost the file at the door — and a spreadsheet is the
+    #: one attachment shape that carries STRUCTURE rather than prose.
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "xls": "application/vnd.ms-excel",
     "txt": "text/plain",
     "md": "text/markdown",
     "csv": "text/csv",
@@ -124,6 +130,56 @@ def attachment_urls(*, workspace_id: str, key: str, filename: str) -> dict[str, 
     return _signed_urls_supabase(bucket, key, filename)
 
 
+def owns_key(*, workspace_id: str, key: str) -> bool:
+    """Is this storage key inside the caller's own workspace prefix?
+
+    THE ONE AUTHORISATION QUESTION A KEY CAN ACTUALLY ANSWER. Keys are minted
+    as `chat-attachments/{workspace_id}/{uuid}.{ext}` by `stage_attachment`,
+    which is the only producer — so the prefix is not a hint about the owner,
+    it IS the owner, and a caller handing back a key from another workspace is
+    asking for someone else's file. `..` is rejected separately because a
+    traversal segment can satisfy the prefix and still address a path outside
+    it.
+
+    A PREDICATE RATHER THAN A RAISE because the callers that need it are
+    filtering a list, where one bad key should cost that key and not the
+    request. `attachment_urls` and `read_attachment` still raise: they return
+    a single file, and there is no such thing as partially returning it.
+    """
+    if not workspace_id or not key:
+        return False
+    if not key.startswith(_prefix(workspace_id)):
+        return False
+    return ".." not in key.split("/")
+
+
+def read_attachment(*, workspace_id: str, key: str) -> bytes:
+    """The stored bytes behind one attachment key.
+
+    The read half of `stage_attachment`. Until now nothing read an attachment
+    back server-side — the file was staged so a browser could be handed a
+    signed URL for it — so a feature that wants to PARSE what someone attached
+    had no way to obtain the bytes without minting a URL and fetching itself.
+
+    Refuses any key outside the caller's workspace prefix (`ValueError`, the
+    same contract and the same reason as `attachment_urls`). Sync, because
+    both backends are blocking calls; async callers use `asyncio.to_thread`.
+    """
+    if not owns_key(workspace_id=workspace_id, key=key):
+        raise ValueError("read_attachment: key is outside the caller's workspace prefix")
+
+    bucket = _bucket_name()
+    if not bucket:
+        target = Path(settings.storage_dir).resolve() / key
+        # RESOLVED AND RE-CHECKED. `owns_key` vets the key as a string; this
+        # vets the PATH it resolved to, which is the thing actually opened.
+        root = (Path(settings.storage_dir).resolve() / _prefix(workspace_id)).resolve()
+        if not target.resolve().is_relative_to(root):
+            raise ValueError("read_attachment: resolved path escapes the workspace prefix")
+        return target.read_bytes()
+    return _read_supabase_sync(bucket, key)
+
+
 # ─── Supabase backend ────────────────────────────────────────────────────────
 
 
@@ -136,6 +192,12 @@ def _stage_supabase_sync(bucket: str, key: str, data: bytes, media_type: str) ->
         file=data,
         file_options={"content-type": media_type, "upsert": "true"},
     )
+
+
+def _read_supabase_sync(bucket: str, key: str) -> bytes:
+    from app.db.client import require_client
+
+    return bytes(require_client().storage.from_(bucket).download(key))
 
 
 def _signed_urls_supabase(bucket: str, key: str, filename: str) -> dict[str, str]:

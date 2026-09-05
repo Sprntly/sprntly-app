@@ -41,6 +41,7 @@ from app.crucible.figure_class import (
 from app.crucible.pipeline import build_findings
 from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
+from app import attachments_storage
 from app.billing import enforce
 from app.db import crucible_runs as runs_db
 from app.entitlements import require_crucible_module
@@ -70,9 +71,48 @@ _EMBED_PAGE = 50
 _inflight: set = set()
 
 
+#: How many uploaded files one run may read. Matches the composer's own
+#: per-message ceiling — the files come FROM a message, so a cap below it
+#: would refuse a send the composer had already accepted.
+MAX_RUN_ATTACHMENTS = 16
+
+
+class RunAttachment(BaseModel):
+    """One file the reader attached in chat, offered to THIS run only.
+
+    `key` is the authority and `name` is the label. The key was minted by
+    `attachments_storage.stage_attachment`, carries the owning workspace in
+    its prefix, and is what decides which bytes are read; the name is what the
+    person called the file and is used for the table names and the prose, and
+    is sanitised into a leaf filename before it touches a filesystem (see
+    `recon.upload_filename`).
+
+    NOT A PATH. The route checks every key against the caller's own workspace
+    prefix before a single byte is read, so this field cannot be used to name
+    an arbitrary object in storage — see `attachments_storage.owns_key`.
+    """
+    key: str = Field(min_length=1, max_length=400)
+    name: str = Field(default="", max_length=300)
+
+
 class StartRun(BaseModel):
     goal_text: str = Field(min_length=3, max_length=2000)
     conversation_id: Optional[int] = None
+    #: FILES ATTACHED IN CHAT, READ FOR THIS RUN AND NOTHING ELSE.
+    #:
+    #: The alternative route for the same bytes is the connector upload, which
+    #: ingests into `kg_signal` — permanent, tenant-wide, and visible to every
+    #: later run and every chat answer. That is the right shape for a source a
+    #: company keeps, and the wrong one for a file someone is analysing once:
+    #: it cannot be undone from the product, and a graph carrying a one-off
+    #: export answers later questions with it forever.
+    #:
+    #: So these are RUN-SCOPED. They are read during reconnaissance, they
+    #: shape the plan, and nothing is written to any knowledge-graph table on
+    #: their account.
+    attachments: Optional[list[RunAttachment]] = Field(
+        default=None, max_length=MAX_RUN_ATTACHMENTS,
+    )
     #: THE READER'S OWN SENTENCE, when the caller has one distinct from
     #: `goal_text` — chat dispatches the planner's EXTRACTED goal as
     #: `goal_text` (right for `goal.resolve` and the KPI-tree match, which
@@ -125,6 +165,23 @@ async def start(
     company: WorkspaceContext = Depends(require_crucible_module),
 ):
     """Start a run. Returns the row immediately, `resolving_goal`."""
+    # ── EVERY KEY, AGAINST THE CALLER'S OWN WORKSPACE, BEFORE ANYTHING. ────
+    #
+    # Checked HERE because this is the only layer that knows who is asking:
+    # `execute_run` and the reconnaissance pass below it receive a company id,
+    # and the workspace prefix a key must match is not derivable from it. A
+    # foreign key is refused outright rather than dropped from the list — it
+    # is a caller bug or an attempt, and neither should end in a plan that
+    # quietly analysed less than it was asked to.
+    uploads: tuple[tuple[str, str], ...] = ()
+    if body.attachments:
+        for att in body.attachments:
+            if not attachments_storage.owns_key(
+                workspace_id=company.workspace_id, key=att.key,
+            ):
+                raise HTTPException(422, "Attachment not found")
+        uploads = tuple((att.key, att.name) for att in body.attachments)
+
     # Billable action. Goal Analysis is a multi-stage sweep, hence the price.
     enforce.bill(company.company_id, "crucible", actor_user_id=company.user_id)
     row = await asyncio.to_thread(
@@ -137,7 +194,8 @@ async def start(
     )
 
     kwargs = dict(run_id=row["id"], company_id=company.company_id,
-                  goal_text=body.goal_text, asked_text=body.asked_text)
+                  goal_text=body.goal_text, asked_text=body.asked_text,
+                  workspace_id=company.workspace_id, uploads=uploads)
     if "pytest" in sys.modules:
         # The TestClient does not keep the loop alive between requests, so a
         # fire-and-forget task would never run and a polling test would spin
@@ -946,6 +1004,16 @@ def execute_run(
     #: extraction). Never reaches `resolve()`/`_convention_definition` below —
     #: the metric definition stays sourced from `goal_text` alone (I9).
     asked_text: Optional[str] = None,
+    #: FILES ATTACHED IN CHAT — `(storage_key, display_name)`, already checked
+    #: against `workspace_id` by the route. Read during reconnaissance so the
+    #: plan is built over them as well as the connected corpus; NEVER written
+    #: to the knowledge graph. Empty on every other entry point, which
+    #: therefore behaves exactly as it did before this existed.
+    uploads: tuple[tuple[str, str], ...] = (),
+    #: Needed only to read those uploads back out of storage — the workspace
+    #: prefix is what authorises the read, and a company id cannot stand in
+    #: for it. Empty means "no uploads", which is the normal case.
+    workspace_id: str = "",
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -1119,7 +1187,8 @@ def execute_run(
             #
             # So this write lands the deterministic method, marked pending, and
             # the gate renders off it immediately.
-            report = _recon_report(company_id)
+            report = _recon_report(company_id, uploads=uploads,
+                                   workspace_id=workspace_id)
             plan = build_plan(
                 company_id=company_id,
                 goal_text=goal_text,
@@ -2479,12 +2548,64 @@ def _signal_page(client, company_id: str, page: int) -> list[dict]:
 _RECON_PAGES = 4
 
 
-def _recon_report(company_id: str):
+def _upload_tables(uploads: tuple[tuple[str, str], ...], workspace_id: str):
+    """The attached files, as tables. Never raises; a file it cannot read is
+    one fewer table.
+
+    RUN-SCOPED, AND THAT IS THE POINT. Nothing here writes: the bytes are
+    fetched, parsed into `Table`s in memory, and the temporary directory
+    `tables_from_uploads` used is gone before this returns. No `kg_signal`, no
+    `kg_entity`, no row of any kind — a file analysed once leaves the graph
+    exactly as it found it, which is the difference between this and the
+    connector upload that ingests the same spreadsheet permanently.
+    """
+    from app.crucible.recon import tables_from_uploads, upload_filename
+
+    if not uploads or not workspace_id:
+        return []
+    files: list[tuple[str, bytes]] = []
+    for key, name in uploads:
+        try:
+            data = attachments_storage.read_attachment(
+                workspace_id=workspace_id, key=key,
+            )
+        except Exception:  # noqa: BLE001 — an unreadable attachment costs its
+            # own table and nothing else. A plan that fell over because one of
+            # twelve files had been swept from storage would be strictly worse
+            # than a plan that reads eleven and says so in its own inventory.
+            logger.warning("crucible: could not read attachment for %s; "
+                           "continuing without it", workspace_id, exc_info=True)
+            continue
+        files.append((upload_filename(name, key), data))
+    return tables_from_uploads(files)
+
+
+def _recon_report(company_id: str, *,
+                  uploads: tuple[tuple[str, str], ...] = (),
+                  workspace_id: str = ""):
     """What the evidence looks like structurally, or an empty report.
 
     Total: never raises, never blocks a plan.
+
+    `uploads` are ADDITIVE. The corpus query below is untouched by them — the
+    same signals are read for the same company whether or not a file was
+    attached — and the uploaded tables join the connected ones in a SINGLE
+    `observe()` call. One call rather than two because every interesting check
+    here is cross-table: the value-column reconciliation, the concentration
+    divergence and the funnel collapse all compare rectangles against each
+    other, and observing the two sets separately would give a reader the
+    structural findings within their upload and within their graph while
+    silently discarding every finding that spans the two.
     """
-    from app.crucible.recon import ReconReport, observe, tables_from_signals
+    from app.crucible.recon import observe, tables_from_signals
+
+    # OUTSIDE THE TRY, AND DELIBERATELY. The uploads do not depend on the
+    # graph, so a corpus read that fails must not take them with it: a reader
+    # who attached twelve files and hit a statement timeout on the signal
+    # query would otherwise be shown a plan that read nothing at all, when
+    # everything they actually handed over was sitting in storage, readable.
+    # `_upload_tables` is itself total, so this cannot raise.
+    uploaded = _upload_tables(uploads, workspace_id)
 
     try:
         from app.db.client import require_client
@@ -2503,12 +2624,14 @@ def _recon_report(company_id: str):
         # writing the answer to `provenance.triage_category` — and both signal
         # reads here already select `provenance`, so reading it costs no extra
         # query, no tokens and no latency.
-        return observe(tables_from_signals(rows), signals=rows)
+        return observe(tables_from_signals(rows) + uploaded, signals=rows)
     except Exception:  # noqa: BLE001 — see the constant above
         logger.warning("crucible: reconnaissance pass failed for %s; the plan "
                        "will be built without a method section", company_id,
                        exc_info=True)
-        return ReconReport()
+        # What survived: the uploads, observed on their own. An empty report
+        # when there is nothing else is the same object this used to return.
+        return observe(uploaded)
 
 
 def _load_signals(company_id: str) -> list[dict]:

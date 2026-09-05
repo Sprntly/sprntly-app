@@ -197,7 +197,15 @@ class AskIn(BaseModel):
     # `_load_history` folds a PRIOR turn's attachments. Ignored on the
     # main/PRD/artifact branches (which never persist a turn here). The clamp
     # matches main's composer ceiling.
-    attachments: list[TurnAttachment] | None = Field(default=None, max_length=8)
+    #: SIXTEEN, NOT EIGHT. A person assembling the evidence for one decision
+    #: attaches a set, not a file: a twelve-file pack of exports, transcripts
+    #: and research is an ordinary send, and eight silently truncated it at the
+    #: validator with a 422 rather than a sentence anyone could act on. Sixteen
+    #: is a deliberate ceiling and not "unbounded" — every attachment is read,
+    #: stored and folded into a prompt, so the cap is what stops one send from
+    #: becoming an unbounded amount of work. Both send routes carry the same
+    #: number on purpose; they are one composer to the person using them.
+    attachments: list[TurnAttachment] | None = Field(default=None, max_length=16)
 
     # Belt to `ingest.strip_nul`'s braces. That fix stops extraction PRODUCING a
     # NUL; this one stops one ARRIVING — the client inlines attachment text it
