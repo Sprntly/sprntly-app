@@ -165,11 +165,25 @@ export function GoalAnalysisPlan({
   plan,
   approving,
   onApprove,
+  approveNonce,
   settled,
 }: {
   plan: GoalRunPlan
   approving: boolean
   onApprove: (decision: PlanDecision) => void
+  /** A COMPOSER APPROVAL, ROUTED THROUGH THIS CARD RATHER THAN AROUND IT.
+   *
+   *  While a gate is open the composer targets it, so "ok let's go with the
+   *  plan" has to reach the plan. It arrives as a changing number rather than
+   *  a boolean because the same reader can say it twice, and each time is a
+   *  fresh instruction.
+   *
+   *  IT RUNS THE CARD'S OWN SUBMIT, which is the whole point: a shortcut that
+   *  built its own decision would approve the plan as STORED and silently drop
+   *  the source this reader had just unticked. Everything they changed here —
+   *  exclusions, a reworded definition, answers already typed — goes with it,
+   *  exactly as if they had pressed the button. */
+  approveNonce?: number
   /** THE PLAN STAYS IN THE THREAD after it is approved, read-only.
    *
    *  It used to collapse into a four-line receipt — "Plan approved", the source
@@ -285,6 +299,24 @@ export function GoalAnalysisPlan({
         .filter(Boolean),
     })
   }
+
+  // The composer's approval, applied once per instruction. `useRef` seeded
+  // with the incoming value so a card that mounts with a nonce already set —
+  // a re-render, a restore — does not read it as a fresh one and approve a
+  // plan nobody just approved.
+  const lastApproveNonce = React.useRef(approveNonce)
+  React.useEffect(() => {
+    if (approveNonce === undefined || approveNonce === lastApproveNonce.current) {
+      return
+    }
+    lastApproveNonce.current = approveNonce
+    if (settled || approving) return
+    // STRAIGHT TO THE RUN, not to the questions. "Let us go with the plan"
+    // means start it; stopping at a second step the reader did not ask for
+    // would leave them having said go with nothing happening. The questions
+    // are optional by design and their absence is disclosed in the output.
+    submit()
+  }, [approveNonce])
 
   const showingQuestions = !settled && stage === "questions"
   const showingPlan = settled || stage === "plan"

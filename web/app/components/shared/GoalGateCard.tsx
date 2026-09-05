@@ -176,11 +176,12 @@ function usePlanWhenComposed(runId: number, plan: GoalRunPlan): GoalRunPlan {
  *  there would run conditionally. This is that rule, not a layer for its own
  *  sake. */
 function GoalPlanGate({
-  gate, busy, onApprovePlan,
+  gate, busy, onApprovePlan, approveNonce,
 }: {
   gate: { kind: "plan"; runId: number; plan: GoalRunPlan }
   busy?: boolean
   onApprovePlan?: (decision: PlanDecision) => void
+  approveNonce?: number
 }) {
   const plan = usePlanWhenComposed(gate.runId, gate.plan)
   return (
@@ -188,6 +189,7 @@ function GoalPlanGate({
       plan={plan}
       approving={!!busy}
       onApprove={(decision) => onApprovePlan?.(decision)}
+      approveNonce={approveNonce}
     />
   )
 }
@@ -200,6 +202,7 @@ export function GoalGateCard({
   error,
   onConfirmDefinition,
   onApprovePlan,
+  approveNonce,
 }: {
   gate?: GoalGate
   resolved?: GoalGateResolved
@@ -211,6 +214,9 @@ export function GoalGateCard({
   error?: string
   onConfirmDefinition?: (definition: string) => void
   onApprovePlan?: (decision: PlanDecision) => void
+  /** A composer approval, handed to the plan card so it runs that card's own
+   *  submit with that card's own state. */
+  approveNonce?: number
 }) {
   if (resolved) return <GoalGateSettled resolved={resolved} error={error} />
   if (!gate) return null
@@ -238,6 +244,7 @@ export function GoalGateCard({
         gate={gate}
         busy={busy}
         onApprovePlan={onApprovePlan}
+        approveNonce={approveNonce}
       />
       {error ? <p className="ggc-error" role="status">{error}</p> : null}
     </div>
