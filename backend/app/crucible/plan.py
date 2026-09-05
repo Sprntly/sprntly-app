@@ -7,10 +7,25 @@ phrased as an apology. The same facts are worth far more BEFOREHAND, where they
 are a decision: connect the missing source, narrow the window, or accept a
 qualitative answer and press on.
 
-THE PLAN IS AN INVENTORY, NOT A SAMPLE. It counts what exists per source and
-reads no content, so it costs a few queries and returns in about a second. That
-is deliberate: a plan that had to read the corpus to describe it would be the
-expensive thing it exists to gate.
+THE PLAN NOW READS BEFORE IT SPEAKS, AND THAT REVERSES AN EARLIER DECISION.
+This module still only counts — `source_inventory` reads no content — but the
+stage no longer does. `routes.crucible._recon_report` reads a bounded slice of
+the corpus (`_RECON_PAGES` pages) and hands the observations in, so a step can
+say "these two value columns disagree on 13 of 60 rows" rather than "you have a
+revenue source connected".
+
+The decision this replaces was deliberate and its reasoning was sound: a plan
+that had to read the corpus to describe it would be the expensive thing it
+exists to gate. What changed is the evidence about what a plan is FOR. A plan
+built from counts can state coverage and nothing else, so it cannot say how a
+decision will be made — which is the whole of what a reader needs before
+approving one, and the reason the old gate read as a receipt.
+
+The cost is contained rather than dismissed: the read is bounded, fails open to
+the count-only plan, and reuses a column both signal reads already select. It is
+NOT free, and on a large tenant it has not been measured. If that measurement
+comes back badly, the honest fix is a smaller sample — not a return to a plan
+that cannot describe its own method.
 
 WHAT MAKES IT ACTIONABLE. Sprntly can ingest numbers — connectors exist, and a
 user can upload a document. So a gap is never reported as a dead end: every
