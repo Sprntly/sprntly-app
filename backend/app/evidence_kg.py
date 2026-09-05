@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+
+from app.graph.types import signal_kind_label, source_type_label
 import logging
 from typing import Optional
 
@@ -156,8 +158,11 @@ def _render_trail(trail: list[dict]) -> str:
     lines = []
     for t in trail:
         prov = json.dumps(t["provenance"], sort_keys=True) if t["provenance"] else "{}"
+        # The line's own docstring says it "carries the source attribution the
+        # doc must cite" — so it has to carry words, not storage keys.
         lines.append(
-            f"- [{t['source_type']} / {t['kind']}] "
+            f"- [{source_type_label(t['source_type'])}] "
+            f"({signal_kind_label(t['kind'])}) "
             f"provenance={prov} "
             f"confidence={t['confidence']} weight={t['weight']} "
             f"(edge={t['edge']})\n  {t['content']}"

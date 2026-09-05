@@ -40,6 +40,7 @@ from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Optional
 
 from app.crucible.claims import AUTHORITATIVE_FOR
+from app.graph.types import source_type_label
 
 if TYPE_CHECKING:  # imported for annotations only — `planner` imports
     # `primitives`, which imports nothing from here, so a runtime import
@@ -54,23 +55,28 @@ logger = logging.getLogger(__name__)
 #: What each source can and cannot witness, in the user's language rather than
 #: the type system's. Mirrors AUTHORITATIVE_FOR — the plan must not promise more
 #: than the engine will accept later.
+#: What each source can WITNESS. The other half — what each source is called —
+#: is `graph.types.SOURCE_TYPE_LABELS`, because a source type is graph
+#: vocabulary and this module is one consumer of it. They were both here, and
+#: the consequence was that every other path in the product showed the reader
+#: the storage key instead: a real session cited `[Source: pm_manual/finding]`.
+_SOURCE_WITNESSES: dict[str, str] = {
+    "customer_voice":   "what customers asked for and reported",
+    "communication":    "what was discussed, hit and attempted",
+    "project_mgmt":     "what was built, broken, blocked or attempted",
+    "pm_manual":        "the company's stated constraints and goals",
+    "analytics":        "how much something moved, and in which direction",
+    "revenue":          "how much something moved, and in which direction",
+    "outcome_measured": "whether a change actually worked",
+    "verbal_claim":     "nothing — recorded, never counted",
+    "agent_inferred":   "nothing — recorded, never counted",
+}
+
+#: Kept in this shape, and in this ORDER, because `source_inventory` iterates
+#: it to decide which source types to count.
 _SOURCE_PROSE: dict[str, tuple[str, str]] = {
-    "customer_voice": ("calls and customer tickets",
-                       "what customers asked for and reported"),
-    "communication":  ("Slack and email",
-                       "what was discussed, hit and attempted"),
-    "project_mgmt":   ("the tracker",
-                       "what was built, broken, blocked or attempted"),
-    "pm_manual":      ("your own business context",
-                       "the company's stated constraints and goals"),
-    "analytics":      ("product analytics",
-                       "how much something moved, and in which direction"),
-    "revenue":        ("revenue data",
-                       "how much something moved, and in which direction"),
-    "outcome_measured": ("measured outcomes",
-                         "whether a change actually worked"),
-    "verbal_claim":   ("unverified claims", "nothing — recorded, never counted"),
-    "agent_inferred": ("our own inferences", "nothing — recorded, never counted"),
+    source_type: (source_type_label(source_type), witnesses)
+    for source_type, witnesses in _SOURCE_WITNESSES.items()
 }
 
 #: Sources that carry NUMBERS. Without at least one, no finding can be stated as
