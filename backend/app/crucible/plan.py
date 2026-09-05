@@ -635,6 +635,10 @@ def build_plan(
                 currency=currency,
                 report=recon_report,
                 source_types=tuple(sv.source_type for sv in kept),
+                # THE WORDS, NOT THE KEYS. The inventory carries the label the
+                # card shows and the role the source plays, so the prompt can
+                # name a source the way the reader will see it named.
+                sources=kept,
                 run_meta=run_meta,
             )
         else:

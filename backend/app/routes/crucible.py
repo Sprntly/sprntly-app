@@ -856,7 +856,7 @@ async def approve(
 
 def _complete_plan_steps(
     run_id: int, company_id: str, *, report, goal_text: str,
-    definition_text: str, source_types: tuple,
+    definition_text: str, source_types: tuple, sources: tuple = (),
 ) -> None:
     """Compose the method and write it onto the plan the gate is already
     showing.
@@ -880,7 +880,7 @@ def _complete_plan_steps(
         steps = build_steps(
             enterprise_id=company_id, goal_text=goal_text,
             definition_text=definition_text, currency="accounts",
-            report=report, source_types=source_types,
+            report=report, source_types=source_types, sources=sources,
         )
         row = runs_db.get(run_id, company_id) or {}
         if row.get("status") != "awaiting_approval":
@@ -1115,6 +1115,7 @@ def execute_run(
                 run_id, company_id, report=report, goal_text=goal_text,
                 definition_text=definition_text,
                 source_types=tuple(sv.source_type for sv in plan.sources),
+                sources=plan.sources,
             )
             return
 

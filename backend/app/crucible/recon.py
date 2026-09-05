@@ -1315,7 +1315,7 @@ def _observe_dating(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
         source="knowledge graph",
         fields=("valid_at", "created_at"),
         what=(
-            f"{_pct(d.share)} of {d.signals} signals are dated within "
+            f"{_pct(d.share)} of {d.signals:,} signals are dated within "
             f"{INGEST_CLOCK_TOLERANCE_S:.0f} seconds of when we read them, so "
             f"the dates record the import and not when anything happened. "
             f"Nothing here can be judged on recency, and the check that throws "
@@ -1392,7 +1392,7 @@ def _observe_source_concentration(
         source="knowledge graph",
         fields=("provenance.doc",),
         what=(
-            f"{c.signals} signals come from {c.documents} documents — "
+            f"{c.signals:,} signals come from {c.documents} documents — "
             f"{c.per_document:.0f} apiece — and the largest single document is "
             f"{_pct(c.top_share)} of everything. The row count is not a count "
             f"of independent observations, so two claims agreeing may be one "
@@ -1406,6 +1406,20 @@ def _observe_source_concentration(
             "even_share": c.even_share,
         },
     )]
+
+
+def _kind_prose(kind: str) -> str:
+    """A signal kind as a plural noun phrase — "deal blockers", not
+    `deal_blocker`.
+
+    NO TABLE, BECAUSE THE KINDS ARE ALREADY WORDS. Every one of them reads
+    correctly once the underscore is a space and it is pluralised; inventing a
+    lookup would be a vocabulary to maintain for no gain. What this stops is
+    the raw key reaching a sentence, which is what did happen — a composed step
+    called them "740 'finding' signals".
+    """
+    words = str(kind or "").replace("_", " ").strip() or "signals"
+    return words if words.endswith("s") else f"{words}s"
 
 
 def _observe_claim_mix(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
@@ -1422,9 +1436,9 @@ def _observe_claim_mix(signals: Sequence[Mapping[str, Any]]) -> list[Observation
         fields=("kind",),
         what=(
             f"{_pct(m.top_share)} of the corpus is one kind of thing: "
-            f"{top_n} of {m.signals} signals are "
-            f"{top_kind.replace('_', ' ')}. A ranking over evidence that is "
-            f"mostly one shape will reflect that shape."
+            f"{top_n:,} of {m.signals:,} signals are "
+            f"{_kind_prose(top_kind)}. A ranking over evidence that is mostly "
+            f"one shape will reflect that shape."
         ),
         figures={
             "signals": float(m.signals),
@@ -1455,7 +1469,7 @@ def _observe_evidence_mix(mix: EvidenceMix) -> list[Observation]:
         source="knowledge graph",
         fields=("triage_category",),
         what=(
-            f"{mix.categorised} of {mix.signals} signals "
+            f"{mix.categorised:,} of {mix.signals:,} signals "
             f"({_pct(mix.coverage)}) are classified. The largest single kind "
             f"is {_category_label(top_code)} at {_pct(top_share)}, and "
             f"{_pct(firsthand_share)} is a customer speaking firsthand rather "

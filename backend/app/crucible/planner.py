@@ -932,6 +932,14 @@ KEEP `what` SHORT. It is one action phrase, under about 120 characters, and it \
 is what the reader scans down the page. Lists, examples and enumerations of \
 sources or record types belong in `why`, never in `what`.
 
+NEVER WRITE AN IDENTIFIER. Say the words you were given, not the keys. \
+"calls and customer tickets", never `customer_voice`. "Product requirements \
+docs", never `product_prd` or "product-requirements-doc". Never a column name, \
+a field path, an observation id or an operation id in a `what` or a `why` — \
+those are handles for the machine and a reader who meets one learns only that \
+they are reading a database. The one place an id belongs is the `observations` \
+list on the step, which is not prose.
+
 WHAT YOU MUST NOT DO:
 - Do not invent an operation. You may only name a primitive from the catalogue.
 - Do not state a number that is NOT in an observation below. No scores, no \
@@ -946,29 +954,73 @@ VOICE: a colleague explaining the approach to the person who has to act on it. \
 enthusiasm."""
 
 
+def _source_prose(source_type: str) -> str:
+    """A source type as the product says it — "calls and customer tickets",
+    not `customer_voice`.
+
+    Read from `plan._SOURCE_PROSE`, which is the one place those words live, so
+    the prompt cannot describe a source differently from the card. Imported
+    lazily: `plan` reaches into this module and a top-level import back would
+    couple two files that only need each other at call time.
+    """
+    try:
+        from app.crucible.plan import _SOURCE_PROSE
+
+        label, _witnesses = _SOURCE_PROSE.get(source_type, ("", ""))
+        return label or str(source_type).replace("_", " ")
+    except Exception:  # noqa: BLE001 — a label is a nicety, never a failure
+        return str(source_type).replace("_", " ")
+
+
 def _prompt(
     *, goal_text: str, definition_text: str, currency: str,
     report: ReconReport, source_types: Sequence[str],
+    sources: Sequence[Any] = (),
 ) -> str:
+    """The material the model composes from.
+
+    NOTHING IN HERE IS AN IDENTIFIER THE READER SHOULD NOT SEE. A model writes
+    back the vocabulary it is given, and this prompt used to hand it raw
+    storage keys — `pm_manual:finding` as a source name, `account_attribution_
+    gap` as an observation kind. They came back out in the prose: "alongside
+    firsthand customer_voice records" reached a reader on a real run.
+
+    Fixed HERE rather than by scrubbing the output, because a substitution pass
+    over generated text would be a second vocabulary, free to drift from the
+    first and silent when it did. There is simply no slug available to copy.
+
+    The observation ids are the exception and they stay: a step has to name the
+    observation it drew a figure from, that is the citation gate's whole
+    mechanism, and `_SYSTEM` tells the model they are handles rather than
+    words.
+    """
     lines = [
         f"GOAL: {goal_text}",
         f"WHAT THE READER SAYS THE METRIC MEANS: {definition_text or '(not given)'}",
         f"EVERY SIZE IS STATED IN: {currency}",
         "",
-        "SOURCES CONNECTED TO THIS RUN:",
+        "SOURCES CONNECTED TO THIS RUN — refer to them by these words:",
     ]
-    for s in report.sources:
-        span = f", {s.earliest} to {s.latest}" if s.earliest else ""
-        lines.append(f"  - {s.name} ({s.records} records{span})")
-    if not report.sources:
-        lines.append("  - (none read structurally)")
+    for src in sources:
+        label = getattr(src, "label", "") or _source_prose(
+            getattr(src, "source_type", ""))
+        count = getattr(src, "signal_count", 0) or 0
+        role = getattr(src, "role", "")
+        role_note = f", used for {role.lower()}" if role else ""
+        lines.append(f"  - {label} ({count:,} signals{role_note})")
+    if not sources:
+        for source_type in source_types:
+            lines.append(f"  - {_source_prose(source_type)}")
+    if not sources and not source_types:
+        lines.append("  - (none)")
     if report.missing:
         lines.append("")
-        lines.append("NOT CONNECTED AT ALL: " + ", ".join(report.missing))
+        lines.append("NOT CONNECTED AT ALL: " + ", ".join(
+            _source_prose(m) for m in report.missing))
     lines += ["", "OBSERVATIONS — the ONLY numbers you may use, each with an id:"]
     for o in report.observations:
         figures = ", ".join(f"{k}={v:g}" for k, v in o.figures.items())
-        lines.append(f"  [{o.id}] ({o.kind}, {o.severity}) {o.what}")
+        lines.append(f"  [{o.id}] ({o.severity}) {o.what}")
         lines.append(f"      figures: {figures}")
     if not report.observations:
         lines.append("  (none — so write no numbers at all)")
@@ -1075,6 +1127,10 @@ def build_steps(
     currency: str = "accounts",
     report: Optional[ReconReport] = None,
     source_types: Sequence[str] = (),
+    #: The source inventory, duck-typed on `.label` / `.signal_count` /
+    #: `.role`. Carries the words the product uses for a source, so the prompt
+    #: never has to name one by its storage key.
+    sources: Sequence[Any] = (),
     run_meta: Optional[Mapping[str, Any]] = None,
 ) -> tuple[PlanStep, ...]:
     """The plan for this run: drawn once, validated, and never re-sampled.
@@ -1108,10 +1164,14 @@ def build_steps(
         | {s.label for s in report.sources}
         | {o.source for o in report.observations}
         | {o.source_label for o in report.observations}
-    )
+        # The words the prompt actually gave it, so a step that names a source
+        # the way it was told to is not then rejected for doing so.
+        | {getattr(x, "label", "") for x in sources}
+    ) - {""}
     prompt = _prompt(
         goal_text=goal_text, definition_text=definition_text,
         currency=currency, report=report, source_types=source_types,
+        sources=sources,
     )
     for attempt in range(MAX_REGENERATIONS + 1):
         try:
