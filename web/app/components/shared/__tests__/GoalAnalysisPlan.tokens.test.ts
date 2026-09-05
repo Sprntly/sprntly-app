@@ -137,3 +137,50 @@ describe("text sits on the measured ink ladder, never on an opacity", () => {
     }
   })
 })
+
+describe("the shared rules this card renders are on the ladder too", () => {
+  /** The `.ga-doc-*` text rules the plan gate actually puts on screen.
+   *
+   *  SCOPED TO WHAT THIS CARD RENDERS, deliberately. `globals.css` is a hot
+   *  file and most of it is nothing to do with this screen; these five are the
+   *  ones a browser pass measured failing AA on the plan gate — the eyebrow at
+   *  2.60:1, the section headings at 2.89:1, the notes at 3.78:1 and the gap
+   *  explanations at 4.05:1. */
+  const SHARED = [
+    ".ga-doc-eyebrow", ".ga-doc-h3", ".ga-doc-note",
+    ".ga-doc-gap-why", ".ga-sources-label",
+  ]
+
+  /** One rule's declaration block, comments stripped. */
+  const ruleFor = (selector: string): string => {
+    const body = GLOBALS.replace(/\/\*[\s\S]*?\*\//g, "")
+    const at = body.indexOf(`\n${selector}`)
+    expect(at, `${selector} not found`).toBeGreaterThan(-1)
+    return body.slice(at, body.indexOf("}", at) + 1)
+  }
+
+  it("dims none of them with opacity", () => {
+    // THE HIERARCHY INVERTED WHEN ONLY THE MODULE WAS FIXED. Darkening the
+    // steps to the ladder while the headings around them stayed on an opacity
+    // left a section heading at 2.89:1 sitting above step numbers at 5.23:1 —
+    // the label fainter than its own contents, which is the single thing that
+    // made the card look unfinished.
+    for (const selector of SHARED) {
+      expect(ruleFor(selector), selector).not.toMatch(/opacity\s*:/)
+    }
+  })
+
+  it("puts every one of them on an explicit ink token", () => {
+    for (const selector of SHARED) {
+      expect(ruleFor(selector), selector).toMatch(/color:\s*var\(\s*--ink(-[23])?\s*\)/)
+    }
+  })
+
+  it("keeps a section heading darker than the step numbers inside it", () => {
+    // `--ink-2` is 7.6:1 and `--ink-3` is 5.2:1 on `--surface`. A heading on
+    // the lighter of the two would put the label behind its own contents
+    // again, which is the bug rather than a smaller version of it.
+    expect(ruleFor(".ga-doc-h3")).toMatch(/color:\s*var\(\s*--ink-2\s*\)/)
+    expect(CSS).toMatch(/\.stepN\s*\{[^}]*--ink-3/)
+  })
+})
