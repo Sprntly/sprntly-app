@@ -85,9 +85,19 @@ def test_turn_attachments_validation(tenant_client):
     conv = _conv(t.client)
     url = f"/v1/conversations/{conv['id']}/turns"
 
-    nine = [{"name": f"d{i}.md", "content": "x"} for i in range(9)]
+    # THE CAP MOVED FROM EIGHT TO SIXTEEN, and both edges are asserted so this
+    # keeps testing that a cap EXISTS rather than that it happens to be a
+    # particular number. A person assembling the evidence for one decision
+    # attaches a set — a twelve-file pack of exports, transcripts and research
+    # is an ordinary send — and eight refused it at the validator.
+    twelve = [{"name": f"d{i}.md", "content": "x"} for i in range(12)]
     assert t.client.post(
-        url, json={"role": "user", "content": "m", "attachments": nine}
+        url, json={"role": "user", "content": "m", "attachments": twelve}
+    ).status_code == 200
+
+    seventeen = [{"name": f"d{i}.md", "content": "x"} for i in range(17)]
+    assert t.client.post(
+        url, json={"role": "user", "content": "m", "attachments": seventeen}
     ).status_code == 422
 
     big = [{"name": "big.md", "content": "x" * 60_001}]
