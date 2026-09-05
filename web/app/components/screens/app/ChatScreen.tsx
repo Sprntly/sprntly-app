@@ -5732,14 +5732,26 @@ export function ChatScreen() {
   // all stay with the engine's keydown.
   const handleGoalOrComposerKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (goalMode && e.key === "Enter" && !e.shiftKey && !slashOpen && !(e.metaKey || e.ctrlKey)) {
+      // ENTER IS ITS OWN SUBMIT ROUTE, and it was the one that mattered.
+      // The send BUTTON calls `handleGoalOrComposerSubmit`; Enter does not —
+      // it falls through to the engine's own keydown, which dispatches the ask
+      // directly. So the plan-gate guard sat on the path nobody uses: typing a
+      // revision and pressing Enter reached `/v1/ask` and came back as another
+      // invented plan, with the chip visible above the composer the whole time.
+      //
+      // Both routes now go through one handler. A guard that only covers one
+      // way of sending is not a guard.
+      if ((goalMode || replyingToPlan)
+          && e.key === "Enter" && !e.shiftKey && !slashOpen
+          && !(e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         handleGoalOrComposerSubmit()
         return
       }
       handleComposerKeyDown(e)
     },
-    [goalMode, slashOpen, handleGoalOrComposerSubmit, handleComposerKeyDown],
+    [goalMode, replyingToPlan, slashOpen, handleGoalOrComposerSubmit,
+     handleComposerKeyDown],
   )
 
   // The `+` menu's third item (present only while enrolled — ChatComposer
