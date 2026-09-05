@@ -281,7 +281,14 @@ def test_render_evidence_trail_section_cites_sources(facade):
 
     md = render_evidence_trail_section(trail)
     assert "KNOWLEDGE GRAPH EVIDENCE" in md
-    assert "customer_voice" in md
+    # THE SOURCE IS NAMED, NOT KEYED. This asserted `customer_voice` and passed
+    # because the trail line interpolated the raw `source_type` — which is
+    # exactly how `[Source: pm_manual/deal_blocker]` reached a reader's
+    # citations. The bracket the model copies now carries the words the product
+    # uses, so the assertion is the stronger one: the label is there, and no
+    # storage key is.
+    assert "calls and customer tickets" in md
+    assert "customer_voice" not in md
     assert "the pain" in md
     assert "gong" in md
 
@@ -329,7 +336,10 @@ def test_prd_grounds_on_kg_trail_not_corpus(isolated_settings, facade, monkeypat
     inp = calls[0]["input"]
     assert "KNOWLEDGE GRAPH EVIDENCE" in inp
     assert "KG_SIGNAL_MARK abandon at pay" in inp
-    assert "customer_voice" in inp           # source_type cited
+    # The source is cited by name; the storage key never reaches the prompt,
+    # so there is nothing keyed for the model to copy into a citation.
+    assert "calls and customer tickets" in inp
+    assert "customer_voice" not in inp
     assert "zendesk" in inp                   # provenance cited
     assert "CORPUS_FALLBACK_MARK" not in inp  # corpus is NOT dumped
     # The human PRD binds prd-author, on the prd agent; no machine spec.

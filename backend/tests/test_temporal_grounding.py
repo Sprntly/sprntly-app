@@ -37,22 +37,66 @@ def test_today_line_forbids_substituting_another_period():
     assert "wrong answer, not a partial one" in line
 
 
-def test_generic_ask_path_injects_the_date():
-    """The path that produced the stale answer."""
+# ── EVERY ASK_SYSTEM VARIANT IS DATED ────────────────────────────────────
+#
+# These used to count the literal string `today_line()` in a module's source —
+# three occurrences in `ask_runner`, one in `qa_agent._answer_single_shot`. The
+# date is now composed once, by `prompts.ask_system_suffix`, and applied at all
+# nine assembly sites across the two files, so the identifier the tests grepped
+# for is gone from both and the count is zero.
+#
+# THE PROPERTY IS MORE GUARANTEED, NOT LESS: it is impossible to build an
+# ASK_SYSTEM variant that skips the date without deliberately not using the
+# suffix. What broke was the mechanism — a test pinned to an identifier cannot
+# survive the refactor that identifier existed to enable, and it fails loudest
+# exactly when the thing it protects has been made safer. So these now assert
+# what the prompt CONTAINS and that every site reaches it, rather than how the
+# call happens to be spelled.
+
+
+def test_the_ask_suffix_leads_with_the_real_date():
+    """What any prompt built from it actually says, checked against the clock
+    rather than against a function name."""
+    from app.prompts import ask_system_suffix
+
+    suffix = ask_system_suffix(None)
+    today = datetime.now(timezone.utc).strftime("%d %B %Y")
+    assert "TODAY'S DATE IS" in suffix
+    assert today in suffix
+    # FIRST, because these append to a cached prompt prefix: a date that
+    # arrived after the corpus block would move the cache boundary every day.
+    assert suffix.lstrip().startswith("TODAY'S DATE IS")
+
+
+def test_every_ask_system_variant_is_dated():
+    """Reached through the suffix, so one check covers all nine sites.
+
+    Asserted as "no assembly reaches past the suffix for the date" rather than
+    by counting call sites — a windowed or counted scan can be fooled by a
+    branch longer than the window, and by a new assembly nobody thought to
+    count."""
     import inspect
 
     import app.ask_runner as ask_runner
+    import app.qa_agent as qa
 
-    src = inspect.getsource(ask_runner)
-    assert src.count("today_line()") >= 3, "not every ASK_SYSTEM variant is dated"
+    for module in (ask_runner, qa):
+        src = inspect.getsource(module)
+        assert "ask_system_suffix" in src, f"{module.__name__} builds an undated prompt"
+        # The parts are reached ONLY through the suffix. If a module called
+        # `today_line` directly again it would be a second dating path, free to
+        # be forgotten at the next site — which is the bug this replaced.
+        assert "today_line(" not in src, (
+            f"{module.__name__} dates a prompt outside ask_system_suffix"
+        )
 
 
-def test_qa_single_shot_injects_the_date():
+def test_qa_single_shot_is_dated_through_the_same_suffix():
     import inspect
 
     import app.qa_agent as qa
 
-    assert "today_line()" in inspect.getsource(qa._answer_single_shot)
+    assert "ask_system_suffix" in inspect.getsource(qa._answer_single_shot)
 
 
 def test_ds_engine_dates_without_breaking_its_prompt_cache():
