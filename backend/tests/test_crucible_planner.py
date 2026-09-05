@@ -387,3 +387,95 @@ def test_the_evidence_mix_becomes_a_step_about_what_the_answer_rests_on():
 def test_both_new_operations_are_implemented_not_declared():
     for pid in ("check_period_censoring", "characterise_evidence_mix"):
         assert prim.REGISTRY[pid].is_implemented
+
+
+# ─── The plan a PROSE tenant gets ─────────────────────────────────────────
+#
+# The table checks find nothing on a knowledge-graph corpus, so before the
+# graph-side checks existed such a tenant got a plan with no measured fact in
+# it at all. These cover what it says now, and the one thing it must stop
+# saying.
+
+
+def _prose_report(**kw):
+    signals = fx.kg_signals(**kw)
+    return recon.observe(fx.kg_tables(signals), signals=signals)
+
+
+def _prose_plan(**kw):
+    report = _prose_report(**kw)
+    return report, planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=report,
+        source_types=("pm_manual", "customer_voice"))
+
+
+def test_a_prose_corpus_gets_a_plan_with_measured_facts_in_it():
+    report, steps = _prose_plan()
+    named = {s.primitive for s in steps}
+    assert "audit_signal_field_coverage" in named
+    assert "check_dating_reliability" in named
+    assert "check_source_concentration" in named
+    assert "characterise_claim_mix" in named
+    assert len(report.observations) >= 5
+
+
+def test_the_plan_says_it_will_count_rather_than_weight_and_why():
+    """THE GRACEFUL-DEGRADATION RULE, STATED OUT LOUD. The engine already
+    counts rather than weighting by revenue, on every corpus, silently — and a
+    reader has no way to tell a considered count from a weighting that quietly
+    failed."""
+    _, steps = _prose_plan()
+    step = next(s for s in steps
+                if s.params.get("field") == "properties.account")
+    assert "count accounts instead of weighting" in step.why
+    assert "0.0%" in step.why or "0 of 200" in step.why
+
+
+def test_the_plan_never_promises_the_echo_rule_a_prose_run_switches_off():
+    """`pipeline._refute` skips it on a corpus dated by the ingest clock,
+    because over those dates every cluster looks like one conversation. The
+    plan listed it anyway, so the document said the rule was off in one step
+    and promised it four steps later — describing work that does not happen."""
+    _, steps = _prose_plan()
+    named = [s.primitive for s in steps]
+    assert "check_dating_reliability" in named
+    assert "refute_echo" not in named
+
+
+def test_it_still_promises_the_echo_rule_where_the_dates_are_real():
+    _, steps = _prose_plan(ingest_clock=False)
+    named = [s.primitive for s in steps]
+    assert "check_dating_reliability" not in named
+    assert "refute_echo" in named
+
+
+def test_weighting_by_revenue_is_registered_and_never_emitted():
+    """It is what a reader assumes is happening when a plan calls a theme
+    "big", and nothing performs it — `score_impact` counts accounts. Declared
+    so the gap has a name; never emitted, so the plan cannot promise it."""
+    assert not prim.REGISTRY["weight_by_account_value"].is_implemented
+    _, steps = _prose_plan(attributed=True)
+    assert "weight_by_account_value" not in {s.primitive for s in steps}
+
+
+def test_every_figure_in_a_prose_plan_traces_to_an_observation():
+    report, steps = _prose_plan()
+    engine = list(planner._engine_figures().values()) + list(
+        report.inventory_figures())
+    for step in steps:
+        extra = engine + [
+            float(v) for v in step.params.values()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)
+        ]
+        assert planner.untraceable_figures(
+            f"{step.what} {step.why}", report.observations, extra=extra,
+        ) == (), f"step {step.n} ({step.primitive}) states an unbacked figure"
+
+
+def test_a_prose_plan_validates_and_names_only_implemented_operations():
+    report, steps = _prose_plan()
+    for step in steps:
+        assert prim.REGISTRY[step.primitive].is_implemented
+    assert planner.verify(
+        steps, report.observations, inventory=report.inventory_figures(),
+    )[1] == []

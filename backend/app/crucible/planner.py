@@ -483,6 +483,73 @@ def minimal_plan(
         params={"sources": list(source_types) or ["all"]},
         sources=source_types,
     ))
+    # ── WHAT THE EVIDENCE CANNOT SUPPORT, SAID BEFORE IT IS RELIED ON. ────
+    #
+    # THE HONEST VERSION OF GRACEFUL DEGRADATION. The engine already counts
+    # accounts rather than weighting by revenue, on every corpus, silently —
+    # and a reader has no way to tell a considered count from a weighting that
+    # quietly failed. Stated here it is the opposite: the run says what it
+    # would have taken, what it actually has, and which of the two it is
+    # therefore doing.
+    for o in report.of_kind("account_attribution_gap")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "audit_signal_field_coverage", o,
+            "Check how much of the evidence names an account",
+            f"Only {o.figures['present']:,.0f} of "
+            f"{o.figures['signals']:,.0f} signals name one, so weighting a "
+            f"theme by the revenue behind it would rest on "
+            f"{o.figures['share'] * 100:.1f}% of what I read. I will count "
+            f"accounts instead of weighting them, and the report will say that "
+            f"is what happened rather than presenting the count as a "
+            f"valuation.",
+            params={"field": (list(o.fields) or ["properties.account"])[0]},
+        ))
+    for o in report.of_kind("monetary_coverage_gap")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "audit_signal_field_coverage", o,
+            "Check whether anything here carries a figure",
+            f"{o.figures['present']:,.0f} of {o.figures['signals']:,.0f} "
+            f"signals do. Every size in the finished document is therefore "
+            f"stated in accounts touched, never in money — not because money "
+            f"is unimportant, but because nothing connected here measures it.",
+            params={"field": (list(o.fields) or ["properties.amount"])[0]},
+        ))
+    for o in report.of_kind("dating_unreliable")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "check_dating_reliability", o,
+            "Check whether the dates mean anything",
+            f"{o.figures['ingest_clock_share'] * 100:.1f}% of "
+            f"{o.figures['signals']:,.0f} signals are dated within "
+            f"{o.figures['tolerance_seconds']:.0f} seconds of when we imported "
+            f"them, so the dates are the import and not the events. Nothing "
+            f"is weighted by recency, and the rule that throws out one "
+            f"conversation echoing is switched off — over these dates it would "
+            f"throw out everything.",
+            params={},
+            part=PARTS[1],
+        ))
+    for o in report.of_kind("source_concentration")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "check_source_concentration", o,
+            "Count how many documents this actually rests on",
+            f"{o.figures['signals']:,.0f} signals come from "
+            f"{o.figures['documents']:.0f} documents, and the largest single "
+            f"one is {o.figures['top_share'] * 100:.1f}% of everything. Two "
+            f"claims agreeing may be one document read twice, so corroboration "
+            f"is judged on distinct documents rather than on how many rows say "
+            f"the same thing.",
+            params={},
+            part=PARTS[1],
+        ))
+    for o in report.of_kind("claim_mix")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "characterise_claim_mix", o,
+            "Say what kind of thing this evidence mostly is",
+            f"{o.figures['top_share'] * 100:.1f}% of it is a single kind. A "
+            f"ranking over evidence that is mostly one shape will reflect that "
+            f"shape, and you should know which one before you read the order.",
+            params={},
+        ))
     for o in report.of_kind("evidence_mix")[:MAX_DETERMINISTIC_PER_KIND]:
         steps.append(_obs_step(
             "characterise_evidence_mix", o,
@@ -632,12 +699,23 @@ def minimal_plan(
         "a blocker, where one mention is the whole point — a blocked deal is "
         "specific to that deal by definition.",
     ))
-    steps.append(_plain(
-        "refute_echo",
-        "Drop patterns that are one conversation echoing",
-        "Nine quotes from one call is one data point, not nine, and it is the "
-        "shape that most reliably fools this kind of analysis.",
-    ))
+    # THE ECHO RULE IS NOT PROMISED WHEN THE RUN WILL NOT APPLY IT.
+    #
+    # `pipeline._refute` skips it on a corpus dated by the ingest clock,
+    # because over those dates every cluster looks like one conversation and
+    # the run would return nothing. The plan listed it anyway, so a prose
+    # tenant got a document that said the rule was switched off in one step and
+    # promised it four steps later — describing work that does not happen,
+    # which is the single failure this whole stage exists to remove. The
+    # observation that reports the dating is the same one the pipeline's own
+    # detector produces, so the two cannot disagree.
+    if not report.of_kind("dating_unreliable"):
+        steps.append(_plain(
+            "refute_echo",
+            "Drop patterns that are one conversation echoing",
+            "Nine quotes from one call is one data point, not nine, and it is "
+            "the shape that most reliably fools this kind of analysis.",
+        ))
     steps.append(_plain(
         "refute_single_account",
         "Drop anything only one account ever said",

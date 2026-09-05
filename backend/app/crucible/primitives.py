@@ -166,6 +166,26 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         implemented_by="app.crucible.recon.evidence_mix",
     ),
     Primitive(
+        id="audit_signal_field_coverage",
+        group="scoping",
+        description="Count how much of the evidence names an account, or "
+                    "carries a figure, before anything is sized by it.",
+        params=(
+            _p("field", "field", note="e.g. properties.account"),
+        ),
+        status="implemented",
+        implemented_by="app.crucible.recon.signal_field_presence",
+    ),
+    Primitive(
+        id="characterise_claim_mix",
+        group="scoping",
+        description="Say what kind of thing the evidence mostly is, before "
+                    "ranking it.",
+        params=(),
+        status="implemented",
+        implemented_by="app.crucible.recon.claim_mix",
+    ),
+    Primitive(
         id="partition_population",
         group="scoping",
         description="Split the book into groups that should be looked at "
@@ -259,6 +279,24 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         implemented_by="app.crucible.recon.identical_columns",
     ),
     Primitive(
+        id="check_dating_reliability",
+        group="measurement",
+        description="Check whether the dates record when things happened or "
+                    "just when we imported them.",
+        params=(),
+        status="implemented",
+        implemented_by="app.crucible.recon.dating_reliability",
+    ),
+    Primitive(
+        id="check_source_concentration",
+        group="measurement",
+        description="Count how many separate documents the evidence actually "
+                    "rests on, rather than how many rows it has.",
+        params=(),
+        status="implemented",
+        implemented_by="app.crucible.recon.source_concentration",
+    ),
+    Primitive(
         id="check_period_censoring",
         group="measurement",
         description="Check whether the empty later periods are a decline or "
@@ -321,6 +359,20 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         ),
         status="implemented",
         implemented_by="app.crucible.recon.prefer_field",
+    ),
+    Primitive(
+        id="weight_by_account_value",
+        group="evidence",
+        description="Weight a theme by the revenue of the accounts it touches, "
+                    "instead of counting how many raised it.",
+        params=(),
+        # DECLARED, AND THIS ONE IS THE POINT OF THE STATUS FIELD. It is what a
+        # reader assumes is happening when a plan says a theme is "big", and
+        # nothing performs it: `score_impact` counts accounts. On a corpus
+        # where almost nothing names an account it could not run even if it
+        # existed, which is what `account_attribution_gap` says out loud —
+        # instead of the run degrading to a count in silence.
+        status="declared",
     ),
     Primitive(
         id="weight_by_speaker_authority",
