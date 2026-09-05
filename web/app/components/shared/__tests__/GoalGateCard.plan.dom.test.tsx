@@ -65,6 +65,37 @@ const renderPlan = (onApprovePlan = vi.fn()) => {
   return onApprovePlan
 }
 
+/** THE GATE IS TWO STEPS NOW. Approving the PLAN reveals what the run still
+ *  needs from the reader, and the second button is the one that starts
+ *  anything — `/approve` is the only endpoint and it starts the run, so the
+ *  answers have to travel with it.
+ *
+ *  These drive both, so every assertion below stays about WHAT gets posted
+ *  rather than about how many clicks it took. Nothing here is loosened: the
+ *  exact-object expectations are unchanged, and `approve` deliberately uses
+ *  `queryByRole` so a disabled first step still yields "never called" instead
+ *  of a lookup error that would pass for the wrong reason. */
+const toQuestions = () => {
+  const first = screen.queryByRole("button", { name: /approve this plan/i })
+  if (first) fireEvent.click(first)
+}
+const approve = () => {
+  toQuestions()
+  const run = screen.queryByRole("button", { name: /approve and run/i })
+  if (run) fireEvent.click(run)
+}
+/** Sources are a tick list on the reading surface; changing them is one quiet
+ *  disclosure away, because a reader reading a plan is not filling in a form. */
+const openSources = () => {
+  const t = screen.queryByRole("button", { name: /change what gets read/i })
+  if (t) fireEvent.click(t)
+}
+/** The definition is a quotation until the reader asks to change it. */
+const openReword = () => {
+  const t = screen.queryByRole("button", { name: /reword this/i })
+  if (t) fireEvent.click(t)
+}
+
 afterEach(cleanup)
 
 describe("the plan is shown before anything is spent", () => {
@@ -119,7 +150,7 @@ describe("the plan is shown before anything is spent", () => {
 describe("approving carries the user's decision", () => {
   it("posts nothing extra when the user changed nothing", () => {
     const onApprove = renderPlan()
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledWith({ excluded_sources: [], hypotheses: [] })
   })
 
@@ -127,8 +158,9 @@ describe("approving carries the user's decision", () => {
     // The whole point of the gate: a dropped source has to reach the server, or
     // the run quietly reads it anyway and the screen looks identical.
     const onApprove = renderPlan()
+    openSources()
     fireEvent.click(screen.getByLabelText(/calls and customer tickets/i))
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledWith({
       excluded_sources: ["customer_voice"], hypotheses: [],
     })
@@ -136,19 +168,21 @@ describe("approving carries the user's decision", () => {
 
   it("unchecking and re-checking a source leaves it read", () => {
     const onApprove = renderPlan()
+    openSources()
     const box = screen.getByLabelText(/calls and customer tickets/i)
     fireEvent.click(box)
     fireEvent.click(box)
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledWith({ excluded_sources: [], hypotheses: [] })
   })
 
   it("posts the hypotheses the user typed, one per line", () => {
     const onApprove = renderPlan()
+    toQuestions()
     fireEvent.change(screen.getByLabelText("What you already believe"), {
       target: { value: "onboarding is the drop-off\n\nenterprise churns on SSO" },
     })
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledWith({
       excluded_sources: [],
       hypotheses: ["onboarding is the drop-off", "enterprise churns on SSO"],
@@ -159,10 +193,13 @@ describe("approving carries the user's decision", () => {
     // A run with nothing to read produces a confident-looking empty report,
     // which is the worst output this feature has.
     renderPlan()
+    openSources()
     fireEvent.click(screen.getByLabelText(/calls and customer tickets/i))
     fireEvent.click(screen.getByLabelText(/the tracker/i))
+    // The FIRST step is the one that refuses: with nothing to read there is
+    // no plan to approve, so the reader never reaches the questions at all.
     expect(
-      (screen.getByRole("button", { name: /approve and run/i }) as HTMLButtonElement)
+      (screen.getByRole("button", { name: /approve this plan/i }) as HTMLButtonElement)
         .disabled,
     ).toBe(true)
   })
@@ -190,21 +227,23 @@ describe("a hypothesis longer than the API accepts", () => {
   // the reader has to decode. Carried over from the retired panel file.
   it("is caught before approve, and names the problem", () => {
     const onApprove = renderPlan()
+    toQuestions()
     fireEvent.change(screen.getByLabelText("What you already believe"), {
       target: { value: "x".repeat(MAX_HYPOTHESIS_CHARS + 1) },
     })
     expect(screen.getByTestId("goal-plan-hypothesis-too-long")).toBeTruthy()
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).not.toHaveBeenCalled()
   })
 
   it("lets an ordinary hypothesis through untouched", () => {
     const onApprove = renderPlan()
+    toQuestions()
     fireEvent.change(screen.getByLabelText("What you already believe"), {
       target: { value: "onboarding is where they drop" },
     })
     expect(screen.queryByTestId("goal-plan-hypothesis-too-long")).toBeNull()
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledWith({
       excluded_sources: [], hypotheses: ["onboarding is where they drop"],
     })
@@ -226,7 +265,7 @@ describe("a refusal leaves the gate answerable", () => {
       />,
     )
     expect(document.body.textContent).toContain("Shorten what you wrote")
-    expect(screen.getByRole("button", { name: /approve and run/i })).toBeTruthy()
+    expect(screen.getByRole("button", { name: /approve this plan/i })).toBeTruthy()
   })
 })
 
@@ -296,12 +335,16 @@ describe("the settled plan is a record, not a receipt", () => {
     )
     const card = screen.getByTestId("goal-gate-plan-done")
     expect(card.textContent ?? "").toContain("dropped by you")
-    expect(card.querySelector(".ggc-src-struck")).not.toBeNull()
-    // A SETTLED PLAN IS A RECORD, NOT A CONTROL: no checkboxes, no button.
+    // A SETTLED PLAN IS A RECORD, NOT A CONTROL: no checkboxes, no textarea,
+    // and neither step of the gate. Asserted on the ROLES rather than on a
+    // class name, so the guarantee survives the styles moving.
     expect(card.querySelectorAll("input[type=checkbox]")).toHaveLength(0)
     expect(card.querySelector("textarea")).toBeNull()
     expect(
       screen.queryByRole("button", { name: /approve and run/i }),
+    ).toBeNull()
+    expect(
+      screen.queryByRole("button", { name: /approve this plan/i }),
     ).toBeNull()
   })
 
@@ -491,12 +534,18 @@ describe("the plan leads with the approach, not the form", () => {
   it("opens with a numbered account of what will happen", () => {
     renderPlan()
     const approach = screen.getByTestId("goal-plan-approach")
-    expect(approach.textContent).toMatch(/This is the approach I am going to use/i)
+    // The lede sentence is gone: the section now has a heading, and the steps
+    // themselves are the account. What is asserted is the thing that mattered
+    // — that a numbered account of the method is on screen, ahead of any
+    // control — not the particular sentence that used to introduce it.
+    expect(approach.textContent).toMatch(/how i will do it/i)
     const steps = approach.querySelectorAll("li")
     expect(steps.length).toBeGreaterThanOrEqual(4)
     // The plan carries a definition, so step one confirms it; the "what gets
     // read" step — in the reader's words, with the total — follows it.
-    const sourcesStep = [...steps].find((s) => (s.textContent ?? "").startsWith("Read "))!
+    // The number and the action phrase are separate spans now, so the step is
+    // found by the action's own text rather than by the line starting with it.
+    const sourcesStep = [...steps].find((s) => /Read your/.test(s.textContent ?? ""))!
     expect(sourcesStep.textContent).toContain("calls and customer tickets")
     expect(sourcesStep.textContent).toContain("412")
   })
@@ -506,8 +555,11 @@ describe("the plan leads with the approach, not the form", () => {
     // the card is back to being a form with a paragraph attached.
     renderPlan()
     const approach = screen.getByTestId("goal-plan-approach")
-    const firstBox = document.querySelector("input[type=checkbox]")!
-    expect(approach.compareDocumentPosition(firstBox) & Node.DOCUMENT_POSITION_FOLLOWING)
+    // AGAINST THE SOURCES SECTION, not against a checkbox: there is no
+    // checkbox on the reading surface any more, which is the stronger version
+    // of the same guarantee. The account is read before anything operable.
+    const sources = screen.getByTestId("goal-plan-sources")
+    expect(approach.compareDocumentPosition(sources) & Node.DOCUMENT_POSITION_FOLLOWING)
       .toBeTruthy()
   })
 
@@ -516,6 +568,7 @@ describe("the plan leads with the approach, not the form", () => {
     // the tracker would be the most confidently wrong sentence on the card.
     renderPlan()
     expect(screen.getByTestId("goal-plan-approach").textContent).toContain("the tracker")
+    openSources()
     fireEvent.click(screen.getByLabelText("Read the tracker"))
     const after = screen.getByTestId("goal-plan-approach").textContent ?? ""
     expect(after).not.toContain("the tracker")
@@ -565,7 +618,13 @@ describe("the definition is confirmed in the plan, not one screen earlier", () =
   }
 
   it("shows the proposal as an editable field, attributed to what produced it", () => {
+    // IT IS A QUOTATION FIRST. An open textarea mid-page asked the reader to
+    // fill something in while they were still trying to read; the words are
+    // now shown as a statement and rewording is one quiet control away.
     renderProposed()
+    expect(screen.getByTestId("goal-plan-definition").textContent)
+      .toContain(PLAN.definition_text)
+    openReword()
     const box = screen.getByLabelText("What this goal means") as HTMLTextAreaElement
     expect(box.value).toBe(PLAN.definition_text)
     // A proposal that cannot be attributed is an assertion with a polite tone.
@@ -575,10 +634,11 @@ describe("the definition is confirmed in the plan, not one screen earlier", () =
 
   it("carries an edited definition on the approve that adopts it", () => {
     const onApprove = renderProposed()
+    openReword()
     fireEvent.change(screen.getByLabelText("What this goal means"), {
       target: { value: "retention counted on seats, not accounts" },
     })
-    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    approve()
     expect(onApprove).toHaveBeenCalledTimes(1)
     expect(onApprove.mock.calls[0][0].definition_text)
       .toBe("retention counted on seats, not accounts")
@@ -589,25 +649,28 @@ describe("the definition is confirmed in the plan, not one screen earlier", () =
     // stale card overwrite the stored definition with words the server already
     // has — a round trip that can only lose.
     const onApprove = renderProposed()
-    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    approve()
     expect(onApprove.mock.calls[0][0].definition_text).toBeUndefined()
   })
 
   it("treats retyping the same words as agreement, not as an edit", () => {
     const onApprove = renderProposed()
+    openReword()
     fireEvent.change(screen.getByLabelText("What this goal means"), {
       target: { value: `  ${PLAN.definition_text}  ` },
     })
-    fireEvent.click(screen.getByRole("button", { name: /start|approve|run/i }))
+    approve()
     expect(onApprove.mock.calls[0][0].definition_text).toBeUndefined()
   })
 
   it("says what is done with the sentence without restating it", () => {
+    // Shown where the sentence becomes editable, which is where it is needed.
     // §6's note, from the server so the wording lives in one place. It must
     // say the part the sentence cannot — that it is taken literally — and must
     // NOT repeat the convention, which is already the text in the field above.
     // That repetition is exactly what the feedback asked us to cut.
     renderProposed()
+    openReword()
     const note = screen.getByTestId("goal-plan-definition-note").textContent ?? ""
     expect(note).toMatch(/exactly as you write it/i)
     expect(note).not.toContain(PLAN.definition_text)
@@ -653,9 +716,9 @@ describe("the gate asks what it cannot know", () => {
   // else it lacked was reported afterwards as a limit.
   it("asks for the three, and says they are optional", () => {
     renderPlan()
+    toQuestions()
     const box = screen.getByTestId("goal-plan-unknowns").textContent ?? ""
-    expect(box).toMatch(/what I cannot know/i)
-    expect(box).toMatch(/will not guess/i)
+    expect(box).toMatch(/cannot work out myself/i)
     expect(box).toMatch(/stays stated as missing/i)
     expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
     expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
@@ -665,13 +728,14 @@ describe("the gate asks what it cannot know", () => {
   it("carries the answers on approve", () => {
     const onApprove = vi.fn()
     renderPlan(onApprove)
+    toQuestions()
     fireEvent.change(screen.getByLabelText(/one account worth/i),
       { target: { value: "12000" } })
     fireEvent.change(screen.getByLabelText(/who decides/i),
       { target: { value: "VP Product" } })
     fireEvent.change(screen.getByLabelText(/when do you need/i),
       { target: { value: "before the Q3 review" } })
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
 
     const d = onApprove.mock.calls[0][0]
     expect(d.account_value).toBe(12000)
@@ -685,7 +749,7 @@ describe("the gate asks what it cannot know", () => {
     // measurement.
     const onApprove = vi.fn()
     renderPlan(onApprove)
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     const d = onApprove.mock.calls[0][0]
     expect(d.account_value).toBeUndefined()
     expect(d.decision_owner).toBeUndefined()
@@ -695,9 +759,10 @@ describe("the gate asks what it cannot know", () => {
   it("ignores a zero or unparseable account value rather than sending it", () => {
     const onApprove = vi.fn()
     renderPlan(onApprove)
+    toQuestions()
     fireEvent.change(screen.getByLabelText(/one account worth/i),
       { target: { value: "0" } })
-    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
+    approve()
     expect(onApprove.mock.calls[0][0].account_value).toBeUndefined()
   })
 })
@@ -720,6 +785,7 @@ describe("the gate asks only what the CHOSEN framework needs", () => {
         ]),
       }} onApprovePlan={vi.fn()} />,
     )
+    toQuestions()
     expect(screen.queryByLabelText(/one account worth/i)).toBeNull()
     expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
     expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()
@@ -737,6 +803,7 @@ describe("the gate asks only what the CHOSEN framework needs", () => {
         ]),
       }} onApprovePlan={vi.fn()} />,
     )
+    toQuestions()
     expect(screen.getByTestId("goal-plan-unknowns").textContent)
       .toContain("Named on the decision box so the ranking has an owner.")
   })
@@ -752,6 +819,7 @@ describe("the gate asks only what the CHOSEN framework needs", () => {
         ]),
       }} onApprovePlan={vi.fn()} />,
     )
+    toQuestions()
     expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
   })
 
@@ -759,6 +827,7 @@ describe("the gate asks only what the CHOSEN framework needs", () => {
     // `PLAN` (used everywhere else in this file) carries no `questions` at
     // all — a run left `awaiting_approval` from before this shipped.
     renderPlan()
+    toQuestions()
     expect(screen.getByLabelText(/one account worth/i)).toBeTruthy()
     expect(screen.getByLabelText(/who decides/i)).toBeTruthy()
     expect(screen.getByLabelText(/when do you need/i)).toBeTruthy()

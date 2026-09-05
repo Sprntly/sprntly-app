@@ -218,8 +218,14 @@ async function answerBothGatesInThread(runId: number) {
     fireEvent.click(screen.getByRole("button", { name: /confirm and plan/i }))
   })
   await waitFor(() => expect(screen.getByTestId("goal-gate-plan")).toBeTruthy())
+  // THE PLAN GATE IS TWO STEPS. Approving the plan reveals what the run still
+  // needs; the second button is the one that posts. `/approve` is the only
+  // endpoint and it starts the run, so the answers travel with it.
   await act(async () => {
-    fireEvent.click(screen.getByRole("button", { name: /approve|start reading/i }))
+    fireEvent.click(screen.getByRole("button", { name: /approve this plan/i }))
+  })
+  await act(async () => {
+    fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
   })
 }
 
@@ -785,6 +791,11 @@ describe("the guards around the restore", () => {
     // The approve response is lost, and the run turns out to have died.
     approveRun.mockRejectedValue(new Error("connection lost"))
     getRun.mockResolvedValue({ id: 99, status: "failed", prioritisation: {} })
+    // TWO ACTS, NOT ONE. React batches inside a single `act`, so the second
+    // button does not exist yet when the first click is still being flushed.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: /approve this plan/i }))
+    })
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: /approve and run/i }))
     })

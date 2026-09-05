@@ -826,6 +826,68 @@ export type GoalPlanQuestion = {
   id: string
   prompt: string
   why: string
+  /** ── WHAT A DERIVED QUESTION CARRIES THAT A FIXED ONE DID NOT. ────────
+   *  The old three were asked unconditionally, so there was nothing to say
+   *  about why THIS run is asking. A question derived from something the
+   *  reconnaissance pass actually saw can say it — and a reader told "your
+   *  contracts carry two different account values and they differ on 13
+   *  rows" answers in seconds, where the same question asked cold reads as
+   *  the engine being unsure of itself.
+   *
+   *  All optional: a plan stored before this shipped carries none of them
+   *  and must still render. */
+  what_i_saw?: string
+  affects?: string
+  /** Never "we will guess". Every default is a stated, conservative
+   *  behaviour the run carries out and discloses. */
+  default_if_skipped?: string
+  /** A closed set of answers where one exists — right for "which of these
+   *  two columns is your book", wrong for a person's name. Empty or absent
+   *  means free text. */
+  options?: string[]
+}
+
+/** One numbered thing the run will do, composed by the server against a
+ *  closed vocabulary of operations it can actually perform.
+ *
+ *  `what` is an ACTION PHRASE and `why` is what it gets the reader; they are
+ *  separate fields because they are read at different speeds. The card scans
+ *  as a column of `what`, and `why` opens underneath on one control. */
+export type GoalPlanStep = {
+  n: number
+  part: string
+  primitive: string
+  what: string
+  why: string
+  sources?: string[]
+  observations?: string[]
+  params?: Record<string, unknown>
+}
+
+/** Something the reconnaissance pass saw in the evidence, with its numbers
+ *  under names. Carried so a stored plan can be re-checked without re-reading
+ *  the corpus. */
+export type GoalPlanObservation = {
+  id: string
+  kind: string
+  severity: string
+  source: string
+  source_label?: string
+  fields?: string[]
+  what: string
+  figures?: Record<string, number>
+}
+
+/** How much was read, over what window, from how many places. Absent on every
+ *  plan built without a reconnaissance pass — which renders as no stat strip
+ *  rather than as zeroes, because "nothing was read" and "we did not look"
+ *  are different statements. */
+export type GoalPlanCoverage = {
+  records?: number
+  tables?: number
+  origins?: number
+  earliest?: string
+  latest?: string
 }
 
 /** What the run will do, said BEFORE it does it. This is what the user
@@ -870,12 +932,38 @@ export type GoalRunPlan = {
   /** What the chosen framework needs and cannot derive, batched — replaces
    *  the old fixed three questions asked regardless of framework. */
   questions?: GoalPlanQuestion[]
+  /** ── THE METHOD, COMPOSED BY THE SERVER. ─────────────────────────────
+   *  The numbered sequence this run will carry out, each step naming an
+   *  operation the engine can actually perform, and `observations` is what
+   *  the pass saw in the evidence — both the input the steps were composed
+   *  from and the check every figure in them was verified against.
+   *
+   *  OPTIONAL, AND THAT IS LOAD-BEARING RATHER THAN DEFENSIVE. A plan stored
+   *  before this shipped has neither, and one sitting `awaiting_approval`
+   *  right now must still render. `planNarrative` is the fallback for exactly
+   *  those, and it is unreachable whenever `steps` is present — two live
+   *  generators for one list is the drift that makes a plan describe a run
+   *  that no longer happens. */
+  steps?: GoalPlanStep[]
+  observations?: GoalPlanObservation[]
+  coverage?: GoalPlanCoverage
   /** Answers the reader gave at the gate to things the run cannot know. Each
    *  is an ASSUMPTION when present, and the document labels it as one where it
    *  is used. */
   account_value?: number
   decision_owner?: string
   needed_by?: string
+  /** WHAT ONE ACCOUNT IS WORTH, TAKEN FROM THE EVIDENCE rather than asked
+   *  for. Deliberately NOT `account_value`: that field is the reader's own
+   *  estimate and the report renders it with the words "an estimate you gave
+   *  rather than something measured", which is false of a figure read off
+   *  their contracts. Present only when the evidence carried one — which is
+   *  also when the gate stops asking for it. */
+  account_value_derived?: number
+  account_value_derived_note?: string
+  /** Answers to the DERIVED questions, keyed by question id, as recorded at
+   *  approval. */
+  answers?: Record<string, string>
 }
 
 /** What the run has decided so far, written as it goes.
@@ -1140,6 +1228,17 @@ export const goalAnalysisApi = {
       account_value?: number
       decision_owner?: string
       needed_by?: string
+      /** Answers to the questions the gate DERIVED from the evidence, keyed
+       *  by question id. A generic map because the set depends on what the
+       *  reconnaissance pass saw, so a dedicated field per question would
+       *  need a schema change every time a check is added.
+       *
+       *  RECORDED, NOT YET APPLIED. The run carries out the
+       *  `default_if_skipped` each question states; the answer is stored on
+       *  the plan for the pass that will honour it. The card says so where
+       *  it asks, because collecting an answer and quietly ignoring it is
+       *  the dishonesty this gate exists to remove. */
+      answers?: Record<string, string>
     },
   ) =>
     api.post<GoalRun>(`/v1/crucible/${runId}/approve`, {
@@ -1155,6 +1254,11 @@ export const goalAnalysisApi = {
       ...(opts?.decision_owner !== undefined
         ? { decision_owner: opts.decision_owner } : {}),
       ...(opts?.needed_by !== undefined ? { needed_by: opts.needed_by } : {}),
+      // Omitted entirely when empty, for the same reason as the three above:
+      // absence is the server's "unanswered", and an empty object would be
+      // recorded as a set of answers nobody gave.
+      ...(opts?.answers && Object.keys(opts.answers).length
+        ? { answers: opts.answers } : {}),
     }),
 
   /** This run's report document, or a 404 when it has none yet. */

@@ -408,8 +408,21 @@ async function walkTheFlow() {
   // 3. Gate 2, in the thread: drop a source, say what you already believe.
   await waitFor(() => expect(screen.getByTestId("goal-gate-plan")).toBeTruthy())
   const gate = screen.getByTestId("goal-gate-plan")
+  // Changing what gets read is one quiet disclosure away: the plan is a
+  // reading surface, and the tick list states what will happen rather than
+  // handing the reader checkboxes while they are still reading it.
+  await act(async () => {
+    fireEvent.click(
+      within(gate).getByRole("button", { name: /change what gets read/i }))
+  })
   await act(async () => {
     fireEvent.click(within(gate).getByLabelText(`Read ${DROPPED_LABEL}`))
+  })
+  // Approving the PLAN comes first; the hypotheses and the questions are the
+  // second step, and the button there is the one that posts.
+  await act(async () => {
+    fireEvent.click(
+      within(gate).getByRole("button", { name: /approve this plan/i }))
   })
   await act(async () => {
     fireEvent.change(within(gate).getByLabelText("What you already believe"),
@@ -559,7 +572,7 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // thread still names the source and shows it struck.
       const settled = screen.getByTestId("goal-gate-plan-done")
       expect(within(settled).getByText(DROPPED_LABEL)
-        .closest(".ggc-src-struck")).toBeTruthy()
+        .closest("[data-dropped]")).toBeTruthy()
       expect(settled.textContent).toContain(KEPT_LABEL)
     }, 30_000)
 
@@ -602,7 +615,7 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       // stays where it was agreed to — with no live controls on it.
       await walkTheFlow()
       const settled = screen.getByTestId("goal-gate-plan-done")
-      expect(within(settled).getByText(DROPPED_LABEL).closest(".ggc-src-struck"))
+      expect(within(settled).getByText(DROPPED_LABEL).closest("[data-dropped]"))
         .toBeTruthy()
       expect(settled.textContent).toContain("dropped by you")
       expect(settled.textContent).toContain(HYPOTHESIS)
@@ -673,8 +686,15 @@ describe("a goal whose metric we recognise skips straight to the plan", () => {
       { timeout: 8_000 })
     const gate = screen.getByTestId("goal-gate-plan")
     await act(async () => {
+      fireEvent.click(within(gate).getByRole("button", { name: /reword this/i }))
+    })
+    await act(async () => {
       fireEvent.change(within(gate).getByLabelText("What this goal means"),
         { target: { value: CONFIRMED } })
+    })
+    await act(async () => {
+      fireEvent.click(
+        within(gate).getByRole("button", { name: /approve this plan/i }))
     })
     await act(async () => {
       fireEvent.click(

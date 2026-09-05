@@ -1,0 +1,314 @@
+/* The plan gate's own styles.
+ *
+ * A MODULE RATHER THAN `globals.css`, where the older `.ga-plan-*` rules live.
+ * That file is shared and enormous; this screen's new surfaces belong beside
+ * the component that owns them, which is the convention the rest of
+ * `components/shared` already follows. The existing `.ga-doc-*` classes are
+ * still used for the parts that were already right — header, sections, quote,
+ * actions — so this file only carries what is genuinely new.
+ *
+ * EVERY COLOUR IS A TOKEN. No literal outside a fallback, so the screen
+ * follows the product's theme rather than pinning its own.
+ */
+
+/* ── The verdict and the stat strip ──────────────────────────────────────
+   A reader arriving at a plan asks two things before anything else: can this
+   be answered, and off how much. The verdict answers the first in a sentence;
+   the strip answers the second in four numbers they can take in without
+   reading. Numbers are tabular so the strip does not shift as it fills. */
+.verdict {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  font-weight: 560;
+}
+
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border, #ececec);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.statValue {
+  font-size: 15px;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+}
+
+.statLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  opacity: 0.5;
+}
+
+/* ── The counting unit, in one serif sentence ────────────────────────────
+   The one line on this screen set in a serif, because it is the one decision
+   every number below inherits. It reads as a statement the reader can
+   disagree with, which is what it is — not a setting they have to operate. */
+.unit {
+  margin: 0;
+  font-family: var(--font-serif, ui-serif, Georgia, "Times New Roman", serif);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: -0.005em;
+}
+
+.unitNote {
+  margin: 4px 0 0;
+  font-size: 12.5px;
+  opacity: 0.7;
+}
+
+/* ── The steps: the centre of the screen ─────────────────────────────────
+   Numbered continuously across their parts, because the numbering is the
+   reader's handle on the whole method — restarting it inside each part turns
+   one sequence of twenty-three into five sequences of four.
+
+   `why` STACKS UNDERNEATH AND IS HIDDEN. Inline after a dash defeats
+   scanning: the eye has to read every line to find the next action, so a
+   twenty-three step method reads as a wall. Stacked and collapsed it is a
+   column of actions; expanded it is the full method. One control apart. */
+.partHead {
+  margin: 18px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  opacity: 0.55;
+}
+.partHead:first-of-type { margin-top: 4px; }
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  align-items: baseline;
+  gap: 0 8px;
+  padding: 5px 0;
+}
+
+.stepN {
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.42;
+  text-align: right;
+}
+
+.stepWhat {
+  font-size: 13.5px;
+  line-height: 1.5;
+}
+
+/* The second line. Indented to the action's column so the eye can still run
+   straight down the list of `what` with the detail open. */
+.stepWhy {
+  grid-column: 2;
+  margin: 3px 0 2px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  opacity: 0.72;
+  border-left: 2px solid var(--border, #ececec);
+  padding-left: 10px;
+}
+
+/* ONE control for the whole list, not one per step. Twenty-three disclosure
+   triangles is a worse wall than the one they were meant to fix. */
+.showHow {
+  align-self: flex-start;
+  margin: 0 0 8px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+.showHow:hover { background: var(--surface-2, #f7f7f6); }
+
+/* ── Sources as a record, not a control surface ──────────────────────────
+   A tick states what will be read. The ability to CHANGE it is real and stays,
+   one disclosure away, because a reader reading a plan is not filling in a
+   form and should not be handed checkboxes while they do it. */
+.tickList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tickRow {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 0 8px;
+  align-items: baseline;
+  font-size: 13px;
+}
+
+.tick {
+  color: var(--accent, #2e8a57);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.tickOff { opacity: 0.34; }
+
+.tickLabelOff { text-decoration: line-through; opacity: 0.55; }
+
+.tickWitness {
+  grid-column: 2;
+  font-size: 12px;
+  opacity: 0.62;
+}
+
+/* ── Questions: the second step of the gate ──────────────────────────────
+   Grouped by whether the answer touches the ANALYSIS or only annotates the
+   report. "Who decides" never changes a number and must not sit beside a
+   question that rescales every size on the page. */
+.questions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 10px;
+  background: var(--surface-2, #f7f7f6);
+}
+
+.questionPrompt {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+
+/* What the run actually saw that made it ask. The reason a derived question
+   can be answered in seconds where a cold one cannot. */
+.questionSaw {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  opacity: 0.78;
+  border-left: 2px solid var(--accent, #2e8a57);
+  padding-left: 10px;
+}
+
+.questionDefault {
+  margin: 0;
+  font-size: 12px;
+  opacity: 0.62;
+}
+
+/* A closed set of answers renders as choices. A text box beside two known
+   options invites a third that nothing downstream can read. */
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.option {
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-weight: 550;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 999px;
+  background: var(--surface, #fff);
+  color: inherit;
+  cursor: pointer;
+}
+.option:hover { border-color: var(--accent, #2e8a57); }
+
+.optionOn {
+  border-color: var(--accent, #2e8a57);
+  background: var(--accent-muted, var(--green-s, #e9f4ec));
+  font-weight: 640;
+}
+
+.freeText {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--border, #ececec);
+  border-radius: 8px;
+  background: var(--surface, #fff);
+  color: inherit;
+}
+
+/* ── The approved plan, collapsed ────────────────────────────────────────
+   What was agreed, in one line, so the questions that follow have their
+   subject on screen without the whole document above them. */
+.record {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--border, #ececec);
+  border-left: 2px solid var(--accent, #2e8a57);
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-2, #f7f7f6);
+  font-size: 12.5px;
+}
+
+.recordNote { margin: 0; opacity: 0.72; }
+
+.reopen {
+  margin-left: auto;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 0;
+  background: none;
+  color: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+/* A quiet disclosure for the things that are still editable but must not
+   greet the reader as a form: the definition's wording, and which sources
+   get read. */
+.quietToggle {
+  align-self: flex-start;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 0;
+  background: none;
+  color: inherit;
+  opacity: 0.7;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.quietToggle:hover { opacity: 1; }
