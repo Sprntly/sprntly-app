@@ -1804,7 +1804,9 @@ def _generate_one_sync(dataset: str, question: str) -> dict:
         feature=Feature.ASK, operation="warm"
     ):
         return call_json(
-            system=ASK_SYSTEM + today_line() + connected_sources_line(company_id),
+            system=ASK_SYSTEM + today_line()
+            + connected_sources_line(company_id)
+            + open_goal_gate_line(company_id),
             user=user,
             user_cacheable_prefix=cacheable,
             schema=_ASK_RESPONSE_SCHEMA,

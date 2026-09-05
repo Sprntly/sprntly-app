@@ -68,6 +68,7 @@ from app.prompt_history import render_history_block
 from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
+    open_goal_gate_line,
     ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
@@ -1001,6 +1002,7 @@ def _answer_single_shot(
         ASK_SYSTEM
         + today_line()
         + connected_sources_line(enterprise_id)
+        + open_goal_gate_line(enterprise_id)
         + (ASK_SYSTEM_PRD_ADDENDUM if prd_context else "")
         + (ASK_SYSTEM_KG_ADDENDUM if kg_used else "")
         # skill_spec is not None ⇔ the method text is a company upload, not a
@@ -1157,6 +1159,7 @@ def _answer_voc_report(
         ASK_SYSTEM
         + today_line()
         + connected_sources_line(enterprise_id)
+        + open_goal_gate_line(enterprise_id)
         + "\n\n"
         + _VOC_KG_SYSTEM
     )
@@ -1207,6 +1210,7 @@ def _answer_voc_report(
                 ASK_SYSTEM
                 + today_line()
                 + connected_sources_line(enterprise_id)
+        + open_goal_gate_line(enterprise_id)
                 + "\n\n"
                 + _VOC_KG_SYSTEM
             ),
