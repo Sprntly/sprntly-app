@@ -88,17 +88,37 @@
   color: var(--ink-3);
 }
 
-/* ── The counting unit, in one serif sentence ────────────────────────────
-   The one line on this screen set in a serif, because it is the one decision
-   every number below inherits. It reads as a statement the reader can
-   disagree with, which is what it is — not a setting they have to operate. */
+/* ── The counting unit ───────────────────────────────────────────────────
+   THE STATEMENT ON THE PAGE, and it needs a container to read as one. Set as
+   bare text it is another paragraph among paragraphs; contained, ruled and on
+   its own ground it is the decision every number below inherits, which is what
+   it actually is.
+
+   The fill is a grey, not a tint — the brand is black, white and grey, and a
+   callout is not a status. */
+.unitBlock {
+  padding: 14px 16px;
+  border-left: 3px solid var(--ink-2);
+  border-radius: 0 10px 10px 0;
+  background: var(--surface-3);
+}
+
 .unit {
   margin: 0;
-  font-family: var(--font-serif, ui-serif, Georgia, "Times New Roman", serif);
-  font-size: 16px;
-  line-height: 1.5;
+  font-family: var(--font-serif);
+  font-size: 18px;
+  line-height: 1.4;
   letter-spacing: -0.005em;
   color: var(--ink);
+}
+
+/* The reasoning. The unit alone is the conclusion with the argument removed,
+   and the argument is the half a reader can disagree with. */
+.unitWhy {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
 }
 
 
