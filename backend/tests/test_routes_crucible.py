@@ -2638,6 +2638,12 @@ _CONTRACT_BOOK = (
 )
 
 
+#: The triage categories the ingest pass writes to `provenance`, in the
+#: proportions measured on a real 1,416-signal tenant.
+_TRIAGE_MIX = ("product_prd", "product_prd", "decision_record",
+               "business_context", "meeting_notes", "sales_deal")
+
+
 def _contract_signals(company_id: str) -> None:
     """Signals whose `properties` carry real numbers, which is the shape the
     reconnaissance pass reads. `ds/analyses.py` already writes numbers there
@@ -2652,7 +2658,8 @@ def _contract_signals(company_id: str) -> None:
             "properties": {"account": account, "base_acv_usd": base,
                            "expansion_acv_usd": expansion,
                            "total_acv_usd": total},
-            "provenance": {"doc": "contracts"},
+            "provenance": {"doc": "contracts",
+                           "triage_category": _TRIAGE_MIX[i % len(_TRIAGE_MIX)]},
             "valid_at": "2026-08-19T00:00:00+00:00",
             "created_at": "2026-08-19T00:00:00+00:00",
             "transaction_at": "2026-08-19T00:00:00+00:00",
@@ -2732,3 +2739,56 @@ def test_a_reconnaissance_pass_that_finds_nothing_still_produces_a_plan(ctx):
     plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
     assert plan["steps"], "the deterministic plan is a plan, not a failure state"
     assert plan["sources"] and plan["cannot_answer"]
+
+
+def test_the_plan_reads_the_triage_category_ingest_already_writes(ctx):
+    """A triage call classifies every ingested document into a declared
+    taxonomy and writes the answer to `provenance.triage_category`. Both signal
+    reads here already select `provenance`, so consuming it costs no extra
+    query, no tokens, no latency and no migration — and until now nothing
+    anywhere read it.
+
+    It matters most where the structural checks find least: a tenant whose
+    evidence is calls and Slack has no columns to inspect, so without this the
+    plan can say how much evidence there is and nothing about what it IS.
+    """
+    from app.db.client import require_client
+
+    _contract_signals(ctx.company_id)
+    # A corpus rather than a handful: the mix is not reported over a few rows,
+    # because a proportion computed from eight signals is not a proportion.
+    for i in range(40):
+        require_client().table("kg_signal").insert({
+            "id": f"cat-{i:04d}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {},
+            "provenance": {"doc": "calls",
+                           "triage_category": _TRIAGE_MIX[i % len(_TRIAGE_MIX)]},
+            "valid_at": "2026-08-19T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    mix = [o for o in plan["observations"] if o["kind"] == "evidence_mix"]
+    assert mix, "the categories are written on every ingest and read nowhere"
+    assert mix[0]["figures"]["classified"] > 0
+    assert 0 < mix[0]["figures"]["firsthand_share"] < 1
+
+
+def test_the_plan_opens_with_a_sentence_rather_than_a_list_of_storage_keys(ctx):
+    """Enumerating is not describing, and a sheet key teaches a reader
+    nothing except that they are reading a machine's notes."""
+    import re as _re
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    key = _re.compile(r"\S+:\S+")
+    for step in plan["steps"]:
+        for text in [step["what"], step["why"], *step["sources"]]:
+            assert not key.search(text), f"storage key rendered: {text}"

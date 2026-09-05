@@ -212,13 +212,33 @@ def _matches(x: float, allowed: Sequence[float]) -> bool:
     which is exactly what it is not allowed to do.
     """
     for a in allowed:
-        tol = max(0.5, abs(a) * 0.005)
-        if abs(x - a) <= tol:
+        if abs(x - a) <= _tolerance(a):
             return True
         scaled = a * 100.0
-        if abs(x - scaled) <= max(0.5, abs(scaled) * 0.005):
+        if abs(x - scaled) <= _tolerance(scaled):
             return True
     return False
+
+
+#: How far a written figure may sit from a measured one and still be that
+#: figure.
+#:
+#: TIGHTENED FROM AN ABSOLUTE 0.5, AND A TEST CAUGHT WHY. The gate's
+#: false-accept rate scales with how many figures are in play: at 0.5, "41%"
+#: matched a measured 40.6% and an assertion that an invented number gets
+#: caught started passing for the wrong reason the moment a new check added
+#: eight more figures to the allowed set. The floor now admits a one-decimal
+#: rendering of a measured value (8.88 written as "8.9") and nothing looser.
+#:
+#: An approximation is therefore DROPPED, not accepted. That is the right
+#: direction: the model is handed the exact figures and told to use them, and
+#: a step that rounds to "about 41%" loses nothing a reader needed.
+_ABSOLUTE_TOLERANCE = 0.05
+_RELATIVE_TOLERANCE = 0.005
+
+
+def _tolerance(a: float) -> float:
+    return max(_ABSOLUTE_TOLERANCE, abs(a) * _RELATIVE_TOLERANCE)
 
 
 def untraceable_figures(
@@ -262,6 +282,10 @@ def verify(
     observations: Sequence[Observation],
     *,
     available_sources: Sequence[str] = (),
+    #: The run's own countable facts — table count, source count, records.
+    #: See `ReconReport.inventory_figures`: a step may say how much it is
+    #: about to read without that being a claim about what is in it.
+    inventory: Sequence[float] = (),
 ) -> tuple[list[PlanStep], list[str]]:
     """Keep the steps that survive both gates; say why the others did not.
 
@@ -274,7 +298,7 @@ def verify(
     """
     kept: list[PlanStep] = []
     dropped: list[str] = []
-    engine = list(_engine_figures().values())
+    engine = list(_engine_figures().values()) + [float(v) for v in inventory]
     obs_by_id = {o.id: o for o in observations}
 
     problems = prim.validate_steps(
@@ -350,6 +374,47 @@ def _part_for(primitive: str) -> str:
 # ── THE DETERMINISTIC PLAN ──────────────────────────────────────────────────
 
 
+#: How many sources are NAMED in the opening sentence before it stops listing
+#: and starts counting. Three, because a sentence naming four things is a list
+#: and a reader skims a list.
+MAX_NAMED_SOURCES = 3
+
+
+def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
+    """What this run will read, said as a sentence rather than an inventory.
+
+    Counts TABLES and SOURCES separately, because six sheets of one workbook
+    are one source to a reader and calling them six would overstate what is
+    connected. Falls back to the source types when nothing was read
+    structurally, which is every prose-only tenant.
+    """
+    origins: list[str] = []
+    for s in report.sources:
+        if s.origin and s.origin not in origins:
+            origins.append(s.origin)
+    if not origins:
+        origins = [str(t).replace("_", " ") for t in source_types]
+
+    if not origins:
+        return ("Everything below is computed over the sources you connected "
+                "and nothing else, so a figure in the finished document can "
+                "always be traced back to one of them.")
+
+    shown = origins[:MAX_NAMED_SOURCES]
+    named = ", ".join(shown[:-1]) + (" and " + shown[-1] if len(shown) > 1 else shown[0])
+    if len(origins) > MAX_NAMED_SOURCES:
+        named += f", and {len(origins) - MAX_NAMED_SOURCES} more"
+
+    tables = len(report.sources)
+    scope = (f"{tables} tables across {len(origins)} sources"
+             if tables > len(origins) else
+             f"{len(origins)} source{'s' if len(origins) != 1 else ''}")
+
+    return (f"Everything below is computed over {scope} — {named} — and "
+            f"nothing else, so a figure in the finished document can always "
+            f"be traced back to something you connected.")
+
+
 def _obs_step(
     primitive: str, o: Observation, what: str, why: str,
     params: Mapping[str, Any], part: str = "",
@@ -357,7 +422,10 @@ def _obs_step(
     return PlanStep(
         n=0, part=part or _part_for(primitive),
         primitive=primitive, params=dict(params), what=what, why=why,
-        sources=(o.source,), observations=(o.id,),
+        # THE LABEL, NOT THE KEY. `sources` is what a renderer shows beside
+        # the step; the key it addresses lives on `params`, which is machine
+        # -facing. `verify` accepts either vocabulary — see `build_steps`.
+        sources=(o.source_label,), observations=(o.id,),
     )
 
 
@@ -398,18 +466,34 @@ def minimal_plan(
     report = report or ReconReport()
     obs = report.observations
     steps: list[PlanStep] = []
-    named = ", ".join(source_types) or "everything connected"
 
     # ── Get the unit right. ────────────────────────────────────────────────
+    #
+    # THE FIRST THING A READER SEES IS A SENTENCE, NOT AN INVENTORY. This step
+    # used to join every source it had into one line, which on a real upload
+    # rendered sixteen storage keys — `03_product_analytics:activation_funnel`
+    # and fifteen more — as the opening of a document whose entire purpose is
+    # to be read. Enumerating is not describing. The count and the named
+    # sources go in the prose; the full list stays on the parameters, where an
+    # operation is being addressed rather than a person.
     steps.append(_plain(
         "select_evidence",
         "Fix which sources this answer may rest on",
-        f"Everything below is computed over {named} and nothing else, so a "
-        f"figure in the finished document can always be traced back to a "
-        f"source you connected.",
+        _evidence_sentence(report, source_types),
         params={"sources": list(source_types) or ["all"]},
         sources=source_types,
     ))
+    for o in report.of_kind("evidence_mix")[:MAX_DETERMINISTIC_PER_KIND]:
+        steps.append(_obs_step(
+            "characterise_evidence_mix", o,
+            "Say what kind of evidence this actually is",
+            f"Only {o.figures['firsthand_share'] * 100:.1f}% of what is "
+            f"classified is a customer speaking firsthand; the rest is the "
+            f"company describing itself. A revenue answer built mostly from "
+            f"internal documents can still be right, but you should know that "
+            f"is what it is before you act on it.",
+            params={},
+        ))
     unit_obs = report.of_kind("unit_value_derivable")
     if unit_obs:
         o = unit_obs[0]
@@ -474,6 +558,24 @@ def minimal_plan(
         ))
 
     # ── Understand why. ────────────────────────────────────────────────────
+    for o in report.of_kind("censored_periods")[:MAX_DETERMINISTIC_PER_KIND]:
+        key, size, last = (list(o.fields) + ["", "", ""])[:3]
+        steps.append(_obs_step(
+            "check_period_censoring", o,
+            "Count retention only over cohorts old enough to have one",
+            f"{o.figures['immature_cohorts']:.0f} of "
+            f"{o.figures['cohorts']:.0f} cohorts have zeros in the later "
+            f"periods because those months have not happened yet. Dividing "
+            f"the last period by every cohort gives "
+            f"{o.figures['naive_rate'] * 100:.1f}%; over the "
+            f"{o.figures['mature_cohorts']:.0f} that have a full window it is "
+            f"{o.figures['mature_rate'] * 100:.1f}%. That is a "
+            f"{o.figures['error_points']:.1f} point error in the direction "
+            f"that invents a crisis, so the run reports the second figure and "
+            f"says which cohorts it counted.",
+            params={"source": o.source, "period_field": key},
+            part=PARTS[1],
+        ))
     for o in report.of_kind("coding_gap")[:MAX_DETERMINISTIC_PER_KIND]:
         coded, text = (list(o.fields) + ["", ""])[:2]
         steps.append(_obs_step(
@@ -835,7 +937,18 @@ def build_steps(
     if _offline():
         return fallback
 
-    available = set(source_types) | {s.name for s in report.sources}
+    # BOTH VOCABULARIES. A step addresses a source two ways — the storage key
+    # on its parameters, the reader's label on `sources` — so the validator
+    # has to know both or it would reject every correctly-labelled step. It
+    # keeps its teeth: a step naming a source this run does not have under
+    # EITHER name still fails, which is the check that matters.
+    available = (
+        set(source_types)
+        | {s.name for s in report.sources}
+        | {s.label for s in report.sources}
+        | {o.source for o in report.observations}
+        | {o.source_label for o in report.observations}
+    )
     prompt = _prompt(
         goal_text=goal_text, definition_text=definition_text,
         currency=currency, report=report, source_types=source_types,
@@ -861,7 +974,8 @@ def build_steps(
             return fallback
 
         kept, dropped = verify(drawn, report.observations,
-                               available_sources=sorted(available))
+                               available_sources=sorted(available),
+                               inventory=report.inventory_figures())
         if dropped:
             logger.warning("crucible_plan_steps_dropped attempt=%s dropped=%s",
                            attempt, "; ".join(dropped))

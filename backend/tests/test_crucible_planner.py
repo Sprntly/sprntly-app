@@ -9,6 +9,8 @@ nobody measured, and cannot be asked the same question twice for the same run.
 """
 from __future__ import annotations
 
+import re
+
 from tests import _tabular_recon_fixtures as fx
 
 from app.crucible import planner, primitives as prim, recon
@@ -17,7 +19,8 @@ SOURCES = ("revenue", "analytics", "customer_voice")
 
 
 def _report():
-    return recon.observe(fx.full_pack(), expected_sources=SOURCES)
+    return recon.observe(fx.full_pack(), expected_sources=SOURCES,
+                         signals=fx.signals())
 
 
 def _plan():
@@ -39,9 +42,15 @@ def test_the_deterministic_plan_names_only_implemented_operations():
 
 
 def test_the_deterministic_plan_validates_against_the_registry():
+    report = _report()
     problems = prim.validate_steps(
         [s.to_json() for s in _plan()],
-        available_sources=[t.name for t in fx.full_pack()] + list(SOURCES),
+        available_sources=(
+            [t.name for t in fx.full_pack()] + list(SOURCES)
+            + [s.label for s in report.sources]
+            + [o.source for o in report.observations]
+            + [o.source_label for o in report.observations]
+        ),
     )
     assert problems == ()
 
@@ -64,7 +73,8 @@ def test_every_figure_in_the_deterministic_plan_traces_to_an_observation():
     a figure from nowhere, in a document whose whole claim is that its numbers
     come from the evidence."""
     report = _report()
-    engine = list(planner._engine_figures().values())
+    engine = list(planner._engine_figures().values()) + list(
+        report.inventory_figures())
     for step in _plan():
         extra = engine + [
             float(v) for v in step.params.values()
@@ -307,3 +317,73 @@ def test_steps_round_trip_through_json():
     assert [s.primitive for s in restored] == [s.primitive for s in original]
     assert [s.why for s in restored] == [s.why for s in original]
     assert [s.params for s in restored] == [dict(s.params) for s in original]
+
+
+# ─── The plan opens with a sentence, not an inventory ──────────────────────
+
+
+def test_the_first_step_summarises_the_evidence_instead_of_listing_it():
+    """It used to join every source it had into one line, which on a real
+    upload rendered sixteen storage keys as the opening of a document whose
+    whole purpose is to be read. Enumerating is not describing."""
+    first = _plan()[0]
+    assert first.primitive == "select_evidence"
+    # Five sheets drawn from four workbooks: the sentence counts BOTH, because
+    # several sheets of one workbook are one source to a reader and calling
+    # them five would overstate what is connected.
+    assert "5 tables across 4 sources" in first.why
+    # The count is in the prose; the full list is on the parameters, where an
+    # operation is being addressed rather than a person.
+    assert first.params["sources"]
+
+
+def test_no_storage_key_ever_reaches_a_readers_eye():
+    """`03_product_analytics:activation_funnel` is the right handle for a join
+    and the wrong thing to put in a document."""
+    # A storage key is `word:word` with no space — an English colon in a
+    # sentence is not one, and a check that cannot tell them apart would push
+    # the prose into avoiding punctuation.
+    key = re.compile(r"\S+:\S+")
+    for step in _plan():
+        for text in (step.what, step.why, *step.sources):
+            assert not key.search(text), (
+                f"step {step.n} shows a storage key: {text}")
+
+
+def test_the_opening_sentence_names_a_few_sources_and_counts_the_rest():
+    """A sentence naming four things is a list, and a reader skims a list."""
+    why = _plan()[0].why
+    assert "sales data" in why and "and 1 more" in why
+
+
+def test_a_step_may_say_how_much_it_will_read_without_that_being_a_claim():
+    """The run's own inventory counts are facts about the plan, not claims
+    about the evidence — and the figure gate deleted the opening sentence for
+    citing them until `inventory_figures` existed."""
+    report = _report()
+    first = _plan()[0]
+    kept, dropped = planner.verify(
+        [first], report.observations,
+        inventory=report.inventory_figures(),
+    )
+    assert kept and not dropped
+
+
+# ─── The two checks the follow-up added reach the plan ─────────────────────
+
+
+def test_the_censoring_finding_becomes_a_step_with_both_figures():
+    step = next(s for s in _plan() if s.primitive == "check_period_censoring")
+    assert "46.7" in step.why and "93.3" in step.why
+    assert step.part == planner.PARTS[1]
+
+
+def test_the_evidence_mix_becomes_a_step_about_what_the_answer_rests_on():
+    step = next(s for s in _plan()
+                if s.primitive == "characterise_evidence_mix")
+    assert "4.5%" in step.why
+
+
+def test_both_new_operations_are_implemented_not_declared():
+    for pid in ("check_period_censoring", "characterise_evidence_mix"):
+        assert prim.REGISTRY[pid].is_implemented

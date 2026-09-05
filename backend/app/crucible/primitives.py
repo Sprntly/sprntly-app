@@ -156,6 +156,16 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         implemented_by="app.crucible.plan.build_plan",
     ),
     Primitive(
+        id="characterise_evidence_mix",
+        group="scoping",
+        description="Say what KIND of evidence this rests on — how much is a "
+                    "customer speaking, and how much is the company "
+                    "describing itself.",
+        params=(),
+        status="implemented",
+        implemented_by="app.crucible.recon.evidence_mix",
+    ),
+    Primitive(
         id="partition_population",
         group="scoping",
         description="Split the book into groups that should be looked at "
@@ -247,6 +257,18 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         ),
         status="implemented",
         implemented_by="app.crucible.recon.identical_columns",
+    ),
+    Primitive(
+        id="check_period_censoring",
+        group="measurement",
+        description="Check whether the empty later periods are a decline or "
+                    "simply months that have not happened yet.",
+        params=(
+            _p("source", "source"),
+            _p("period_field", "field"),
+        ),
+        status="implemented",
+        implemented_by="app.crucible.recon.period_grid",
     ),
     Primitive(
         id="trend_over_window",

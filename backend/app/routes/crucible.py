@@ -2403,7 +2403,14 @@ def _recon_report(company_id: str):
             rows.extend(chunk)
             if len(chunk) < _PAGE:
                 break
-        return observe(tables_from_signals(rows))
+        # `signals` AS WELL AS THE TABLES. The structural checks need columns
+        # and a prose tenant has none, so reconnaissance over calls and Slack
+        # returned counts and little else. The triage pass has been
+        # classifying every ingested document into a declared taxonomy and
+        # writing the answer to `provenance.triage_category` — and both signal
+        # reads here already select `provenance`, so reading it costs no extra
+        # query, no tokens and no latency.
+        return observe(tables_from_signals(rows), signals=rows)
     except Exception:  # noqa: BLE001 — see the constant above
         logger.warning("crucible: reconnaissance pass failed for %s; the plan "
                        "will be built without a method section", company_id,
