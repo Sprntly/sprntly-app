@@ -854,6 +854,52 @@ async def approve(
     return _public(row or claimed)
 
 
+def _complete_plan_steps(
+    run_id: int, company_id: str, *, report, goal_text: str,
+    definition_text: str, source_types: tuple,
+) -> None:
+    """Compose the method and write it onto the plan the gate is already
+    showing.
+
+    A COMPLETION, NOT A RE-ROLL, and the difference is enforced rather than
+    asserted: `planner.load_steps` treats a pending plan as undrawn, so this
+    upgrade can happen exactly once, and every later read of a completed plan
+    comes back off the store unchanged.
+
+    IT DECLINES ONCE THE RUN HAS LEFT THE GATE. A reader who approves while the
+    composition is in flight would otherwise have their answers, definition and
+    exclusions overwritten by this write, which read the plan before any of
+    them existed. The deterministic method is a real method and a perfectly
+    good final answer; losing what somebody typed is not recoverable.
+
+    Total: a failure here costs the composed wording and nothing else.
+    """
+    try:
+        from app.crucible.planner import build_steps
+
+        steps = build_steps(
+            enterprise_id=company_id, goal_text=goal_text,
+            definition_text=definition_text, currency="accounts",
+            report=report, source_types=source_types,
+        )
+        row = runs_db.get(run_id, company_id) or {}
+        if row.get("status") != "awaiting_approval":
+            logger.info("crucible: run %s left the gate before its method was "
+                        "composed; keeping the deterministic one", run_id)
+            return
+        meta = dict(_meta_of(run_id, company_id))
+        plan_json = dict(meta.get("plan") or {})
+        if not plan_json.get("steps_pending"):
+            return
+        plan_json["steps"] = [st.to_json() for st in steps]
+        plan_json["steps_pending"] = False
+        meta["plan"] = plan_json
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — the plan on screen is already valid
+        logger.exception("crucible: could not compose the method for run %s; "
+                         "the deterministic one stands", run_id)
+
+
 def execute_run(
     *,
     run_id: int,
@@ -1034,6 +1080,18 @@ def execute_run(
         #
         # Inventory only, no content read, so this returns in about a second.
         if not approved:
+            # ── PHASE 1. THE FAST, TRUE HALF. ──────────────────────────
+            #
+            # Everything above the steps is deterministic and lands in a few
+            # hundred milliseconds: the verdict, the coverage, the definition,
+            # the counting unit, the sources and what each is being used for.
+            # Only the WORDING of the method needs a model call. Composing
+            # before the first write made the reader wait on the slow part for
+            # the fast part, staring at nothing while the answer sat ready.
+            #
+            # So this write lands the deterministic method, marked pending, and
+            # the gate renders off it immediately.
+            report = _recon_report(company_id)
             plan = build_plan(
                 company_id=company_id,
                 goal_text=goal_text,
@@ -1043,18 +1101,21 @@ def execute_run(
                 definition_source=definition_source,
                 definition_note=_PROCESS_NOTE,
                 definition_adopted=definition_adopted,
-                # THE METHOD. Read once, here, on the one pass through this
-                # branch a run ever makes — `build_plan` only runs when the
-                # run is NOT yet approved, so the steps are composed exactly
-                # once and every later read comes off the stored plan.
-                recon_report=_recon_report(company_id),
+                recon_report=report,
                 run_meta=_meta_of(run_id, company_id),
                 enterprise_id=company_id,
+                compose=False,
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()
             runs_db.update(run_id, company_id, status="awaiting_approval",
                            prioritisation=meta)
+            # ── PHASE 2. The composed wording, written onto the same plan.
+            _complete_plan_steps(
+                run_id, company_id, report=report, goal_text=goal_text,
+                definition_text=definition_text,
+                source_types=tuple(sv.source_type for sv in plan.sources),
+            )
             return
 
         # THE USER'S ANSWER TO THE PLAN IS PART OF THE RECORD. `build_plan`

@@ -183,6 +183,14 @@ def load_steps(run_meta: Mapping[str, Any]) -> Optional[tuple[PlanStep, ...]]:
     plan = run_meta.get("plan")
     if not isinstance(plan, Mapping) or STEPS_KEY not in plan:
         return None
+    # A PENDING PLAN HAS NOT BEEN DRAWN, IT HAS BEEN PLACEHELD. The gate writes
+    # the deterministic method first so the reader sees something true in a few
+    # hundred milliseconds, and the composition completes it in a second write.
+    # Reading those placeholder steps back as "already drawn" would mean the
+    # composition never ran — the whole plan silently deterministic, forever,
+    # with nothing to show it had happened.
+    if plan.get("steps_pending"):
+        return None
     return steps_from_json(plan.get(STEPS_KEY))
 
 
