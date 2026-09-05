@@ -50,6 +50,7 @@ from app.prompts import (
     ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM,
     ASK_SYSTEM_PROJECTS_ADDENDUM,
     ASK_SYSTEM_TEAM_ADDENDUM,
+    open_goal_gate_line,
     connected_sources_line,
     today_line,
     ASK_USER_TEMPLATE_QUESTION_ONLY,
@@ -520,6 +521,17 @@ def set_active_conversation(conversation_id: int | None, user_id: str | None):
     """
     return (_active_conversation_id.set(conversation_id),
             _active_conversation_user_id.set(user_id))
+
+
+def active_conversation_id() -> int | None:
+    """The conversation this Ask is running for, or None.
+
+    Read by `prompts.open_goal_gate_line`, which needs to know whether a Goal
+    Analysis gate is open in THIS conversation. Exposed as a function rather
+    than by reaching for the contextvar directly, so the storage stays private
+    to this module.
+    """
+    return _active_conversation_id.get()
 
 
 def reset_active_conversation(tokens) -> None:
@@ -2354,7 +2366,8 @@ def compose_ask_answer(
                   + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
                   + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
                      if knowledge_base_context else "")
-                  + today_line() + connected_sources_line(enterprise_id))
+                  + today_line() + connected_sources_line(enterprise_id)
+                  + open_goal_gate_line(enterprise_id))
         own_records = "\n\n---\n\n".join(
             p for p in (library_context, team_context, projects_context,
                         backlog_context, knowledge_base_context)
@@ -2422,13 +2435,15 @@ def compose_ask_answer(
                       + (ASK_SYSTEM_BACKLOG_ADDENDUM if backlog_context else "")
                       + (ASK_SYSTEM_KNOWLEDGE_BASE_ADDENDUM
                          if knowledge_base_context else "")
-                      + today_line() + connected_sources_line(enterprise_id))
+                      + today_line() + connected_sources_line(enterprise_id)
+                  + open_goal_gate_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_WITH_KG.format(
                 kg_context="\n\n---\n\n".join(context_sections), question=question
             )
         else:
             system = (ASK_SYSTEM + today_line()
-                      + connected_sources_line(enterprise_id))
+                      + connected_sources_line(enterprise_id)
+                      + open_goal_gate_line(enterprise_id))
             user = history_block + ASK_USER_TEMPLATE_QUESTION_ONLY.format(question=question)
 
     # Self-reported workspace identity (interim incident fix): computed once
