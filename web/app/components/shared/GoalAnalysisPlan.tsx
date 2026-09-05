@@ -108,6 +108,14 @@ export const MAX_HYPOTHESIS_CHARS = 2_000
 
 type Stage = "plan" | "questions"
 
+/** A step as this card renders it.
+ *
+ *  `items` is CLIENT-SIDE ONLY and never arrives from the server: the composed
+ *  method has one action phrase per step, and only the legacy narrative
+ *  fallback splits a step into sub-points. It is typed here rather than on
+ *  `GoalPlanStep` so the wire type keeps describing the wire. */
+type RenderStep = GoalPlanStep & { items?: string[] }
+
 export function GoalAnalysisPlan({
   plan,
   approving,
@@ -162,7 +170,7 @@ export function GoalAnalysisPlan({
   // ONE RESOLUTION OF THE STEP LIST, shared by the plan body and the
   // collapsed record. Resolving it twice would let the record disagree with
   // the document about how many steps were approved.
-  const steps = useMemo(
+  const steps = useMemo<RenderStep[]>(
     () => planSteps(plan, effectiveExcluded), [plan, effectiveExcluded],
   )
 
@@ -443,14 +451,22 @@ export function GoalAnalysisPlan({
  */
 function planSteps(
   plan: GoalRunPlan, excluded: ReadonlySet<string>,
-): GoalPlanStep[] {
+): RenderStep[] {
   if (plan.steps?.length) return plan.steps
+  // ITEMS STAY A LIST. Joining them into `what` with a space produced exactly
+  // the run-on the narrative already learned not to write: "…something an
+  // account asked for Graded by how many independent source documents…", four
+  // bullets welded into one five-line paragraph with no sentence boundary
+  // between them. Two steps rendered that way and the rest as single lines, so
+  // the column of actions had no consistent left edge to run down — which is
+  // the entire thing the step list is shaped for.
   return planNarrative(plan, excluded).map((step, i) => ({
     n: i + 1,
     part: "",
     primitive: "",
-    what: [step.text, ...(step.items ?? [])].join(" "),
+    what: step.text,
     why: "",
+    items: step.items,
   }))
 }
 
@@ -461,7 +477,7 @@ function PlanBody({
   changingSources, setChangingSources, toggle, questionCount,
 }: {
   plan: GoalRunPlan
-  steps: GoalPlanStep[]
+  steps: RenderStep[]
   settled?: { excludedSources: string[]; hypotheses: string[] }
   kept: GoalRunPlan["sources"]
   keptSignals: number
@@ -592,14 +608,23 @@ function PlanBody({
         <h2 className="ga-doc-h3">
           {settled ? "The approach you approved" : "How I will do it"}
         </h2>
-        <button
-          type="button"
-          className={s.showHow}
-          aria-expanded={showHow}
-          onClick={() => setShowHow(!showHow)}
-        >
-          {showHow ? "Hide how" : "Show how"}
-        </button>
+        {/* ONLY WHEN THERE IS SOMETHING TO SHOW. On a plan stored before the
+            server composed the method every `why` is empty, so this rendered,
+            flipped its own `aria-expanded` and its own label, and changed
+            nothing else on the card — measured live at exactly the same height
+            before and after the click. A control that changes only its own
+            state is worse than no control: it tells the reader there is more
+            to read and then withholds it. */}
+        {steps.some((x) => x.why) ? (
+          <button
+            type="button"
+            className={s.showHow}
+            aria-expanded={showHow}
+            onClick={() => setShowHow(!showHow)}
+          >
+            {showHow ? "Hide how" : "Show how"}
+          </button>
+        ) : null}
         <ol className={s.steps} data-testid="goal-plan-steps">
           {steps.map((step, i) => {
             // The part heading prints once, when it changes. Numbering does
@@ -614,6 +639,11 @@ function PlanBody({
                 <li className={s.step}>
                   <span className={s.stepN}>{step.n}</span>
                   <span className={s.stepWhat}>{step.what}</span>
+                  {step.items?.length ? (
+                    <ul className={s.stepItems}>
+                      {step.items.map((item, j) => <li key={j}>{item}</li>)}
+                    </ul>
+                  ) : null}
                   {showHow && step.why ? (
                     <span className={s.stepWhy}>{step.why}</span>
                   ) : null}

@@ -159,6 +159,23 @@
   color: var(--ink);
 }
 
+/* SUB-POINTS OF A STEP, as a list rather than welded into the action phrase.
+   Only the legacy narrative fallback produces these; the composed method has
+   one action per step. Indented to the action's own column so the numbers
+   still form an unbroken left edge down the card. */
+.stepItems {
+  grid-column: 2;
+  margin: 4px 0 2px;
+  padding-left: 16px;
+  list-style: disc;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
 /* The second line. Indented to the action's column so the eye can still run
    straight down the list of `what` with the detail open. */
 .stepWhy {

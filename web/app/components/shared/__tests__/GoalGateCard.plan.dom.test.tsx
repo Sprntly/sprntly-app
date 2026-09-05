@@ -545,7 +545,12 @@ describe("the plan leads with the approach, not the form", () => {
     // read" step — in the reader's words, with the total — follows it.
     // The number and the action phrase are separate spans now, so the step is
     // found by the action's own text rather than by the line starting with it.
-    const sourcesStep = [...steps].find((s) => /Read your/.test(s.textContent ?? ""))!
+    // NOT by "Read your": the labels carry their own determiners — one of them
+    // is literally "your own business context" — so the template no longer
+    // adds a possessive, and a finder pinned to one would have gone looking
+    // for the bug rather than the step.
+    const sourcesStep = [...steps]
+      .find((s) => /Read .*signals? in all/.test(s.textContent ?? ""))!
     expect(sourcesStep.textContent).toContain("calls and customer tickets")
     expect(sourcesStep.textContent).toContain("412")
   })

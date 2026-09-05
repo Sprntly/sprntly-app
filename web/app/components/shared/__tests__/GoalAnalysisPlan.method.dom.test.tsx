@@ -454,3 +454,88 @@ describe("what the reader answers is what gets posted", () => {
     })
   })
 })
+
+
+// ─── 9. The legacy fallback, which is what production renders today ───────
+//
+// Every plan currently sitting `awaiting_approval` has no `steps`, so the
+// narrative path is not a museum piece — it is the live one until those runs
+// drain. A browser pass over it found three defects that no assertion here
+// could see, because nothing rendered that path.
+
+// A framework is what produces a step with sub-points, and it is the step the
+// browser pass caught: "Rank what survives with MoSCoW:" followed by three
+// bullets, all four welded into one line.
+const LEGACY = {
+  ...PLAN,
+  steps: undefined,
+  coverage: undefined,
+  framework: "moscow",
+  framework_reason: "nothing connected here carries a number",
+} as unknown as GoalRunPlan
+
+describe("the narrative fallback renders as a list, not a run-on", () => {
+  it("keeps a step's sub-points as separate list items", () => {
+    // Joined with a space they became "…an account asked for Graded by how
+    // many independent source documents…" — four bullets welded into one
+    // five-line paragraph, with two steps rendered that way and the rest as
+    // single lines, so the column of actions had no left edge to run down.
+    renderPlan(LEGACY)
+    const items = screen.getByTestId("goal-plan-steps")
+      .querySelectorAll("ul li")
+    expect(items.length).toBeGreaterThan(2)
+    for (const li of items) {
+      expect((li.textContent ?? "").length).toBeGreaterThan(0)
+    }
+  })
+
+  it("never welds two sentences together without a boundary", () => {
+    renderPlan(LEGACY)
+    const text = screen.getByTestId("goal-plan-steps").textContent ?? ""
+    // A lowercase word butting straight against a capitalised one is the
+    // signature of the join: "asked for Graded", "claim count your team".
+    expect(text).not.toMatch(/[a-z]{2} [A-Z][a-z]+ by how many/)
+  })
+})
+
+describe("show how is offered only when there is a how to show", () => {
+  it("is absent when no step carries a why", () => {
+    // It rendered on the legacy plan, flipped its own `aria-expanded` and its
+    // own label, and changed nothing else — measured live at exactly the same
+    // card height before and after the click.
+    renderPlan(LEGACY)
+    expect(screen.queryByRole("button", { name: /show how/i })).toBeNull()
+  })
+
+  it("is present when a step does carry one", () => {
+    renderPlan()
+    expect(screen.getByRole("button", { name: /show how/i })).toBeTruthy()
+  })
+
+  it("still reveals the why it was offered for", () => {
+    renderPlan()
+    fireEvent.click(screen.getByRole("button", { name: /show how/i }))
+    expect(screen.getByTestId("goal-plan-steps").textContent)
+      .toContain(STEPS[0].why)
+  })
+})
+
+describe("the card says each word once", () => {
+  it("does not say 'your your'", () => {
+    // The template prefixed "Read your " and one source label is literally
+    // "your own business context", so the first sentence a reader got was
+    // "Read your your own business context."
+    const withPossessive = {
+      ...LEGACY,
+      sources: [{
+        source_type: "pm_manual", signal_count: 12,
+        label: "your own business context",
+        witnesses: "the company's stated constraints",
+      }],
+    } as unknown as GoalRunPlan
+    renderPlan(withPossessive)
+    const text = screen.getByTestId("goal-plan").textContent ?? ""
+    expect(text).toContain("your own business context")
+    expect(text.toLowerCase()).not.toContain("your your")
+  })
+})
