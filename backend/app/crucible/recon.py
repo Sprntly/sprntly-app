@@ -161,6 +161,11 @@ KINDS: tuple[str, ...] = (
     "unit_value_derivable",
     "censored_periods",
     "evidence_mix",
+    "dating_unreliable",
+    "account_attribution_gap",
+    "monetary_coverage_gap",
+    "source_concentration",
+    "claim_mix",
 )
 
 SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
@@ -960,6 +965,245 @@ def _observe_coding_gap(table: Table, prof: Mapping[str, ColumnProfile]) -> list
     return out
 
 
+# ── THE KNOWLEDGE-GRAPH SIDE: checks that need no table at all ─────────────
+#
+# WHY THESE EXIST. Every check above needs columns, and a tenant whose evidence
+# is call transcripts and Slack has none — so on a measured 1,275-signal
+# corpus the whole pass produced exactly one observation and spent 128ms
+# building and profiling seventeen tables that every check then declined to
+# speak about. That is a yield problem, not a speed one: the facts a plan needs
+# on a prose corpus are all THERE, in fields already fetched, and nothing was
+# reading them.
+#
+# ALL FIVE ARE AGGREGATES OVER ROWS THE RUN ALREADY HAS. No new query, no new
+# page, no extra round trip: `_load_signals` selects `properties`, `provenance`,
+# `valid_at`, `created_at` and `kind` today, and these read what is already in
+# hand.
+
+#: Above this share of signals whose `valid_at` is just their `created_at`, the
+#: corpus is dated by the ingest clock rather than by when anything happened,
+#: and every date-based test is measuring our own backfill.
+INGEST_CLOCK_SHARE = 0.6
+
+#: How close `valid_at` and `created_at` must be to count as the same moment.
+#: NOT an exact match: `valid_at` is stamped in Python when the Signal object
+#: is built and `created_at` by the database on insert, with an embedding call
+#: in between, so identical-in-intent timestamps routinely differ by seconds.
+#: An exact second-prefix compare would miss the very pattern it looks for on
+#: any tenant whose ingest is slightly slower than this one's.
+INGEST_CLOCK_TOLERANCE_S = 120.0
+
+#: Below this share of signals naming a thing, a run cannot weight by it —
+#: it can only count. Not a quality bar and not tuned to a tenant: it is the
+#: point past which a weighted total is decided by the handful of rows that
+#: happen to carry the field, which is a worse answer than an honest count.
+ATTRIBUTABLE_MIN_SHARE = 0.5
+
+#: How much of the corpus one document may account for before the row count
+#: stops being a count of independent observations.
+SOURCE_CONCENTRATION_MIN_RATIO = 1.5
+
+#: Signals per distinct document, above which the corpus is a small shelf read
+#: many times rather than a wide body of evidence.
+SHELF_MIN_SIGNALS_PER_DOC = 20.0
+
+#: Above this share of one claim kind, the corpus is mostly one sort of thing
+#: and a reader should know which before they read a ranking of it.
+CLAIM_MIX_MIN_TOP_SHARE = 0.5
+
+
+def seconds_between(a: Any, b: Any) -> Optional[float]:
+    """Absolute gap in seconds, or None if either side is unreadable."""
+    from datetime import datetime, timezone
+
+    parsed = []
+    for value in (a, b):
+        if not value:
+            return None
+        text = str(value).replace("Z", "+00:00")
+        try:
+            moment = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        parsed.append(moment)
+    return abs((parsed[0] - parsed[1]).total_seconds())
+
+
+@dataclass(frozen=True)
+class DatingReliability:
+    signals: int
+    ingest_clock: int
+
+    @property
+    def share(self) -> float:
+        return 0.0 if not self.signals else self.ingest_clock / self.signals
+
+    @property
+    def unreliable(self) -> bool:
+        return self.share >= INGEST_CLOCK_SHARE
+
+
+def dating_reliability(signals: Sequence[Mapping[str, Any]]) -> DatingReliability:
+    """Is this corpus dated by when we READ it rather than when it happened?
+
+    `valid_at` defaults to now() at ingest and most pullers never set it, so a
+    backfill gives thousands of signals the same few timestamps. Detected
+    rather than assumed, because a tenant whose sources DO carry real dates
+    should still get the full checks.
+
+    MOVED HERE FROM THE ROUTE, WHICH STILL CALLS IT. The pipeline already acts
+    on this — `_refute` skips its echo rule when the dates are the ingest clock,
+    because otherwise every cluster looks like one conversation — and the plan
+    now has to say the same thing to the reader. Two implementations of "are
+    these dates real" would drift, and the bad direction is the likely one: a
+    plan reporting a dating problem the run did not act on, or a run skipping
+    its echo rule while the plan said the dates were fine.
+    """
+    same = 0
+    total = 0
+    for row in signals:
+        if not isinstance(row, Mapping):
+            continue
+        total += 1
+        gap = seconds_between(row.get("valid_at"), row.get("created_at"))
+        if gap is not None and gap <= INGEST_CLOCK_TOLERANCE_S:
+            same += 1
+    return DatingReliability(signals=total, ingest_clock=same)
+
+
+def dates_are_ingest_clock(signals: Sequence[Mapping[str, Any]]) -> bool:
+    """The pipeline's own question, answered off the same measurement."""
+    return bool(signals) and dating_reliability(signals).unreliable
+
+
+@dataclass(frozen=True)
+class FieldPresence:
+    """How much of the corpus carries a given field at all."""
+    field_path: str
+    signals: int
+    present: int
+
+    @property
+    def share(self) -> float:
+        return 0.0 if not self.signals else self.present / self.signals
+
+
+def signal_field_presence(
+    signals: Sequence[Mapping[str, Any]], *, path: Sequence[str],
+) -> FieldPresence:
+    """Count the signals carrying `path`, e.g. `("properties", "account")`.
+
+    PARAMETERISED OVER THE PATH rather than written once per field, because
+    "how much of this names an account" and "how much of this carries a
+    figure" are the same question asked of two keys — and the next one will be
+    a third key, not a third function.
+    """
+    present = 0
+    total = 0
+    for row in signals:
+        if not isinstance(row, Mapping):
+            continue
+        total += 1
+        cursor: Any = row
+        for key in path:
+            cursor = cursor.get(key) if isinstance(cursor, Mapping) else None
+            if cursor is None:
+                break
+        if cursor is not None and not (isinstance(cursor, str) and not cursor.strip()):
+            present += 1
+    return FieldPresence(field_path=".".join(path), signals=total, present=present)
+
+
+@dataclass(frozen=True)
+class Concentration2:
+    """How much of a corpus rests on how few artifacts."""
+    signals: int
+    documents: int
+    top_name: str
+    top_count: int
+
+    @property
+    def top_share(self) -> float:
+        return 0.0 if not self.signals else self.top_count / self.signals
+
+    @property
+    def even_share(self) -> float:
+        return 0.0 if not self.documents else 1.0 / self.documents
+
+    @property
+    def per_document(self) -> float:
+        return 0.0 if not self.documents else self.signals / self.documents
+
+
+def source_concentration(
+    signals: Sequence[Mapping[str, Any]],
+) -> Concentration2:
+    """How many distinct documents this corpus actually rests on.
+
+    THE ROW COUNT IS NOT A COUNT OF OBSERVATIONS. A measured tenant had 1,275
+    signals drawn from eleven documents, and every corroboration rule in the
+    pipeline — "two independent claims", "not one conversation echoing" — reads
+    differently once that is known. Reported as both the shelf size and the
+    largest single document's share, because a corpus can be thin either by
+    having few sources or by being dominated by one.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    for row in signals:
+        if not isinstance(row, Mapping):
+            continue
+        total += 1
+        prov = row.get("provenance")
+        doc = prov.get("doc") if isinstance(prov, Mapping) else None
+        name = str(doc).strip() if doc else ""
+        if name:
+            counts[name] = counts.get(name, 0) + 1
+    if not counts:
+        return Concentration2(signals=total, documents=0, top_name="", top_count=0)
+    top_name, top_count = max(sorted(counts.items()), key=lambda kv: kv[1])
+    return Concentration2(signals=total, documents=len(counts),
+                          top_name=top_name, top_count=top_count)
+
+
+@dataclass(frozen=True)
+class ClaimMix:
+    """What KIND of thing the corpus is mostly made of."""
+    signals: int
+    counts: Mapping[str, int]
+
+    @property
+    def top(self) -> tuple[str, int]:
+        if not self.counts:
+            return ("", 0)
+        return max(sorted(self.counts.items()), key=lambda kv: kv[1])
+
+    @property
+    def top_share(self) -> float:
+        return 0.0 if not self.signals else self.top[1] / self.signals
+
+
+def claim_mix(signals: Sequence[Mapping[str, Any]]) -> ClaimMix:
+    """The distribution of `kind` across a corpus.
+
+    Distinct from `evidence_mix`, which reads the triage category the INGEST
+    pass assigned to a document. This reads what the extractor decided each
+    signal IS — and on a measured tenant 58% were `finding`, the engine's own
+    inference, rather than anything a customer said.
+    """
+    counts: dict[str, int] = {}
+    total = 0
+    for row in signals:
+        if not isinstance(row, Mapping):
+            continue
+        total += 1
+        kind = str(row.get("kind") or "").strip()
+        if kind:
+            counts[kind] = counts.get(kind, 0) + 1
+    return ClaimMix(signals=total, counts=counts)
+
+
 # ── THE KNOWLEDGE GRAPH SIDE: what KIND of evidence this run is reading ─────
 
 
@@ -1048,6 +1292,147 @@ def _category_label(code: str) -> str:
     if not text:
         return code.replace("_", " ")
     return text.split("—")[0].split(",")[0].strip().lower()
+
+
+def _observe_dating(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
+    """Dates that are the ingest clock, not the calendar.
+
+    THE PIPELINE ALREADY ACTS ON THIS AND THE READER WAS NEVER TOLD. `_refute`
+    skips its echo rule on a corpus like this, because otherwise every cluster
+    looks like one conversation and the run returns nothing — with a reason
+    stated confidently and false. That is the right behaviour and it is
+    invisible: a plan that promises to weigh recent evidence more heavily, over
+    a corpus whose dates are all the afternoon of the backfill, is promising
+    something no code can do.
+    """
+    d = dating_reliability(signals)
+    if not d.signals or not d.unreliable:
+        return []
+    return [Observation(
+        id="knowledge_graph:dating",
+        kind="dating_unreliable",
+        severity="high",
+        source="knowledge graph",
+        fields=("valid_at", "created_at"),
+        what=(
+            f"{_pct(d.share)} of {d.signals} signals are dated within "
+            f"{INGEST_CLOCK_TOLERANCE_S:.0f} seconds of when we read them, so "
+            f"the dates record the import and not when anything happened. "
+            f"Nothing here can be judged on recency, and the check that throws "
+            f"out one conversation echoing is switched off, because over these "
+            f"dates it would throw out everything."
+        ),
+        figures={
+            "signals": float(d.signals),
+            "ingest_clock": float(d.ingest_clock),
+            "ingest_clock_share": d.share,
+            "tolerance_seconds": float(INGEST_CLOCK_TOLERANCE_S),
+        },
+    )]
+
+
+def _observe_attribution(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
+    """How much of the evidence names an account, and how much carries money.
+
+    THE HONEST VERSION OF GRACEFUL DEGRADATION. A run that cannot attribute
+    evidence to accounts cannot weight themes by the revenue behind them — it
+    can only count how often something came up. It already does exactly that,
+    silently, and a reader has no way to tell a considered count from a
+    weighting that quietly failed. Stated up front, it is the difference
+    between a plan that is trustworthy on a thin corpus and one that flatters
+    itself: "weighting would cover 0.3% of what I read, so I will count, and
+    the report will say so."
+    """
+    out: list[Observation] = []
+    for path, kind, noun, consequence in (
+        (("properties", "account"), "account_attribution_gap", "names an account",
+         "themes can only be counted, never weighted by the revenue behind "
+         "them — and the report will say that is what happened"),
+        (("properties", "amount"), "monetary_coverage_gap", "carry a figure",
+         "nothing can be sized in money; every size is stated in accounts "
+         "touched"),
+    ):
+        p = signal_field_presence(signals, path=path)
+        if not p.signals or p.share >= ATTRIBUTABLE_MIN_SHARE:
+            continue
+        out.append(Observation(
+            id=f"knowledge_graph:{kind}",
+            kind=kind,
+            severity="high",
+            source="knowledge graph",
+            fields=(p.field_path,),
+            what=(
+                f"{p.present} of {p.signals} signals ({_pct(p.share)}) "
+                f"{noun}. At that coverage {consequence}."
+            ),
+            figures={
+                "signals": float(p.signals),
+                "present": float(p.present),
+                "share": p.share,
+            },
+        ))
+    return out
+
+
+def _observe_source_concentration(
+    signals: Sequence[Mapping[str, Any]],
+) -> list[Observation]:
+    """How few documents a large row count actually rests on."""
+    c = source_concentration(signals)
+    if not c.documents or c.signals < 20:
+        return []
+    dominated = c.top_share >= c.even_share * SOURCE_CONCENTRATION_MIN_RATIO
+    shelf = c.per_document >= SHELF_MIN_SIGNALS_PER_DOC
+    if not dominated and not shelf:
+        return []
+    return [Observation(
+        id="knowledge_graph:source_concentration",
+        kind="source_concentration",
+        severity="medium",
+        source="knowledge graph",
+        fields=("provenance.doc",),
+        what=(
+            f"{c.signals} signals come from {c.documents} documents — "
+            f"{c.per_document:.0f} apiece — and the largest single document is "
+            f"{_pct(c.top_share)} of everything. The row count is not a count "
+            f"of independent observations, so two claims agreeing may be one "
+            f"document read twice."
+        ),
+        figures={
+            "signals": float(c.signals),
+            "documents": float(c.documents),
+            "per_document": c.per_document,
+            "top_share": c.top_share,
+            "even_share": c.even_share,
+        },
+    )]
+
+
+def _observe_claim_mix(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
+    """What the corpus is mostly made of."""
+    m = claim_mix(signals)
+    if m.signals < 20 or not m.counts or m.top_share < CLAIM_MIX_MIN_TOP_SHARE:
+        return []
+    top_kind, top_n = m.top
+    return [Observation(
+        id="knowledge_graph:claim_mix",
+        kind="claim_mix",
+        severity="medium",
+        source="knowledge graph",
+        fields=("kind",),
+        what=(
+            f"{_pct(m.top_share)} of the corpus is one kind of thing: "
+            f"{top_n} of {m.signals} signals are "
+            f"{top_kind.replace('_', ' ')}. A ranking over evidence that is "
+            f"mostly one shape will reflect that shape."
+        ),
+        figures={
+            "signals": float(m.signals),
+            "top": float(top_n),
+            "top_share": m.top_share,
+            "kinds": float(len(m.counts)),
+        },
+    )]
 
 
 def _observe_evidence_mix(mix: EvidenceMix) -> list[Observation]:
@@ -1637,6 +2022,62 @@ def _span(table: Table, prof: Mapping[str, ColumnProfile]) -> tuple[str, str]:
     return min(dates), max(dates)
 
 
+#: How full a table has to be before the table-side checks will speak about it.
+#:
+#: MEASURED, NOT CHOSEN. Real spreadsheets in a multi-source upload run
+#: 0.878–1.000 dense — the floor is a CRM export whose loss-reason columns are
+#: legitimately empty on open deals. The pseudo-tables built from a prose
+#: corpus's `properties` run 0.032–0.111 for every large one, because those
+#: forty columns are the UNION of keys across heterogeneous signals and each
+#: row carries a handful. 0.6 sits in the gap with room on both sides.
+RECTANGULAR_MIN_DENSITY = 0.6
+
+#: Rows sampled to estimate it. The question is "is this a rectangle", which
+#: the head answers as well as the whole; scanning every row to decide whether
+#: to scan every row would defeat the purpose.
+DENSITY_SAMPLE_ROWS = 50
+
+
+def density(table: Table) -> float:
+    """What share of this table's cells are filled, over a sample of rows."""
+    rows = table.rows[:DENSITY_SAMPLE_ROWS]
+    if not rows or not table.columns:
+        return 0.0
+    cells = len(rows) * len(table.columns)
+    filled = sum(1 for r in rows for c in table.columns if not _is_blank(r.get(c)))
+    return filled / cells
+
+
+def is_rectangular(table: Table) -> bool:
+    """Is this dense enough to be a table, or is it a union of stray keys?
+
+    THE GATE ON THE TABLE-SIDE CHECKS, and it runs before profiling because
+    profiling is the cost. Measured on a 1,275-signal prose corpus: the pass
+    spent ~100ms building and profiling seventeen tables — one of them forty
+    columns wide over 458 rows — and every check then declined to speak about
+    any of them.
+
+    DENSITY RATHER THAN COLUMN NAMES. The obvious gate is "does any column
+    look like an account or an amount", and on real data it does not work: a
+    prose corpus's `properties` are whatever the extractor's model wrote, and
+    the measured tenant carries `valuation_usd`, `raise_usd`, `ask_usd`,
+    `market_size_usd_2035` and `customer_name`. A name gate opens on
+    essentially every prose tenant, which is exactly the tenant it was meant to
+    spare.
+
+    What actually separates the two is SHAPE. Every check above assumes a
+    rectangle — two columns that both claim to be the value, two adjacent
+    funnel stages, a cohort grid. A union of keys across heterogeneous signals
+    is not a rectangle, and the checks are not wrong about it so much as
+    inapplicable to it.
+
+    PER TABLE, NOT PER PASS. An upload carrying a funnel and no money keeps its
+    checks, because it is still a rectangle; a two-row scrap of signal
+    properties keeps its own, because it costs nothing to look.
+    """
+    return density(table) >= RECTANGULAR_MIN_DENSITY
+
+
 def observe(
     tables: Sequence[Table],
     *,
@@ -1669,7 +2110,37 @@ def observe(
     #: against property-removed fixtures and reading the warnings.
     readable: list[Table] = []
 
+    # THE TABLE-SIDE CHECKS ONLY RUN OVER TABLES THEY COULD SPEAK ABOUT.
+    # Decided per table, on a sampled density, before anything is profiled.
+    # GUARDED LIKE EVERYTHING ELSE HERE. The gate runs before the try that
+    # wraps profiling, so an unreadable table would raise from inside it and
+    # take the whole pass with it — the totality guarantee, lost to the very
+    # change that was meant to make the pass cheaper. A table that cannot be
+    # measured is not a rectangle, which skips it exactly as before.
+    rectangles = []
     for t in tables:
+        try:
+            if is_rectangular(t):
+                rectangles.append(t)
+        except Exception:  # noqa: BLE001 — see above
+            logger.warning("crucible recon: could not measure %s", t.name,
+                           exc_info=True)
+    tabular = bool(rectangles)
+    rect_names = {t.name for t in rectangles}
+
+    for t in tables:
+        if t.name not in rect_names:
+            # Coverage WITHOUT the date span, which is the one part that needs
+            # profiling. A corpus whose tables are not rectangles reports its
+            # dating from `valid_at`/`created_at` instead, which is the more
+            # honest answer for it anyway — see `_observe_dating`.
+            sources.append(SourceCoverage(
+                name=t.name, source_type=t.source_type, records=len(t.rows),
+                columns=len(t.columns),
+            ))
+            if t.source_type:
+                present_types.add(t.source_type)
+            continue
         try:
             prof = profiles(t)
         except Exception:  # noqa: BLE001 — see docstring
@@ -1692,13 +2163,22 @@ def observe(
                 logger.warning("crucible recon: %s failed on %s",
                                check.__name__, t.name, exc_info=True)
 
-    for cross in (_observe_concentration, _observe_unit_value):
+    for cross in (_observe_concentration, _observe_unit_value) if tabular else ():
         try:
             observations.extend(cross(readable))
         except Exception:  # noqa: BLE001
             logger.warning("crucible recon: %s failed", cross.__name__,
                            exc_info=True)
 
+    for kg_check in (_observe_dating, _observe_attribution,
+                     _observe_source_concentration, _observe_claim_mix):
+        if not signals:
+            break
+        try:
+            observations.extend(kg_check(signals))
+        except Exception:  # noqa: BLE001 — one check is never the run
+            logger.warning("crucible recon: %s failed", kg_check.__name__,
+                           exc_info=True)
     if signals:
         try:
             observations.extend(_observe_evidence_mix(evidence_mix(signals)))

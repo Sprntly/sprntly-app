@@ -280,3 +280,79 @@ def signals(*, fail_open: int = 0) -> list[dict]:
 def full_pack() -> list[Table]:
     """Everything, as a run would see it."""
     return [contracts(), tickets(), funnel(), feedback(), retention()]
+
+
+# ── Knowledge-graph signals: the shape a prose tenant actually has ─────────
+#
+# Proportions taken from two real local tenants, because the whole point of
+# these checks is that a prose corpus has facts worth reporting and nothing was
+# reading them. The larger measured 100% ingest-clock dating, 0.3% account
+# attribution, 0% monetary coverage, 11 documents behind 1,275 signals and 58%
+# of one claim kind. The smaller measured 0% ingest-clock, which is why it is
+# the negative twin rather than a second positive.
+
+def kg_signals(
+    *,
+    n: int = 200,
+    ingest_clock: bool = True,
+    attributed: bool = False,
+    monetary: bool = False,
+    documents: int = 4,
+    one_kind: bool = True,
+) -> list[dict]:
+    """Signal rows shaped as `kg_signal` reads them.
+
+    Every flag turns exactly one property on or off, so a check that fires on
+    both settings of its own flag is detecting the fixture rather than the
+    property.
+    """
+    out: list[dict] = []
+    for i in range(n):
+        # `valid_at` is either the moment of import (the backfill shape) or a
+        # real spread of event dates months earlier.
+        created = "2026-08-19T12:00:00+00:00"
+        valid = created if ingest_clock else f"2026-0{1 + i % 6}-1{i % 9}T09:00:00+00:00"
+        props: dict = {"summary": f"signal {i}"}
+        if attributed:
+            props["account"] = f"Account {i % 12}"
+        if monetary:
+            props["amount"] = 1000 * (i % 7 + 1)
+        out.append({
+            "id": f"sig-{i:04d}",
+            "kind": "finding" if one_kind or i % 3 == 0 else
+                    ["bug", "feature_request", "deal_blocker",
+                     "sentiment", "incident"][i % 5],
+            "source_type": "pm_manual",
+            "properties": props,
+            "provenance": {"doc": f"document-{i % max(1, documents)}"},
+            "valid_at": valid,
+            "created_at": created,
+        })
+    return out
+
+
+def kg_tables(signals: list[dict]) -> list[Table]:
+    """The tables a prose corpus produces — sparse unions of stray keys."""
+    from app.crucible.recon import tables_from_signals
+
+    return tables_from_signals(signals)
+
+
+def sparse_table(*, rows: int = 60, columns: int = 40) -> Table:
+    """A union of keys across heterogeneous signals: wide, and almost empty.
+
+    The shape that cost a measured prose tenant ~25ms of profiling per pass and
+    yielded nothing. Two cells per row, so density lands near 0.05 — where the
+    real ones measured.
+    """
+    records = []
+    for i in range(rows):
+        records.append({
+            f"key_{(i * 2) % columns}": i,
+            f"key_{(i * 2 + 1) % columns}": f"value {i}",
+        })
+    return make_table(
+        "pm_manual:finding", records,
+        columns=tuple(f"key_{i}" for i in range(columns)),
+        source_type="pm_manual",
+    )

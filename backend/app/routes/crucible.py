@@ -2156,53 +2156,21 @@ def _bare_definition(company_id: str, goal_text: str) -> GoalDefinition:
     )
 
 
-#: Above this share of signals whose `valid_at` is just their `created_at`,
-#: the corpus is dated by the ingest clock rather than by when anything
-#: happened, and every date-based test is measuring our own backfill.
-_INGEST_CLOCK_SHARE = 0.6
-
-#: How close `valid_at` and `created_at` must be to count as the same moment.
-#: NOT an exact match: `valid_at` is stamped in Python when the Signal object
-#: is built and `created_at` by the database on insert, with an embedding call
-#: in between, so identical-in-intent timestamps routinely differ by seconds.
-#: An exact second-prefix compare would miss the very pattern it looks for on
-#: any tenant whose ingest is slightly slower than this one's.
-_INGEST_CLOCK_TOLERANCE_S = 120.0
-
-
-def _dates_are_ingest_clock(signals: list[dict]) -> bool:
-    """Is this corpus dated by when we READ it rather than when it happened?
-
-    `valid_at` defaults to now() at ingest and most pullers never set it, so a
-    backfill gives thousands of signals the same few timestamps. Detected
-    rather than assumed, because a tenant whose sources DO carry real dates
-    should still get the full checks.
-    """
-    if not signals:
-        return False
-    same = 0
-    for row in signals:
-        gap = _seconds_between(row.get("valid_at"), row.get("created_at"))
-        if gap is not None and gap <= _INGEST_CLOCK_TOLERANCE_S:
-            same += 1
-    return (same / len(signals)) >= _INGEST_CLOCK_SHARE
-
-
-def _seconds_between(a, b) -> Optional[float]:
-    """Absolute gap in seconds, or None if either side is unreadable."""
-    parsed = []
-    for value in (a, b):
-        if not value:
-            return None
-        text = str(value).replace("Z", "+00:00")
-        try:
-            moment = datetime.fromisoformat(text)
-        except ValueError:
-            return None
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=timezone.utc)
-        parsed.append(moment)
-    return abs((parsed[0] - parsed[1]).total_seconds())
+#: THE INGEST-CLOCK DETECTOR MOVED TO `app.crucible.recon`.
+#:
+#: It was here, and the reconnaissance pass needed the same answer to tell a
+#: reader that recency cannot be judged on their corpus. Two implementations of
+#: "are these dates real" would drift, and the direction they drift is the bad
+#: one: the pass would report a dating problem the pipeline did not act on, or
+#: the pipeline would skip its echo rule while the plan said the dates were
+#: fine. Re-exported under the old private name so this module's own callers
+#: read unchanged.
+from app.crucible.recon import (  # noqa: E402
+    INGEST_CLOCK_SHARE as _INGEST_CLOCK_SHARE,
+    INGEST_CLOCK_TOLERANCE_S as _INGEST_CLOCK_TOLERANCE_S,
+    dates_are_ingest_clock as _dates_are_ingest_clock,
+    seconds_between as _seconds_between,
+)
 
 
 def _row_meta(row: dict) -> dict:

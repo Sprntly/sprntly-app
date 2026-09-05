@@ -350,3 +350,167 @@ def test_a_sheet_key_is_rendered_as_something_a_reader_recognises():
 def test_every_observation_can_name_its_source_without_the_key():
     for o in recon.observe(fx.full_pack(), signals=fx.signals()).observations:
         assert ":" not in o.source_label
+
+
+# ─── 8. The knowledge-graph side, where the table checks find nothing ──────
+#
+# Measured on two real local tenants: the whole pass produced exactly ONE
+# observation each and spent ~29ms on the larger building and profiling
+# seventeen tables that every check then declined to speak about. The facts a
+# plan needs on a prose corpus were all there, in fields already fetched.
+#
+# Every assertion below has a negative twin driven by a single fixture flag, so
+# a check that fires on both settings is detecting the fixture, not a property.
+
+
+def test_dates_that_are_the_import_and_not_the_events():
+    o = _only([], "dating_unreliable", signals=fx.kg_signals())
+    assert o.figures["ingest_clock_share"] == 1.0
+    assert o.figures["signals"] == 200
+
+
+def test_a_corpus_with_real_event_dates_says_nothing_about_dating():
+    """The smaller real tenant measures 0% ingest-clock, so this is the shape
+    that must stay quiet — otherwise the check reports a dating problem on
+    every corpus and the plan learns nothing from it."""
+    assert "dating_unreliable" not in _kinds(
+        [], signals=fx.kg_signals(ingest_clock=False))
+
+
+def test_the_pipeline_and_the_plan_share_one_dating_answer():
+    """`pipeline._refute` switches off its echo rule on exactly this shape.
+    Two implementations of "are these dates real" would drift, and the likely
+    direction is the bad one — a plan promising a rule the run disabled."""
+    assert recon.dates_are_ingest_clock(fx.kg_signals()) is True
+    assert recon.dates_are_ingest_clock(fx.kg_signals(ingest_clock=False)) is False
+    assert recon.dates_are_ingest_clock([]) is False
+
+
+def test_evidence_that_names_almost_no_account():
+    """THE HONEST VERSION OF GRACEFUL DEGRADATION. The engine already counts
+    rather than weighting, on every corpus, silently — and a reader cannot tell
+    a considered count from a weighting that quietly failed."""
+    o = _only([], "account_attribution_gap", signals=fx.kg_signals())
+    assert o.figures["present"] == 0
+    assert o.figures["signals"] == 200
+    assert o.severity == "high"
+
+
+def test_a_corpus_that_does_name_its_accounts_raises_no_attribution_gap():
+    assert "account_attribution_gap" not in _kinds(
+        [], signals=fx.kg_signals(attributed=True))
+
+
+def test_evidence_that_carries_no_figure_at_all():
+    o = _only([], "monetary_coverage_gap", signals=fx.kg_signals())
+    assert o.figures["present"] == 0
+    assert "accounts touched" in o.what
+
+
+def test_a_corpus_carrying_figures_raises_no_monetary_gap():
+    assert "monetary_coverage_gap" not in _kinds(
+        [], signals=fx.kg_signals(monetary=True))
+
+
+def test_both_gaps_are_measured_by_one_parameterised_check():
+    """"How much of this names an account" and "how much carries a figure" are
+    the same question asked of two keys. The next one will be a third key, not
+    a third function."""
+    signals = fx.kg_signals(attributed=True)
+    assert recon.signal_field_presence(
+        signals, path=("properties", "account")).share == 1.0
+    assert recon.signal_field_presence(
+        signals, path=("properties", "amount")).share == 0.0
+    assert recon.signal_field_presence(
+        signals, path=("properties", "nothing_here")).present == 0
+
+
+def test_a_large_row_count_resting_on_a_few_documents():
+    """The row count is not a count of independent observations. Every
+    corroboration rule in the pipeline reads differently once that is known."""
+    o = _only([], "source_concentration", signals=fx.kg_signals(documents=4))
+    assert o.figures["documents"] == 4
+    assert o.figures["per_document"] == 50
+
+
+def test_evidence_spread_across_many_documents_is_not_concentrated():
+    assert "source_concentration" not in _kinds(
+        [], signals=fx.kg_signals(documents=60))
+
+
+def test_a_corpus_that_is_mostly_one_kind_of_thing():
+    o = _only([], "claim_mix", signals=fx.kg_signals())
+    assert o.figures["top_share"] == 1.0
+
+
+def test_a_mixed_corpus_says_nothing_about_its_mix():
+    assert "claim_mix" not in _kinds([], signals=fx.kg_signals(one_kind=False))
+
+
+def test_none_of_the_graph_checks_need_a_table():
+    """They are aggregates over rows the run already has — no new query, no new
+    page, no extra round trip."""
+    kinds = _kinds([], signals=fx.kg_signals())
+    assert kinds == {
+        "dating_unreliable", "account_attribution_gap", "monetary_coverage_gap",
+        "source_concentration", "claim_mix",
+    }
+
+
+def test_a_corpus_too_small_to_have_a_shape_is_not_described():
+    """A proportion computed from a handful of signals is not a proportion."""
+    assert _kinds([], signals=fx.kg_signals(n=5)) <= {
+        "dating_unreliable", "account_attribution_gap", "monetary_coverage_gap",
+    }
+
+
+# ─── 9. The table checks stay off tables they could not speak about ───────
+
+
+def test_a_sparse_union_of_keys_is_not_a_table():
+    """The forty-column shape a prose corpus produces: those columns are the
+    union of keys across heterogeneous signals and each row carries a couple.
+    Measured on real data at 0.032–0.111 dense."""
+    assert recon.density(fx.sparse_table()) < 0.1
+    assert recon.is_rectangular(fx.sparse_table()) is False
+
+
+def test_every_real_spreadsheet_is_still_a_table():
+    """Measured 0.878–1.000 on a real multi-source upload. An upload-shaped
+    tenant must keep everything it has today."""
+    for table in fx.full_pack():
+        assert recon.is_rectangular(table), table.name
+
+
+def test_a_prose_corpus_runs_no_table_checks_at_all():
+    signals = fx.kg_signals()
+    kinds = _kinds(fx.kg_tables(signals), signals=signals)
+    assert not (kinds & {
+        "value_columns_disagree", "coding_gap", "stage_collapse",
+        "censored_periods", "concentration_divergence", "unit_value_derivable",
+    })
+
+
+def test_an_upload_keeps_every_table_finding_it_had():
+    assert _kinds(fx.full_pack()) >= {
+        "value_columns_disagree", "coding_gap", "stage_collapse",
+        "concentration_divergence", "censored_periods",
+    }
+
+
+def test_the_gate_reads_shape_rather_than_column_names():
+    """THE OBVIOUS GATE DOES NOT WORK ON REAL DATA. "Does any column look like
+    an account or an amount" opens on essentially every prose tenant: the
+    measured corpus carries `valuation_usd`, `raise_usd`, `ask_usd`,
+    `market_size_usd_2035` and `customer_name` among its extracted keys. Shape
+    is what separates the two, not vocabulary."""
+    money_named = recon.make_table(
+        "pm_manual:finding",
+        [{"valuation_usd": 1}, {"customer_name": "x"}, {"ask_usd": 2},
+         {"raise_usd": 3}, {"market_size_usd_2035": 4}],
+        columns=("valuation_usd", "customer_name", "ask_usd", "raise_usd",
+                 "market_size_usd_2035"),
+    )
+    assert any(recon._looks_monetary(c) or recon._looks_like_account(c)
+               for c in money_named.columns)
+    assert recon.is_rectangular(money_named) is False
