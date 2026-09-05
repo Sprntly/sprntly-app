@@ -249,7 +249,11 @@ describe("the reader learns whether this can be answered, and off how much", () 
     expect(screen.getByTestId("goal-plan-verdict").textContent)
       .toMatch(/I can answer this/i)
     const stats = screen.getByTestId("goal-plan-stats").textContent ?? ""
-    expect(stats).toContain("1,676")
+    // ONE TOTAL, AND IT IS THE ONE THE STEPS TALK ABOUT. The strip used to
+    // report the structural record count (1,676 here) beside steps counting
+    // signals (412), so the card stated two totals and explained neither.
+    expect(stats).toContain("412")
+    expect(stats).not.toContain("1,676")
     expect(stats).toContain("2024-07")
     expect(stats).toContain("2026-09")
   })
@@ -537,5 +541,52 @@ describe("the card says each word once", () => {
     const text = screen.getByTestId("goal-plan").textContent ?? ""
     expect(text).toContain("your own business context")
     expect(text.toLowerCase()).not.toContain("your your")
+  })
+})
+
+
+// ─── 10. The card says each number once, and says what it means ──────────
+
+describe("the strip and the steps agree about how much there is", () => {
+  it("reports one total, matching the one the steps count", () => {
+    renderPlan()
+    const stats = screen.getByTestId("goal-plan-stats").textContent ?? ""
+    expect(stats).toContain(PLAN.total_signals.toLocaleString())
+  })
+
+  it("shows a single date when both ends of the window are the same month", () => {
+    // "2026-04 → 2026-04" reads as a bug even though it is the honest answer,
+    // and it is usually the same fact the dating step explains.
+    const point = {
+      ...PLAN,
+      coverage: { ...PLAN.coverage, earliest: "2026-04", latest: "2026-04" },
+    } as unknown as GoalRunPlan
+    renderPlan(point)
+    const stats = screen.getByTestId("goal-plan-stats").textContent ?? ""
+    expect(stats).toContain("2026-04")
+    expect(stats).not.toContain("→")
+    expect(stats).toContain("All dated")
+  })
+})
+
+describe("the counting unit is stated once", () => {
+  it("does not print the unit step's sentence twice", () => {
+    // The serif line used to lift its words from `set_counting_unit`, which
+    // then rendered again in the numbered list ~250px below.
+    renderPlan()
+    const card = screen.getByTestId("goal-plan").textContent ?? ""
+    const unitStep = STEPS.find((x) => x.primitive === "set_counting_unit")!
+    expect(card.split(unitStep.what).length - 1).toBe(1)
+  })
+})
+
+describe("a question says what answering it changes", () => {
+  it("renders `affects`", () => {
+    // Populated by the server on every question and rendered by nothing, so
+    // the one line saying why a question is worth answering never arrived.
+    renderPlan()
+    toQuestions()
+    expect(screen.getByTestId("goal-plan-question-decision_owner").textContent)
+      .toContain("who the recommendation is addressed to")
   })
 })

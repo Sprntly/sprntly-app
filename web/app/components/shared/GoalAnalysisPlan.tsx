@@ -506,10 +506,11 @@ function PlanBody({
         `thing${gaps.length === 1 ? "" : "s"} I will not be able to settle.`
       : "I can answer this from what you have connected."
 
-  // The counting unit, and where its price came from when the evidence
-  // carried one. `set_counting_unit` is the step that fixes it, so its own
-  // sentence is preferred over anything reconstructed here.
-  const unitStep = steps.find((x) => x.primitive === "set_counting_unit")
+  // THE UNIT LINE IS NOT A COPY OF A STEP. It used to lift its sentence from
+  // `set_counting_unit`, which then rendered again in the numbered list about
+  // 250px further down — the same words twice on one card, which reads as a
+  // template that lost track of itself. The serif line makes the general
+  // statement; the step states the action, in the model's own words.
 
   return (
     <>
@@ -521,13 +522,26 @@ function PlanBody({
             the exact duplication an earlier pass removed from this section,
             reintroduced by giving the section a lede again. The strip renders
             only when there are coverage facts the steps do NOT carry. */}
-        {coverage && (coverage.records || coverage.tables) ? (
+        {coverage ? (
           <dl className={s.strip} data-testid="goal-plan-stats">
-            {coverage.records ? (
-              <Stat label="Records" value={coverage.records.toLocaleString()} />
-            ) : null}
+            {/* ONE TOTAL ON THIS CARD, AND IT IS THE ONE THE STEPS TALK ABOUT.
+                The strip used to report `coverage.records` — the rows carrying
+                structured fields — beside steps counting `total_signals`, so a
+                numerate reader met "1,009" and "1,275 signals" on one screen
+                with nothing saying they measure different things. They do, and
+                the difference is an implementation detail of the structural
+                pass; the reader's question is how much evidence there is. */}
+            <Stat label="Signals" value={plan.total_signals.toLocaleString()} />
             {coverage.earliest && coverage.latest ? (
-              <Stat label="Window" value={`${coverage.earliest} → ${coverage.latest}`} />
+              coverage.earliest === coverage.latest ? (
+                // A POINT, NOT A RANGE. "2026-04 → 2026-04" reads as a bug
+                // even though it is the honest answer, and it is usually the
+                // same fact the dating step explains: every date is the
+                // import. Said as one date, it stops looking like an error.
+                <Stat label="All dated" value={coverage.earliest} />
+              ) : (
+                <Stat label="Window" value={`${coverage.earliest} → ${coverage.latest}`} />
+              )
             ) : null}
             <Stat label="Sources" value={String(kept.length)} />
             {gaps.length ? (
@@ -542,8 +556,7 @@ function PlanBody({
           reader can disagree with, not a switch they have to operate. */}
       <section className="ga-plan-section" data-testid="goal-plan-unit">
         <p className={s.unit}>
-          {unitStep?.what ??
-            `Everything is sized in ${plan.currency || "accounts"}.`}
+          Everything is sized in {plan.currency || "accounts"}.
         </p>
         {plan.account_value_derived_note ? (
           <p className={s.unitNote}>{plan.account_value_derived_note}</p>
@@ -787,6 +800,13 @@ function QuestionCard({
         <p className={s.questionSaw}>{question.what_i_saw}</p>
       ) : question.why ? (
         <p className={s.questionSaw}>{question.why}</p>
+      ) : null}
+      {/* WHAT THE ANSWER CHANGES. The server has always populated this — "who
+          the recommendation is addressed to", "the date on the decision box" —
+          and the card never rendered it, so the one line saying why a question
+          is worth answering was the line that never arrived. */}
+      {question.affects ? (
+        <p className={s.questionAffects}>Changes {question.affects}.</p>
       ) : null}
 
       {options.length ? (

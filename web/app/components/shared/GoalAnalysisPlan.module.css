@@ -300,6 +300,16 @@
   padding-left: 10px;
 }
 
+/* What the answer changes, in the reader's terms. Sits between the evidence
+   and the control, because it is the sentence that decides whether they
+   bother. */
+.questionAffects {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--ink-2);
+}
+
 .questionDefault {
   margin: 0;
   font-size: 12px;
