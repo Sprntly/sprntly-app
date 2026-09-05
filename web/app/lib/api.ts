@@ -966,6 +966,13 @@ export type GoalRunPlan = {
    *  in both, so nothing above them moves; only the steps section changes, and
    *  it says so while it waits. */
   steps_pending?: boolean
+  /** TRUE WHEN THE READER APPROVED BEFORE THE COMPOSED WORDING ARRIVED.
+   *
+   *  The composition takes the best part of a minute and the completing write
+   *  declines once the run has left the gate — rather than overwrite the
+   *  answers that reader just gave. So they keep the deterministic method, and
+   *  the record says which one they got instead of leaving it unexplained. */
+  steps_settled_early?: boolean
   /** Answers the reader gave at the gate to things the run cannot know. Each
    *  is an ASSUMPTION when present, and the document labels it as one where it
    *  is used. */

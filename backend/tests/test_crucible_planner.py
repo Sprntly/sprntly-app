@@ -573,3 +573,70 @@ def test_the_prompt_asks_for_the_figure_rather_than_only_forbidding_others():
     # And the hedges it has to name to rule out.
     for hedge in ('"very few"', '"a large share"'):
         assert hedge in planner._SYSTEM
+
+
+# ─── The parameter the server knows and the model cannot ──────────────────
+
+
+def test_a_draw_that_omits_the_sources_keeps_its_step():
+    """A real draw left `sources` off `select_evidence` and the step was
+    dropped, so the plan lost its opening move — the one that says what the
+    answer is allowed to rest on. That parameter is not a creative choice: it
+    is the run's own inventory, which the model can only copy and can get
+    wrong."""
+    step = planner.PlanStep(
+        n=1, part=planner.PARTS[0], primitive="select_evidence",
+        what="Fix which sources this may rest on", why="So a figure traces.")
+    filled = planner.fill_known_params(
+        [step], source_labels=["revenue data", "the tracker"])
+    assert filled[0].params["sources"] == ["revenue data", "the tracker"]
+    assert prim.validate_steps([filled[0].to_json()]) == ()
+
+
+def test_a_parameter_the_model_did_supply_is_never_overwritten():
+    step = planner.PlanStep(
+        n=1, part=planner.PARTS[0], primitive="select_evidence",
+        params={"sources": ["revenue data"]}, what="w", why="y")
+    filled = planner.fill_known_params(step and [step], source_labels=["a", "b"])
+    assert filled[0].params["sources"] == ["revenue data"]
+
+
+def test_nothing_else_is_filled_in_for_the_model():
+    """NOT A GENERAL LENIENCY. A missing parameter is normally the model
+    inventing an operation it does not understand, and dropping that step is
+    the right answer."""
+    step = planner.PlanStep(
+        n=1, part=planner.PARTS[1], primitive="reconcile_value_columns",
+        what="w", why="y")
+    filled = planner.fill_known_params([step], source_labels=["a"])
+    assert filled[0].params == {}
+    assert prim.validate_steps([filled[0].to_json()]) != ()
+
+
+def test_with_no_inventory_to_fill_from_nothing_is_invented():
+    step = planner.PlanStep(
+        n=1, part=planner.PARTS[0], primitive="select_evidence",
+        what="w", why="y")
+    assert planner.fill_known_params([step], source_labels=[])[0].params == {}
+
+
+# ─── The two-phase write ──────────────────────────────────────────────────
+
+
+def test_a_pending_plan_is_not_treated_as_already_drawn():
+    """The gate writes the deterministic method first so the reader sees
+    something true in a few hundred milliseconds. Reading those placeholder
+    steps back as "already drawn" would mean the composition never ran — the
+    plan silently deterministic for ever, with nothing to show it happened."""
+    pending = {"plan": {"steps": [{"n": 1, "primitive": "score_impact"}],
+                        "steps_pending": True}}
+    assert planner.load_steps(pending) is None
+
+
+def test_a_completed_plan_is_read_back_and_never_re_drawn():
+    completed = {"plan": {"steps": [{"n": 1, "part": planner.PARTS[4],
+                                     "primitive": "score_impact",
+                                     "what": "stored", "why": ""}],
+                          "steps_pending": False}}
+    steps = planner.load_steps(completed)
+    assert steps is not None and [s.what for s in steps] == ["stored"]

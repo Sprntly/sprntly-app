@@ -2845,3 +2845,80 @@ def test_an_approve_with_no_answers_records_none(ctx):
     _confirm(ctx, run_id)
     ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     assert "answers" not in _prioritisation(run_id)["plan"]
+
+
+# ─── The two-phase write, end to end ──────────────────────────────────────
+
+
+def test_the_gate_lands_before_the_wording_is_composed(ctx):
+    """Everything above the steps is deterministic and arrives in a few hundred
+    milliseconds; only the wording needs a model call, and it measured 53.8s on
+    a real run. Composing before the first write made the reader wait on the
+    slow part for the fast one."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    # Under pytest the composition is offline, so phase 2 completes with the
+    # deterministic method — what matters here is that the flag settles rather
+    # than being left promising a write nobody will make.
+    assert plan["steps"], "the gate must render off a real method, not a stub"
+    assert plan["steps_pending"] is False
+
+
+def test_approving_before_the_wording_lands_says_which_plan_you_got(ctx):
+    """The completing write declines once the run has left the gate — it would
+    overwrite the answers, definition and exclusions the reader just gave. That
+    is right, and it used to be silent: the plan sat `steps_pending` for ever,
+    so the card kept promising wording that was never coming."""
+    from app.db import crucible_runs as runs_db
+    from app.routes import crucible as route
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    # Put the stored plan back into the state phase 1 leaves it in.
+    meta = dict(_prioritisation(run_id))
+    plan_json = dict(meta["plan"])
+    plan_json["steps_pending"] = True
+    meta["plan"] = plan_json
+    runs_db.update(run_id, ctx.company_id, prioritisation=meta)
+
+    route._settle_pending_steps(run_id, ctx.company_id)
+
+    after = _prioritisation(run_id)["plan"]
+    assert after["steps_pending"] is False
+    assert after["steps_settled_early"] is True
+    assert after["steps"], "the deterministic method is what they approved"
+
+
+def test_settling_a_plan_that_was_never_pending_changes_nothing(ctx):
+    from app.routes import crucible as route
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    before = _prioritisation(run_id)["plan"]
+    route._settle_pending_steps(run_id, ctx.company_id)
+    after = _prioritisation(run_id)["plan"]
+    assert after == before
+
+
+def test_the_open_gate_line_is_empty_for_a_conversation_without_one(ctx):
+    """The warning is scoped to the conversation holding the run. A blanket
+    warning would tell every other thread it cannot approve something that is
+    not there."""
+    from app import ask_runner
+    from app.prompts import open_goal_gate_line
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+
+    token = ask_runner.set_active_conversation(9_999_999, "u")
+    try:
+        assert open_goal_gate_line(ctx.company_id) == ""
+    finally:
+        ask_runner.reset_active_conversation(token)
+    # …and with no conversation in scope at all.
+    assert open_goal_gate_line(ctx.company_id) == ""

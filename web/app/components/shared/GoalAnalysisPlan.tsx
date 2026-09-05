@@ -95,10 +95,17 @@ const UNUSED_NOTE = "Dropped by you, and the report says so."
  *  looked like before roles existed. */
 function groupSourcesByRole(
   sources: GoalRunPlan["sources"], excluded: ReadonlySet<string>,
+  { regroupExcluded = true }: { regroupExcluded?: boolean } = {},
 ): { role: string; sources: GoalRunPlan["sources"]; note?: string }[] {
   const buckets = new Map<string, GoalRunPlan["sources"]>()
   for (const src of sources) {
-    const role = excluded.has(src.source_type)
+    // WHILE THE READER IS EDITING, NOTHING MOVES. Unticking a source used to
+    // send its row into the "Not using" group immediately — so the checkbox
+    // jumped out from under the cursor mid-interaction, and unticking then
+    // re-ticking left the source excluded because the second click landed on
+    // a control that was no longer there. Regrouping is for READING the plan;
+    // while it is being changed, a row stays where the reader found it.
+    const role = (regroupExcluded && excluded.has(src.source_type))
       ? UNUSED_ROLE
       : ROLE_ORDER.includes(src.role ?? "") ? (src.role as string) : ""
     const bucket = buckets.get(role)
@@ -746,6 +753,17 @@ function PlanBody({
             between watching the method assemble and having the page change
             under you for no stated reason. Nothing ABOVE this section differs
             between the two, so this is the only thing that moves. */}
+        {plan.steps_settled_early ? (
+          // SAID, RATHER THAN LEFT TO BE NOTICED. Approving inside the
+          // composition window keeps the deterministic method — the completing
+          // write stands down rather than overwrite the answers just given —
+          // and a reader who saw "the wording will fill in" is owed the reason
+          // it did not.
+          <p className={s.pending} data-testid="goal-plan-settled-early">
+            You approved this while the write-up was still being composed, so
+            the run went ahead with the method as listed here.
+          </p>
+        ) : null}
         {plan.steps_pending ? (
           <p className={s.pending} role="status" data-testid="goal-plan-pending">
             These are the operations this run will perform. Writing them up in
@@ -819,7 +837,8 @@ function PlanBody({
                 — Sizing first because it is the scarcest capability, "Not
                 using" last because it is the only one that is not part of
                 the method. */}
-            {groupSourcesByRole(plan.sources, effectiveExcluded).map(
+            {groupSourcesByRole(plan.sources, effectiveExcluded,
+              { regroupExcluded: !changingSources }).map(
               ({ role, sources: inRole, note }) => (
                 <div
                   key={role || "ungrouped"}

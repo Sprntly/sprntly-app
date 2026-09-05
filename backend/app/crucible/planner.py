@@ -307,6 +307,45 @@ def cites_a_figure(text: str, observations: Sequence[Observation]) -> bool:
     return any(_matches(x, allowed) for x in _numbers_in(text))
 
 
+#: Parameters the SERVER knows better than the model does, filled in when a
+#: draw leaves them out.
+#:
+#: NOT A GENERAL LENIENCY. A missing parameter is normally the model inventing
+#: an operation it does not understand, and dropping that step is right. This
+#: is the one case where the opposite is true: `select_evidence` names the
+#: sources this run may rest on, and that is not a creative choice — it is the
+#: run's own inventory, which the model can only copy and can get wrong. A real
+#: draw omitted it and lost the plan its entire first step, so the reader was
+#: never told what the answer was allowed to rest on.
+#:
+#: Filled ONLY when absent, and only from a fact the caller already holds.
+_SERVER_KNOWN_PARAMS = {"select_evidence": ("sources",)}
+
+
+def fill_known_params(
+    steps: Sequence[PlanStep], *, source_labels: Sequence[str],
+) -> list[PlanStep]:
+    """Supply the parameters the run knows and the model cannot."""
+    if not source_labels:
+        return list(steps)
+    out: list[PlanStep] = []
+    for step in steps:
+        wanted = _SERVER_KNOWN_PARAMS.get(step.primitive, ())
+        missing = [p for p in wanted if p not in step.params]
+        if not missing:
+            out.append(step)
+            continue
+        params = dict(step.params)
+        for name in missing:
+            params[name] = list(source_labels)
+        out.append(PlanStep(
+            n=step.n, part=step.part, primitive=step.primitive, params=params,
+            what=step.what, why=step.why, sources=tuple(step.sources),
+            observations=tuple(step.observations),
+        ))
+    return out
+
+
 def verify(
     steps: Sequence[PlanStep],
     observations: Sequence[Observation],
@@ -1193,6 +1232,11 @@ def build_steps(
                              "deterministic plan")
             return fallback
 
+        drawn = fill_known_params(
+            drawn,
+            source_labels=[getattr(x, "label", "") for x in sources
+                           if getattr(x, "label", "")] or list(source_types),
+        )
         kept, dropped = verify(drawn, report.observations,
                                available_sources=sorted(available),
                                inventory=report.inventory_figures())

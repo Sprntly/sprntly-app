@@ -854,6 +854,27 @@ async def approve(
     return _public(row or claimed)
 
 
+def _settle_pending_steps(run_id: int, company_id: str) -> None:
+    """Mark a pending plan final, because nothing further is coming.
+
+    The reader approved inside the composition window, so the deterministic
+    method IS the method — and the record has to say so rather than leave a
+    flag promising a completion nothing will ever write.
+    """
+    try:
+        meta = dict(_meta_of(run_id, company_id))
+        plan_json = dict(meta.get("plan") or {})
+        if not plan_json.get("steps_pending"):
+            return
+        plan_json["steps_pending"] = False
+        plan_json["steps_settled_early"] = True
+        meta["plan"] = plan_json
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — a flag is never worth failing a run
+        logger.warning("crucible: could not settle the pending plan for run %s",
+                       run_id, exc_info=True)
+
+
 def _complete_plan_steps(
     run_id: int, company_id: str, *, report, goal_text: str,
     definition_text: str, source_types: tuple, sources: tuple = (),
@@ -884,8 +905,15 @@ def _complete_plan_steps(
         )
         row = runs_db.get(run_id, company_id) or {}
         if row.get("status") != "awaiting_approval":
+            # APPROVED WHILE THE WORDING WAS STILL BEING WRITTEN. Declining the
+            # write is right — it would overwrite the answers, definition and
+            # exclusions this reader just gave with a plan read before any of
+            # them existed. But the deterministic method is then FINAL, and
+            # saying nothing left `steps_pending` set for ever: the card kept
+            # telling the reader the wording was still coming, and it never was.
             logger.info("crucible: run %s left the gate before its method was "
                         "composed; keeping the deterministic one", run_id)
+            _settle_pending_steps(run_id, company_id)
             return
         meta = dict(_meta_of(run_id, company_id))
         plan_json = dict(meta.get("plan") or {})

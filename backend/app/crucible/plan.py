@@ -346,6 +346,14 @@ class RunPlan:
     #: pending plan as not yet drawn precisely so this one upgrade can happen
     #: and no other.
     steps_pending: bool = False
+    #: TRUE WHEN THE READER APPROVED BEFORE THE WORDING ARRIVED.
+    #:
+    #: The composition takes the best part of a minute, and a reader who
+    #: approves inside that window keeps the deterministic method — the
+    #: completing write declines rather than overwrite the answers they just
+    #: gave. That is the right trade and it used to be silent: the plan sat
+    #: `steps_pending` for ever, promising a completion nothing would write.
+    steps_settled_early: bool = False
     #: WHAT ONE ACCOUNT IS WORTH, TAKEN FROM THE EVIDENCE RATHER THAN ASKED.
     #:
     #: DELIBERATELY NOT `account_value`. That field is the reader's own
@@ -384,6 +392,7 @@ class RunPlan:
             "needed_by": self.needed_by,
             "coverage": dict(self.coverage),
             "steps_pending": self.steps_pending,
+            "steps_settled_early": self.steps_settled_early,
             "steps": [st.to_json() for st in self.steps],
             "observations": [o.to_json() for o in self.observations],
             "account_value_derived": self.account_value_derived,
