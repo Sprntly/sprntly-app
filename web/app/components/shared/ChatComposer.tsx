@@ -364,7 +364,7 @@ export function ChatComposer({
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx"
+            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx,.xlsx,.xls"
             style={{ display: "none" }}
             onChange={onFileSelect}
           />

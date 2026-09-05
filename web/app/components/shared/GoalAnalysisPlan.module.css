@@ -264,6 +264,17 @@
    `:last-child` would have faded whichever group happened to render last. */
 .roleUnused { border-left-color: var(--line); }
 
+/* Attached files. Same left rule as a role group so the block reads as part
+   of "what I will read", DASHED so it reads as the temporary member of that
+   set — the one thing on this screen that is true for a single run. The
+   distinction is carried by the border style and the pill's own words, not by
+   a second accent colour. */
+.uploads {
+  padding-left: 12px;
+  border-left: 2px dashed var(--line-strong);
+  margin-top: 12px;
+}
+
 .roleHead {
   display: flex;
   flex-wrap: wrap;

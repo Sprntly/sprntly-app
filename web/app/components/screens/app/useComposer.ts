@@ -148,11 +148,19 @@ export function useComposer({ showToast }: UseComposerDeps) {
 
   // Attach: documents keep the real File (for the PRD-import command); plain-text
   // formats are read as text and inlined into the next ask as context.
+  //
+  // SPREADSHEETS ARE BINARY, AND THAT IS THE WHOLE POINT OF THIS BRANCH. An
+  // .xlsx is a ZIP; `readAsText` on one yields mojibake, and because the
+  // result is a non-empty string it lands in `content` as if extraction had
+  // SUCCEEDED — so the server-side parser, which is only consulted when
+  // `content` is empty, is never called and the workbook is silently reduced
+  // to noise. Anything whose bytes have to survive to the server belongs here
+  // with the documents, keeping the real `File` and an empty `content`.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
     Array.from(files).forEach((file) => {
-      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
+      if (/\.(pdf|pptx|docx|doc|xlsx|xls)$/i.test(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
         return
       }

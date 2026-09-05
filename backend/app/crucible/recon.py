@@ -324,6 +324,89 @@ def tables_from_dir(directory: "str | Path", *, source_type: str = "") -> list[T
     return out[:MAX_TABLES]
 
 
+#: The `source_type` carried by a table that came from a file attached in
+#: chat, as opposed to one reconstructed from the knowledge graph. It is the
+#: only thing downstream has to distinguish the two, and both the plan's
+#: opening sentence and its source inventory turn on it — an uploaded file is
+#: read for one run and is NOT part of what the company has connected, and a
+#: plan that presented the two identically would be claiming the first.
+UPLOAD_SOURCE_TYPE = "upload"
+
+
+def upload_filename(name: str, key: str = "") -> str:
+    """A safe, on-disk filename for an attachment, keeping the name a person
+    gave it.
+
+    THE NAME IS LOAD-BEARING, WHICH IS WHY IT IS NOT SIMPLY THE KEY. Table
+    names here are built from the file's stem, `source_label` turns that stem
+    into the prose the plan shows, and a storage key's stem is a uuid — so
+    reading the bytes under their key would produce a plan that tells the
+    reader it read `9f3c1e2a-...`, which is no more use than not naming the
+    source at all.
+
+    The name is therefore CLIENT-SUPPLIED and treated as such: directory
+    components are dropped, so it can only ever be a leaf; a name that is
+    empty or reduces to nothing falls back to the key's own stem; and the
+    EXTENSION comes from the key, never from the name, because the extension
+    is what decides which reader runs and the key's extension is the one the
+    write side validated. The name chooses a label; the key chooses a parser.
+    """
+    ext = Path(str(key or "")).suffix.lower()
+    stem = Path(str(name or "").replace("\\", "/")).name
+    stem = Path(stem).stem.strip().strip(".")
+    stem = re.sub(r"[^\w.\- ]+", "", stem).strip()
+    if not stem:
+        stem = Path(str(key or "")).stem or "upload"
+    return f"{stem}{ext}"
+
+
+def tables_from_uploads(
+    files: Sequence[tuple[str, bytes]], *, source_type: str = UPLOAD_SOURCE_TYPE,
+) -> list[Table]:
+    """Tables from files held in memory, named as the person named them.
+
+    Materialises into a temporary directory and delegates to
+    `tables_from_dir` RATHER THAN re-implementing the readers over byte
+    streams. Two reasons, and the second is the one that matters: openpyxl and
+    `csv` both want a path or a handle and would need separate call sites, and
+    — far more importantly — an upload read through this function and the same
+    upload read off disk must produce IDENTICAL tables. One reader, one size
+    guard, one set of table names, so "what the plan saw" cannot depend on how
+    the bytes arrived.
+
+    The directory is removed when this returns; nothing here persists.
+    """
+    if not files:
+        return []
+    import tempfile
+
+    out: list[Table] = []
+    with tempfile.TemporaryDirectory(prefix="crucible-upload-") as tmp:
+        root = Path(tmp)
+        used: set[str] = set()
+        for name, data in files:
+            if not data:
+                continue
+            fname = name
+            # Two attachments can share a filename; a second write would
+            # otherwise silently replace the first and the plan would report
+            # one table where the reader sent two.
+            n = 1
+            while fname in used:
+                n += 1
+                stem, dot, ext = fname.rpartition(".")
+                fname = f"{stem} ({n}){dot}{ext}" if dot else f"{fname} ({n})"
+            used.add(fname)
+            try:
+                (root / fname).write_bytes(data)
+            except OSError:  # noqa: BLE001 — one unwritable name costs that
+                # file, never the pass. Same posture as every reader here.
+                logger.warning("crucible recon: could not stage upload %s", fname,
+                               exc_info=True)
+        out = tables_from_dir(root, source_type=source_type)
+    return out
+
+
 def tables_from_signals(signals: Sequence[Mapping[str, Any]]) -> list[Table]:
     """Signals whose `properties` carry real numbers, grouped into tables.
 

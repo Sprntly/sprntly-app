@@ -801,6 +801,19 @@ export type GoalRejection = {
 /** One source the run will read: how much of it there is, and what it can
  *  actually witness. These counts are an INVENTORY — the plan step reads no
  *  content, which is why it returns in about a second rather than minutes. */
+/** One file attached in the composer and read for a single run — GET
+ *  /v1/crucible/{id}. `name` is the filename the reader uploaded; `tables` is
+ *  how many rectangles came out of it (a workbook is usually several).
+ *
+ *  ONLY THE FILES THAT YIELDED A TABLE APPEAR. A PDF carries prose, not
+ *  columns, so a pack of seven documents and five spreadsheets lists five —
+ *  which is the honest answer to "what did you actually read". */
+export type GoalPlanUpload = {
+  name: string
+  tables: number
+  records: number
+}
+
 export type GoalPlanSource = {
   source_type: string
   signal_count: number
@@ -917,6 +930,15 @@ export type GoalRunPlan = {
   currency: string
   total_signals: number
   sources: GoalPlanSource[]
+  /** Files attached to the message this run came from, read for THIS RUN and
+   *  nothing else — never ingested into the knowledge graph.
+   *
+   *  Deliberately not folded into `sources`: a connected source is a standing
+   *  fact about the workspace and an upload is not, and the plan has to let a
+   *  reader see the difference before they approve a method built on both.
+   *  Absent on every run without attachments and on plans stored before this
+   *  existed. */
+  uploads?: GoalPlanUpload[]
   cannot_answer: GoalPlanGap[]
   will_produce: string[]
   /** Source types the user dropped at the plan step. */
@@ -1210,12 +1232,25 @@ export const goalAnalysisApi = {
        *  text — the `+` menu, where the two are the same thing — and the
        *  server falls back to `goal_text`, exactly as before this existed. */
       asked_text?: string
+      /** FILES ATTACHED TO THE MESSAGE THAT ASKED, by storage key.
+       *
+       *  The same bytes could reach a run through Settings → Connectors →
+       *  Uploads, which INGESTS them: permanent rows in the knowledge graph,
+       *  visible to every later run and every chat answer, and not removable
+       *  from the product. That is right for a source a company keeps and
+       *  wrong for a file someone is analysing once. Sent here instead, the
+       *  files are read during reconnaissance, shape the plan, and are
+       *  written nowhere.
+       *
+       *  Omitted when the message carried none, which is the normal case. */
+      attachments?: { key: string; name: string }[]
     },
   ) =>
     api.post<GoalRun>("/v1/crucible", {
       goal_text,
       ...(opts?.conversation_id != null ? { conversation_id: opts.conversation_id } : {}),
       ...(opts?.asked_text ? { asked_text: opts.asked_text } : {}),
+      ...(opts?.attachments?.length ? { attachments: opts.attachments } : {}),
     }),
   list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
   get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),

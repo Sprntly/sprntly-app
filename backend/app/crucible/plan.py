@@ -170,6 +170,30 @@ class SourceInventory:
 
 
 @dataclass(frozen=True)
+class UploadedSource:
+    """A file attached to the message, read for THIS run only.
+
+    SEPARATE FROM `SourceInventory`, AND NOT A SUBTYPE OF IT. A connected
+    source is a standing fact about the company: it has a `source_type` the
+    framework selector reasons about, a role drawn from `AUTHORITATIVE_FOR`,
+    and a signal count the run's gaps and promises are derived from. An upload
+    has none of those and must not be given them by accident — folding one
+    into the inventory would let an attached spreadsheet change which
+    prioritisation framework the run chooses and silently close a gap the
+    company genuinely still has, on the strength of a file that will not exist
+    the next time they ask.
+
+    So it is listed beside the inventory rather than inside it: named, counted
+    and visibly its own thing, which is also what the reader needs to see.
+    """
+    #: The filename as the reader will recognise it — the stem they uploaded.
+    name: str
+    #: How many rectangles came out of it. A workbook is usually several.
+    tables: int
+    records: int
+
+
+@dataclass(frozen=True)
 class Gap:
     """Something this run will NOT be able to answer, and how to change that."""
     question: str
@@ -233,6 +257,10 @@ class RunPlan:
     #: direct API, the `+` menu, or a plan built before this field existed.
     asked_text: str = ""
     sources: tuple[SourceInventory, ...] = ()
+    #: FILES ATTACHED TO THE MESSAGE THIS RUN CAME FROM. Empty on every run
+    #: that had none, and on every plan stored before this field existed —
+    #: which renders exactly as it did then.
+    uploads: tuple[UploadedSource, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
     total_signals: int = 0
@@ -377,6 +405,7 @@ class RunPlan:
             "currency": self.currency,
             "total_signals": self.total_signals,
             "sources": [asdict(s) for s in self.sources],
+            "uploads": [asdict(u) for u in self.uploads],
             "cannot_answer": [asdict(g) for g in self.cannot_answer],
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
@@ -433,6 +462,39 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
         out.append(SourceInventory(source_type, n, label, witnesses,
                                    role=role, role_note=ROLE_NOTES[role]))
     return out, total
+
+
+def uploads_from_report(recon_report: "Optional[object]") -> tuple[UploadedSource, ...]:
+    """The attached files the reconnaissance pass actually managed to read.
+
+    DERIVED FROM THE REPORT, NOT FROM WHAT WAS SENT. The two differ exactly
+    when they should: a file that could not be fetched, or that held no
+    rectangle at all — every PDF in a pack, for instance — produces no table
+    and so does not appear here. That is the honest list. A plan that echoed
+    the twelve filenames it was HANDED would be telling the reader it read
+    seven documents it could not open, and the reader would approve a method
+    on that basis.
+
+    One entry per FILE, not per sheet: several sheets of one workbook are one
+    upload to the person who attached it.
+    """
+    from app.crucible.recon import UPLOAD_SOURCE_TYPE
+
+    tables: dict[str, int] = {}
+    records: dict[str, int] = {}
+    for s in getattr(recon_report, "sources", ()) or ():
+        if getattr(s, "source_type", "") != UPLOAD_SOURCE_TYPE:
+            continue
+        # `name` is `stem:sheet`; the stem is the filename the reader chose.
+        stem = str(getattr(s, "name", "")).split(":")[0].strip()
+        if not stem:
+            continue
+        tables[stem] = tables.get(stem, 0) + 1
+        records[stem] = records.get(stem, 0) + int(getattr(s, "records", 0) or 0)
+    return tuple(
+        UploadedSource(name=stem, tables=tables[stem], records=records[stem])
+        for stem in tables
+    )
 
 
 def derive_gaps_and_promises(
@@ -670,6 +732,7 @@ def build_plan(
         definition_text=definition_text,
         currency=currency,
         sources=tuple(kept),
+        uploads=uploads_from_report(recon_report),
         cannot_answer=tuple(gaps),
         will_produce=tuple(produce),
         total_signals=sum(s.signal_count for s in kept),
