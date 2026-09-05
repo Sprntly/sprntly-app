@@ -334,7 +334,11 @@ describe("the settled plan is a record, not a receipt", () => {
       />,
     )
     const card = screen.getByTestId("goal-gate-plan-done")
-    expect(card.textContent ?? "").toContain("dropped by you")
+    // The words moved into the "Not using" group's own line and became a
+    // sentence, so this asserts the GUARANTEE — the dropped source is named
+    // and marked as dropped — rather than the casing it happens to have.
+    expect((card.textContent ?? "").toLowerCase()).toContain("dropped by you")
+    expect(card.querySelector("[data-dropped]")).not.toBeNull()
     // A SETTLED PLAN IS A RECORD, NOT A CONTROL: no checkboxes, no textarea,
     // and neither step of the gate. Asserted on the ROLES rather than on a
     // class name, so the guarantee survives the styles moving.

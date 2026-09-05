@@ -590,3 +590,54 @@ describe("a question says what answering it changes", () => {
       .toContain("who the recommendation is addressed to")
   })
 })
+
+
+// ─── 11. A plan approved before its wording arrived ───────────────────────
+
+describe("approving inside the composition window", () => {
+  it("says which plan you got, rather than promising one that is not coming", () => {
+    // The composition takes the best part of a minute. Approve inside that
+    // window and the completing write stands down — it would overwrite the
+    // answers just given with a plan read before they existed — so the
+    // deterministic method is what ran. That used to be silent: the card kept
+    // saying the wording would fill in, for ever.
+    const early = { ...PLAN, steps_settled_early: true } as unknown as GoalRunPlan
+    renderPlan(early)
+    expect(screen.getByTestId("goal-plan-settled-early").textContent)
+      .toMatch(/still being composed/i)
+  })
+
+  it("says nothing of the sort on an ordinary plan", () => {
+    renderPlan()
+    expect(screen.queryByTestId("goal-plan-settled-early")).toBeNull()
+  })
+})
+
+// ─── 12. Sources hold their place while the reader edits them ─────────────
+
+describe("changing what gets read does not move it", () => {
+  it("keeps a source in its role group while the checkboxes are open", () => {
+    // Unticking used to send the row straight into "Not using", so the
+    // checkbox jumped out from under the cursor — and unticking then
+    // re-ticking left the source excluded, because the second click landed on
+    // a control that was no longer there.
+    renderPlan()
+    fireEvent.click(screen.getByRole("button", { name: /change what gets read/i }))
+    const box = screen.getByLabelText(/Read revenue data/i)
+    fireEvent.click(box)
+    // Same element, still mounted, still in its own group.
+    expect(screen.getByLabelText(/Read revenue data/i)).toBe(box)
+    fireEvent.click(box)
+    expect((box as HTMLInputElement).checked).toBe(true)
+  })
+
+  it("regroups a dropped source once the reader is done", () => {
+    renderPlan()
+    fireEvent.click(screen.getByRole("button", { name: /change what gets read/i }))
+    fireEvent.click(screen.getByLabelText(/Read revenue data/i))
+    fireEvent.click(screen.getByRole("button", { name: /^done$/i }))
+    const unused = screen.getByTestId("goal-plan-role-not-using")
+    expect(unused.textContent).toContain("revenue data")
+    expect(unused.querySelector("[data-dropped]")).not.toBeNull()
+  })
+})

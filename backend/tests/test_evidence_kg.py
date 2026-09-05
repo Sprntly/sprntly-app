@@ -304,7 +304,14 @@ def test_build_feeds_signals_to_llm_and_logs_refs(facade, isolated_settings,
     prompt = captured["input"]
     assert "Acme $1.4M deal blocked on missing SSO" in prompt
     assert "hubspot" in prompt and "fireflies" in prompt
-    assert "revenue" in prompt and "customer_voice" in prompt
+    # THE SOURCE IS NAMED, NOT KEYED. This asserted `customer_voice` — the raw
+    # `source_type` — and passed because the trail line interpolated it
+    # verbatim, which is exactly how `[Source: pm_manual/deal_blocker]` reached
+    # a reader's citations. The line now carries the words the product uses, so
+    # the assertion is the stronger one: the label is there and the key is not.
+    assert "revenue data" in prompt
+    assert "calls and customer tickets" in prompt
+    assert "customer_voice" not in prompt
     # Agent + prompt_version are attributed.
     assert captured["agent"] == "evidence"
     assert captured["prompt_version"] == evidence_kg.EVIDENCE_KG_PROMPT_VERSION

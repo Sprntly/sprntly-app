@@ -617,7 +617,11 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       const settled = screen.getByTestId("goal-gate-plan-done")
       expect(within(settled).getByText(DROPPED_LABEL).closest("[data-dropped]"))
         .toBeTruthy()
-      expect(settled.textContent).toContain("dropped by you")
+      // The words moved into the "Not using" group's own line and became a
+      // sentence. What must hold is that the settled record still names the
+      // dropped source and marks it, not the casing it happens to have.
+      expect((settled.textContent ?? "").toLowerCase())
+        .toContain("dropped by you")
       expect(settled.textContent).toContain(HYPOTHESIS)
       // A record, not a control.
       expect(settled.querySelectorAll("input[type=checkbox]").length).toBe(0)

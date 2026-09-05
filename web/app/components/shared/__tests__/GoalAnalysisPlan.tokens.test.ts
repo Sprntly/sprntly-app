@@ -133,7 +133,11 @@ describe("text sits on the measured ink ladder, never on an opacity", () => {
       .filter((d) => /\d+px\s+(solid|dashed)/.test(d))
     expect(borders.length).toBeGreaterThan(0)
     for (const decl of borders) {
-      expect(decl).toMatch(/var\(\s*--(line|line-strong|accent|ink-3)\b/)
+      // `--ink-2` joined this list when the counting-unit callout landed: its
+      // 3px rule is the one place a border is doing EMPHASIS rather than
+      // separation, and the ink ladder is where emphasis lives. Still a closed
+      // list — the point is that a rule colour is chosen, not improvised.
+      expect(decl).toMatch(/var\(\s*--(line|line-strong|accent|ink-2|ink-3)\b/)
     }
   })
 })
