@@ -101,11 +101,6 @@
   color: var(--ink);
 }
 
-.unitNote {
-  margin: 4px 0 0;
-  font-size: 12.5px;
-  color: var(--ink-3);
-}
 
 /* ── The steps: the centre of the screen ─────────────────────────────────
    Numbered continuously across their parts, because the numbering is the
@@ -188,6 +183,18 @@
   padding-left: 10px;
 }
 
+/* The method is still being written. Announced rather than left to happen,
+   because a section that fills itself in silently reads as a page that
+   changed its mind. */
+.pending {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
 /* ONE control for the whole list, not one per step. Twenty-three disclosure
    triangles is a worse wall than the one they were meant to fix. */
 .showHow {
@@ -205,6 +212,64 @@
 .showHow:hover {
   background: var(--surface-3);
   border-color: var(--ink-3);
+}
+
+/* ── Section labels ──────────────────────────────────────────────────────
+   A LABEL, NOT A HEADING. These were `<h2>`, and `globals.css` sets every
+   h1–h6 in the serif — so the section labels rendered in Instrument Serif and
+   competed with the goal for the reader's eye. Small tracked uppercase in the
+   display face reads as a signpost and gets out of the way. */
+.sectionLabel {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+/* ── Roles: what each source is FOR ──────────────────────────────────────
+   Six groups, separated WITHOUT COLOUR. The reference design gave each a hue;
+   the brand is black, white and grey now, and inventing a second accent to
+   keep six groups apart would be the wrong trade. The pill carries the name,
+   the rule carries the boundary, and the order carries the priority. */
+.role {
+  padding-left: 12px;
+  border-left: 2px solid var(--line-strong);
+  margin-top: 12px;
+}
+/* The one group that is not part of the method is drawn lighter, so the eye
+   skips it on the way down. Keyed on the role rather than on DOM position:
+   `:last-child` would have faded whichever group happened to render last. */
+.roleUnused { border-left-color: var(--line); }
+
+.roleHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.rolePill {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* The "never" half of the definition is what earns this line its place: a
+   reader who knows analytics can say how many but never why will not ask it
+   why. */
+.roleNote {
+  font-size: 12px;
+  color: var(--ink-3);
 }
 
 /* ── Sources as a record, not a control surface ──────────────────────────

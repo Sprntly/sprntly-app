@@ -72,6 +72,51 @@ const LEGACY_QUESTIONS: GoalPlanQuestion[] = [
  *  concluded that none of them were. */
 const REPORT_ONLY_QUESTION_IDS = new Set(["decision_owner", "needed_by"])
 
+/** The roles a source can play, strongest claim first.
+ *
+ *  Mirrors `app.crucible.plan.ROLE_ORDER`. The ORDER lives here because it is
+ *  a rendering decision; the role each source carries is derived server-side
+ *  from what that source may witness, so this list can never disagree with the
+ *  engine about which sources may size a finding. */
+const ROLE_ORDER = [
+  "Sizing", "Cause", "Constraint", "Corroborating", "Background",
+]
+/** The one group that is not part of the method. Always shown last. */
+const UNUSED_ROLE = "Not using"
+const UNUSED_NOTE = "Dropped by you, and the report says so."
+
+/** Sources in the order they are shown, grouped by what each is being used
+ *  for — and TOTAL BY CONSTRUCTION.
+ *
+ *  Every source lands in exactly one group, including one carrying no role at
+ *  all: a plan stored before roles existed has none, and a filter keyed on the
+ *  role list alone silently rendered that plan's entire source section as
+ *  nothing. It falls through to an unlabelled group instead, which is what it
+ *  looked like before roles existed. */
+function groupSourcesByRole(
+  sources: GoalRunPlan["sources"], excluded: ReadonlySet<string>,
+): { role: string; sources: GoalRunPlan["sources"]; note?: string }[] {
+  const buckets = new Map<string, GoalRunPlan["sources"]>()
+  for (const src of sources) {
+    const role = excluded.has(src.source_type)
+      ? UNUSED_ROLE
+      : ROLE_ORDER.includes(src.role ?? "") ? (src.role as string) : ""
+    const bucket = buckets.get(role)
+    if (bucket) bucket.push(src)
+    else buckets.set(role, [src])
+  }
+  const order = [...ROLE_ORDER, "", UNUSED_ROLE]
+  return order
+    .filter((role) => buckets.has(role))
+    .map((role) => ({
+      role,
+      sources: buckets.get(role)!,
+      note: role === UNUSED_ROLE
+        ? UNUSED_NOTE
+        : buckets.get(role)!.find((x) => x.role_note)?.role_note,
+    }))
+}
+
 /** Question ids with a dedicated field on `/approve`. Anything else is a
  *  DERIVED question and travels in the generic `answers` map. */
 const WIRED_QUESTION_IDS = new Set([
@@ -317,7 +362,7 @@ export function GoalAnalysisPlan({
       {showingQuestions ? (
         <>
           <section className="ga-plan-section" data-testid="goal-plan-unknowns">
-            <h2 className="ga-doc-h3">What I cannot work out myself</h2>
+            <h2 className={s.sectionLabel}>What I cannot work out myself</h2>
             <p className="ga-doc-note">
               Answer what you can — anything you leave blank stays stated as
               missing rather than filled in.
@@ -373,7 +418,7 @@ export function GoalAnalysisPlan({
           </section>
 
           <section className="ga-plan-section">
-            <h2 className="ga-doc-h3">What do you already believe?</h2>
+            <h2 className={s.sectionLabel}>What do you already believe?</h2>
             <p className="ga-doc-note">
               Optional, one per line. A run can always tell you what it found;
               told what you expected, it can also record what it did not find.
@@ -392,7 +437,7 @@ export function GoalAnalysisPlan({
 
       {settled && settled.hypotheses.length ? (
         <section className="ga-plan-section" data-testid="goal-plan-settled-hypotheses">
-          <h2 className="ga-doc-h3">What you already believed</h2>
+          <h2 className={s.sectionLabel}>What you already believed</h2>
           <ul className="ga-doc-list">
             {settled.hypotheses.map((h, i) => <li key={i}>{h}</li>)}
           </ul>
@@ -506,6 +551,32 @@ function PlanBody({
         `thing${gaps.length === 1 ? "" : "s"} I will not be able to settle.`
       : "I can answer this from what you have connected."
 
+  // WHY THIS UNIT, in one sentence, taken from what the pass measured. The
+  // order is the order of honesty: if the evidence prices an account, say so;
+  // if it cannot attribute one, say that instead, because that is the reason
+  // the run counts rather than weights.
+  const derivedValue = plan.observations?.find(
+    (o) => o.kind === "unit_value_derivable")
+  const attributionGap = plan.observations?.find(
+    (o) => o.kind === "account_attribution_gap")
+  const monetaryGap = plan.observations?.find(
+    (o) => o.kind === "monetary_coverage_gap")
+  const unitReason = derivedValue
+    ? [`Your contracts price an account, so a theme's size is how much of ` +
+       `the book it touches rather than how often it came up.`,
+       plan.account_value_derived_note].filter(Boolean).join(" ")
+    : attributionGap
+      ? `Only ${attributionGap.figures?.present ?? 0} of ` +
+        `${(attributionGap.figures?.signals ?? 0).toLocaleString()} signals ` +
+        `name an account, so I count what a theme touches rather than ` +
+        `weighting it by the revenue behind it — and the report says that is ` +
+        `what happened.`
+      : monetaryGap
+        ? `Nothing connected here carries a figure, so size is stated in ` +
+          `accounts touched and never in money.`
+        : `Sizes are stated in ${plan.currency || "accounts"} throughout, so ` +
+          `two numbers are never added that do not share a unit.`
+
   // THE UNIT LINE IS NOT A COPY OF A STEP. It used to lift its sentence from
   // `set_counting_unit`, which then rendered again in the numbered list about
   // 250px further down — the same words twice on one card, which reads as a
@@ -551,16 +622,32 @@ function PlanBody({
         ) : null}
       </section>
 
-      {/* ── THE COUNTING UNIT. One serif sentence, because it is the one
-          decision every number below inherits. It reads as a statement the
-          reader can disagree with, not a switch they have to operate. */}
+      {/* ── THE COUNTING UNIT. The most consequential sentence here, and
+          given the weight to match: every number below inherits it.
+
+          IT HAS TO SAY WHY, NOT JUST WHAT. "Everything is sized in accounts"
+          is the conclusion with the reasoning removed, and the reasoning is
+          the half a reader can disagree with.
+
+          AND THE WHY IS THIS RUN'S, NOT A HOUSE LINE. The reference wording
+          was "I weigh what I find by the revenue behind it, not by how often
+          it comes up" — which this engine does not do: `score_impact` counts
+          accounts, and on a corpus where almost nothing names one it says so
+          out loud. Printing the aspiration would be the plan describing work
+          the run does not perform, which is the one failure this whole stage
+          exists to remove. So the sentence is assembled from what the
+          reconnaissance pass actually measured. */}
       <section className="ga-plan-section" data-testid="goal-plan-unit">
-        <p className={s.unit}>
-          Everything is sized in {plan.currency || "accounts"}.
-        </p>
-        {plan.account_value_derived_note ? (
-          <p className={s.unitNote}>{plan.account_value_derived_note}</p>
-        ) : null}
+        <div className={s.unitBlock}>
+          <p className={s.unit}>
+            Everything is sized in {plan.currency || "accounts"}.
+          </p>
+          {unitReason ? (
+            <p className={s.unitWhy} data-testid="goal-plan-unit-why">
+              {unitReason}
+            </p>
+          ) : null}
+        </div>
       </section>
 
       {/* THE DEFINITION AS A QUOTED STATEMENT, not a textarea.
@@ -572,7 +659,7 @@ function PlanBody({
           in while they were still trying to read. */}
       {plan.definition_text ? (
         <section className="ga-plan-section" data-testid="goal-plan-definition">
-          <h2 className="ga-doc-h3">
+          <h2 className={s.sectionLabel}>
             {settled || plan.definition_adopted
               ? "What this was asked to establish"
               : "What this is taken to mean"}
@@ -618,9 +705,21 @@ function PlanBody({
 
       {/* ── THE STEPS. The centre of the screen. ─────────────────────── */}
       <section className="ga-plan-section" data-testid="goal-plan-approach">
-        <h2 className="ga-doc-h3">
+        <h2 className={s.sectionLabel}>
           {settled ? "The approach you approved" : "How I will do it"}
         </h2>
+        {/* STILL ARRIVING, SAID PLAINLY. The gate renders off the
+            deterministic method the moment reconnaissance lands; the composed
+            wording follows in a second write. Announcing it is the difference
+            between watching the method assemble and having the page change
+            under you for no stated reason. Nothing ABOVE this section differs
+            between the two, so this is the only thing that moves. */}
+        {plan.steps_pending ? (
+          <p className={s.pending} role="status" data-testid="goal-plan-pending">
+            These are the operations this run will perform. Writing them up in
+            full now — the wording will fill in.
+          </p>
+        ) : null}
         {/* ONLY WHEN THERE IS SOMETHING TO SHOW. On a plan stored before the
             server composed the method every `why` is empty, so this rendered,
             flipped its own `aria-expanded` and its own label, and changed
@@ -671,54 +770,76 @@ function PlanBody({
           disclosure away, because a reader reading a plan is not filling in a
           form and should not be handed checkboxes while they do it. */}
       <section className="ga-plan-section" data-testid="goal-plan-sources">
-        <h2 className="ga-doc-h3">What I will read</h2>
+        <h2 className={s.sectionLabel}>What I will read</h2>
         {plan.sources.length ? (
           <>
-            <ul className={s.tickList}>
-              {plan.sources.map((src) => {
-                // READ FROM WHAT WAS POSTED on a settled plan. Reading local
-                // state here rendered every source as kept, so the record
-                // silently agreed with a wider run than the one that actually
-                // happened — the single thing this card exists to prevent.
-                const on = !effectiveExcluded.has(src.source_type)
-                return (
-                  <li key={src.source_type} className={s.tickRow}>
-                    {changingSources && !settled ? (
-                      <input
-                        type="checkbox"
-                        checked={on}
-                        aria-label={`Read ${src.label}`}
-                        onChange={() => toggle(src.source_type)}
-                      />
-                    ) : (
-                      <span
-                        className={on ? s.tick : `${s.tick} ${s.tickOff}`}
-                        aria-hidden
-                      >
-                        {on ? "✓" : "—"}
-                      </span>
-                    )}
-                    {/* A STABLE HOOK FOR "this one was dropped", so the
-                        guarantee outlives the styling. A test pinned to a
-                        class name breaks the moment the styles move, and
-                        proves nothing about what the reader sees. */}
-                    <span
-                      className={on ? undefined : s.tickLabelOff}
-                      data-dropped={on ? undefined : "true"}
-                    >
-                      <b>{src.label}</b>{" "}
-                      <span className="ga-doc-source-count">
-                        {src.signal_count.toLocaleString()}
-                      </span>
-                      {!on ? " — dropped by you" : ""}
-                    </span>
-                    <span className={s.tickWitness}>
-                      Can witness {src.witnesses}
-                    </span>
-                  </li>
-                )
-              })}
-            </ul>
+            {/* GROUPED BY WHAT EACH ONE IS FOR, which is what turns an
+                inventory into a method. A flat ticked list answers "what have
+                you got"; the reader's question is "what are you doing with
+                it", and a count cannot tell them whether a transcript is
+                sizing an opportunity or explaining one — a distinction the
+                engine itself enforces and never showed.
+
+                THE ROLES ARE SEPARATED WITHOUT COLOUR. The reference design
+                gave each a hue; the brand is black, white and grey now, and
+                inventing a second accent to keep six groups apart would be
+                the wrong trade. Rule weight, the pill, and the order carry it
+                — Sizing first because it is the scarcest capability, "Not
+                using" last because it is the only one that is not part of
+                the method. */}
+            {groupSourcesByRole(plan.sources, effectiveExcluded).map(
+              ({ role, sources: inRole, note }) => (
+                <div
+                  key={role || "ungrouped"}
+                  className={role === UNUSED_ROLE ? `${s.role} ${s.roleUnused}` : s.role}
+                  data-testid={`goal-plan-role-${(role || "ungrouped")
+                    .toLowerCase().replace(/\s+/g, "-")}`}
+                >
+                  {role ? (
+                    <div className={s.roleHead}>
+                      <span className={s.rolePill}>{role}</span>
+                      {note ? <span className={s.roleNote}>{note}</span> : null}
+                    </div>
+                  ) : null}
+                  <ul className={s.tickList}>
+                    {inRole.map((src) => {
+                      const on = !effectiveExcluded.has(src.source_type)
+                      return (
+                        <li key={src.source_type} className={s.tickRow}>
+                          {changingSources && !settled ? (
+                            <input
+                              type="checkbox"
+                              checked={on}
+                              aria-label={`Read ${src.label}`}
+                              onChange={() => toggle(src.source_type)}
+                            />
+                          ) : (
+                            <span
+                              className={on ? s.tick : `${s.tick} ${s.tickOff}`}
+                              aria-hidden
+                            >
+                              {on ? "\u2713" : "\u2014"}
+                            </span>
+                          )}
+                          <span
+                            className={on ? undefined : s.tickLabelOff}
+                            data-dropped={on ? undefined : "true"}
+                          >
+                            <b>{src.label}</b>{" "}
+                            <span className="ga-doc-source-count">
+                              {src.signal_count.toLocaleString()}
+                            </span>
+                          </span>
+                          <span className={s.tickWitness}>
+                            Can witness {src.witnesses}
+                          </span>
+                        </li>
+                      )
+                    })}
+                  </ul>
+                </div>
+              ),
+            )}
             {settled ? null : (
               <button
                 type="button"
@@ -748,7 +869,7 @@ function PlanBody({
 
       {gaps.length ? (
         <section className="ga-plan-section" data-testid="goal-plan-gaps">
-          <h2 className="ga-doc-h3">What I will not be able to answer</h2>
+          <h2 className={s.sectionLabel}>What I will not be able to answer</h2>
           <ul className="ga-doc-gaps">
             {gaps.map((g, i) => (
               <li key={i}>

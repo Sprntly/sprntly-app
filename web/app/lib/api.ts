@@ -806,6 +806,17 @@ export type GoalPlanSource = {
   signal_count: number
   label: string
   witnesses: string
+  /** WHAT THIS SOURCE IS BEING USED FOR — "Sizing", "Cause", "Constraint",
+   *  "Background". A count answers "what have you got"; the role answers
+   *  "what are you doing with it", and a reader cannot tell from a number
+   *  whether a transcript is sizing an opportunity or explaining one.
+   *
+   *  Derived server-side from the claim types the source may witness, so it
+   *  cannot disagree with what the engine will accept later. Absent on an
+   *  inventory built before roles existed, which renders ungrouped. */
+  role?: string
+  /** The role's one line, including what it may NOT do. */
+  role_note?: string
 }
 
 /** Something this run will NOT be able to answer. `remedy` is not decoration:
@@ -947,6 +958,14 @@ export type GoalRunPlan = {
   steps?: GoalPlanStep[]
   observations?: GoalPlanObservation[]
   coverage?: GoalPlanCoverage
+  /** TRUE WHILE THE METHOD IS STILL BEING COMPOSED.
+   *
+   *  The gate lands in two writes: the deterministic method first, so the
+   *  reader sees something true in a few hundred milliseconds, then the
+   *  composed wording when it arrives. Everything ABOVE the steps is identical
+   *  in both, so nothing above them moves; only the steps section changes, and
+   *  it says so while it waits. */
+  steps_pending?: boolean
   /** Answers the reader gave at the gate to things the run cannot know. Each
    *  is an ASSUMPTION when present, and the document labels it as one where it
    *  is used. */
