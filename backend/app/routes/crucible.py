@@ -742,6 +742,25 @@ class ApprovePlan(BaseModel):
     account_value: Optional[Annotated[float, Field(ge=0, le=100_000_000)]] = None
     decision_owner: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
     needed_by: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
+    #: ── THE DERIVED QUESTIONS' ANSWERS, KEYED BY QUESTION ID. ─────────
+    #:
+    #: The gate now asks things it worked out from the evidence — which of two
+    #: value columns is the book, whether to rank by accounts or by revenue —
+    #: and those have no dedicated field because the SET of them depends on
+    #: what the reconnaissance pass saw. A generic map is the only shape that
+    #: does not need a migration every time a check is added.
+    #:
+    #: RECORDED, NOT YET APPLIED, AND THE CARD SAYS SO. No executor reads
+    #: these: the run carries out the `default_if_skipped` each question
+    #: states, and the answer is stored on the plan so it is on the record and
+    #: available to the pass that will honour it. Collecting an answer and
+    #: quietly ignoring it would be the dishonesty this whole gate exists to
+    #: remove, which is why the disclosure is in the UI copy rather than in a
+    #: comment here.
+    answers: dict[
+        Annotated[str, StringConstraints(max_length=64)],
+        Annotated[str, StringConstraints(max_length=200)],
+    ] = Field(default_factory=dict, max_length=12)
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
     # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
     # ten 40,000-char hypotheses render past the document limit with only a
@@ -800,6 +819,12 @@ async def approve(
         "decision_owner": (body.decision_owner or "").strip(),
         "needed_by": (body.needed_by or "").strip(),
     }
+    #: Kept apart from `answered`, which is spread onto the plan as top-level
+    #: fields the report reads by name. These are keyed by question id and go
+    #: to one place, so a new question cannot collide with a plan field.
+    derived_answers = {
+        k: v.strip() for k, v in (body.answers or {}).items() if v and v.strip()
+    }
     edited = (body.definition_text or "").strip()
     definition_text = edited or (meta.get("plan") or {}).get("definition_text") or ""
 
@@ -810,6 +835,7 @@ async def approve(
         confirmed_by=company.user_id,
         approved=True,
         answered=answered,
+        derived_answers=derived_answers,
         excluded_sources=tuple(body.excluded_sources),
         hypotheses=tuple(body.hypotheses),
         # READ BACK OFF THE ROW — see the `/confirm` handler's own comment.
@@ -836,6 +862,7 @@ def execute_run(
     definition_text: Optional[str] = None,
     confirmed_by: Optional[str] = None,
     approved: bool = False,
+    derived_answers: Optional[dict] = None,
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
     answered: Optional[dict] = None,
@@ -1068,6 +1095,14 @@ def execute_run(
                 for key, val in (answered or {}).items():
                     if val not in (None, ""):
                         plan_json[key] = val
+                # THE DERIVED ANSWERS, UNDER ONE KEY. Merged rather than
+                # replaced so a re-approve cannot silently drop an earlier
+                # answer that this body did not carry.
+                if derived_answers:
+                    existing = plan_json.get("answers")
+                    merged = dict(existing) if isinstance(existing, dict) else {}
+                    merged.update(derived_answers)
+                    plan_json["answers"] = merged
                 plan_json["definition_text"] = definition_text
                 # AND IT IS ADOPTED, which is the whole meaning of this click.
                 # `definition_adopted` was written False at plan time to say

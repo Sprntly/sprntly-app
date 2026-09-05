@@ -2792,3 +2792,56 @@ def test_the_plan_opens_with_a_sentence_rather_than_a_list_of_storage_keys(ctx):
     for step in plan["steps"]:
         for text in [step["what"], step["why"], *step["sources"]]:
             assert not key.search(text), f"storage key rendered: {text}"
+
+
+def test_the_plan_carries_how_much_was_read_over_what_window(ctx):
+    """The card leads with a verdict and a stat strip, and the window is a
+    min/max across every table the pass read. Aggregated on the server because
+    a renderer that recomputed it would be a second implementation of the same
+    fact, free to disagree with the one the run used."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    coverage = plan["coverage"]
+    assert coverage["records"] == len(_CONTRACT_BOOK)
+    assert coverage["tables"] >= 1
+
+
+def test_a_plan_built_without_a_reconnaissance_pass_carries_no_coverage(ctx):
+    """"Nothing was read" and "we did not look" are different statements. The
+    card renders no strip at all rather than a row of zeroes."""
+    from app.crucible.plan import RunPlan
+
+    assert RunPlan(goal_text="g", definition_text="d",
+                   currency="accounts").to_json()["coverage"] == {}
+
+
+def test_an_answer_to_a_derived_question_is_recorded_on_the_plan(ctx):
+    """The gate now asks things it worked out from the evidence, and the set of
+    them depends on what the pass saw — so they travel in a map keyed by
+    question id rather than in a field per question.
+
+    RECORDED, NOT YET APPLIED. No pass reads these: the run carries out the
+    `default_if_skipped` each question states. Storing the answer is what makes
+    it a record rather than a control that lies, and the card says so where it
+    asks."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={
+        "answers": {"value_column_choice": "base_acv_usd"},
+    })
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["answers"] == {"value_column_choice": "base_acv_usd"}
+
+
+def test_an_approve_with_no_answers_records_none(ctx):
+    """Absence is the server's "unanswered". An empty map written to the plan
+    would read back as a set of answers nobody gave."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert "answers" not in _prioritisation(run_id)["plan"]

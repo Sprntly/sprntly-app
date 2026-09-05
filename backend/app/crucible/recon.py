@@ -771,6 +771,35 @@ class ReconReport:
     missing: tuple[str, ...] = ()
     total_records: int = 0
 
+    def summary(self) -> dict:
+        """The coverage facts a reader needs in one line, aggregated.
+
+        The plan gate renders a stat strip from this — how much was read, over
+        what window, from how many places. Aggregated HERE rather than on the
+        client because the window is a min/max across every table and a
+        renderer that recomputed it would be a second implementation of the
+        same fact, free to disagree with the one the run used.
+
+        WHAT IS DELIBERATELY NOT HERE: what is missing entirely. `RunPlan.
+        cannot_answer` already carries that, with the reason and the remedy
+        attached — a bare list of absent source types beside it would be the
+        same fact twice, once without the half that makes it actionable.
+        """
+        # TO THE MONTH, BOTH ENDS. Tables date themselves differently — a
+        # cohort column is `YYYY-MM` and a ticket column is `YYYY-MM-DD` — so
+        # the raw min and max come back in two different shapes and render as
+        # "2024-07 to 2026-09-02", which reads as a bug. The window is a
+        # coarse fact and the month is the honest resolution for it.
+        spans = [s.earliest[:7] for s in self.sources if s.earliest]
+        ends = [s.latest[:7] for s in self.sources if s.latest]
+        return {
+            "records": self.total_records,
+            "tables": len(self.sources),
+            "origins": len({s.origin for s in self.sources if s.origin}),
+            "earliest": min(spans) if spans else "",
+            "latest": max(ends) if ends else "",
+        }
+
     def inventory_figures(self) -> tuple[float, ...]:
         """The run's countable facts about ITSELF — how many tables, how many
         sources, how many records.

@@ -255,6 +255,12 @@ class RunPlan:
     #: before this existed reads back as, which renders as the old document.
     steps: tuple["PlanStep", ...] = ()
     observations: tuple["Observation", ...] = ()
+    #: HOW MUCH WAS READ, OVER WHAT WINDOW, FROM HOW MANY PLACES — the
+    #: aggregate of `ReconReport.summary`. Empty dict on every plan built
+    #: without a reconnaissance pass, which renders as no stat strip rather
+    #: than as zeroes: "nothing was read" and "we did not look" are different
+    #: statements and only one of them is true here.
+    coverage: dict = field(default_factory=dict)
     #: WHAT ONE ACCOUNT IS WORTH, TAKEN FROM THE EVIDENCE RATHER THAN ASKED.
     #:
     #: DELIBERATELY NOT `account_value`. That field is the reader's own
@@ -291,6 +297,7 @@ class RunPlan:
             "account_value": self.account_value,
             "decision_owner": self.decision_owner,
             "needed_by": self.needed_by,
+            "coverage": dict(self.coverage),
             "steps": [st.to_json() for st in self.steps],
             "observations": [o.to_json() for o in self.observations],
             "account_value_derived": self.account_value_derived,
@@ -523,6 +530,7 @@ def build_plan(
     # path needs.
     observations: tuple = ()
     steps: tuple = ()
+    coverage: dict = {}
     derived_value: Optional[float] = None
     derived_note = ""
     if recon_report is not None:
@@ -530,6 +538,8 @@ def build_plan(
         from app.crucible.planner import build_steps
 
         observations = tuple(getattr(recon_report, "observations", ()) or ())
+        summary = getattr(recon_report, "summary", None)
+        coverage = summary() if callable(summary) else {}
         derived_value, derived_note = derived_account_value(observations)
         steps = build_steps(
             enterprise_id=enterprise_id or company_id,
@@ -563,6 +573,7 @@ def build_plan(
         needed_by=needed_by,
         steps=steps,
         observations=observations,
+        coverage=coverage,
         account_value_derived=derived_value,
         account_value_derived_note=derived_note,
     )
