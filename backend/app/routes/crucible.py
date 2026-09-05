@@ -742,6 +742,25 @@ class ApprovePlan(BaseModel):
     account_value: Optional[Annotated[float, Field(ge=0, le=100_000_000)]] = None
     decision_owner: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
     needed_by: Optional[Annotated[str, StringConstraints(max_length=120)]] = None
+    #: ── THE DERIVED QUESTIONS' ANSWERS, KEYED BY QUESTION ID. ─────────
+    #:
+    #: The gate now asks things it worked out from the evidence — which of two
+    #: value columns is the book, whether to rank by accounts or by revenue —
+    #: and those have no dedicated field because the SET of them depends on
+    #: what the reconnaissance pass saw. A generic map is the only shape that
+    #: does not need a migration every time a check is added.
+    #:
+    #: RECORDED, NOT YET APPLIED, AND THE CARD SAYS SO. No executor reads
+    #: these: the run carries out the `default_if_skipped` each question
+    #: states, and the answer is stored on the plan so it is on the record and
+    #: available to the pass that will honour it. Collecting an answer and
+    #: quietly ignoring it would be the dishonesty this whole gate exists to
+    #: remove, which is why the disclosure is in the UI copy rather than in a
+    #: comment here.
+    answers: dict[
+        Annotated[str, StringConstraints(max_length=64)],
+        Annotated[str, StringConstraints(max_length=200)],
+    ] = Field(default_factory=dict, max_length=12)
     excluded_sources: list[str] = Field(default_factory=list, max_length=12)
     # `max_length` on a `list[str]` bounds the LIST, not the strings in it —
     # ten 40,000-char hypotheses render past the document limit with only a
@@ -800,6 +819,12 @@ async def approve(
         "decision_owner": (body.decision_owner or "").strip(),
         "needed_by": (body.needed_by or "").strip(),
     }
+    #: Kept apart from `answered`, which is spread onto the plan as top-level
+    #: fields the report reads by name. These are keyed by question id and go
+    #: to one place, so a new question cannot collide with a plan field.
+    derived_answers = {
+        k: v.strip() for k, v in (body.answers or {}).items() if v and v.strip()
+    }
     edited = (body.definition_text or "").strip()
     definition_text = edited or (meta.get("plan") or {}).get("definition_text") or ""
 
@@ -810,6 +835,7 @@ async def approve(
         confirmed_by=company.user_id,
         approved=True,
         answered=answered,
+        derived_answers=derived_answers,
         excluded_sources=tuple(body.excluded_sources),
         hypotheses=tuple(body.hypotheses),
         # READ BACK OFF THE ROW — see the `/confirm` handler's own comment.
@@ -828,6 +854,80 @@ async def approve(
     return _public(row or claimed)
 
 
+def _settle_pending_steps(run_id: int, company_id: str) -> None:
+    """Mark a pending plan final, because nothing further is coming.
+
+    The reader approved inside the composition window, so the deterministic
+    method IS the method — and the record has to say so rather than leave a
+    flag promising a completion nothing will ever write.
+    """
+    try:
+        meta = dict(_meta_of(run_id, company_id))
+        plan_json = dict(meta.get("plan") or {})
+        if not plan_json.get("steps_pending"):
+            return
+        plan_json["steps_pending"] = False
+        plan_json["steps_settled_early"] = True
+        meta["plan"] = plan_json
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — a flag is never worth failing a run
+        logger.warning("crucible: could not settle the pending plan for run %s",
+                       run_id, exc_info=True)
+
+
+def _complete_plan_steps(
+    run_id: int, company_id: str, *, report, goal_text: str,
+    definition_text: str, source_types: tuple, sources: tuple = (),
+) -> None:
+    """Compose the method and write it onto the plan the gate is already
+    showing.
+
+    A COMPLETION, NOT A RE-ROLL, and the difference is enforced rather than
+    asserted: `planner.load_steps` treats a pending plan as undrawn, so this
+    upgrade can happen exactly once, and every later read of a completed plan
+    comes back off the store unchanged.
+
+    IT DECLINES ONCE THE RUN HAS LEFT THE GATE. A reader who approves while the
+    composition is in flight would otherwise have their answers, definition and
+    exclusions overwritten by this write, which read the plan before any of
+    them existed. The deterministic method is a real method and a perfectly
+    good final answer; losing what somebody typed is not recoverable.
+
+    Total: a failure here costs the composed wording and nothing else.
+    """
+    try:
+        from app.crucible.planner import build_steps
+
+        steps = build_steps(
+            enterprise_id=company_id, goal_text=goal_text,
+            definition_text=definition_text, currency="accounts",
+            report=report, source_types=source_types, sources=sources,
+        )
+        row = runs_db.get(run_id, company_id) or {}
+        if row.get("status") != "awaiting_approval":
+            # APPROVED WHILE THE WORDING WAS STILL BEING WRITTEN. Declining the
+            # write is right — it would overwrite the answers, definition and
+            # exclusions this reader just gave with a plan read before any of
+            # them existed. But the deterministic method is then FINAL, and
+            # saying nothing left `steps_pending` set for ever: the card kept
+            # telling the reader the wording was still coming, and it never was.
+            logger.info("crucible: run %s left the gate before its method was "
+                        "composed; keeping the deterministic one", run_id)
+            _settle_pending_steps(run_id, company_id)
+            return
+        meta = dict(_meta_of(run_id, company_id))
+        plan_json = dict(meta.get("plan") or {})
+        if not plan_json.get("steps_pending"):
+            return
+        plan_json["steps"] = [st.to_json() for st in steps]
+        plan_json["steps_pending"] = False
+        meta["plan"] = plan_json
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — the plan on screen is already valid
+        logger.exception("crucible: could not compose the method for run %s; "
+                         "the deterministic one stands", run_id)
+
+
 def execute_run(
     *,
     run_id: int,
@@ -836,6 +936,7 @@ def execute_run(
     definition_text: Optional[str] = None,
     confirmed_by: Optional[str] = None,
     approved: bool = False,
+    derived_answers: Optional[dict] = None,
     excluded_sources: tuple[str, ...] = (),
     hypotheses: tuple[str, ...] = (),
     answered: Optional[dict] = None,
@@ -1007,6 +1108,18 @@ def execute_run(
         #
         # Inventory only, no content read, so this returns in about a second.
         if not approved:
+            # ── PHASE 1. THE FAST, TRUE HALF. ──────────────────────────
+            #
+            # Everything above the steps is deterministic and lands in a few
+            # hundred milliseconds: the verdict, the coverage, the definition,
+            # the counting unit, the sources and what each is being used for.
+            # Only the WORDING of the method needs a model call. Composing
+            # before the first write made the reader wait on the slow part for
+            # the fast part, staring at nothing while the answer sat ready.
+            #
+            # So this write lands the deterministic method, marked pending, and
+            # the gate renders off it immediately.
+            report = _recon_report(company_id)
             plan = build_plan(
                 company_id=company_id,
                 goal_text=goal_text,
@@ -1016,11 +1129,22 @@ def execute_run(
                 definition_source=definition_source,
                 definition_note=_PROCESS_NOTE,
                 definition_adopted=definition_adopted,
+                recon_report=report,
+                run_meta=_meta_of(run_id, company_id),
+                enterprise_id=company_id,
+                compose=False,
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()
             runs_db.update(run_id, company_id, status="awaiting_approval",
                            prioritisation=meta)
+            # ── PHASE 2. The composed wording, written onto the same plan.
+            _complete_plan_steps(
+                run_id, company_id, report=report, goal_text=goal_text,
+                definition_text=definition_text,
+                source_types=tuple(sv.source_type for sv in plan.sources),
+                sources=plan.sources,
+            )
             return
 
         # THE USER'S ANSWER TO THE PLAN IS PART OF THE RECORD. `build_plan`
@@ -1061,6 +1185,14 @@ def execute_run(
                 for key, val in (answered or {}).items():
                     if val not in (None, ""):
                         plan_json[key] = val
+                # THE DERIVED ANSWERS, UNDER ONE KEY. Merged rather than
+                # replaced so a re-approve cannot silently drop an earlier
+                # answer that this body did not carry.
+                if derived_answers:
+                    existing = plan_json.get("answers")
+                    merged = dict(existing) if isinstance(existing, dict) else {}
+                    merged.update(derived_answers)
+                    plan_json["answers"] = merged
                 plan_json["definition_text"] = definition_text
                 # AND IT IS ADOPTED, which is the whole meaning of this click.
                 # `definition_adopted` was written False at plan time to say
@@ -1124,9 +1256,23 @@ def execute_run(
                 choice = select_framework(kept_inventory, declared)
                 plan_json["framework"] = choice.framework
                 plan_json["framework_reason"] = choice.reason
+                # RE-DERIVED FROM THE STORED OBSERVATIONS, NEVER FROM A FRESH
+                # RECONNAISSANCE PASS. The framework can change here (a reader
+                # who unticks the only numeric source), so the question set
+                # has to be recomputed — but recomputing it from a second read
+                # of the corpus would make the questions a function of when
+                # the reader clicked approve. The observations are a fact
+                # already on the plan; they are read, not re-taken. Same
+                # discipline the steps follow, one field over.
+                from app.crucible.recon import observations_from_json
+
+                stored_obs = observations_from_json(plan_json.get("observations"))
                 plan_json["questions"] = [
-                    {"id": q.id, "prompt": q.prompt, "why": q.why}
-                    for q in questions_for(choice.framework)
+                    {"id": q.id, "prompt": q.prompt, "why": q.why,
+                     "what_i_saw": q.what_i_saw, "affects": q.affects,
+                     "default_if_skipped": q.default_if_skipped,
+                     "options": list(q.options)}
+                    for q in questions_for(choice.framework, stored_obs)
                 ]
 
                 gaps, produce = derive_gaps_and_promises(
@@ -2100,53 +2246,21 @@ def _bare_definition(company_id: str, goal_text: str) -> GoalDefinition:
     )
 
 
-#: Above this share of signals whose `valid_at` is just their `created_at`,
-#: the corpus is dated by the ingest clock rather than by when anything
-#: happened, and every date-based test is measuring our own backfill.
-_INGEST_CLOCK_SHARE = 0.6
-
-#: How close `valid_at` and `created_at` must be to count as the same moment.
-#: NOT an exact match: `valid_at` is stamped in Python when the Signal object
-#: is built and `created_at` by the database on insert, with an embedding call
-#: in between, so identical-in-intent timestamps routinely differ by seconds.
-#: An exact second-prefix compare would miss the very pattern it looks for on
-#: any tenant whose ingest is slightly slower than this one's.
-_INGEST_CLOCK_TOLERANCE_S = 120.0
-
-
-def _dates_are_ingest_clock(signals: list[dict]) -> bool:
-    """Is this corpus dated by when we READ it rather than when it happened?
-
-    `valid_at` defaults to now() at ingest and most pullers never set it, so a
-    backfill gives thousands of signals the same few timestamps. Detected
-    rather than assumed, because a tenant whose sources DO carry real dates
-    should still get the full checks.
-    """
-    if not signals:
-        return False
-    same = 0
-    for row in signals:
-        gap = _seconds_between(row.get("valid_at"), row.get("created_at"))
-        if gap is not None and gap <= _INGEST_CLOCK_TOLERANCE_S:
-            same += 1
-    return (same / len(signals)) >= _INGEST_CLOCK_SHARE
-
-
-def _seconds_between(a, b) -> Optional[float]:
-    """Absolute gap in seconds, or None if either side is unreadable."""
-    parsed = []
-    for value in (a, b):
-        if not value:
-            return None
-        text = str(value).replace("Z", "+00:00")
-        try:
-            moment = datetime.fromisoformat(text)
-        except ValueError:
-            return None
-        if moment.tzinfo is None:
-            moment = moment.replace(tzinfo=timezone.utc)
-        parsed.append(moment)
-    return abs((parsed[0] - parsed[1]).total_seconds())
+#: THE INGEST-CLOCK DETECTOR MOVED TO `app.crucible.recon`.
+#:
+#: It was here, and the reconnaissance pass needed the same answer to tell a
+#: reader that recency cannot be judged on their corpus. Two implementations of
+#: "are these dates real" would drift, and the direction they drift is the bad
+#: one: the pass would report a dating problem the pipeline did not act on, or
+#: the pipeline would skip its echo rule while the plan said the dates were
+#: fine. Re-exported under the old private name so this module's own callers
+#: read unchanged.
+from app.crucible.recon import (  # noqa: E402
+    INGEST_CLOCK_SHARE as _INGEST_CLOCK_SHARE,
+    INGEST_CLOCK_TOLERANCE_S as _INGEST_CLOCK_TOLERANCE_S,
+    dates_are_ingest_clock as _dates_are_ingest_clock,
+    seconds_between as _seconds_between,
+)
 
 
 def _row_meta(row: dict) -> dict:
@@ -2345,6 +2459,56 @@ def _signal_page(client, company_id: str, page: int) -> list[dict]:
         if len(slice_) < _PAGE_RETRY:
             break
     return out
+
+
+#: Signal pages the reconnaissance pass may read at PLAN time.
+#:
+#: THE PLAN GATE USED TO READ NO CONTENT AT ALL, and that was a deliberate,
+#: documented property: "a plan that had to read the corpus to describe it
+#: would be the expensive thing it exists to gate." A plan that names its
+#: method has to look at the evidence, so that property is now traded away —
+#: but only for a bounded slice, and only over the STRUCTURED signals whose
+#: `properties` carry numbers. Four pages is one query per page against the
+#: same index `_load_signals` already uses, not the whole corpus.
+#:
+#: FAILING OPEN IS THE WHOLE SAFETY PROPERTY. If this read is slow, errors, or
+#: returns nothing usable, the plan is built exactly as it was before any of
+#: this existed: an inventory, with no steps. A gate that cannot render
+#: because reconnaissance struggled would be a far worse regression than a
+#: plan without a method section.
+_RECON_PAGES = 4
+
+
+def _recon_report(company_id: str):
+    """What the evidence looks like structurally, or an empty report.
+
+    Total: never raises, never blocks a plan.
+    """
+    from app.crucible.recon import ReconReport, observe, tables_from_signals
+
+    try:
+        from app.db.client import require_client
+
+        client = require_client()
+        rows: list[dict] = []
+        for page in range(_RECON_PAGES):
+            chunk = _signal_page(client, company_id, page)
+            rows.extend(chunk)
+            if len(chunk) < _PAGE:
+                break
+        # `signals` AS WELL AS THE TABLES. The structural checks need columns
+        # and a prose tenant has none, so reconnaissance over calls and Slack
+        # returned counts and little else. The triage pass has been
+        # classifying every ingested document into a declared taxonomy and
+        # writing the answer to `provenance.triage_category` — and both signal
+        # reads here already select `provenance`, so reading it costs no extra
+        # query, no tokens and no latency.
+        return observe(tables_from_signals(rows), signals=rows)
+    except Exception:  # noqa: BLE001 — see the constant above
+        logger.warning("crucible: reconnaissance pass failed for %s; the plan "
+                       "will be built without a method section", company_id,
+                       exc_info=True)
+        return ReconReport()
 
 
 def _load_signals(company_id: str) -> list[dict]:

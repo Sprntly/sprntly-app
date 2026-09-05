@@ -2615,3 +2615,310 @@ def test_the_run_announces_that_enrichment_is_still_coming():
         f"the flag is cleared {down - results} lines after the results are "
         "merged in; it must be the same write, not a separate one"
     )
+
+
+# ─── The plan says HOW, and the method survives approval ────────────────────
+#
+# The plan gate used to be a coverage report: it counted rows per source type
+# and said nothing about method, so approving it was approving a promise to
+# "read your revenue data" — not a procedure, and therefore not something that
+# could be wrong. These cover the parts that only break in the wiring: that a
+# structural read actually happens at the gate, that the composed method is
+# stored on the run, and that approving does not silently re-derive it.
+
+_CONTRACT_BOOK = (
+    ("Account A", 22500, 0, 22500),
+    ("Account B", 372810, 174034, 546844),
+    ("Account C", 210000, 0, 210000),
+    ("Account D", 414846, 0, 414846),
+    ("Account E", 210000, 99344, 309344),
+    ("Account F", 301893, 0, 301893),
+    ("Account G", 265159, 0, 265159),
+    ("Account H", 235911, 0, 235911),
+)
+
+
+#: The triage categories the ingest pass writes to `provenance`, in the
+#: proportions measured on a real 1,416-signal tenant.
+_TRIAGE_MIX = ("product_prd", "product_prd", "decision_record",
+               "business_context", "meeting_notes", "sales_deal")
+
+
+def _contract_signals(company_id: str) -> None:
+    """Signals whose `properties` carry real numbers, which is the shape the
+    reconnaissance pass reads. `ds/analyses.py` already writes numbers there
+    for every anomaly it finds; nothing had ever read them as a table."""
+    from app.db.client import require_client
+
+    for i, (account, base, expansion, total) in enumerate(_CONTRACT_BOOK):
+        require_client().table("kg_signal").insert({
+            "id": f"con-{i:04d}", "enterprise_id": company_id,
+            "kind": "contract", "source_type": "revenue",
+            "content": f"contract for {account}",
+            "properties": {"account": account, "base_acv_usd": base,
+                           "expansion_acv_usd": expansion,
+                           "total_acv_usd": total},
+            "provenance": {"doc": "contracts",
+                           "triage_category": _TRIAGE_MIX[i % len(_TRIAGE_MIX)]},
+            "valid_at": "2026-08-19T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+
+
+def test_the_plan_says_how_the_run_will_work_not_just_what_it_will_read(ctx):
+    from app.crucible import primitives as prim
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    steps = plan["steps"]
+    assert steps, "a plan with no method is the coverage report this replaced"
+    assert [s["n"] for s in steps] == list(range(1, len(steps) + 1))
+    # THE HONESTY INVARIANT, end to end: every line of the document a reader
+    # approves is something the engine actually does.
+    for step in steps:
+        assert prim.REGISTRY[step["primitive"]].is_implemented
+        assert step["what"] and step["why"]
+
+
+def test_the_plan_carries_what_the_reconnaissance_pass_actually_saw(ctx):
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    kinds = {o["kind"] for o in plan["observations"]}
+    assert "value_columns_disagree" in kinds, (
+        "two columns both reading as the account's value, differing by exactly "
+        "a third, is the finding no row count can see"
+    )
+    assert plan["account_value_derived"] == 283526
+    assert plan["account_value_derived_note"]
+
+
+def test_the_gate_stops_asking_for_a_number_the_contracts_already_carry(ctx):
+    """Asking for an estimate the customer's own data contains invites a guess
+    that then disagrees with the figures underneath it."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    ids = [q["id"] for q in plan["questions"]]
+    assert "account_value" not in ids
+    # …and the two that no corpus can ever answer are still asked.
+    assert ids[-2:] == ["decision_owner", "needed_by"]
+
+
+def test_approving_does_not_re_derive_the_method_it_was_approved_with(ctx):
+    """A model call is a draw, not a lookup, and the reader has said yes to
+    one of the samples. Re-composing on approve would run the analysis they
+    agreed to and store a different description of it."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    before = _prioritisation(run_id)["plan"]
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = _prioritisation(run_id)["plan"]
+
+    assert after["steps"] == before["steps"]
+    assert after["observations"] == before["observations"]
+
+
+def test_a_reconnaissance_pass_that_finds_nothing_still_produces_a_plan(ctx):
+    """Failing open is the whole safety property. A gate that could not render
+    because the structural read struggled would be a far worse regression than
+    a plan with a shorter method section."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["steps"], "the deterministic plan is a plan, not a failure state"
+    assert plan["sources"] and plan["cannot_answer"]
+
+
+def test_the_plan_reads_the_triage_category_ingest_already_writes(ctx):
+    """A triage call classifies every ingested document into a declared
+    taxonomy and writes the answer to `provenance.triage_category`. Both signal
+    reads here already select `provenance`, so consuming it costs no extra
+    query, no tokens, no latency and no migration — and until now nothing
+    anywhere read it.
+
+    It matters most where the structural checks find least: a tenant whose
+    evidence is calls and Slack has no columns to inspect, so without this the
+    plan can say how much evidence there is and nothing about what it IS.
+    """
+    from app.db.client import require_client
+
+    _contract_signals(ctx.company_id)
+    # A corpus rather than a handful: the mix is not reported over a few rows,
+    # because a proportion computed from eight signals is not a proportion.
+    for i in range(40):
+        require_client().table("kg_signal").insert({
+            "id": f"cat-{i:04d}", "enterprise_id": ctx.company_id,
+            "kind": "finding", "source_type": "customer_voice",
+            "content": f"signal {i}", "properties": {},
+            "provenance": {"doc": "calls",
+                           "triage_category": _TRIAGE_MIX[i % len(_TRIAGE_MIX)]},
+            "valid_at": "2026-08-19T00:00:00+00:00",
+            "created_at": "2026-08-19T00:00:00+00:00",
+            "transaction_at": "2026-08-19T00:00:00+00:00",
+        }).execute()
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    mix = [o for o in plan["observations"] if o["kind"] == "evidence_mix"]
+    assert mix, "the categories are written on every ingest and read nowhere"
+    assert mix[0]["figures"]["classified"] > 0
+    assert 0 < mix[0]["figures"]["firsthand_share"] < 1
+
+
+def test_the_plan_opens_with_a_sentence_rather_than_a_list_of_storage_keys(ctx):
+    """Enumerating is not describing, and a sheet key teaches a reader
+    nothing except that they are reading a machine's notes."""
+    import re as _re
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    key = _re.compile(r"\S+:\S+")
+    for step in plan["steps"]:
+        for text in [step["what"], step["why"], *step["sources"]]:
+            assert not key.search(text), f"storage key rendered: {text}"
+
+
+def test_the_plan_carries_how_much_was_read_over_what_window(ctx):
+    """The card leads with a verdict and a stat strip, and the window is a
+    min/max across every table the pass read. Aggregated on the server because
+    a renderer that recomputed it would be a second implementation of the same
+    fact, free to disagree with the one the run used."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+    coverage = plan["coverage"]
+    assert coverage["records"] == len(_CONTRACT_BOOK)
+    assert coverage["tables"] >= 1
+
+
+def test_a_plan_built_without_a_reconnaissance_pass_carries_no_coverage(ctx):
+    """"Nothing was read" and "we did not look" are different statements. The
+    card renders no strip at all rather than a row of zeroes."""
+    from app.crucible.plan import RunPlan
+
+    assert RunPlan(goal_text="g", definition_text="d",
+                   currency="accounts").to_json()["coverage"] == {}
+
+
+def test_an_answer_to_a_derived_question_is_recorded_on_the_plan(ctx):
+    """The gate now asks things it worked out from the evidence, and the set of
+    them depends on what the pass saw — so they travel in a map keyed by
+    question id rather than in a field per question.
+
+    RECORDED, NOT YET APPLIED. No pass reads these: the run carries out the
+    `default_if_skipped` each question states. Storing the answer is what makes
+    it a record rather than a control that lies, and the card says so where it
+    asks."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={
+        "answers": {"value_column_choice": "base_acv_usd"},
+    })
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["answers"] == {"value_column_choice": "base_acv_usd"}
+
+
+def test_an_approve_with_no_answers_records_none(ctx):
+    """Absence is the server's "unanswered". An empty map written to the plan
+    would read back as a set of answers nobody gave."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert "answers" not in _prioritisation(run_id)["plan"]
+
+
+# ─── The two-phase write, end to end ──────────────────────────────────────
+
+
+def test_the_gate_lands_before_the_wording_is_composed(ctx):
+    """Everything above the steps is deterministic and arrives in a few hundred
+    milliseconds; only the wording needs a model call, and it measured 53.8s on
+    a real run. Composing before the first write made the reader wait on the
+    slow part for the fast one."""
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    # Under pytest the composition is offline, so phase 2 completes with the
+    # deterministic method — what matters here is that the flag settles rather
+    # than being left promising a write nobody will make.
+    assert plan["steps"], "the gate must render off a real method, not a stub"
+    assert plan["steps_pending"] is False
+
+
+def test_approving_before_the_wording_lands_says_which_plan_you_got(ctx):
+    """The completing write declines once the run has left the gate — it would
+    overwrite the answers, definition and exclusions the reader just gave. That
+    is right, and it used to be silent: the plan sat `steps_pending` for ever,
+    so the card kept promising wording that was never coming."""
+    from app.db import crucible_runs as runs_db
+    from app.routes import crucible as route
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    # Put the stored plan back into the state phase 1 leaves it in.
+    meta = dict(_prioritisation(run_id))
+    plan_json = dict(meta["plan"])
+    plan_json["steps_pending"] = True
+    meta["plan"] = plan_json
+    runs_db.update(run_id, ctx.company_id, prioritisation=meta)
+
+    route._settle_pending_steps(run_id, ctx.company_id)
+
+    after = _prioritisation(run_id)["plan"]
+    assert after["steps_pending"] is False
+    assert after["steps_settled_early"] is True
+    assert after["steps"], "the deterministic method is what they approved"
+
+
+def test_settling_a_plan_that_was_never_pending_changes_nothing(ctx):
+    from app.routes import crucible as route
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    before = _prioritisation(run_id)["plan"]
+    route._settle_pending_steps(run_id, ctx.company_id)
+    after = _prioritisation(run_id)["plan"]
+    assert after == before
+
+
+def test_the_open_gate_line_is_empty_for_a_conversation_without_one(ctx):
+    """The warning is scoped to the conversation holding the run. A blanket
+    warning would tell every other thread it cannot approve something that is
+    not there."""
+    from app import ask_runner
+    from app.prompts import open_goal_gate_line
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+
+    token = ask_runner.set_active_conversation(9_999_999, "u")
+    try:
+        assert open_goal_gate_line(ctx.company_id) == ""
+    finally:
+        ask_runner.reset_active_conversation(token)
+    # …and with no conversation in scope at all.
+    assert open_goal_gate_line(ctx.company_id) == ""

@@ -499,6 +499,11 @@ export interface MapMainTurnsDeps {
    *  Naming them costs a surface one line and makes dropping them a build
    *  error. */
   goalGateBusyTurnId: string | null | undefined
+  /** The turn whose plan card the composer is targeting, and a counter bumped
+   *  each time the reader approves it from the composer. Scoped to one turn
+   *  because a thread can hold two plan gates. */
+  goalApproveTurnId?: string | null
+  goalApproveNonce?: number
   confirmGoalDefinition:
     | ((tabId: string, turnId: string, runId: number,
         definition: string) => void | Promise<void>)

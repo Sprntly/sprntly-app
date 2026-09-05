@@ -7,10 +7,25 @@ phrased as an apology. The same facts are worth far more BEFOREHAND, where they
 are a decision: connect the missing source, narrow the window, or accept a
 qualitative answer and press on.
 
-THE PLAN IS AN INVENTORY, NOT A SAMPLE. It counts what exists per source and
-reads no content, so it costs a few queries and returns in about a second. That
-is deliberate: a plan that had to read the corpus to describe it would be the
-expensive thing it exists to gate.
+THE PLAN NOW READS BEFORE IT SPEAKS, AND THAT REVERSES AN EARLIER DECISION.
+This module still only counts — `source_inventory` reads no content — but the
+stage no longer does. `routes.crucible._recon_report` reads a bounded slice of
+the corpus (`_RECON_PAGES` pages) and hands the observations in, so a step can
+say "these two value columns disagree on 13 of 60 rows" rather than "you have a
+revenue source connected".
+
+The decision this replaces was deliberate and its reasoning was sound: a plan
+that had to read the corpus to describe it would be the expensive thing it
+exists to gate. What changed is the evidence about what a plan is FOR. A plan
+built from counts can state coverage and nothing else, so it cannot say how a
+decision will be made — which is the whole of what a reader needs before
+approving one, and the reason the old gate read as a receipt.
+
+The cost is contained rather than dismissed: the read is bounded, fails open to
+the count-only plan, and reuses a column both signal reads already select. It is
+NOT free, and on a large tenant it has not been measured. If that measurement
+comes back badly, the honest fix is a smaller sample — not a return to a plan
+that cannot describe its own method.
 
 WHAT MAKES IT ACTIONABLE. Sprntly can ingest numbers — connectors exist, and a
 user can upload a document. So a gap is never reported as a dead end: every
@@ -22,32 +37,46 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 from app.crucible.claims import AUTHORITATIVE_FOR
+from app.graph.types import source_type_label
+
+if TYPE_CHECKING:  # imported for annotations only — `planner` imports
+    # `primitives`, which imports nothing from here, so a runtime import
+    # would not actually be circular; it is deferred anyway because building
+    # a plan without steps (every existing caller, every stored plan) must
+    # not pay for loading the planner.
+    from app.crucible.planner import PlanStep
+    from app.crucible.recon import Observation
 
 logger = logging.getLogger(__name__)
 
 #: What each source can and cannot witness, in the user's language rather than
 #: the type system's. Mirrors AUTHORITATIVE_FOR — the plan must not promise more
 #: than the engine will accept later.
+#: What each source can WITNESS. The other half — what each source is called —
+#: is `graph.types.SOURCE_TYPE_LABELS`, because a source type is graph
+#: vocabulary and this module is one consumer of it. They were both here, and
+#: the consequence was that every other path in the product showed the reader
+#: the storage key instead: a real session cited `[Source: pm_manual/finding]`.
+_SOURCE_WITNESSES: dict[str, str] = {
+    "customer_voice":   "what customers asked for and reported",
+    "communication":    "what was discussed, hit and attempted",
+    "project_mgmt":     "what was built, broken, blocked or attempted",
+    "pm_manual":        "the company's stated constraints and goals",
+    "analytics":        "how much something moved, and in which direction",
+    "revenue":          "how much something moved, and in which direction",
+    "outcome_measured": "whether a change actually worked",
+    "verbal_claim":     "nothing — recorded, never counted",
+    "agent_inferred":   "nothing — recorded, never counted",
+}
+
+#: Kept in this shape, and in this ORDER, because `source_inventory` iterates
+#: it to decide which source types to count.
 _SOURCE_PROSE: dict[str, tuple[str, str]] = {
-    "customer_voice": ("calls and customer tickets",
-                       "what customers asked for and reported"),
-    "communication":  ("Slack and email",
-                       "what was discussed, hit and attempted"),
-    "project_mgmt":   ("the tracker",
-                       "what was built, broken, blocked or attempted"),
-    "pm_manual":      ("your own business context",
-                       "the company's stated constraints and goals"),
-    "analytics":      ("product analytics",
-                       "how much something moved, and in which direction"),
-    "revenue":        ("revenue data",
-                       "how much something moved, and in which direction"),
-    "outcome_measured": ("measured outcomes",
-                         "whether a change actually worked"),
-    "verbal_claim":   ("unverified claims", "nothing — recorded, never counted"),
-    "agent_inferred": ("our own inferences", "nothing — recorded, never counted"),
+    source_type: (source_type_label(source_type), witnesses)
+    for source_type, witnesses in _SOURCE_WITNESSES.items()
 }
 
 #: Sources that carry NUMBERS. Without at least one, no finding can be stated as
@@ -68,12 +97,76 @@ _REMEDY = {
 }
 
 
+#: WHAT EACH SOURCE IS BEING USED FOR, not merely what it contains.
+#:
+#: The plan gate listed sources as a flat inventory with counts, which is an
+#: answer to "what have you got" and not to "what are you doing with it". A
+#: reader cannot tell from a count whether a transcript is being used to size
+#: an opportunity or to explain one — and those are different claims with
+#: different reliability, which is the whole reason `AUTHORITATIVE_FOR` exists.
+#:
+#: DERIVED FROM `AUTHORITATIVE_FOR`, NEVER RESTATED. The role is a reading of
+#: the claim types a source may witness, so it cannot disagree with what the
+#: engine will actually accept later. A second table of "source X is for
+#: sizing" would drift from the first the moment a source's authority changed,
+#: and it would drift silently.
+#:
+#: ORDERED BY WHAT A CLAIM CAN CARRY. Magnitude outranks mechanism outranks
+#: constraint: a source that may witness how much something moved is a sizing
+#: source even if it can also say why, because sizing is the scarcer capability
+#: and the one a reader most needs to locate.
+ROLE_SIZING = "Sizing"
+ROLE_CAUSE = "Cause"
+ROLE_CONSTRAINT = "Constraint"
+ROLE_CORROBORATING = "Corroborating"
+ROLE_BACKGROUND = "Background"
+ROLE_UNUSED = "Not using"
+
+#: The order they are shown in, strongest claim first. `Not using` is last
+#: because it is the only one that is not part of the method.
+ROLE_ORDER: tuple[str, ...] = (
+    ROLE_SIZING, ROLE_CAUSE, ROLE_CONSTRAINT, ROLE_CORROBORATING,
+    ROLE_BACKGROUND, ROLE_UNUSED,
+)
+
+#: One line each, in the reader's language, saying what the role may and may
+#: not do. The "never" half is the part that earns its place: a reader who
+#: knows analytics can say how many but never why will not ask it why.
+ROLE_NOTES: dict[str, str] = {
+    ROLE_SIZING: "Behaviour: how many, how much. Never why.",
+    ROLE_CAUSE: "Why it happened, from the party in a position to know.",
+    ROLE_CONSTRAINT: "What is stopping something today.",
+    ROLE_CORROBORATING: "What was asked for or attempted. Supports, never sizes.",
+    ROLE_BACKGROUND: "Recorded and shown, never counted towards a finding.",
+    ROLE_UNUSED: "Dropped by you, and the report says so.",
+}
+
+
+def role_for(source_type: str) -> str:
+    """What this source is for, read off what it may witness."""
+    witnesses = AUTHORITATIVE_FOR.get(source_type, frozenset())
+    if not witnesses:
+        return ROLE_BACKGROUND
+    if {"magnitude", "direction"} & witnesses:
+        return ROLE_SIZING
+    if "mechanism" in witnesses:
+        return ROLE_CAUSE
+    if "constraint" in witnesses:
+        return ROLE_CONSTRAINT
+    return ROLE_CORROBORATING
+
+
 @dataclass(frozen=True)
 class SourceInventory:
     source_type: str
     signal_count: int
     label: str
     witnesses: str
+    #: What this source is being used FOR — see `role_for`. Empty on an
+    #: inventory built before roles existed, which renders ungrouped exactly
+    #: as it did then.
+    role: str = ""
+    role_note: str = ""
 
 
 @dataclass(frozen=True)
@@ -99,6 +192,31 @@ class PlanQuestion:
     id: str
     prompt: str
     why: str
+    #: ── WHAT A DERIVED QUESTION CARRIES THAT A FIXED ONE DID NOT. ───────
+    #:
+    #: The old three were asked unconditionally, so there was nothing to say
+    #: about WHY THIS RUN in particular is asking. A question derived from
+    #: something the reconnaissance pass actually saw can say it, and has to:
+    #: a reader who is told "your contracts carry two different account
+    #: values and they differ on 13 rows" can answer in seconds, where the
+    #: same question asked cold reads as the engine being unsure of itself.
+    #:
+    #: All default to empty so every existing construction, and every plan
+    #: stored before this shipped, is unchanged.
+    #:
+    #: What the run saw that prompted the question, with the numbers.
+    what_i_saw: str = ""
+    #: What the answer changes, said as the thing at stake rather than the
+    #: field name it lands in.
+    affects: str = ""
+    #: What happens if it is left blank. NEVER "we will guess": every default
+    #: here is a stated, conservative behaviour the run will carry out and
+    #: disclose, which is the difference between a default and an invention.
+    default_if_skipped: str = ""
+    #: A closed set of answers where one exists. Empty means free text — right
+    #: for a person's name or a date, wrong for "which of these two columns is
+    #: your book", where the options ARE the answer and typing invites a third.
+    options: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -191,6 +309,65 @@ class RunPlan:
     #: When the decision is needed. Free text on purpose — "before the Q3 QBR"
     #: is a real answer and a date picker would refuse it.
     needed_by: str = ""
+    #: ── THE METHOD, AND WHAT IT WAS DERIVED FROM. ───────────────────────
+    #:
+    #: `steps` is the numbered sequence this run will carry out, each naming a
+    #: registered primitive (`app.crucible.planner`). `observations` is what
+    #: the reconnaissance pass saw in the evidence (`app.crucible.recon`) —
+    #: carried on the plan because it is BOTH the input the steps were
+    #: composed from and the check every figure in them was verified against,
+    #: so a stored plan can be re-verified without re-reading the corpus.
+    #:
+    #: ADDITIVE WITH DEFAULTS, AND THAT IS LOAD-BEARING. `crucible_runs.
+    #: prioritisation` is a single JSONB blob with no version field and every
+    #: reader guards with `.get()`; a rename or a required field would strand
+    #: every plan already stored. Empty tuples are exactly what a plan built
+    #: before this existed reads back as, which renders as the old document.
+    steps: tuple["PlanStep", ...] = ()
+    observations: tuple["Observation", ...] = ()
+    #: HOW MUCH WAS READ, OVER WHAT WINDOW, FROM HOW MANY PLACES — the
+    #: aggregate of `ReconReport.summary`. Empty dict on every plan built
+    #: without a reconnaissance pass, which renders as no stat strip rather
+    #: than as zeroes: "nothing was read" and "we did not look" are different
+    #: statements and only one of them is true here.
+    coverage: dict = field(default_factory=dict)
+    #: TRUE WHILE THE METHOD IS STILL BEING COMPOSED.
+    #:
+    #: Everything above the steps on the gate — the verdict, the coverage, the
+    #: definition, the counting unit, the sources and their roles — is
+    #: deterministic and lands in a few hundred milliseconds. Only the wording
+    #: of the steps needs a model call. Making the reader wait for the whole
+    #: thing meant staring at nothing while the fast, true part sat ready.
+    #:
+    #: So the plan is written twice: once with the deterministic method, marked
+    #: pending, which is what the gate renders immediately; then once more when
+    #: the composition lands. THE SECOND WRITE IS A COMPLETION, NOT A RE-ROLL —
+    #: the draw-once rule is unchanged, and `planner.load_steps` treats a
+    #: pending plan as not yet drawn precisely so this one upgrade can happen
+    #: and no other.
+    steps_pending: bool = False
+    #: TRUE WHEN THE READER APPROVED BEFORE THE WORDING ARRIVED.
+    #:
+    #: The composition takes the best part of a minute, and a reader who
+    #: approves inside that window keeps the deterministic method — the
+    #: completing write declines rather than overwrite the answers they just
+    #: gave. That is the right trade and it used to be silent: the plan sat
+    #: `steps_pending` for ever, promising a completion nothing would write.
+    steps_settled_early: bool = False
+    #: WHAT ONE ACCOUNT IS WORTH, TAKEN FROM THE EVIDENCE RATHER THAN ASKED.
+    #:
+    #: DELIBERATELY NOT `account_value`. That field is the reader's own
+    #: estimate and `report.py` renders it with the words "which is an
+    #: estimate you gave rather than something measured" — true of a typed
+    #: number and false of one read off the contracts, so writing a derived
+    #: figure there would make the finished document misattribute measured
+    #: data to the reader. A separate field keeps that attribution correct;
+    #: rendering this one is a change to the report, not to the plan.
+    account_value_derived: Optional[float] = None
+    #: How it was derived, in one sentence, so the suppression of the question
+    #: is visible rather than silent — a question that stops being asked with
+    #: no explanation reads as a feature that broke.
+    account_value_derived_note: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -213,6 +390,13 @@ class RunPlan:
             "account_value": self.account_value,
             "decision_owner": self.decision_owner,
             "needed_by": self.needed_by,
+            "coverage": dict(self.coverage),
+            "steps_pending": self.steps_pending,
+            "steps_settled_early": self.steps_settled_early,
+            "steps": [st.to_json() for st in self.steps],
+            "observations": [o.to_json() for o in self.observations],
+            "account_value_derived": self.account_value_derived,
+            "account_value_derived_note": self.account_value_derived_note,
         }
 
 
@@ -245,7 +429,9 @@ def source_inventory(company_id: str) -> tuple[list[SourceInventory], int]:
     out = []
     for source_type, n in sorted(counts.items(), key=lambda kv: -kv[1]):
         label, witnesses = _SOURCE_PROSE[source_type]
-        out.append(SourceInventory(source_type, n, label, witnesses))
+        role = role_for(source_type)
+        out.append(SourceInventory(source_type, n, label, witnesses,
+                                   role=role, role_note=ROLE_NOTES[role]))
     return out, total
 
 
@@ -392,9 +578,25 @@ def build_plan(
     account_value: Optional[float] = None,
     decision_owner: str = "",
     needed_by: str = "",
+    #: WHAT THE RECONNAISSANCE PASS SAW, when one has been run. `None` — the
+    #: default, and every existing caller — produces exactly the plan this
+    #: function has always produced, with no steps and no observations. That
+    #: matters beyond backwards compatibility: the pass reads content, and
+    #: whether a given entry point can afford to is the CALLER's decision,
+    #: not this function's.
+    recon_report: "Optional[object]" = None,
+    #: The run's own `prioritisation` blob, for the draw-once read-back. A
+    #: plan whose steps were already composed is READ, never re-composed —
+    #: see `app.crucible.planner.build_steps`.
+    run_meta: "Optional[dict]" = None,
+    enterprise_id: str = "",
+    #: False writes the DETERMINISTIC method and marks the plan pending,
+    #: skipping the model call entirely. The caller composes and completes it
+    #: in a second write — see `RunPlan.steps_pending`.
+    compose: bool = True,
 ) -> RunPlan:
-    """What this run will try to establish, where it will look, and what it
-    will not be able to tell you."""
+    """What this run will try to establish, HOW, where it will look, and what
+    it will not be able to tell you."""
     sources, total = source_inventory(company_id)
     kept = tuple(s for s in sources if s.source_type not in excluded_sources)
 
@@ -422,6 +624,46 @@ def build_plan(
         choice = select_framework(kept, declared)
 
     gaps, produce = derive_gaps_and_promises(kept, hypotheses, framework_choice=choice)
+
+    # ── THE METHOD, WHEN THERE IS EVIDENCE TO DERIVE IT FROM. ──────────────
+    # Local imports, and unconditionally cheap when `recon_report` is None:
+    # `planner` pulls in the primitive registry, which nothing else on this
+    # path needs.
+    observations: tuple = ()
+    steps: tuple = ()
+    coverage: dict = {}
+    derived_value: Optional[float] = None
+    derived_note = ""
+    if recon_report is not None:
+        from app.crucible.framework import derived_account_value
+        from app.crucible.planner import build_steps
+
+        observations = tuple(getattr(recon_report, "observations", ()) or ())
+        summary = getattr(recon_report, "summary", None)
+        coverage = summary() if callable(summary) else {}
+        derived_value, derived_note = derived_account_value(observations)
+        if compose:
+            steps = build_steps(
+                enterprise_id=enterprise_id or company_id,
+                goal_text=goal_text,
+                definition_text=definition_text,
+                currency=currency,
+                report=recon_report,
+                source_types=tuple(sv.source_type for sv in kept),
+                # THE WORDS, NOT THE KEYS. The inventory carries the label the
+                # card shows and the role the source plays, so the prompt can
+                # name a source the way the reader will see it named.
+                sources=kept,
+                run_meta=run_meta,
+            )
+        else:
+            from app.crucible.planner import minimal_plan
+
+            steps = tuple(minimal_plan(
+                goal_text=goal_text, currency=currency, report=recon_report,
+                source_types=tuple(sv.source_type for sv in kept),
+            ))
+
     return RunPlan(
         goal_text=goal_text,
         asked_text=asked_text,
@@ -438,8 +680,14 @@ def build_plan(
         definition_adopted=definition_adopted,
         framework=choice.framework,
         framework_reason=choice.reason,
-        questions=questions_for(choice.framework),
+        questions=questions_for(choice.framework, observations),
         account_value=account_value,
         decision_owner=decision_owner,
         needed_by=needed_by,
+        steps=steps,
+        observations=observations,
+        coverage=coverage,
+        steps_pending=bool(recon_report is not None and not compose),
+        account_value_derived=derived_value,
+        account_value_derived_note=derived_note,
     )

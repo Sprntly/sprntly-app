@@ -119,6 +119,43 @@ def compute_evidence_eligible(source_type: str, origin: Optional[str]) -> bool:
 #
 # NOTE: pending Apurva/David sign-off — this is a reasoned starting draft,
 # not yet confirmed with the team.
+#: WHAT EACH SOURCE TYPE IS CALLED, in the words the product uses for it.
+#:
+#: ONE VOCABULARY, BECAUSE THERE WAS ALREADY MORE THAN ONE. `source_type` is a
+#: storage key, and every path that showed it to a reader showed the key: the
+#: knowledge-graph evidence lines rendered `[pm_manual/finding]`, and a real
+#: session cited `[Source: pm_manual/deal_blocker]` four times over. The plan
+#: gate had prose for exactly these nine and nothing else could reach it.
+#:
+#: It lives HERE, beside the taxonomy, because a source type is graph
+#: vocabulary — Crucible is one consumer of it, not its owner.
+SOURCE_TYPE_LABELS: dict[str, str] = {
+    "customer_voice":   "calls and customer tickets",
+    "communication":    "Slack and email",
+    "project_mgmt":     "the tracker",
+    "pm_manual":        "your own business context",
+    "analytics":        "product analytics",
+    "revenue":          "revenue data",
+    "outcome_measured": "measured outcomes",
+    "verbal_claim":     "unverified claims",
+    "agent_inferred":   "our own inferences",
+}
+
+
+def source_type_label(source_type: str) -> str:
+    """A source type as the product says it. Unknown types degrade to the key
+    with its underscores opened out, which is still better than the key."""
+    key = str(source_type or "").strip()
+    return SOURCE_TYPE_LABELS.get(key) or key.replace("_", " ") or "an unnamed source"
+
+
+def signal_kind_label(kind: str) -> str:
+    """A signal kind as a phrase — "deal blocker", not `deal_blocker`. Every
+    kind already reads correctly with its underscore opened out, so this is a
+    formatting rule rather than a table to maintain."""
+    return str(kind or "").replace("_", " ").strip() or "signal"
+
+
 TRIAGE_TAXONOMY_VERSION = "triage-categories-v1"
 
 TRIAGE_CATEGORIES: dict[str, str] = {

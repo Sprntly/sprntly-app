@@ -1,0 +1,504 @@
+/* The plan gate's own styles.
+ *
+ * A MODULE RATHER THAN `globals.css`, where the older `.ga-plan-*` rules live.
+ * That file is shared and enormous; this screen's new surfaces belong beside
+ * the component that owns them, which is the convention the rest of
+ * `components/shared` already follows. The existing `.ga-doc-*` classes are
+ * still used for the parts that were already right — header, sections, quote,
+ * actions — so this file only carries what is genuinely new.
+ *
+ * ── THREE RULES THIS FILE FOLLOWS, EACH FOR A REASON IT PAID FOR ──────────
+ *
+ * 1. EVERY TOKEN NAMED HERE IS DEFINED IN `:root`. The first version of this
+ *    file leaned on `var(--border, #ececec)` seven times. `--border` does not
+ *    exist anywhere the web app loads — it is declared only in `ds-agent/` and
+ *    `prototype-runtime/` — so all seven silently rendered the hardcoded
+ *    fallback, in a warmer, lighter grey than the house rule colour. A
+ *    fallback is a safety net, not a colour choice, and a token that never
+ *    resolves is a hardcoded value wearing a variable's name. Rules are
+ *    `--line` and `--line-strong`, which is what the rest of the app draws in.
+ *
+ * 2. TEXT USES THE INK LADDER, NEVER OPACITY. Dimming inherited ink with an
+ *    opacity produces a ratio nobody chose: measured against `--surface`, this
+ *    file's own values landed at 3.33:1, 2.66:1, 2.15:1 and 3.90:1 — four
+ *    failures of AA, two of them on sentences. The ladder is measured and
+ *    documented (`--ink` 16.6:1, `--ink-2` 7.6:1, `--ink-3` 5.2:1, `--ink-4`
+ *    3.2:1 on `--surface`), so using it is how the ratio stays a decision.
+ *    `--ink-4` is under AA by design and appears here ONLY on `aria-hidden`
+ *    decoration — never on a sentence.
+ *
+ * 3. `--accent` IS THE BRAND NEAR-BLACK (#17191A), NOT A COLOUR ACCENT, and
+ *    `--success` (#179463) is the only green left in the system: it means "it
+ *    worked" and nothing else. So accent appears here exactly once, on the
+ *    SELECTED state of a choice chip, which is what it is for; hairlines and
+ *    decoration use the neutral scale instead. There is no success state on
+ *    this screen, so there is no green on it.
+ *
+ * WHAT THE NEUTRAL BRAND DID NOT COST US. The one distinction on this screen
+ * that could have leaned on colour — questions that change the analysis versus
+ * questions that only annotate the report — is carried by a heading, an order
+ * and a card boundary, none of which were ever coloured. Nothing here needed a
+ * second accent to survive the change.
+ */
+
+/* ── The verdict and the stat strip ──────────────────────────────────────
+   A reader arriving at a plan asks two things before anything else: can this
+   be answered, and off how much. The verdict answers the first in a sentence;
+   the strip answers the second in four numbers they can take in without
+   reading. Numbers are tabular so the strip does not shift as it fills. */
+.verdict {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.45;
+  font-weight: 560;
+  color: var(--ink);
+}
+
+.strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 18px;
+  margin: 0;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.statValue {
+  font-size: 15px;
+  font-weight: 640;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* A LABEL, SO IT IS READABLE. At 10px small-caps this was the most tempting
+   thing on the card to fade out, and it is also the word that says what the
+   number beside it means. */
+.statLabel {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+
+/* ── The counting unit ───────────────────────────────────────────────────
+   THE STATEMENT ON THE PAGE, and it needs a container to read as one. Set as
+   bare text it is another paragraph among paragraphs; contained, ruled and on
+   its own ground it is the decision every number below inherits, which is what
+   it actually is.
+
+   The fill is a grey, not a tint — the brand is black, white and grey, and a
+   callout is not a status. */
+.unitBlock {
+  padding: 14px 16px;
+  border-left: 3px solid var(--ink-2);
+  border-radius: 0 10px 10px 0;
+  background: var(--surface-3);
+}
+
+.unit {
+  margin: 0;
+  font-family: var(--font-serif);
+  font-size: 18px;
+  line-height: 1.4;
+  letter-spacing: -0.005em;
+  color: var(--ink);
+}
+
+/* The reasoning. The unit alone is the conclusion with the argument removed,
+   and the argument is the half a reader can disagree with. */
+.unitWhy {
+  margin: 8px 0 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+}
+
+
+/* ── The steps: the centre of the screen ─────────────────────────────────
+   Numbered continuously across their parts, because the numbering is the
+   reader's handle on the whole method — restarting it inside each part turns
+   one sequence of twenty-three into five sequences of four.
+
+   `why` STACKS UNDERNEATH AND IS HIDDEN. Inline after a dash defeats
+   scanning: the eye has to read every line to find the next action, so a
+   twenty-three step method reads as a wall. Stacked and collapsed it is a
+   column of actions; expanded it is the full method. One control apart. */
+.partHead {
+  margin: 18px 0 6px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+}
+.partHead:first-of-type { margin-top: 4px; }
+
+.steps {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+}
+
+.step {
+  display: grid;
+  grid-template-columns: 26px 1fr;
+  align-items: baseline;
+  gap: 0 8px;
+  padding: 5px 0;
+}
+
+/* THE ORDINAL IS CONTENT, NOT DECORATION. It is how a reader refers to a step
+   out loud and how they find their place again, so it sits on the ladder
+   rather than being faded to taste. */
+.stepN {
+  font-size: 11.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+  text-align: right;
+}
+
+.stepWhat {
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--ink);
+}
+
+/* SUB-POINTS OF A STEP, as a list rather than welded into the action phrase.
+   Only the legacy narrative fallback produces these; the composed method has
+   one action per step. Indented to the action's own column so the numbers
+   still form an unbroken left edge down the card. */
+.stepItems {
+  grid-column: 2;
+  margin: 4px 0 2px;
+  padding-left: 16px;
+  list-style: disc;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+/* The second line. Indented to the action's column so the eye can still run
+   straight down the list of `what` with the detail open. */
+.stepWhy {
+  grid-column: 2;
+  margin: 3px 0 2px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  border-left: 1px solid var(--line);
+  padding-left: 10px;
+}
+
+/* The method is still being written. Announced rather than left to happen,
+   because a section that fills itself in silently reads as a page that
+   changed its mind. */
+.pending {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-3);
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+/* ONE control for the whole list, not one per step. Twenty-three disclosure
+   triangles is a worse wall than the one they were meant to fix. */
+.showHow {
+  align-self: flex-start;
+  margin: 0 0 8px;
+  padding: 3px 9px;
+  font-size: 11.5px;
+  font-weight: 600;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink-2);
+  cursor: pointer;
+}
+.showHow:hover {
+  background: var(--surface-3);
+  border-color: var(--ink-3);
+}
+
+/* ── Section labels ──────────────────────────────────────────────────────
+   A LABEL, NOT A HEADING. These were `<h2>`, and `globals.css` sets every
+   h1–h6 in the serif — so the section labels rendered in Instrument Serif and
+   competed with the goal for the reader's eye. Small tracked uppercase in the
+   display face reads as a signpost and gets out of the way. */
+.sectionLabel {
+  margin: 6px 0 0;
+  font-family: var(--font-display);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+/* ── Roles: what each source is FOR ──────────────────────────────────────
+   Six groups, separated WITHOUT COLOUR. The reference design gave each a hue;
+   the brand is black, white and grey now, and inventing a second accent to
+   keep six groups apart would be the wrong trade. The pill carries the name,
+   the rule carries the boundary, and the order carries the priority. */
+.role {
+  padding-left: 12px;
+  border-left: 2px solid var(--line-strong);
+  margin-top: 12px;
+}
+/* The one group that is not part of the method is drawn lighter, so the eye
+   skips it on the way down. Keyed on the role rather than on DOM position:
+   `:last-child` would have faded whichever group happened to render last. */
+.roleUnused { border-left-color: var(--line); }
+
+.roleHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.rolePill {
+  padding: 2px 8px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+
+/* The "never" half of the definition is what earns this line its place: a
+   reader who knows analytics can say how many but never why will not ask it
+   why. */
+.roleNote {
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* ── Sources as a record, not a control surface ──────────────────────────
+   A tick states what will be read. The ability to CHANGE it is real and stays,
+   one disclosure away, because a reader reading a plan is not filling in a
+   form and should not be handed checkboxes while they do it. */
+.tickList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.tickRow {
+  display: grid;
+  grid-template-columns: 16px 1fr;
+  gap: 0 8px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--ink);
+}
+
+/* NOT GREEN. A tick here means "this source is in scope", which is a
+   statement about the plan and not a report that something succeeded — and
+   green is now reserved for the second thing. */
+.tick {
+  color: var(--ink-2);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* The only `--ink-4` in this file, and it is an `aria-hidden` dash standing in
+   for an absent tick. Decoration by construction: a screen reader is told what
+   happened by the words beside it. */
+.tickOff { color: var(--ink-4); }
+
+/* A DROPPED SOURCE IS STILL A SENTENCE. The strike-through carries the state;
+   the words stay legible, because "which source did I drop" is exactly what a
+   reader comes back to this card to check. */
+.tickLabelOff {
+  text-decoration: line-through;
+  color: var(--ink-3);
+}
+
+.tickWitness {
+  grid-column: 2;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* ── Questions: the second step of the gate ──────────────────────────────
+   Grouped by whether the answer touches the ANALYSIS or only annotates the
+   report. "Who decides" never changes a number and must not sit beside a
+   question that rescales every size on the page. The grouping is carried by a
+   heading and an order, never by colour. */
+.questions {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+/* Raised, because this is the one part of the screen that is asking for
+   something. White against the page's `--surface`. */
+.question {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-2);
+}
+
+.questionPrompt {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.45;
+  color: var(--ink);
+}
+
+/* What the run actually saw that made it ask. The reason a derived question
+   can be answered in seconds where a cold one cannot. The rule marks it as
+   quoted evidence rather than more prompt; it does not need a hue to do that. */
+.questionSaw {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--ink-2);
+  border-left: 2px solid var(--line-strong);
+  padding-left: 10px;
+}
+
+/* What the answer changes, in the reader's terms. Sits between the evidence
+   and the control, because it is the sentence that decides whether they
+   bother. */
+.questionAffects {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 550;
+  color: var(--ink-2);
+}
+
+.questionDefault {
+  margin: 0;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+
+/* A closed set of answers renders as choices. A text box beside two known
+   options invites a third that nothing downstream can read. */
+.options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.option {
+  padding: 5px 11px;
+  font-size: 12.5px;
+  font-weight: 550;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  color: var(--ink);
+  cursor: pointer;
+}
+.option:hover { border-color: var(--ink-3); }
+
+/* THE ONE ACCENT ON THIS SCREEN, and it is what accent now means: the brand
+   near-black, marking the thing the reader chose. Follows the house selected
+   pattern — accent border over the neutral `--accent-soft` tint — rather than
+   the mint fill this used to carry, which was a literal for a token
+   (`--green-s`) scoped to a screen this card never renders inside. */
+.optionOn {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--ink);
+  font-weight: 640;
+}
+
+.freeText {
+  width: 100%;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--surface-2);
+  color: var(--ink);
+}
+.freeText:focus-visible {
+  outline: none;
+  border-color: var(--ink-3);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ── The approved plan, collapsed ────────────────────────────────────────
+   What was agreed, in one line, so the questions that follow have their
+   subject on screen without the whole document above them. Quiet by
+   construction: it is a receipt, not the thing being read. */
+.record {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-left: 2px solid var(--line-strong);
+  border-radius: 0 8px 8px 0;
+  background: var(--surface-3);
+  font-size: 12.5px;
+}
+
+.recordNote {
+  margin: 0;
+  color: var(--ink-2);
+}
+
+.reopen {
+  margin-left: auto;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.reopen:hover { color: var(--ink); }
+
+/* A quiet disclosure for the things that are still editable but must not
+   greet the reader as a form: the definition's wording, and which sources
+   get read. Quiet is a weight and a size here, not a faded ink — the words
+   still have to be read to be used. */
+.quietToggle {
+  align-self: flex-start;
+  padding: 0;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  border: 0;
+  background: none;
+  color: var(--ink-2);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.quietToggle:hover { color: var(--ink); }

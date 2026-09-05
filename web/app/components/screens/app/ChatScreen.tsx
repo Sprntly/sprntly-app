@@ -5362,6 +5362,83 @@ export function ChatScreen() {
      goalRefusalMessage, patchTurn],
   )
 
+  // ── WHILE A GATE IS OPEN, THE COMPOSER TALKS TO THE CARD. ──────────────
+  //
+  // Asked "ok let's go with the plan" in the composer, the chat replied "Got
+  // it — the plan is locked" and wrote out a complete four-item revenue plan.
+  // Nothing was locked and nothing ran. The cause is structural: the ask
+  // planner can START a goal analysis and has no action for approving a
+  // pending one, so a plain-English approval fell through to the general
+  // answer path, where a model looking at a plan in the transcript obliged.
+  //
+  // TARGETING IS THE STRUCTURAL FIX. Input that reaches the card cannot reach
+  // the planner — a guarantee about wiring rather than about behaviour, which
+  // is the only kind worth having here. The prompt-side defence still lands
+  // too (`prompts.open_goal_gate_line`), because this can be dismissed.
+  //
+  // NOT A DISABLED COMPOSER. A gate can be abandoned — several runs sit at
+  // `awaiting_approval` right now — and a forgotten gate must never brick the
+  // conversation it is sitting in. Hence the ×.
+  const openPlanGateTurn = useMemo(() => {
+    for (let i = thread.length - 1; i >= 0; i -= 1) {
+      const t = thread[i]
+      if (t.goalGate?.kind === "plan" && !t.goalGateResolved) return t
+    }
+    return null
+  }, [thread])
+  const [planReplyDismissedFor, setPlanReplyDismissedFor] =
+    useState<string | null>(null)
+  const [goalApproveNonce, setGoalApproveNonce] = useState(0)
+  const replyingToPlan = !!openPlanGateTurn
+    && planReplyDismissedFor !== openPlanGateTurn.id
+  const planReplyLabel = (() => {
+    if (!openPlanGateTurn || openPlanGateTurn.goalGate?.kind !== "plan") return ""
+    const goal = (openPlanGateTurn.goalGate.plan.goal_text || "").trim()
+    return goal ? `Replying to the plan for “${goal}”` : "Replying to the plan"
+  })()
+
+  //: What counts as approving, and it is deliberately narrow.
+  //:
+  //: THE TWO MISTAKES ARE NOT EQUAL. Reading a revision as an approval starts
+  //: an analysis the reader did not ask for, over evidence they were about to
+  //: change. Reading an approval as a revision costs them one more sentence,
+  //: and the reply says exactly what to do. So this matches only what is
+  //: unmistakable, and everything else is a revision.
+  const APPROVAL = /^\s*(ok(ay)?[, ]*)?(let'?s |lets |please |just )?(go|go ahead|run it|run this|start( it)?|approve( it| this| the plan)?|proceed|do it|yes|yep|yeah|sounds good|looks good|lgtm|ship it|go with (the|this) plan|let'?s go with (the|this) plan)[.! ]*$/i
+
+  const planReplyTurn = useCallback((query: string, answer: string) => ({
+    id: `plan-reply-${Date.now()}`,
+    query,
+    reply: {
+      answer, sources: [], follow_ups: [], key_points: [], citations: [],
+      confidence: 1, unanswered: "",
+    } as unknown as AskResponse,
+  } as ThreadTurn), [])
+
+  const handlePlanReply = useCallback((text: string) => {
+    const said = text.trim()
+    const tabId = activeTabIdRef.current
+    if (!said || !openPlanGateTurn || !tabId) return
+    if (APPROVAL.test(said)) {
+      // ROUTED TO THE CARD, NOT AROUND IT. The card holds the reader's own
+      // edits — a source they unticked, a definition they reworded — and a
+      // shortcut that built its own decision here would silently drop them.
+      emitCommandTurn(
+        planReplyTurn(said, "Approving the plan above and starting the run."),
+        tabId)
+      setGoalApproveNonce((n) => n + 1)
+      return
+    }
+    // A REVISION HAS NOWHERE TO GO YET, AND SAYING SO IS THE POINT. There is
+    // no re-plan endpoint; swallowing the sentence and carrying on would be
+    // the same lie in a quieter voice.
+    emitCommandTurn(planReplyTurn(said,
+      "Noted — but I cannot change a plan that is already waiting; there is no "
+      + "way for me to re-plan it yet. You can change what it reads on the card "
+      + "above and approve it there, or tell me to go ahead as it stands."),
+      tabId)
+  }, [openPlanGateTurn, emitCommandTurn, planReplyTurn])
+
   // Gate 2 → the run. Only here does anything get read, and only here does the
   // panel earn its place: what follows is a document.
   const approveGoalPlan = useCallback(
@@ -5378,6 +5455,11 @@ export function ChatScreen() {
           // approve click is what adopts it either way — this carries the
           // change, not the agreement.
           definition_text: decision.definition_text,
+          // The gate's own questions. Undefined for anything left blank, which
+          // is what the server reads as unanswered.
+          account_value: decision.account_value,
+          decision_owner: decision.decision_owner,
+          needed_by: decision.needed_by,
         })
         patchTurn(tabId, turnId, {
           goalGate: undefined,
@@ -5599,6 +5681,20 @@ export function ChatScreen() {
   // host so the shared engine's `handleComposerSubmit` stays surface-agnostic;
   // a normal send falls straight through to it.
   const handleGoalOrComposerSubmit = useCallback(() => {
+    // THE GATE GOES FIRST, AND THE GUARANTEE IS THAT THIS RETURNS. While the
+    // composer is targeting an open plan gate, neither `handleComposerSubmit`
+    // nor `startGoalAnalysis` is reached — so the text cannot get to the ask
+    // planner, cannot get to the answer path, and cannot come back as a
+    // sentence claiming the plan was approved. Structural, not behavioural.
+    if (replyingToPlan && !goalMode) {
+      const said = draft.trim()
+      if (!said) return
+      setDraft("")
+      setPlusMenuOpen(false)
+      if (voice.listening) voice.cancel()
+      handlePlanReply(said)
+      return
+    }
     if (!goalMode) {
       handleComposerSubmit()
       return
@@ -5625,6 +5721,10 @@ export function ChatScreen() {
   }, [
     goalMode, handleComposerSubmit, draft, busy, pendingSend, voice,
     setDraft, setPlusMenuOpen, startGoalAnalysis, composerRef, showComposerHint,
+    // Without these the gate branch closes over a stale `replyingToPlan` and
+    // a stale handler — it would keep routing to a card that has already been
+    // answered, or stop routing to one that has just opened.
+    replyingToPlan, handlePlanReply,
   ])
 
   // Enter-to-send must respect goal mode too. Only the plain Enter is overridden
@@ -5632,14 +5732,26 @@ export function ChatScreen() {
   // all stay with the engine's keydown.
   const handleGoalOrComposerKeyDown = useCallback(
     (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-      if (goalMode && e.key === "Enter" && !e.shiftKey && !slashOpen && !(e.metaKey || e.ctrlKey)) {
+      // ENTER IS ITS OWN SUBMIT ROUTE, and it was the one that mattered.
+      // The send BUTTON calls `handleGoalOrComposerSubmit`; Enter does not —
+      // it falls through to the engine's own keydown, which dispatches the ask
+      // directly. So the plan-gate guard sat on the path nobody uses: typing a
+      // revision and pressing Enter reached `/v1/ask` and came back as another
+      // invented plan, with the chip visible above the composer the whole time.
+      //
+      // Both routes now go through one handler. A guard that only covers one
+      // way of sending is not a guard.
+      if ((goalMode || replyingToPlan)
+          && e.key === "Enter" && !e.shiftKey && !slashOpen
+          && !(e.metaKey || e.ctrlKey)) {
         e.preventDefault()
         handleGoalOrComposerSubmit()
         return
       }
       handleComposerKeyDown(e)
     },
-    [goalMode, slashOpen, handleGoalOrComposerSubmit, handleComposerKeyDown],
+    [goalMode, replyingToPlan, slashOpen, handleGoalOrComposerSubmit,
+     handleComposerKeyDown],
   )
 
   // The `+` menu's third item (present only while enrolled — ChatComposer
@@ -6602,6 +6714,8 @@ export function ChatScreen() {
               // short-circuited through `confirmGoalDefinition?.(…)` — the
               // second independent way this feature shipped inert.
               goalGateBusyTurnId,
+              goalApproveTurnId: openPlanGateTurn?.id ?? null,
+              goalApproveNonce,
               confirmGoalDefinition,
               approveGoalPlan,
               handleAskAgain, handleStopAsk, submitClarifyAnswers, setViewerAttachment,
@@ -6651,6 +6765,9 @@ export function ChatScreen() {
                 setSlashActive={setSlashActive}
                 handleComposerInput={handleComposerInput}
                 handleComposerKeyDown={handleGoalOrComposerKeyDown}
+                replyTarget={replyingToPlan ? planReplyLabel : undefined}
+                onExitReplyTarget={() =>
+                  setPlanReplyDismissedFor(openPlanGateTurn?.id ?? null)}
                 handleComposerSubmit={handleGoalOrComposerSubmit}
                 setPlusMenuActive={setPlusMenuActive}
                 setPlusMenuOpen={setPlusMenuOpen}

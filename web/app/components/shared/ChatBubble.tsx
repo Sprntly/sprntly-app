@@ -199,6 +199,8 @@ export interface ChatBubbleProps {
   goalGateError?: string
   onConfirmGoalDefinition?: (definition: string) => void
   onApproveGoalPlan?: (decision: PlanDecision) => void
+  /** Bumped when the composer routes an approval to this turn's plan card. */
+  goalApproveNonce?: number
   clarify?: ClarifyQuestion[] | null
   clarifyResolved?: ClarifyResolution
   /** True while the dock's stepper popup is open and targeting THIS turn —
@@ -451,6 +453,7 @@ export function ChatBubble(props: ChatBubbleProps) {
     goalGate,
     goalGateResolved,
     goalGateBusy,
+    goalApproveNonce,
     goalGateError,
     onConfirmGoalDefinition,
     onApproveGoalPlan,
@@ -774,6 +777,7 @@ export function ChatBubble(props: ChatBubbleProps) {
                       error={goalGateError}
                       onConfirmDefinition={(d) => onConfirmGoalDefinition?.(d)}
                       onApprovePlan={(d) => onApproveGoalPlan?.(d)}
+                      approveNonce={goalApproveNonce}
                     />
                   ) : null}
                   {clarify?.length && (clarifyResolved || clarifyGateOpen) ? (

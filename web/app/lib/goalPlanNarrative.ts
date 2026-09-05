@@ -73,8 +73,13 @@ export function planNarrative(
   if (kept.length) {
     const signals = kept.reduce((n, s) => n + (s.signal_count || 0), 0)
     steps.push({
+      // NO POSSESSIVE. The labels carry their own determiners — "the tracker",
+      // "your own business context", "our own inferences" — so prefixing
+      // "your" produced "Read your your own business context", on screen, in
+      // the first sentence a reader gets. They are written to stand alone and
+      // the template now lets them.
       text:
-        `Read your ${joinWords(kept.map((s) => s.label || s.source_type))}` +
+        `Read ${joinWords(kept.map((s) => s.label || s.source_type))}` +
         ` — ${signals.toLocaleString()} ${signals === 1 ? "signal" : "signals"} in all.`,
     })
   } else {

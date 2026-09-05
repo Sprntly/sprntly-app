@@ -162,50 +162,232 @@ def _choose_from_data(has_numeric: bool, numeric_named: str) -> FrameworkChoice:
 
 
 #: The cap on plan questions, stated once rather than discovered by counting a
-#: list. RICE asks the one thing its own arithmetic needs (`account_value`)
-#: plus the two decision-process questions every framework's decision box
-#: uses regardless of ranking method (`decision_owner`, `needed_by`). MoSCoW
-#: has no dollar arithmetic to feed, so it asks only the two.
-MAX_PLAN_QUESTIONS = 3
+#: list.
+#:
+#: RAISED FROM THREE, AND THE HARD ASSERT THAT ENFORCED IT IS GONE.
+#: The old three were fixed, so three was both the cap and the count and an
+#: assertion could not fire. Questions are now DERIVED from what the
+#: reconnaissance pass saw (`app.crucible.recon`), and a book with a
+#: reconciliation problem, an uncoded field and a weighting choice legitimately
+#: has four things worth asking — at which point an `assert` in a request path
+#: is a 500 on the plan gate, i.e. the reader loses the whole plan because the
+#: run found too much worth clarifying. That is a strictly worse outcome than
+#: asking one question fewer.
+#:
+#: So the cap is now enforced by RANKED TRUNCATION, and the ranking is the
+#: point: the questions kept are the ones where a wrong guess silently
+#: corrupts a NUMBER. What is dropped is never lost — it is still on the plan
+#: as the observation it was derived from, where a reader can see it and a
+#: later run can ask it.
+MAX_PLAN_QUESTIONS = 5
+
+#: The two that are never derived and never dropped. Neither is framework
+#: arithmetic — every ranking still ends at someone deciding, by some date —
+#: and neither is in any corpus, so no amount of reconnaissance can infer
+#: them. They are also the two the plan gate has always rendered, so cutting
+#: one to make room for a derived question would be a visible regression in
+#: exchange for a question nothing renders yet.
+_DECISION_BOX_IDS = ("decision_owner", "needed_by")
 
 
-def questions_for(framework: str) -> tuple[PlanQuestion, ...]:
-    """What THIS framework genuinely needs and cannot derive — batched, asked
-    once, never invented if skipped (the gap is carried into the output
-    instead; see `derive_gaps_and_promises`).
+def _decision_box() -> list[PlanQuestion]:
+    return [
+        PlanQuestion(
+            id="decision_owner",
+            prompt="Who decides this?",
+            why="Named on the decision box so the ranking has an owner, "
+                "whichever framework produced it.",
+            affects="who the recommendation is addressed to",
+            default_if_skipped="the decision box is rendered without an owner",
+        ),
+        PlanQuestion(
+            id="needed_by",
+            prompt="When do you need the decision?",
+            why="Named on the decision box alongside the owner.",
+            affects="the date on the decision box",
+            default_if_skipped="the decision box is rendered without a date",
+        ),
+    ]
 
-    `account_value` is RICE-specific: it follows the product owner's stated
-    reading of the RICE dimensions — reach is how many companies are
-    impacted, and impact is read against what a company said a thing was
-    worth — and it is the only question here that feeds a framework's ARITHMETIC
-    rather than its decision box. Asking it under MoSCoW would collect a
-    number nothing downstream multiplies, which is the dishonest-ask this
-    function exists to avoid: a run must not solicit an input it will not
-    use. `decision_owner`/`needed_by` are not framework math at all — every
-    ranking still ends at someone deciding, by some date — so both are asked
-    regardless of which framework ranked the findings.
+
+def _derived(observations: Sequence[object]) -> list[PlanQuestion]:
+    """Questions the evidence itself raised, in the order they matter.
+
+    THE BAR, AND IT IS DELIBERATELY HIGH: ask only where a wrong guess would
+    silently corrupt a number AND the answer cannot be inferred from what is
+    connected. Everything that fails either half is not a question — it is
+    either a default the run should just take and disclose, or a fact the run
+    should derive and say it derived.
+
+    That bar is what keeps this from becoming a form. A gate that asks six
+    questions gets six blanks; a gate that asks the two whose answers change
+    the arithmetic gets answers.
+
+    Typed loosely (`object`) for the same reason `plan.derive_gaps_and_
+    promises` types its framework choice loosely: `recon` is imported lazily
+    to keep the cheap paths cheap, and duck-typing on `.kind` / `.fields` /
+    `.figures` is enough.
     """
+    # ONE QUESTION PER ID, KEEPING THE FIRST. `recon` emits up to eight
+    # observations of a kind — ticket volume, session volume and NPS volume
+    # all diverge from revenue on the same book — and each would raise the
+    # identical question with different percentages behind it. Asking a reader
+    # the same thing three times is how a gate stops being answered. The
+    # observations are severity-ordered with a stable tie-break, so "the
+    # first" is the strongest instance and is the same one on every read.
+    out: list[PlanQuestion] = []
+    seen: set[str] = set()
+    for o in observations:
+        kind = getattr(o, "kind", "")
+        fields = list(getattr(o, "fields", ()) or [])
+        figures = dict(getattr(o, "figures", {}) or {})
+
+        if kind == "value_columns_disagree" and len(fields) >= 3:
+            base, total, explained = fields[0], fields[1], fields[2]
+            out.append(PlanQuestion(
+                id="value_column_choice",
+                prompt=f"Which figure is your book — {total}, or {base}?",
+                why="Every size in the finished document is denominated in "
+                    "this. Picking the wrong one is not a rounding error, it "
+                    "rescales the whole answer.",
+                what_i_saw=(
+                    f"`{base}` and `{total}` both read as the account's value "
+                    f"and differ on {figures.get('rows_differing', 0):,.0f} of "
+                    f"{figures.get('rows_compared', 0):,.0f} rows; the gap is "
+                    f"exactly `{explained}`, worth "
+                    f"{figures.get('gap_total', 0):,.0f}."
+                ),
+                affects="every size, and the ranking that follows from them",
+                default_if_skipped=(
+                    f"`{total}` is used, because it is the complete column, "
+                    f"and the document says so"
+                ),
+                options=(total, base),
+            ))
+        elif kind == "concentration_divergence" and len(fields) >= 2:
+            out.append(PlanQuestion(
+                id="weighting_choice",
+                prompt="Rank by how many accounts a theme touches, or by the "
+                       "revenue those accounts carry?",
+                why="These two orderings disagree on your data, so this is a "
+                    "choice rather than a detail — and it decides which "
+                    "themes reach the top of the document.",
+                what_i_saw=(
+                    f"The top {figures.get('top_n', 0):.0f} of "
+                    f"{figures.get('groups', 0):.0f} accounts generate "
+                    f"{figures.get('volume_share', 0) * 100:.1f}% of the "
+                    f"activity and hold "
+                    f"{figures.get('value_share', 0) * 100:.1f}% of the money."
+                ),
+                affects="the order of the findings, and which one is recommended",
+                default_if_skipped=(
+                    "themes are ranked by how many accounts they touch, which "
+                    "is what this engine measures today, and the divergence is "
+                    "disclosed beside the ranking"
+                ),
+                options=("Accounts touched", "Revenue carried"),
+            ))
+        elif kind == "coding_gap" and len(fields) >= 2:
+            coded, text = fields[0], fields[1]
+            out.append(PlanQuestion(
+                id="uncoded_rows_policy",
+                prompt=f"Should the rows with no `{coded}` be read from "
+                       f"`{text}`, or left out of the count?",
+                why="Counting only the coded rows reports a share of your "
+                    "feedback as though it were all of it.",
+                what_i_saw=(
+                    f"`{coded}` is empty on {figures.get('missing', 0):,.0f} "
+                    f"of {figures.get('rows', 0):,.0f} rows, and on "
+                    f"{figures.get('missing_with_text', 0):,.0f} of those the "
+                    f"free text is filled in."
+                ),
+                affects="how much of your feedback is counted at all",
+                default_if_skipped=(
+                    "the uncoded rows are left out and the document states how "
+                    "many were dropped"
+                ),
+                options=(f"Read `{text}`", f"Count only coded `{coded}`"),
+            ))
+    deduped: list[PlanQuestion] = []
+    for q in out:
+        if q.id in seen:
+            continue
+        seen.add(q.id)
+        deduped.append(q)
+    return deduped
+
+
+def derived_account_value(observations: Sequence[object]) -> tuple[Optional[float], str]:
+    """What one account is worth, read off the evidence, and how.
+
+    Returns `(None, "")` when nothing connected carries a per-account annual
+    value — in which case the question is still worth asking.
+    """
+    for o in observations:
+        if getattr(o, "kind", "") != "unit_value_derivable":
+            continue
+        figures = dict(getattr(o, "figures", {}) or {})
+        median = figures.get("median")
+        if not isinstance(median, (int, float)):
+            continue
+        fields = list(getattr(o, "fields", ()) or ["", ""])
+        column = fields[1] if len(fields) > 1 else ""
+        return float(median), (
+            f"Taken from `{column}` in {getattr(o, 'source', 'your contracts')}, "
+            f"which carries a value for each of {figures.get('accounts', 0):.0f} "
+            f"accounts. The median is used rather than the mean so a handful of "
+            f"very large accounts do not set the price of a typical one."
+        )
+    return None, ""
+
+
+def questions_for(
+    framework: str, observations: Sequence[object] = (),
+) -> tuple[PlanQuestion, ...]:
+    """What THIS run genuinely needs and cannot derive — batched, asked once,
+    never invented if skipped (the gap is carried into the output instead; see
+    `plan.derive_gaps_and_promises`).
+
+    WHAT CHANGED: the set used to be a function of the FRAMEWORK alone, which
+    meant every RICE run asked the same three things whatever was connected.
+    Two of those three (`decision_owner`, `needed_by`) are genuinely
+    un-derivable and are still asked unconditionally. The third —
+    `account_value` — is frequently sitting in the customer's own contracts,
+    and asking for it there is the engine requesting an estimate it can
+    already measure, then labelling the reader's guess as an assumption in a
+    document whose own data contradicts it. So it is asked only when nothing
+    connected can answer it.
+
+    `account_value` REMAINS RICE-ONLY. Asking it under MoSCoW would collect a
+    number nothing downstream multiplies, which is the dishonest-ask this
+    function exists to avoid.
+
+    `observations` empty reproduces the previous behaviour exactly, which is
+    what every caller that has not run a reconnaissance pass gets.
+    """
+    derived_value, _ = derived_account_value(observations)
     questions: list[PlanQuestion] = []
-    if (framework or "").strip().lower() == "rice":
+
+    # FIRST, NOT LAST, WHEN IT IS ASKED AT ALL. It was appended after the
+    # derived questions and a book with three derived questions truncated it
+    # away — losing the only question that feeds a framework's ARITHMETIC to
+    # make room for three that adjust it. A derived question changes which
+    # column or which weighting; this one decides whether any size can be
+    # stated in money at all.
+    if (framework or "").strip().lower() == "rice" and derived_value is None:
         questions.append(PlanQuestion(
             id="account_value",
             prompt="What is one account worth to you, per year?",
             why="Turns reach-in-accounts into money — RICE's Reach term, "
                 "read in the currency you actually think in.",
+            affects="whether sizes can be stated in money at all",
+            default_if_skipped="sizes stay in accounts touched",
         ))
-    questions.append(PlanQuestion(
-        id="decision_owner",
-        prompt="Who decides this?",
-        why="Named on the decision box so the ranking has an owner, "
-            "whichever framework produced it.",
-    ))
-    questions.append(PlanQuestion(
-        id="needed_by",
-        prompt="When do you need the decision?",
-        why="Named on the decision box alongside the owner.",
-    ))
-    assert len(questions) <= MAX_PLAN_QUESTIONS, (
-        "the plan-question cap: a set grew past what a reader should be "
-        "asked in one batch."
-    )
-    return tuple(questions)
+    questions.extend(_derived(observations))
+
+    # RANKED TRUNCATION, NOT AN ASSERT. The derived questions are already in
+    # the order `_derived` produced them, which is the order the observations
+    # were ranked in — severity first. The decision-box pair is appended after
+    # the cut so it can never be crowded out by a derived question.
+    room = max(0, MAX_PLAN_QUESTIONS - len(_DECISION_BOX_IDS))
+    return tuple(questions[:room] + _decision_box())

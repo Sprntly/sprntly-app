@@ -55,6 +55,8 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     handleStopAsk,
     submitClarifyAnswers,
     goalGateBusyTurnId,
+    goalApproveTurnId,
+    goalApproveNonce,
     confirmGoalDefinition,
     approveGoalPlan,
     setViewerAttachment,
@@ -304,6 +306,10 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       // definition above, the plan below) and a thread-wide flag would grey out
       // the settled one as well as the live one.
       goalGateBusy: goalGateBusyTurnId === turn.id,
+      // Only the turn the composer is actually targeting gets the nonce, so a
+      // thread holding two plan gates cannot approve the wrong one.
+      goalApproveNonce: goalApproveTurnId === turn.id
+        ? goalApproveNonce : undefined,
       // `runId` off the GATE, and the tab off the active tab: both survive a
       // reload, which a ref-held Map does not.
       onConfirmGoalDefinition: (d: string) => {

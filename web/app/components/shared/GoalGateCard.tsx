@@ -28,7 +28,7 @@
 import * as React from "react"
 import { useEffect, useRef, useState } from "react"
 
-import type { GoalRunPlan } from "../../lib/api"
+import { goalAnalysisApi, type GoalRunPlan } from "../../lib/api"
 import { GoalAnalysisPlan, type PlanDecision } from "./GoalAnalysisPlan"
 
 /** What the thread needs in order to render a gate. Carried on the turn, so a
@@ -90,6 +90,111 @@ export type SettledPlan = Partial<GoalRunPlan> & {
   sources?: GoalRunPlan["sources"]
 }
 
+/** How often the card asks whether the method has been composed yet, and how
+ *  long it keeps asking.
+ *
+ *  MEASURED, NOT GUESSED: a real composition took 53.8 seconds. The ceiling is
+ *  generous against that and exists so a run that never completes cannot leave
+ *  a card polling forever — not as a timeout anybody should hit. */
+const COMPLETION_POLL_MS = 3_000
+const COMPLETION_CEILING_MS = 5 * 60 * 1000
+
+/** The plan to render — the one handed in, or the completed one if this plan
+ *  was still being written when it was captured.
+ *
+ *  WHY THE CARD RE-READS RATHER THAN THE THREAD. The gate lands in two writes:
+ *  the deterministic method immediately, then the composed wording ~54s later.
+ *  Two things went wrong with that, and they have one cause — whoever held the
+ *  plan never looked at it again.
+ *
+ *    · The poll that attaches the gate returns the moment the run reaches
+ *      `awaiting_approval`, which is now phase 1. Nothing was listening when
+ *      phase 2 landed.
+ *    · The plan is captured into the conversation turn, so the placeholder was
+ *      frozen into the transcript — a reload still showed "the wording will
+ *      fill in", permanently.
+ *
+ *  Re-reading HERE fixes both, because both end at this component, and it is
+ *  the only place that knows a plan is pending without anything else having to
+ *  be told. A completed plan polls not at all; a pending one stops the moment
+ *  it completes, or the moment the run leaves the gate.
+ *
+ *  IT NEVER RE-DRAWS. This reads the stored plan; the composition happens once,
+ *  server-side, and `load_steps` is what guarantees that. This is a reader
+ *  catching up with a write that already happened.
+ */
+function usePlanWhenComposed(runId: number, plan: GoalRunPlan): GoalRunPlan {
+  const [completed, setCompleted] = useState<GoalRunPlan | null>(null)
+
+  useEffect(() => {
+    setCompleted(null)
+    if (!plan?.steps_pending) return
+    let alive = true
+    const deadline = Date.now() + COMPLETION_CEILING_MS
+    const tick = async () => {
+      // ASKS ONCE IMMEDIATELY, THEN WAITS. The restore case is the common one
+      // and the composition finished long ago there — sleeping first would
+      // show "the wording will fill in" for three seconds on a plan that has
+      // been complete for a week.
+      let first = true
+      while (alive && Date.now() < deadline) {
+        if (!first) {
+          await new Promise((r) => setTimeout(r, COMPLETION_POLL_MS))
+          if (!alive) return
+        }
+        first = false
+        try {
+          const detail = await goalAnalysisApi.get(runId)
+          if (!alive) return
+          const next = detail.prioritisation?.plan
+          if (next && !next.steps_pending) {
+            setCompleted(next)
+            return
+          }
+          // THE RUN LEFT THE GATE WITHOUT THE COMPOSITION LANDING. The
+          // completing write declines once a run is no longer awaiting
+          // approval, so that reader keeps the deterministic method — which is
+          // a real method, and final. Nothing more will arrive; stop asking.
+          if (detail.status !== "awaiting_approval") return
+        } catch {
+          // A run we cannot read is not one to keep asking about.
+          return
+        }
+      }
+    }
+    void tick()
+    return () => { alive = false }
+  }, [runId, plan?.steps_pending])
+
+  return completed ?? plan
+}
+
+
+/** The plan gate, in its own component so the completion re-read can be a hook.
+ *
+ *  `GoalGateCard` returns early for every other gate kind, so a hook called
+ *  there would run conditionally. This is that rule, not a layer for its own
+ *  sake. */
+function GoalPlanGate({
+  gate, busy, onApprovePlan, approveNonce,
+}: {
+  gate: { kind: "plan"; runId: number; plan: GoalRunPlan }
+  busy?: boolean
+  onApprovePlan?: (decision: PlanDecision) => void
+  approveNonce?: number
+}) {
+  const plan = usePlanWhenComposed(gate.runId, gate.plan)
+  return (
+    <GoalAnalysisPlan
+      plan={plan}
+      approving={!!busy}
+      onApprove={(decision) => onApprovePlan?.(decision)}
+      approveNonce={approveNonce}
+    />
+  )
+}
+
+
 export function GoalGateCard({
   gate,
   resolved,
@@ -97,6 +202,7 @@ export function GoalGateCard({
   error,
   onConfirmDefinition,
   onApprovePlan,
+  approveNonce,
 }: {
   gate?: GoalGate
   resolved?: GoalGateResolved
@@ -108,6 +214,9 @@ export function GoalGateCard({
   error?: string
   onConfirmDefinition?: (definition: string) => void
   onApprovePlan?: (decision: PlanDecision) => void
+  /** A composer approval, handed to the plan card so it runs that card's own
+   *  submit with that card's own state. */
+  approveNonce?: number
 }) {
   if (resolved) return <GoalGateSettled resolved={resolved} error={error} />
   if (!gate) return null
@@ -131,10 +240,11 @@ export function GoalGateCard({
   }
   return (
     <div className="ggc" data-testid="goal-gate-plan">
-      <GoalAnalysisPlan
-        plan={gate.plan}
-        approving={!!busy}
-        onApprove={(decision) => onApprovePlan?.(decision)}
+      <GoalPlanGate
+        gate={gate}
+        busy={busy}
+        onApprovePlan={onApprovePlan}
+        approveNonce={approveNonce}
       />
       {error ? <p className="ggc-error" role="status">{error}</p> : null}
     </div>

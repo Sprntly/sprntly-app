@@ -26132,7 +26132,7 @@
 
 .ga-sources { margin: 6px 0 0; font-size: 12px; opacity: 0.72; }
 .ga-sources-label { text-transform: uppercase; letter-spacing: 0.04em;
-  font-size: 10px; opacity: 0.75; }
+  font-size: 10px; color: var(--ink-3); }
 
 /* ── The report, and the plan that precedes it ────────────────────────────
    Both read as a DOCUMENT, not a dashboard: one column, generous leading,
@@ -26147,7 +26147,7 @@
 .ga-doc-header { display: flex; flex-direction: column; gap: 6px; }
 .ga-doc-eyebrow {
   margin: 0; font-size: 10px; font-weight: 700; letter-spacing: 0.14em;
-  text-transform: uppercase; opacity: 0.55;
+  text-transform: uppercase; color: var(--ink-3);
 }
 .ga-doc-title {
   margin: 0; font-size: 21px; line-height: 1.28; font-weight: 650;
@@ -26161,12 +26161,16 @@
 .ga-doc-h2 {
   margin: 0; font-size: 15px; font-weight: 640; letter-spacing: -0.005em;
 }
+/* A SECTION HEADING MUST NOT BE FAINTER THAN WHAT IT CONTAINS. At `opacity:
+   0.6` this measured 2.89:1 while the step numbers inside it sat at 5.23:1, so
+   the hierarchy read upside down and the card looked unfinished. `--ink-2`
+   (7.6:1 on `--surface`) puts it above its own contents and below the title. */
 .ga-doc-h3 {
   margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: 0.06em;
-  text-transform: uppercase; opacity: 0.6;
+  text-transform: uppercase; color: var(--ink-2);
 }
 .ga-doc-lede { margin: 0; }
-.ga-doc-note { margin: 0; font-size: 12.5px; opacity: 0.72; }
+.ga-doc-note { margin: 0; font-size: 12.5px; color: var(--ink-3); }
 /* ── The report as an editable document ───────────────────────────────────
    The run is immutable; the report is a document ABOUT it. These are the two
    states that distinction has to be visible in.
@@ -26240,7 +26244,7 @@
 .ga-doc-section + .ga-doc-limits { border-top: none; }
 .ga-doc-gaps { gap: 14px; }
 .ga-doc-gap-q { margin: 0; font-weight: 620; }
-.ga-doc-gap-why, .ga-doc-gap-fix { margin: 2px 0 0; font-size: 12.5px; opacity: 0.75; }
+.ga-doc-gap-why, .ga-doc-gap-fix { margin: 2px 0 0; font-size: 12.5px; color: var(--ink-3); }
 
 /* The plan step. Same document voice, plus the controls that make it a
    decision rather than a notice. */

@@ -1267,6 +1267,96 @@ def today_line(now=None) -> str:
 # routing failure, and a PM acting on either would go configure something they
 # already have. Stating the inventory is what makes "what is missing" a fact
 # rather than an inference.
+def ask_system_suffix(company_id) -> str:
+    """Every per-company fact the answer prompt has to carry, in one call.
+
+    THE REASON THIS EXISTS IS A BUG IT WOULD HAVE PREVENTED. `open_goal_gate_line`
+    was added to three `ASK_SYSTEM` assemblies in `ask_runner`, which looked like
+    all of them. There are SEVEN across two files, and the three that were missed
+    included every one `qa_agent.answer` builds — the agentic ladder main chat
+    actually answers through. So a run waiting for approval was announced to the
+    paths nobody used, and the answer that invented a plan never saw the line
+    telling it not to.
+
+    The failure was not carelessness, it was that the composition was open-coded
+    seven times: nothing named the set, so nothing could be complete. Adding the
+    next fact to this function is now the whole change.
+
+    ORDER IS PRESERVED EXACTLY as the sites had it — date, then connected
+    sources, then the open gate — because these are appended to a cached prompt
+    prefix and reordering them would cost every warm cache for no gain.
+    """
+    return (today_line() + connected_sources_line(company_id)
+            + open_goal_gate_line(company_id))
+
+
+def open_goal_gate_line(company_id) -> str:
+    """Say, as a fact, that a Goal Analysis in THIS conversation is waiting for
+    the user to approve its plan — and that this path cannot approve it.
+
+    THE TRUST BUG THIS EXISTS FOR. Asked "ok let\u2019s go with the plan" in the
+    composer, the chat replied "Got it \u2014 the plan is locked" and rendered a
+    complete four-item revenue plan. Nothing was locked and nothing ran: the run
+    was still `awaiting_approval` with no `finished_at`. A reader would
+    reasonably have believed the analysis had executed.
+
+    It is structural, not a prompt slip. `ask_planner` has an action to START a
+    goal analysis and none to approve a pending one, and nothing anywhere in the
+    ask path had ever heard of `awaiting_approval` \u2014 so a plain-English
+    approval fell through to the general answer path, where a model looking at a
+    plan in the transcript obliged by narrating success.
+
+    THE FACT COMES FROM THE RUN, NOT THE TRANSCRIPT. A plan in the history is
+    the very thing that invites the confabulation; the run row is the only thing
+    that knows whether anything was approved.
+
+    Returns "" when there is no open gate, no conversation in scope, or the read
+    fails \u2014 the same posture as `connected_sources_line`. Asserting "nothing is
+    pending" on a lookup that simply did not happen would be its own falsehood.
+    """
+    if not company_id:
+        return ""
+    try:
+        from app.ask_runner import active_conversation_id
+
+        conversation_id = active_conversation_id()
+    except Exception:  # noqa: BLE001 — never let this break an answer
+        return ""
+    if not conversation_id:
+        return ""
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client().table("crucible_runs")
+            .select("id,goal_text")
+            .eq("company_id", company_id)
+            .eq("conversation_id", conversation_id)
+            .eq("status", "awaiting_approval")
+            .limit(1)
+            .execute()
+        ).data or []
+    except Exception:  # noqa: BLE001
+        return ""
+    if not rows:
+        return ""
+    goal = (rows[0].get("goal_text") or "").strip()
+    named = f" for \u201c{goal}\u201d" if goal else ""
+    return (
+        f"\n\nA GOAL ANALYSIS{named} IS WAITING FOR THIS USER TO APPROVE ITS "
+        f"PLAN, on the card in this conversation.\n"
+        "You cannot approve it, start it, lock it, run it, or change what it "
+        "will read. Nothing you write causes any of that to happen. If the user "
+        "says anything that sounds like approving, starting or amending it "
+        "\u2014 \u201cgo ahead\u201d, \u201clooks good\u201d, \u201cdrop the app store reviews\u201d \u2014 do NOT "
+        "claim it is done, locked, running or approved, and do NOT invent the "
+        "analysis yourself by writing out a plan, a ranking or a set of "
+        "recommendations for that goal. Say that the plan is waiting on the "
+        "card above and that they approve it there. That card is the only "
+        "thing that can start the run.\n"
+    )
+
+
 def connected_sources_line(company_id) -> str:
     """A factual inventory of this company's connected sources, for the prompt.
 

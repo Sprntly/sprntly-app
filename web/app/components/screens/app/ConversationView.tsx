@@ -105,6 +105,11 @@ export interface ConversationViewHostProps {
   goalMode?: boolean
   onExitGoalMode?: () => void
   goalModeAvailable?: boolean
+  /** What the composer is replying to, when a gate in this thread is open, and
+   *  the escape from it. Named rather than boolean so the chip can say WHICH
+   *  plan — a thread can hold more than one. */
+  replyTarget?: string
+  onExitReplyTarget?: () => void
 
   // ── Landing ────────────────────────────────────────────────────────────────
   /** Per-surface empty-state greeting. UNSET → the default main/private copy
@@ -221,6 +226,8 @@ export function ConversationView(props: ConversationViewProps) {
     goalMode,
     onExitGoalMode,
     goalModeAvailable,
+    replyTarget,
+    onExitReplyTarget,
     // landing
     showChipRow,
     displayChips,
@@ -323,6 +330,8 @@ export function ConversationView(props: ConversationViewProps) {
       goalMode={goalMode}
       onExitGoalMode={onExitGoalMode}
       goalModeAvailable={goalModeAvailable}
+      replyTarget={replyTarget}
+      onExitReplyTarget={onExitReplyTarget}
     />
   )
 

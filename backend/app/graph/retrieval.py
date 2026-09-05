@@ -20,6 +20,8 @@ the caller falls back to corpus-only — the pre-#18 behaviour.
 """
 from __future__ import annotations
 
+from app.graph.types import signal_kind_label, source_type_label
+
 import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -1120,8 +1122,15 @@ def render_evidence_trail_section(trail: dict[str, Any]) -> str:
             src = prov.get("source") or prov.get("doc") or prov.get("connector")
             prov_txt = f" · provenance: {src}" if src else ""
             tag = "SUPPORTS" if s.get("edge") == "SUPPORTS" else "theme"
+            # THE BRACKET IS WHAT THE MODEL CITES, so it carries the words
+            # the product uses for a source and never the storage key. A real
+            # session cited `[Source: pm_manual/deal_blocker]` four times over,
+            # because that is exactly what these lines handed it. The kind
+            # stays — it tells the model what sort of claim it is looking at —
+            # but outside the bracket and spelled out.
             lines.append(
-                f"- [{s['source_type']}/{s['kind']} · {tag}]{prov_txt}: {s['content']}"
+                f"- [{source_type_label(s['source_type'])} · {tag}]"
+                f" ({signal_kind_label(s['kind'])}){prov_txt}: {s['content']}"
             )
 
     return "\n".join(lines)
@@ -1170,7 +1179,8 @@ def render_context_section(bundle: dict[str, Any]) -> str:
             src = prov.get("source") or prov.get("doc") or prov.get("connector")
             prov_txt = f" · provenance: {src}" if src else ""
             lines.append(
-                f"- [{s['source_type']}/{s['kind']}]{theme}{prov_txt}: {s['content']}"
+                f"- [{source_type_label(s['source_type'])}]"
+                f" ({signal_kind_label(s['kind'])}){theme}{prov_txt}: {s['content']}"
             )
 
     # Hypotheses/decisions/outcomes render the §2 ledger spine. Beyond the

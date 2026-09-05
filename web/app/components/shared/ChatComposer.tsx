@@ -97,6 +97,8 @@ export function ChatComposer({
   placeholder,
   quote,
   onRemoveQuote,
+  replyTarget,
+  onExitReplyTarget,
   goalMode,
   onExitGoalMode,
   goalModeAvailable,
@@ -159,6 +161,14 @@ export function ChatComposer({
    *  as before. Undefined ALSO hides the `+` menu entry: the entry is offered
    *  only where the company is enrolled, and enrolment is the host's question
    *  to answer, not this component's. */
+  /** WHAT THIS COMPOSER IS REPLYING TO, when a gate is open in the thread.
+   *
+   *  While it is set, what the reader types goes to that card and never to the
+   *  planner — which is why the chip has to be visible and has to have a way
+   *  out. A gate can be abandoned, and a forgotten one must never leave a
+   *  conversation unable to talk to Sprntly. */
+  replyTarget?: string
+  onExitReplyTarget?: () => void
   goalMode?: boolean
   onExitGoalMode?: () => void
   /** Whether to offer Goal Analysis in the `+` menu at all. Separate from
@@ -196,6 +206,7 @@ export function ChatComposer({
   const canSend = draft.trim().length >= DRAFT_MIN_CHARS
   const showCount = draft.length >= DRAFT_COUNTER_FROM
   const hasHead = !!pinnedSkill || attachments.length > 0 || !!goalMode
+    || !!replyTarget
 
   // The `+` menu as DATA. It was two hardcoded buttons with the arrow-key wrap
   // written as `% 2`, so a third entry was unreachable from the keyboard and
@@ -300,6 +311,22 @@ export function ChatComposer({
               sits first in the head row: it changes what the next message
               does, and a chip you have to hunt for behind two files is a mode
               you will forget you are in. */}
+          {replyTarget ? (
+            <span
+              className="cx-chip cx-chip--skill"
+              data-testid="reply-target-chip"
+            >
+              <b>{replyTarget}</b>
+              <button
+                type="button"
+                className="cx-chip-x"
+                aria-label="Talk to Sprntly instead"
+                onClick={onExitReplyTarget}
+              >
+                ×
+              </button>
+            </span>
+          ) : null}
           {goalMode ? (
             <span
               className="cx-chip cx-chip--skill"
