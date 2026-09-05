@@ -104,6 +104,30 @@ CONCENTRATION_MIN_RATIO = 1.5
 #: three account names in their head and cannot hold ten.
 DEFAULT_TOP_N = 3
 
+#: The fail-open sentinel `graph.triage` stamps when the triage call itself
+#: errors. NOT a member of `TRIAGE_CATEGORIES`, so any reader has to tolerate
+#: it — it means "we tried and could not", which is a different fact from "no
+#: triage ran here" and is reported separately rather than folded into either.
+TRIAGE_FAIL_OPEN = "uncategorized"
+
+#: The categories that are a CUSTOMER speaking, as opposed to the company
+#: describing itself. Declared here rather than inferred because it is a
+#: judgement: a revenue answer resting almost entirely on internal product
+#: documents is a real limitation of that answer, and naming which kinds count
+#: as firsthand is what makes the limitation checkable rather than a vibe.
+FIRSTHAND_CATEGORIES: frozenset[str] = frozenset({
+    "customer_feedback", "support_ticket", "sales_deal", "escalation",
+})
+
+#: How many ordinal columns make a PERIOD GRID rather than a coincidence.
+#: `month_1 … month_12`, `week_1 … week_8`, `d0 … d30` — a repeated prefix with
+#: an incrementing integer suffix. A NAME SHAPE, not a name match: nothing here
+#: knows the word "cohort", and the same detector fires on any periodic grid.
+MIN_PERIOD_COLUMNS = 4
+#: Rows that must agree on where the observation window ends before trailing
+#: zeros are called censoring rather than genuine decline.
+MIN_CENSORED_ROWS = 2
+
 #: Column-name fragments that mean "this is money". A NAME heuristic, and it
 #: is declared here rather than inferred so a reader can see exactly what the
 #: engine will treat as value — inferring it from magnitude would read a
@@ -135,12 +159,39 @@ KINDS: tuple[str, ...] = (
     "stage_collapse",
     "concentration_divergence",
     "unit_value_derivable",
+    "censored_periods",
+    "evidence_mix",
 )
 
 SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
 
 
 # ── THE EVIDENCE, IN A SHAPE THE CHECKS CAN READ ────────────────────────────
+
+
+def source_label(name: str) -> str:
+    """A storage key rendered as something a reader recognises.
+
+    `03_product_analytics:activation_funnel` is a filename and a sheet name
+    joined by a colon. It is the right handle for a join and the wrong thing to
+    put in a document — a reader who sees it learns nothing and is reminded
+    they are looking at a machine's notes. Keys stay on the step's parameters,
+    where they are addressing an operation; prose gets this.
+    """
+    text = str(name or "").strip()
+    if not text:
+        return ""
+    parts = [re.sub(r"^\d+[_-]", "", p).replace("_", " ").strip()
+             for p in text.split(":") if p.strip()]
+    return " — ".join(p for p in parts if p)
+
+
+def origin_label(name: str) -> str:
+    """The same, but the SOURCE only — no sheet. Several sheets of one
+    workbook are one source to a reader, and counting them as several is how a
+    plan claims eleven sources over four files."""
+    head = str(name or "").split(":")[0]
+    return re.sub(r"^\d+[_-]", "", head).replace("_", " ").strip()
 
 
 @dataclass(frozen=True)
@@ -160,6 +211,16 @@ class Table:
 
     def values(self, column: str) -> list[Any]:
         return [r.get(column) for r in self.rows]
+
+    @property
+    def label(self) -> str:
+        """The table's name as a person would say it."""
+        return source_label(self.name)
+
+    @property
+    def origin(self) -> str:
+        """The SOURCE this table came from, without the sheet."""
+        return origin_label(self.name)
 
 
 def make_table(
@@ -660,9 +721,15 @@ class Observation:
     what: str
     figures: Mapping[str, float] = field(default_factory=dict)
 
+    @property
+    def source_label(self) -> str:
+        """The source as a reader would say it — never the storage key."""
+        return source_label(self.source)
+
     def to_json(self) -> dict:
         d = asdict(self)
         d["fields"] = list(self.fields)
+        d["source_label"] = self.source_label
         d["figures"] = {k: float(v) for k, v in self.figures.items()}
         return d
 
@@ -676,8 +743,22 @@ class SourceCoverage:
     earliest: str = ""
     latest: str = ""
 
+    @property
+    def label(self) -> str:
+        return source_label(self.name)
+
+    @property
+    def origin(self) -> str:
+        return origin_label(self.name)
+
     def to_json(self) -> dict:
-        return asdict(self)
+        #: `label` and `origin` ride along in the stored blob so a renderer
+        #: never has to reconstruct them from the key — and so a plan read
+        #: back years from now still has the words, not just the filename.
+        d = asdict(self)
+        d["label"] = self.label
+        d["origin"] = self.origin
+        return d
 
 
 @dataclass(frozen=True)
@@ -689,6 +770,25 @@ class ReconReport:
     #: absence the reader has to infer is not a disclosure.
     missing: tuple[str, ...] = ()
     total_records: int = 0
+
+    def inventory_figures(self) -> tuple[float, ...]:
+        """The run's countable facts about ITSELF — how many tables, how many
+        sources, how many records.
+
+        SEPARATE FROM AN OBSERVATION, AND DELIBERATELY SO. An observation is a
+        claim about the CONTENT of the evidence and has to be earned by a
+        check. "You connected six sources" is a fact about the inventory, it
+        is computed here from the same list the plan renders, and it is as
+        checkable as anything a check produced. Without this the figure gate
+        deletes the plan's own opening sentence for citing the number of
+        sources it is about to read — which it did, before this existed.
+        """
+        origins = {s.origin for s in self.sources if s.origin}
+        return (
+            float(len(self.sources)),
+            float(len(origins)),
+            float(self.total_records),
+        )
 
     def of_kind(self, kind: str) -> tuple[Observation, ...]:
         return tuple(o for o in self.observations if o.kind == kind)
@@ -831,6 +931,382 @@ def _observe_coding_gap(table: Table, prof: Mapping[str, ColumnProfile]) -> list
     return out
 
 
+# ── THE KNOWLEDGE GRAPH SIDE: what KIND of evidence this run is reading ─────
+
+
+@dataclass(frozen=True)
+class EvidenceMix:
+    """The distribution of triage categories across a tenant's signals.
+
+    WHY THIS IS WORTH A CHECK. Every structural check above needs columns, and
+    a tenant whose evidence is call transcripts and Slack has none — so
+    reconnaissance over a prose corpus yielded counts and dates and nothing a
+    plan could act on. The triage pass has meanwhile been classifying every
+    ingested document into a declared taxonomy and writing the answer to
+    `provenance.triage_category`, and nothing has ever read it. It costs no
+    extra query (both signal reads already select `provenance`), no tokens and
+    no latency.
+
+    WHAT IT ANSWERS THAT A ROW COUNT CANNOT: what the evidence IS. "Fourteen
+    hundred signals" and "fourteen hundred signals of which four per cent are
+    a customer speaking" support very different answers to a revenue question,
+    and only the second lets a plan say so before the run rather than after.
+
+    `uncategorized` IS NOT A CATEGORY. It is the fail-open marker, so it is
+    counted apart from both the categorised and the uncategorised: "triage ran
+    and failed" is a different fact from "triage never ran here", and merging
+    them would overstate coverage.
+    """
+    signals: int
+    categorised: int
+    fail_open: int
+    counts: Mapping[str, int]
+
+    @property
+    def coverage(self) -> float:
+        return 0.0 if not self.signals else self.categorised / self.signals
+
+    @property
+    def top(self) -> tuple[str, int]:
+        if not self.counts:
+            return ("", 0)
+        return max(sorted(self.counts.items()), key=lambda kv: kv[1])
+
+    @property
+    def firsthand(self) -> int:
+        return sum(n for c, n in self.counts.items() if c in FIRSTHAND_CATEGORIES)
+
+
+def evidence_mix(signals: Sequence[Mapping[str, Any]]) -> EvidenceMix:
+    """Read `provenance.triage_category` off a tenant's signals.
+
+    Total, and tolerant of every shape the writers actually produce: the key
+    absent entirely (the checklist pass and the batched extract path both pin
+    it to `None`), the fail-open sentinel, and a value outside the declared
+    taxonomy should the taxonomy ever be versioned forward.
+    """
+    counts: dict[str, int] = {}
+    total = fail_open = 0
+    for sig in signals:
+        if not isinstance(sig, Mapping):
+            continue
+        total += 1
+        prov = sig.get("provenance")
+        raw = prov.get("triage_category") if isinstance(prov, Mapping) else None
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        value = raw.strip()
+        if value == TRIAGE_FAIL_OPEN:
+            fail_open += 1
+            continue
+        counts[value] = counts.get(value, 0) + 1
+    return EvidenceMix(signals=total, categorised=sum(counts.values()),
+                       fail_open=fail_open, counts=counts)
+
+
+def _category_label(code: str) -> str:
+    """The taxonomy's own one-line description, shortened to its head clause.
+
+    Read from `graph.types` rather than restated, so a plan cannot describe a
+    category in words the taxonomy no longer uses. Lazily imported: the
+    structural checks have no business pulling in the graph package.
+    """
+    try:
+        from app.graph.types import TRIAGE_CATEGORIES
+    except Exception:  # noqa: BLE001 — a label is a nicety, never a failure
+        return code.replace("_", " ")
+    text = TRIAGE_CATEGORIES.get(code, "")
+    if not text:
+        return code.replace("_", " ")
+    return text.split("—")[0].split(",")[0].strip().lower()
+
+
+def _observe_evidence_mix(mix: EvidenceMix) -> list[Observation]:
+    """What kind of evidence this run is actually reading."""
+    if mix.signals < 20 or not mix.counts:
+        return []
+    top_code, top_n = mix.top
+    top_share = top_n / mix.categorised if mix.categorised else 0.0
+    firsthand_share = mix.firsthand / mix.categorised if mix.categorised else 0.0
+
+    detail = ""
+    if mix.fail_open:
+        detail = (f" A further {mix.fail_open} were attempted and the "
+                  f"classifier failed, so they are counted as unclassified.")
+
+    return [Observation(
+        id="knowledge_graph:evidence_mix",
+        kind="evidence_mix",
+        severity="high" if firsthand_share < 0.15 else "medium",
+        source="knowledge graph",
+        fields=("triage_category",),
+        what=(
+            f"{mix.categorised} of {mix.signals} signals "
+            f"({_pct(mix.coverage)}) are classified. The largest single kind "
+            f"is {_category_label(top_code)} at {_pct(top_share)}, and "
+            f"{_pct(firsthand_share)} is a customer speaking firsthand rather "
+            f"than the company describing itself.{detail}"
+        ),
+        figures={
+            "signals": float(mix.signals),
+            "classified": float(mix.categorised),
+            "coverage_share": mix.coverage,
+            "unclassified": float(mix.signals - mix.categorised),
+            "fail_open": float(mix.fail_open),
+            "distinct_categories": float(len(mix.counts)),
+            "top_share": top_share,
+            "firsthand": float(mix.firsthand),
+            "firsthand_share": firsthand_share,
+        },
+    )]
+
+
+# ── PERIOD GRIDS: telling a retention curve from a funnel ───────────────────
+
+
+@dataclass(frozen=True)
+class PeriodGrid:
+    """A cohort-by-period matrix: one row per cohort, one column per period.
+
+    WHY THIS TYPE EXISTS AT ALL. Two different checks need the same structure
+    for opposite reasons. `stage_collapse` has to RECOGNISE one so it can shut
+    up — month 1 equalling the cohort size is retention starting at 100%, which
+    is a definition, not a finding — and `censored_periods` has to recognise
+    one so it can fire, because the trailing zeros in the same grid are the
+    most expensive misreading available on the whole dataset.
+
+    A SHAPE, NOT A VOCABULARY. Detection is a repeated column prefix with an
+    incrementing integer suffix, values that do not increase along a row, and a
+    RAGGED right edge. Nothing here matches on the word "cohort" or "month", so
+    the same detector finds `week_1…week_8` and `d0…d30`.
+
+    Raggedness is the discriminator that matters. A funnel named
+    `step_1…step_5` is also wide, also ordinal and also non-increasing — and it
+    is fully populated on every row, because every stage has happened. A time
+    grid is ragged because the later periods have not happened yet, and that is
+    exactly the difference between "this number is a drop" and "this number is
+    not a number".
+    """
+    prefix: str
+    columns: tuple[str, ...]
+    key_field: str
+    size_field: str
+    #: Cohort key -> the last period index actually observed (1-based, 0 if
+    #: none). "Observed" is the last non-zero cell: a run of trailing zeros in
+    #: a ragged grid is the window ending, not a cohort reaching zero.
+    last_observed: Mapping[str, int]
+    #: Cohorts observed for the full width of the grid — the only ones a
+    #: full-window rate may be computed over.
+    mature: tuple[str, ...]
+    #: True when the ragged rows agree on where the window ends.
+    censored: bool = False
+
+    @property
+    def width(self) -> int:
+        return len(self.columns)
+
+
+_ORDINAL_RE = re.compile(r"^(.*?)[_\-]?(\d+)$")
+
+
+def _ordinal_series(columns: Sequence[str],
+                    prof: Mapping[str, ColumnProfile]) -> list[tuple[str, list[str]]]:
+    """Groups of numeric columns sharing a prefix and an incrementing suffix."""
+    groups: dict[str, list[tuple[int, str]]] = {}
+    for c in columns:
+        if prof[c].kind != "number":
+            continue
+        m = _ORDINAL_RE.match(c)
+        if not m:
+            continue
+        groups.setdefault(m.group(1), []).append((int(m.group(2)), c))
+    return [
+        (prefix, [c for _, c in sorted(items)])
+        for prefix, items in sorted(groups.items())
+        if len(items) >= MIN_PERIOD_COLUMNS
+    ]
+
+
+def _period_index(value: Any) -> Optional[int]:
+    """A `YYYY-MM` (or `YYYY-MM-DD`) label as a count of months.
+
+    Months rather than a row position, because cohorts are not evenly spaced —
+    a book that starts bimonthly and goes monthly would make rank-based
+    arithmetic silently wrong, and the whole point of the censoring test is
+    that the arithmetic is exact.
+    """
+    if _is_blank(value):
+        return None
+    m = re.match(r"^(\d{4})-(\d{2})", str(value).strip())
+    if not m:
+        return None
+    return int(m.group(1)) * 12 + int(m.group(2))
+
+
+def period_grid(table: Table,
+                prof: Optional[Mapping[str, ColumnProfile]] = None) -> Optional[PeriodGrid]:
+    """The cohort-by-period grid in this table, if it has one."""
+    prof = prof or profiles(table)
+    for prefix, cols in _ordinal_series(table.columns, prof):
+        rows = table.rows
+        if len(rows) < MIN_CENSORED_ROWS + 1:
+            continue
+
+        # Non-increasing along each row. A retention curve only falls; a series
+        # that rises somewhere is a time series of something else.
+        monotonic = 0
+        for r in rows:
+            vals = [_as_number(r.get(c)) for c in cols]
+            if any(v is None for v in vals):
+                continue
+            if all(b <= a for a, b in zip(vals, vals[1:])):
+                monotonic += 1
+        if monotonic < len(rows):
+            continue
+
+        last: dict[str, int] = {}
+        key_field = _period_key(table, prof)
+        for r in rows:
+            key = str(r.get(key_field)) if key_field else str(id(r))
+            idx = 0
+            for i, c in enumerate(cols, start=1):
+                v = _as_number(r.get(c))
+                if v is not None and v > 0:
+                    idx = i
+            last[key] = idx
+
+        width = len(cols)
+        ragged = [k for k, v in last.items() if 0 < v < width]
+        if len(ragged) < MIN_CENSORED_ROWS:
+            # Fully populated: a stage sequence, not a window that has not
+            # finished. Nothing to suppress and nothing to warn about.
+            continue
+
+        # THE CENSORING SIGNATURE: every ragged cohort stops at the same
+        # WALL-CLOCK moment. `cohort start + periods observed` is constant, and
+        # that constant IS the last date the data covers. A cohort that merely
+        # churned out early would break it.
+        censored = False
+        if key_field:
+            frontiers = set()
+            for r in rows:
+                key = str(r.get(key_field))
+                idx = last.get(key, 0)
+                start = _period_index(r.get(key_field))
+                if start is None or not (0 < idx < width):
+                    continue
+                frontiers.add(start + idx)
+            censored = len(frontiers) == 1
+
+        mature = tuple(sorted(k for k, v in last.items() if v >= width))
+        return PeriodGrid(
+            prefix=prefix, columns=tuple(cols), key_field=key_field or "",
+            size_field=_period_size_field(table, prof, cols),
+            last_observed=last, mature=mature, censored=censored,
+        )
+    return None
+
+
+def _period_key(table: Table, prof: Mapping[str, ColumnProfile]) -> str:
+    """The column naming each cohort — one row each, and parseable as a date."""
+    for c in table.columns:
+        if prof[c].kind not in ("date", "text"):
+            continue
+        if prof[c].distinct != prof[c].filled or prof[c].filled < 2:
+            continue
+        if all(_period_index(v) is not None
+               for v in table.values(c) if not _is_blank(v)):
+            return c
+    return ""
+
+
+def _period_size_field(table: Table, prof: Mapping[str, ColumnProfile],
+                       cols: Sequence[str]) -> str:
+    """The denominator: the numeric column outside the series that every first
+    period sits inside. Chosen as the CLOSEST such column, because a retention
+    grid's first period is usually the cohort size exactly."""
+    first = cols[0]
+    best, best_gap = "", None
+    for c in table.columns:
+        if c in cols or prof[c].kind != "number":
+            continue
+        gap = 0.0
+        ok = True
+        for r in table.rows:
+            size, start = _as_number(r.get(c)), _as_number(r.get(first))
+            if size is None or start is None or size < start:
+                ok = False
+                break
+            gap += size - start
+        if ok and (best_gap is None or gap < best_gap):
+            best, best_gap = c, gap
+    return best
+
+
+def _observe_censored_periods(table: Table,
+                              prof: Mapping[str, ColumnProfile]) -> list[Observation]:
+    """Trailing zeros that are the calendar, not the customers.
+
+    THE MOST EXPENSIVE MISREADING ON A RETENTION GRID, and it points the wrong
+    way. Summing the last period over every cohort divides a number that only
+    the mature cohorts could contribute to by a denominator that includes every
+    cohort — including the ones signed last month, whose later periods are zero
+    because they have not happened. The result invents a retention crisis and
+    hides whatever the real number is.
+    """
+    grid = period_grid(table, prof)
+    if grid is None or not grid.censored or not grid.mature or not grid.size_field:
+        return []
+
+    last_col = grid.columns[-1]
+    mature_rows = [r for r in table.rows
+                   if str(r.get(grid.key_field)) in set(grid.mature)]
+    if not mature_rows:
+        return []
+
+    def _sum(rows, col):
+        return sum(v for v in (_as_number(r.get(col)) for r in rows)
+                   if v is not None)
+
+    m_num, m_den = _sum(mature_rows, last_col), _sum(mature_rows, grid.size_field)
+    n_num, n_den = _sum(table.rows, last_col), _sum(table.rows, grid.size_field)
+    if m_den <= 0 or n_den <= 0:
+        return []
+    mature_rate, naive_rate = m_num / m_den, n_num / n_den
+    immature = len(table.rows) - len(mature_rows)
+
+    return [Observation(
+        id=f"{table.name}:censored_periods:{grid.prefix}",
+        kind="censored_periods",
+        severity="high",
+        source=table.name,
+        fields=(grid.key_field, grid.size_field, last_col),
+        what=(
+            f"`{last_col}` is zero for {immature} of {len(table.rows)} cohorts "
+            f"because those months have not happened yet, not because anyone "
+            f"left: every one of them stops exactly at the end of the data. "
+            f"Dividing the last period by every cohort gives "
+            f"{_pct(naive_rate)}; over the {len(mature_rows)} cohorts old "
+            f"enough to have a full window it is {_pct(mature_rate)} — a "
+            f"{abs(mature_rate - naive_rate) * 100:.1f} point error, pointing "
+            f"the wrong way."
+        ),
+        figures={
+            "width": float(grid.width),
+            "cohorts": float(len(table.rows)),
+            "mature_cohorts": float(len(mature_rows)),
+            "immature_cohorts": float(immature),
+            "mature_numerator": m_num,
+            "mature_denominator": m_den,
+            "mature_rate": mature_rate,
+            "naive_numerator": n_num,
+            "naive_denominator": n_den,
+            "naive_rate": naive_rate,
+            "error_points": abs(mature_rate - naive_rate) * 100.0,
+        },
+    )]
+
+
 def _observe_stage_collapse(table: Table, prof: Mapping[str, ColumnProfile]) -> list[Observation]:
     """Two adjacent stages holding identical values across every row.
 
@@ -839,9 +1315,26 @@ def _observe_stage_collapse(table: Table, prof: Mapping[str, ColumnProfile]) -> 
     columns happen to match and call it a collapsed stage.
     """
     out: list[Observation] = []
+    # A PERIOD GRID IS NOT A FUNNEL, AND ADJACENT EQUALITY MEANS NOTHING IN
+    # ONE. On a real retention grid this check fired twice and both were
+    # definitions rather than findings: `month_1` equals `cohort_size` because
+    # retention starts at 100%, and `month_1` equals `month_2` because nobody
+    # happened to leave in the first month. Reporting either as "one
+    # measurement recorded twice" is a false alarm at the top of the plan,
+    # which is worse than silence — it spends the reader's trust on a
+    # non-event.
+    #
+    # Suppressed for the whole grid, its denominator included, because the
+    # grid's SHAPE is what makes adjacent equality meaningless there. A funnel
+    # is untouched: it is fully populated, so `period_grid` does not match it.
+    grid = period_grid(table, prof)
+    in_grid = set(grid.columns) | ({grid.size_field} if grid else set()) if grid else set()
+
     numeric = [(i, c) for i, c in enumerate(table.columns) if prof[c].kind == "number"]
     for (i, a), (j, b) in zip(numeric, numeric[1:]):
         if j != i + 1:
+            continue
+        if a in in_grid or b in in_grid:
             continue
         if not identical_columns(table, [a, b]):
             continue
@@ -1119,6 +1612,10 @@ def observe(
     tables: Sequence[Table],
     *,
     expected_sources: Iterable[str] = (),
+    #: The raw signal rows, for the checks that read the knowledge graph
+    #: rather than a table. Optional: a caller with only spreadsheets passes
+    #: none and simply gets no evidence-mix observation.
+    signals: Sequence[Mapping[str, Any]] = (),
 ) -> ReconReport:
     """Read the structure of the evidence and say what is there.
 
@@ -1159,7 +1656,7 @@ def observe(
         if t.source_type:
             present_types.add(t.source_type)
         for check in (_observe_value_columns, _observe_coding_gap,
-                      _observe_stage_collapse):
+                      _observe_stage_collapse, _observe_censored_periods):
             try:
                 observations.extend(check(t, prof))
             except Exception:  # noqa: BLE001
@@ -1172,6 +1669,12 @@ def observe(
         except Exception:  # noqa: BLE001
             logger.warning("crucible recon: %s failed", cross.__name__,
                            exc_info=True)
+
+    if signals:
+        try:
+            observations.extend(_observe_evidence_mix(evidence_mix(signals)))
+        except Exception:  # noqa: BLE001
+            logger.warning("crucible recon: evidence mix failed", exc_info=True)
 
     missing = tuple(sorted(
         str(s) for s in expected_sources if str(s) not in present_types))

@@ -17,12 +17,13 @@ from tests import _tabular_recon_fixtures as fx
 from app.crucible import recon
 
 
-def _kinds(tables) -> set[str]:
-    return {o.kind for o in recon.observe(tables).observations}
+def _kinds(tables, signals=()) -> set[str]:
+    return {o.kind for o in recon.observe(tables, signals=signals).observations}
 
 
-def _only(tables, kind: str):
-    hits = [o for o in recon.observe(tables).observations if o.kind == kind]
+def _only(tables, kind: str, signals=()):
+    hits = [o for o in recon.observe(tables, signals=signals).observations
+            if o.kind == kind]
     assert len(hits) == 1, f"expected exactly one {kind}, got {len(hits)}"
     return hits[0]
 
@@ -208,3 +209,144 @@ def test_observations_round_trip_through_json():
 def test_a_plan_stored_before_observations_existed_reads_back_as_none_not_broken():
     assert recon.observations_from_json(None) == ()
     assert recon.observations_from_json([{"kind": "nonsense"}])[0].figures == {}
+
+
+# ─── 5. A retention grid is not a funnel ───────────────────────────────────
+
+
+def test_a_retention_grid_does_not_report_collapsed_funnel_stages():
+    """It used to, twice, and both were definitions rather than findings:
+    `month_1` equals `cohort_size` because retention starts at 100%, and
+    `month_1` equals `month_2` because nobody left in the first month.
+    Adjacent-column equality carries no information in a period grid, and a
+    false alarm at the top of a plan spends the reader's trust on a non-event.
+    """
+    assert "stage_collapse" not in _kinds([fx.retention()])
+
+
+def test_a_real_funnel_still_reports_its_collapsed_stage():
+    """The suppression must be narrow. Two adjacent stages that ARE one
+    measurement recorded twice is the finding the check exists for."""
+    assert "stage_collapse" in _kinds([fx.funnel()])
+
+
+def test_what_suppresses_the_check_is_raggedness_not_the_column_names():
+    """THE DISCRIMINATOR, ISOLATED. Keep only the cohorts with a full window
+    and the same columns, with the same names, become a fully populated
+    ordinal series — a stage sequence as far as any shape test can tell — and
+    the check speaks up again. A name match on "month" or "cohort" could not
+    tell these two tables apart."""
+    assert "stage_collapse" in _kinds([fx.retention(mature_only=True)])
+
+
+# ─── 6. Trailing zeros that are the calendar, not the customers ────────────
+
+
+def test_periods_that_have_not_happened_yet_are_not_observed_zeros():
+    o = _only([fx.retention()], "censored_periods")
+    assert o.figures["cohorts"] == 16
+    assert o.figures["mature_cohorts"] == 8
+    # The arithmetic, both ways round. 28/30 against 28/60.
+    assert o.figures["mature_numerator"] == 28
+    assert o.figures["mature_denominator"] == 30
+    assert o.figures["naive_denominator"] == 60
+    assert round(o.figures["mature_rate"], 4) == 0.9333
+    assert round(o.figures["naive_rate"], 4) == 0.4667
+    assert round(o.figures["error_points"], 1) == 46.7
+
+
+def test_a_grid_with_no_immature_cohorts_has_nothing_to_censor():
+    assert "censored_periods" not in _kinds([fx.retention(mature_only=True)])
+
+
+def test_a_cohort_that_actually_emptied_out_is_not_called_censoring():
+    """THE SIGNATURE IS THAT EVERY RAGGED COHORT STOPS AT THE SAME MOMENT —
+    cohort start plus periods observed is one constant, and that constant is
+    the last date the data covers. Walk one cohort's window off that frontier
+    and it is a cohort that genuinely lost everyone, which must not be
+    explained away as the calendar. Inventing the opposite error is not an
+    improvement on the one this fixes."""
+    assert "censored_periods" not in _kinds([fx.retention(unaligned=True)])
+
+
+def test_the_grid_detector_finds_the_series_the_denominator_and_the_key():
+    grid = recon.period_grid(fx.retention())
+    assert grid is not None
+    assert grid.width == 12
+    assert grid.key_field == "cohort_month"
+    assert grid.size_field == "cohort_size"
+    assert grid.censored is True
+    assert len(grid.mature) == 8
+
+
+def test_a_funnel_is_not_a_period_grid_at_all():
+    assert recon.period_grid(fx.funnel()) is None
+
+
+# ─── 7. What KIND of evidence this is, from the triage category ────────────
+
+
+def test_the_triage_category_the_ingest_pass_already_writes_is_read():
+    """A Haiku triage call classifies every ingested document and writes the
+    answer to `provenance.triage_category`. Both signal reads already select
+    `provenance`, so this costs no extra query, no tokens and no latency — and
+    until now nothing anywhere read it."""
+    mix = recon.evidence_mix(fx.signals())
+    assert mix.signals == 1416
+    assert mix.categorised == 1275
+    assert round(mix.coverage, 3) == 0.900
+    assert mix.top[0] == "product_prd"
+
+
+def test_the_fail_open_sentinel_is_tolerated_and_never_counted_as_a_category():
+    """`uncategorized` is stamped when the triage call itself errors and is
+    NOT a member of the declared taxonomy. "Triage ran and failed" is a
+    different fact from "triage never ran here", and merging them would
+    overstate coverage."""
+    mix = recon.evidence_mix(fx.signals(fail_open=50))
+    assert mix.fail_open == 50
+    assert "uncategorized" not in mix.counts
+    assert mix.categorised == 1275
+
+
+def test_signals_with_no_category_at_all_are_simply_uncounted():
+    """The checklist pass and the batched extract path both pin the field to
+    `None`, so on a call-heavy tenant a large share carries nothing. That has
+    to read as absent, never as an error."""
+    mix = recon.evidence_mix([{"provenance": {}} for _ in range(30)])
+    assert mix.signals == 30 and mix.categorised == 0
+    assert recon._observe_evidence_mix(mix) == []
+
+
+def test_the_mix_says_how_much_is_a_customer_speaking():
+    o = _only(fx.full_pack(), "evidence_mix", signals=fx.signals())
+    # Measured on a real tenant: 4.5% firsthand, and the run should say so
+    # before it answers a revenue question from internal documents.
+    assert round(o.figures["firsthand_share"], 3) == 0.045
+    assert o.severity == "high"
+    assert o.figures["coverage_share"] > 0.8
+
+
+def test_the_mix_needs_signals_and_is_absent_without_them():
+    """Every caller with only spreadsheets, and every tenant read before this
+    existed."""
+    assert "evidence_mix" not in _kinds(fx.full_pack())
+
+
+# ─── Storage keys are for joins; readers get words ─────────────────────────
+
+
+def test_a_sheet_key_is_rendered_as_something_a_reader_recognises():
+    assert recon.source_label("03_product_analytics:activation_funnel") == (
+        "product analytics — activation funnel")
+    assert recon.origin_label("03_product_analytics:activation_funnel") == (
+        "product analytics")
+    # Several sheets of one workbook are ONE source to a reader; counting them
+    # as several is how a plan claims eleven sources over four files.
+    assert recon.origin_label("03_product_analytics:cohort_retention") == (
+        recon.origin_label("03_product_analytics:activation_funnel"))
+
+
+def test_every_observation_can_name_its_source_without_the_key():
+    for o in recon.observe(fx.full_pack(), signals=fx.signals()).observations:
+        assert ":" not in o.source_label

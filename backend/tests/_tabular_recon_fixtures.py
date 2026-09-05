@@ -16,6 +16,13 @@ party's customer list has no business in this repository. The column names are
 kept, because two of the checks reason about column naming, and the ordering
 is kept, because the funnel check reasons about adjacency.
 
+TABLES ARE NAMED THE WAY THE REAL LOADER NAMES THEM — `08_sales_data:
+contracts`, a workbook stem and a sheet joined by a colon. That is not
+decoration: two of the assertions here are about storage keys never reaching a
+reader, and fixtures named `contracts` cannot fail them, so they would pass
+against code that renders keys verbatim. Five tables across four sources also
+makes the plan's opening sentence a countable thing to assert on.
+
 EACH FIXTURE HAS A NEGATIVE TWIN. `*_clean` is the same table with the
 structural property removed and nothing else changed. A check that fires on
 both is not detecting the property, it is detecting the table.
@@ -117,7 +124,7 @@ def contracts(*, clean: bool = False) -> Table:
         }
         for a, base, expansion, total in CONTRACT_ROWS
     ]
-    return make_table("contracts", rows, columns=CONTRACT_COLUMNS,
+    return make_table("08_sales_data:contracts", rows, columns=CONTRACT_COLUMNS,
                       source_type="revenue")
 
 
@@ -133,7 +140,7 @@ def tickets(*, aligned: bool = False) -> Table:
         for i in range(10 if aligned else n):
             rows.append({"ticket_id": f"{account}-{i}", "account": account,
                          "category": "Reporting"})
-    return make_table("tickets", rows,
+    return make_table("02_support_tickets:tickets", rows,
                       columns=("ticket_id", "account", "category"),
                       source_type="customer_voice")
 
@@ -149,7 +156,7 @@ def funnel(*, clean: bool = False) -> Table:
             "ran_first_exercise": ran - 1 if clean and cohort == "All accounts" else ran,
             "ran_first_exercise_2plus_facilitators": two_plus,
         })
-    return make_table("activation_funnel", rows, columns=FUNNEL_COLUMNS,
+    return make_table("03_product_analytics:activation_funnel", rows, columns=FUNNEL_COLUMNS,
                       source_type="analytics")
 
 
@@ -168,10 +175,108 @@ def feedback(*, clean: bool = False) -> Table:
             "rating_out_of_5": rating,
             "text": "" if (clean and rating is None) else text,
         })
-    return make_table("feedback_items", rows, columns=FEEDBACK_COLUMNS,
+    return make_table("11_third_party_feedback:feedback_items", rows, columns=FEEDBACK_COLUMNS,
                       source_type="customer_voice")
+
+
+
+#: A cohort-by-period retention grid, verbatim from the real pack.
+#:
+#: THE TRAP, AND IT IS THE BIGGEST ONE HERE. Eight of these sixteen cohorts
+#: have zeros in their later months because those months have not happened
+#: yet — every one of them stops exactly at the end of the data. Summing
+#: `month_12` over every cohort gives 28/60 = 46.7%; over the eight cohorts
+#: with a full twelve-month window it is 28/30 = 93.3%. A 46.6 point error, in
+#: the direction that invents a retention crisis and hides the real number.
+#:
+#: It is also where `stage_collapse` used to fire twice and be wrong twice:
+#: `month_1` equals `cohort_size` because retention starts at 100%, and
+#: `month_1` equals `month_2` because nobody left in the first month. Neither
+#: is a collapsed funnel stage; a retention grid is not a funnel.
+RETENTION_PERIODS = 12
+RETENTION_ROWS: tuple[tuple[str, int, tuple[int, ...]], ...] = (
+    ("2024-07", 4, (4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4)),
+    ("2024-09", 4, (4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4)),
+    ("2024-11", 4, (4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4)),
+    ("2025-01", 3, (3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3)),
+    ("2025-03", 2, (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)),
+    ("2025-05", 2, (2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2)),
+    ("2025-07", 7, (7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 5, 5)),
+    ("2025-09", 4, (4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4)),
+    ("2025-10", 2, (2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 0)),
+    ("2025-11", 3, (3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 0, 0)),
+    ("2025-12", 6, (6, 6, 6, 6, 5, 5, 4, 4, 4, 0, 0, 0)),
+    ("2026-01", 4, (4, 4, 4, 4, 4, 4, 4, 4, 0, 0, 0, 0)),
+    ("2026-02", 7, (7, 7, 7, 7, 7, 7, 7, 0, 0, 0, 0, 0)),
+    ("2026-03", 3, (3, 3, 3, 3, 3, 3, 0, 0, 0, 0, 0, 0)),
+    ("2026-05", 3, (3, 3, 3, 3, 0, 0, 0, 0, 0, 0, 0, 0)),
+    ("2026-06", 2, (2, 2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0)),
+)
+RETENTION_COLUMNS = ("cohort_month", "cohort_size") + tuple(
+    f"month_{i}" for i in range(1, RETENTION_PERIODS + 1))
+
+
+def retention(*, mature_only: bool = False, unaligned: bool = False) -> Table:
+    """The grid, and two twins that each remove one property.
+
+    `mature_only` keeps the eight cohorts with a full window, so the grid is
+    no longer ragged: it is then a fully populated ordinal series — a stage
+    sequence as far as any shape test can tell — and `stage_collapse` should
+    speak up again while the censoring check goes quiet. That pair is what
+    proves the discriminator is RAGGEDNESS rather than the column names.
+
+    `unaligned` keeps the raggedness but walks one cohort's window off the
+    shared frontier, so the trailing zeros no longer all land on the same
+    date. That is a cohort that actually emptied out, and calling it censoring
+    would be the check inventing the opposite error to the one it fixes.
+    """
+    rows = []
+    for cohort, size, periods in RETENTION_ROWS:
+        observed = sum(1 for p in periods if p > 0)
+        if mature_only and observed < RETENTION_PERIODS:
+            continue
+        vals = list(periods)
+        if unaligned and cohort == "2025-12":
+            vals = [v if i < 3 else 0 for i, v in enumerate(vals)]
+        row = {"cohort_month": cohort, "cohort_size": size}
+        row.update({f"month_{i}": v for i, v in enumerate(vals, start=1)})
+        rows.append(row)
+    return make_table("03_product_analytics:cohort_retention", rows, columns=RETENTION_COLUMNS,
+                      source_type="analytics")
+
+
+#: Signals carrying the triage category the ingest pass already writes, in the
+#: proportions measured on a real 1,416-signal tenant: 90.0% classified, the
+#: largest kind product requirements at ~41% of the classified, and only ~4.5%
+#: a customer speaking firsthand.
+MEASURED_TRIAGE_MIX: dict[str, int] = {
+    "product_prd": 518,
+    "decision_record": 264,
+    "business_context": 206,
+    "meeting_notes": 194,
+    "sales_deal": 57,
+    "marketing_content": 29,
+    "engineering_activity": 7,
+}
+MEASURED_UNCLASSIFIED = 141
+
+
+def signals(*, fail_open: int = 0) -> list[dict]:
+    """Signal rows shaped as `kg_signal` reads them, at measured proportions.
+
+    `fail_open` adds rows carrying the `uncategorized` sentinel — not a member
+    of the declared taxonomy, stamped when the triage call itself errors. A
+    reader has to tolerate it and must not count it as a category.
+    """
+    out: list[dict] = []
+    for code, n in MEASURED_TRIAGE_MIX.items():
+        out.extend({"provenance": {"triage_category": code}} for _ in range(n))
+    out.extend({"provenance": {}} for _ in range(MEASURED_UNCLASSIFIED))
+    out.extend({"provenance": {"triage_category": "uncategorized"}}
+               for _ in range(fail_open))
+    return out
 
 
 def full_pack() -> list[Table]:
     """Everything, as a run would see it."""
-    return [contracts(), tickets(), funnel(), feedback()]
+    return [contracts(), tickets(), funnel(), feedback(), retention()]
