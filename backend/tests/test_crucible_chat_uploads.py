@@ -787,3 +787,75 @@ def test_an_unchanged_verdict_rewrites_no_step_at_all(crucible_db,
     after = _plan_of(weighted_ctx, run_id)
     assert after["steps"] == before["steps"]
     assert after["weighting_unit"] == before["weighting_unit"] == "count"
+
+
+def _record_business_type(company_id: str, value: str) -> None:
+    from app.db.client import require_client
+
+    require_client().table("companies").update(
+        {"business_type": value}).eq("id", company_id).execute()
+
+
+def test_approving_does_not_insert_a_question_the_reader_never_saw(
+    crucible_db, weighted_ctx,
+):
+    """THE GATE'S QUESTION SET, REPRODUCED — not a fresh one derived with
+    different inputs.
+
+    `questions_for` suppresses the business-model question when the model is
+    already recorded. The approve path re-derives the set from the stored
+    observations, and re-deriving it WITHOUT the stored business model puts
+    that question back: one the reader was never shown, whose "if you skip
+    this, themes are counted, not weighted" then sits in the stored plan
+    beside `weighting_unit = "value"`. The report renders from that plan, so
+    the document would contradict itself about the single field this whole
+    feature exists to get right."""
+    _record_business_type(weighted_ctx.company_id, "B2B SaaS")
+    run_id = weighted_ctx.start().json()["id"]
+
+    before = _plan_of(weighted_ctx, run_id)
+    assert before["weighting_unit"] == "value", (
+        "fixture must reach a weighted verdict or this proves nothing")
+    assert "business_model" not in {q["id"] for q in before["questions"]}, (
+        "the gate must not ask when the model is recorded")
+
+    weighted_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = _plan_of(weighted_ctx, run_id)
+    assert "business_model" not in {q["id"] for q in after["questions"]}, (
+        "approve inserted a question the reader never saw")
+    assert after["weighting_unit"] == "value"
+
+
+def test_a_question_that_was_asked_and_answered_survives_approve(
+    crucible_db, weighted_ctx,
+):
+    """The other direction. Reproducing the gate's set means KEEPING the
+    question when it was genuinely asked — dropping it would lose the record
+    of what the reader was shown and answered."""
+    run_id = weighted_ctx.start().json()["id"]
+    before = _plan_of(weighted_ctx, run_id)
+    assert "business_model" in {q["id"] for q in before["questions"]}
+
+    weighted_ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"answers": {"business_model":
+                          "Sales-assisted or enterprise (B2B)"}},
+    )
+    after = _plan_of(weighted_ctx, run_id)
+    assert "business_model" in {q["id"] for q in after["questions"]}
+    assert after["weighting_unit"] == "value"
+
+
+def test_the_approved_question_set_is_the_one_the_gate_showed(
+    crucible_db, weighted_ctx,
+):
+    """The general form, so this cannot regress through a different route:
+    approve re-derives, and what it re-derives must equal what was on screen.
+    Ranked truncation means an inserted question does not merely add a row —
+    it can push a derived one off the end."""
+    _record_business_type(weighted_ctx.company_id, "B2B SaaS")
+    run_id = weighted_ctx.start().json()["id"]
+    before = [q["id"] for q in _plan_of(weighted_ctx, run_id)["questions"]]
+    weighted_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = [q["id"] for q in _plan_of(weighted_ctx, run_id)["questions"]]
+    assert after == before, f"gate showed {before}, approve stored {after}"

@@ -1365,12 +1365,33 @@ def execute_run(
                 from app.crucible.recon import observations_from_json
 
                 stored_obs = observations_from_json(plan_json.get("observations"))
+                # AND THE BUSINESS MODEL THE GATE ASKED WITH, read off the plan
+                # rather than left to default.
+                #
+                # `questions_for` suppresses the business-model question when
+                # the model is already recorded, so re-deriving without it
+                # INSERTS a question the reader was never shown — one whose
+                # "if you skip this, themes are counted" sits in the stored
+                # plan beside a verdict of `value`, which is the plan
+                # contradicting itself on the one field this feature exists to
+                # get right. It also consumes a slot in the ranked truncation
+                # and can push out a derived question that WAS on screen.
+                #
+                # THIS KEY STILL HOLDS THE PLAN-TIME VALUE HERE. The settled
+                # verdict overwrites it further down, after the questions are
+                # rebuilt — so reading it at this point reproduces the gate's
+                # own question set exactly, including keeping the question when
+                # it was genuinely asked and answered.
                 plan_json["questions"] = [
                     {"id": q.id, "prompt": q.prompt, "why": q.why,
                      "what_i_saw": q.what_i_saw, "affects": q.affects,
                      "default_if_skipped": q.default_if_skipped,
                      "options": list(q.options)}
-                    for q in questions_for(choice.framework, stored_obs)
+                    for q in questions_for(
+                        choice.framework, stored_obs,
+                        business_model=str(
+                            plan_json.get("weighting_business_model") or ""),
+                    )
                 ]
 
                 # ── THE UNIT, SETTLED FROM WHAT WAS STORED PLUS WHAT THE
