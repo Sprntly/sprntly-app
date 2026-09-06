@@ -38,7 +38,7 @@ from app.crucible.figure_class import (
     classify_figures,
     persist_classes,
 )
-from app.crucible.pipeline import build_findings
+from app.crucible.pipeline import ACCOUNT_VALUE_UNIT, build_findings
 from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
 from app import attachments_storage
@@ -898,6 +898,16 @@ async def approve(
         hypotheses=tuple(body.hypotheses),
         # READ BACK OFF THE ROW — see the `/confirm` handler's own comment.
         asked_text=_row_meta(claimed).get("asked_text"),
+        # THE FILES THE PLAN WAS BUILT OVER, RE-AUTHORISED HERE.
+        #
+        # `/start` checked every key against the caller's workspace before the
+        # plan was built. This is a different request from a different caller,
+        # so it checks again rather than trusting what a row happens to hold:
+        # a stored key is a reference, and a reference is not permission. A key
+        # that fails costs its own file and nothing else, exactly as it does at
+        # `/start`.
+        uploads=_stored_uploads(claimed, company.workspace_id),
+        workspace_id=company.workspace_id,
     )
     if "pytest" in sys.modules:
         await asyncio.to_thread(execute_run, **kwargs)
@@ -1029,6 +1039,11 @@ def execute_run(
     # keep those cases distinguishable everywhere downstream.
     definition_source = "your own words"
     definition_adopted = definition_text is not None
+    #: THE APPROVED UNIT AND THE BOOK IT WILL BE WEIGHED BY, settled inside the
+    #: approve block below and read by the pipeline. A run that never reaches
+    #: that block counts, which is what every run did before this existed.
+    weighting_unit = ""
+    value_map: dict[str, float] = {}
     try:
         runs_db.heartbeat(run_id, company_id)
 
@@ -1205,6 +1220,20 @@ def execute_run(
             )
             meta = dict(_meta_of(run_id, company_id))
             meta["plan"] = plan.to_json()
+            if uploads:
+                # THE REFERENCES, NOT THE CONTENT, AND FOR ONE REASON.
+                # Approving a plan is a second request: it arrives with a run
+                # id and nothing else, so a run that measured its unit against
+                # an attached contracts file had no way to read that file again
+                # and would have weighted by an empty book. These are the same
+                # `(storage_key, display_name)` pairs `/start` already checked
+                # against the caller's workspace, and `/approve` checks them
+                # AGAIN before reading anything — a key stored on a row is a
+                # reference, never an authorisation.
+                #
+                # The bytes stay where they are. Nothing here copies a row of
+                # the reader's contracts into `prioritisation`.
+                meta["uploads"] = [[key, name] for key, name in uploads]
             runs_db.update(run_id, company_id, status="awaiting_approval",
                            prioritisation=meta)
             # ── PHASE 2. The composed wording, written onto the same plan.
@@ -1343,6 +1372,101 @@ def execute_run(
                      "options": list(q.options)}
                     for q in questions_for(choice.framework, stored_obs)
                 ]
+
+                # ── THE UNIT, SETTLED FROM WHAT WAS STORED PLUS WHAT THE
+                # READER JUST SAID — AND FROM NOTHING ELSE.
+                #
+                # The priceable SHARE is read off the stored observations and
+                # never re-measured: the corpus moves between the gate and the
+                # run (a connector syncs every twenty minutes), so a share
+                # taken again here could cross the threshold and hand the
+                # reader a weighted run they approved as counted. The one thing
+                # that legitimately changes is the business model, because the
+                # reader may have just answered the question about it.
+                from app.crucible.plan import (
+                    WEIGHTING_UNIT_COUNT, business_model_unit,
+                    weighting_verdict,
+                )
+
+                stored_answers = plan_json.get("answers")
+                answered_model = (
+                    stored_answers.get("business_model", "")
+                    if isinstance(stored_answers, dict) else ""
+                )
+                model = (business_model_unit("", answer=answered_model)
+                         or str(plan_json.get("weighting_business_model") or ""))
+                verdict = weighting_verdict(stored_obs, business_model=model)
+
+                # THE MAP IS RE-DERIVED FROM THE UPLOADED BYTES, which are
+                # immutable and whose derivation is deterministic — unlike the
+                # verdict, which is not re-derived from anything. If the files
+                # cannot be read back the run DOWNGRADES TO COUNTING and says
+                # so in the same stored plan the report renders from: a plan
+                # promising a weighting the run did not perform is the one
+                # defect this whole path exists to prevent.
+                if verdict.weighted:
+                    from dataclasses import replace as _replace
+
+                    from app.crucible.recon import account_value_map
+
+                    book = None
+                    try:
+                        book = account_value_map(
+                            _upload_tables(uploads, workspace_id))
+                    except Exception:  # noqa: BLE001 — never fail a run on it
+                        logger.warning(
+                            "crucible: could not rebuild the account value map "
+                            "for %s", company_id, exc_info=True)
+                    if book and book.values:
+                        value_map = dict(book.values)
+                    else:
+                        verdict = _replace(
+                            verdict, unit=WEIGHTING_UNIT_COUNT,
+                            because=(
+                                verdict.because
+                                + " The contracts that figure was measured "
+                                  "from could not be read back when the run "
+                                  "started, so this counted accounts instead."
+                            ),
+                        )
+                # AND THE METHOD SECTION SAYS THE SAME THING — BUT ONLY WHEN
+                # THE ANSWER ACTUALLY MOVED.
+                #
+                # The plan is composed before the reader answers, and the gate
+                # question about how they sell can change the unit. A run that
+                # has just become weighted while its own method section still
+                # says "count in accounts" is the same overclaim as promising a
+                # weighting that never happens, pointing the other way — and
+                # worse for being invisible, because the arithmetic is right
+                # and only the audit trail is wrong.
+                #
+                # ONE STEP, AND ONLY IF THE UNIT CHANGED. A model call is a
+                # draw, not a lookup, and the reader said yes to one sample;
+                # re-deriving a method they already approved is the failure
+                # `test_approving_does_not_re_derive_the_method_it_was_
+                # approved_with` exists to catch. An unchanged verdict rewrites
+                # nothing at all.
+                if verdict.unit != str(plan_json.get("weighting_unit") or ""):
+                    from app.crucible.planner import settle_unit_step, unit_step
+
+                    plan_json["steps"] = settle_unit_step(
+                        plan_json.get("steps") or [],
+                        unit_step(
+                            observations=[
+                                o for o in stored_obs
+                                if o.kind == "priceable_coverage"],
+                            currency="accounts",
+                            weighting_unit=verdict.unit,
+                            weighting_because=verdict.because,
+                        ),
+                    )
+                weighting_unit = verdict.unit
+                plan_json["weighting_unit"] = verdict.unit
+                plan_json["weighting_because"] = verdict.because
+                plan_json["weighting_priceable_share"] = verdict.priceable_share
+                plan_json["weighting_threshold"] = verdict.threshold
+                plan_json["weighting_denominator"] = verdict.denominator
+                plan_json["weighting_business_model"] = verdict.business_model
 
                 gaps, produce = derive_gaps_and_promises(
                     kept_inventory, tuple(hypotheses), framework_choice=choice,
@@ -1503,8 +1627,18 @@ def execute_run(
 
         # ── Stages 5–8. Findings, verified and scored. ──────────────────────
         ingest_clock = _dates_are_ingest_clock(signals)
+        # THE VERDICT IS PASSED IN, NEVER INFERRED FROM THE MAP. A non-empty
+        # book is not permission to weigh — the reader approved a unit, and
+        # `build_findings` is handed that answer rather than left to guess it
+        # from whichever files happened to come back out of storage.
+        weighted = weighting_unit == "value"
         result = build_findings(claims, currency="accounts", now=now,
-                                dates_are_ingest_clock=ingest_clock)
+                                dates_are_ingest_clock=ingest_clock,
+                                value_map=value_map, weighted=weighted)
+        logger.info("crucible_weighting unit=%s priced_book=%s findings=%s "
+                    "priced_findings=%s", weighting_unit or "count",
+                    len(value_map), len(result.findings),
+                    sum(1 for ok in result.priced if ok))
         # CAPTURED BEFORE THE MERGE, and this is not a style preference.
         # `assign_clusters` returns its OWN `"clusters"` key counting only the
         # groups formed among the graph-unthemed leftovers, and the merge below
@@ -1579,6 +1713,20 @@ def execute_run(
                 "impact": {
                     "value": impact.value,
                     "affected_population": impact.affected_population,
+                    # WHICH OF THE TWO LISTS THIS IS IN — DERIVED HERE FROM
+                    # `native_units`, NOT STORED AS A SECOND FACT. A weighted
+                    # run carries a money unit on exactly the findings it could
+                    # price, so a `priced` column would be a copy of something
+                    # already in the row, free to disagree with it after a
+                    # backfill or a re-enrichment. `crucible_findings` also has
+                    # no such column, and a migration for a derivable boolean
+                    # is a migration to keep in step for ever.
+                    #
+                    # False is a statement about a WEIGHTED run: on a counted
+                    # run no finding carries the unit and the flag is False for
+                    # all of them, which is correct — there is one list, and
+                    # none of it was ranked by revenue.
+                    "priced": ACCOUNT_VALUE_UNIT in impact.native_units,
                     # Real, transcript-stated commercial figures (if any of
                     # this finding's claims carry one) — carried alongside
                     # `value`, never folded into it, so the report can say
@@ -2625,6 +2773,27 @@ def _read_uploads(uploads: tuple[tuple[str, str], ...], workspace_id: str):
         files.append((upload_filename(name, key), data))
     tables, skipped = read_uploads(files)
     return tables, tuple(unread) + skipped
+
+
+def _stored_uploads(
+    row: dict, workspace_id: str,
+) -> tuple[tuple[str, str], ...]:
+    """The attachments a stored plan was built over, re-checked against the
+    caller's own workspace. Total: an unreadable blob costs the uploads, never
+    the approval."""
+    try:
+        stored = _row_meta(row).get("uploads") or []
+        return tuple(
+            (str(pair[0]), str(pair[1]))
+            for pair in stored
+            if isinstance(pair, (list, tuple)) and len(pair) == 2
+            and attachments_storage.owns_key(
+                workspace_id=workspace_id, key=str(pair[0]))
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("crucible: could not read stored uploads for a run",
+                       exc_info=True)
+        return ()
 
 
 def _self_account_keys(company_id: str) -> frozenset[str]:
