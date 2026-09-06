@@ -458,11 +458,25 @@ def resolve(
         # answers. A reader who connected contract data should still learn it
         # was recognised — and should learn, in the same breath, that it does
         # not move the sizing.
-        notes.append(
-            "Your own evidence carries what an account is worth, so that "
-            "figure is read from your own data rather than asked of you. It "
-            "does not change how anything is sized here: a theme's size is "
-            "still a count of the accounts it touches, never money.")
+        #
+        # AND THE DISCLAIMER IS GATED ON THE SETTLED UNIT, because the engine
+        # can now weight. Left unconditional it rendered immediately above
+        # `weighting_because` — "themes are ranked by the revenue behind
+        # them" — so a weighted plan stated both units on adjacent lines and
+        # `prompt_block` handed the pair to the composition model as settled
+        # fact. A disclaimer kept past the release that made it false is the
+        # same defect as the overclaim it was written to remove.
+        #
+        # The planner's own version of this sentence is already gated: its
+        # step is emitted only when there is no `priceable_coverage`. This
+        # note was the one site that was not.
+        note = ("Your own evidence carries what an account is worth, so that "
+                "figure is read from your own data rather than asked of you.")
+        if weighting_unit != "value":
+            note += (" It does not change how anything is sized here: a "
+                     "theme's size is still a count of the accounts it "
+                     "touches, never money.")
+        notes.append(note)
     else:
         notes.append(
             "Nothing read here carries a per-account value, so every size is "
