@@ -1373,6 +1373,16 @@ def build_findings(
             ),
             "echo_check_skipped": bool(dates_are_ingest_clock),
             "claims_without_artifact": sum(1 for c in claims if not c.artifact_id),
+            # DERIVED FROM THIS CALL'S OWN ARGUMENT, NEVER HARDCODED. `accounts`
+            # is narrowed to `goal_accounts` a few dozen lines above only when a
+            # caller actually passes one — no production caller does yet (see
+            # `_REACH_SEGMENT`'s comment) — so this key is False on every real
+            # run today. It exists so a reader-facing disclosure of that fact
+            # (`report._reach_not_narrowed_note`) reads it back rather than
+            # asserting it, and therefore stops being true the same day a
+            # caller starts passing `goal_accounts`, with no second place to
+            # remember to update.
+            "goal_population_filter_applied": goal_accounts is not None,
         },
     )
 

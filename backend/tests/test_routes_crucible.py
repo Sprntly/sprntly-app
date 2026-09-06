@@ -2138,6 +2138,45 @@ def test_the_route_derives_themes_from_GROUPS_not_from_CLAIMS(ctx, monkeypatch):
     assert p["groups"] == p["themes"] + p["ungroupable_groups"], p
 
 
+# ─── Reach not narrowed to the goal's population ────────────────────────────
+
+def test_a_retention_run_records_that_reach_was_never_narrowed(ctx):
+    """END TO END: a real retention run, through `/approve`, records the fact
+    the report's disclosure reads back — `goal_population_filter_applied` is
+    False because no caller passes `build_findings`' `goal_accounts` argument,
+    and the plan's own routing genuinely classified this goal as RETENTION.
+
+    `NO_METRIC` AS THE GOAL, NOT A CHURN PHRASE. `_METRIC_CONVENTIONS`'
+    churn/retention entries both name "revenue" in their own contrast clause
+    ("rather than revenue churn"), so a goal that FOLDS onto one of them
+    classifies `book_wide`, not `retention` — a real, separate, pre-existing
+    interaction this test must not trip over. Using the goal that reaches its
+    own confirmation gate and supplying a clean definition there is what
+    isolates the fact this test actually checks.
+
+    Both halves are asserted so a change that stops classifying this
+    definition as retention, or that starts passing `goal_accounts`, fails
+    this test rather than leaving it green for the wrong reason.
+    """
+    for i in range(3):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
+    confirmed = _confirm(
+        ctx, run_id,
+        text="accounts lost to churn in the period over accounts held at "
+             "its start",
+    )
+    assert confirmed.status_code == 200, confirmed.text
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200, approved.text
+
+    row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    prioritisation = row["prioritisation"]
+    assert prioritisation["plan"]["routing"]["goal_class"] == "retention", (
+        prioritisation.get("plan", {}).get("routing"))
+    assert prioritisation["goal_population_filter_applied"] is False
+
 
 # ─── §6: the calculation, stated in the same step ───────────────────────────
 
