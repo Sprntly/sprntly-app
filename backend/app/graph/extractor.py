@@ -15,7 +15,7 @@ import logging
 import re
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Sequence
 
 from app.graph.config_layers import resolve_config
 from app.graph.embeddings import embed_texts
@@ -525,6 +525,24 @@ def _finish_extract(
     )
 
 
+def extract_prompt(*, doc_name: str, text: str,
+                   source_hint: str | None = None) -> tuple[str, str]:
+    """The `(system, user)` pair every main-pass extraction sends, for a caller
+    that has to reach `llm_call` (or the batch API) itself rather than through
+    `extract_document`.
+
+    THERE IS ONE EXTRACTION PROMPT AND THIS IS HOW A SECOND CALLER GETS IT.
+    `_SYSTEM` and `_extract_input` are module-private on purpose — a caller
+    that assembled its own approximation of them would be a second classifier,
+    free to drift from the one the knowledge graph was built with, and the
+    whole point of a run-scoped reader is that a sentence in an attached file
+    is typed the SAME WAY a sentence arriving through a connector is. So the
+    pair is exported, and `build_extract_request` below is now built from it
+    rather than from the two names directly.
+    """
+    return _SYSTEM, _extract_input(doc_name, text, source_hint)
+
+
 def build_extract_request(*, doc_name: str, text: str,
                           source_hint: str | None = None) -> dict:
     """Build the `messages.create` kwargs for one `extract_document` main-pass
@@ -545,9 +563,11 @@ def build_extract_request(*, doc_name: str, text: str,
     backfill DOES need a bound skill or a non-default model should extend
     this rather than build kwargs by hand.
     """
+    system, user = extract_prompt(
+        doc_name=doc_name, text=text, source_hint=source_hint)
     return build_json_kwargs(
-        system=_SYSTEM,
-        user=_extract_input(doc_name, text, source_hint),
+        system=system,
+        user=user,
         model=DEFAULT_MODEL,
         schema=_EXTRACT_SCHEMA,
     )
@@ -594,10 +614,36 @@ def parse_extract_response(
     )
 
 
-def _write_items(
-    facade: GraphFacade,
+def drop_malformed_items(
+    items: list, *, enterprise_id: str, doc_name: str,
+) -> list[dict]:
+    """The non-dict elements of a model's `signals` array, dropped and logged.
+
+    Defense in depth: `_finish_extract` guarantees `items` itself is a list
+    (see MalformedLLMResultError), but an individual ELEMENT could still be the
+    wrong shape (e.g. the model's `signals` array mixing a real object with a
+    stray string). Drop just that element rather than letting `i["theme"]` /
+    `i["content"]` downstream take an AttributeError/TypeError and lose every
+    OTHER well-formed item in the same response.
+
+    Split out of `_write_items` so a caller wanting only the pure
+    item -> Signal projection (`signals_from_items`) applies the SAME filter
+    the write path applies, rather than a second near-copy that can drift.
+    """
+    malformed = [i for i in items if not isinstance(i, dict)]
+    if malformed:
+        logger.warning(
+            "dropping %d malformed (non-dict) signal item(s) for "
+            "enterprise=%s doc=%s: %r",
+            len(malformed), enterprise_id, doc_name, malformed,
+        )
+    return [i for i in items if isinstance(i, dict)]
+
+
+def signals_from_items(
     enterprise_id: str,
     items: list[dict],
+    vectors: Sequence[Sequence[float]],
     *,
     doc_name: str,
     origin: str | None,
@@ -607,93 +653,47 @@ def _write_items(
     resolved_skill_id: str | None,
     triage_category: str | None,
     prompt_version: str,
-    tau_high: float,
-    tau_low: float,
     force_source_type: str | None = None,
     source_type_default: str | None = None,
     valid_at: Optional[datetime] = None,
-) -> dict:
-    """Shared write path: signal-schema `items` -> embedded/theme-resolved
-    Signals + theme Relationships in the graph. Factored out of
-    `extract_document` so `run_checklist_pass` (the directed-checklist second
-    call) writes through the EXACT same idempotency, theme-resolution and
-    provenance logic rather than a parallel near-copy — one write path, one
-    place a future fix has to land.
+    #: THE UUID5 NAMESPACE THE SIGNAL ID IS DRAWN FROM. Defaults to the graph's
+    #: own, so every pre-existing caller derives exactly the id it always did.
+    #:
+    #: A RUN-SCOPED READER MUST PASS ITS OWN, and the reason is a collision
+    #: rather than tidiness. The id below is keyed on `enterprise_id|content`,
+    #: so a sentence in an attached file that also exists verbatim in
+    #: `kg_signal` derives the SAME id as the stored row — and the two would
+    #: then be one key in every `claims_by_id` map downstream, with the
+    #: run-scoped claim silently standing in for a real graph signal (or being
+    #: overwritten by it). A separate namespace makes that impossible by
+    #: construction rather than by hoping the sentences differ.
+    id_namespace: uuid.UUID = _NS,
+) -> list[Signal]:
+    """Signal-schema `items` (+ their content embeddings) -> `Signal` objects.
 
-    Each item may carry an optional ``_provenance_extra`` key (used by the
-    checklist pass to stamp ``provenance["checklist_category"]`` per-item,
-    since a checklist batch mixes categories in one call unlike a normal
-    document's uniform `provenance_extra`); every pre-existing caller's items
-    never carry that key, so behaviour there is unchanged.
+    THE PURE HALF OF `_write_items`, AND NOTHING ELSE. Every line here is a
+    function of its arguments: source_type defaulting, the amount/account
+    sanitising, the content-keyed uuid5 id, the provenance dict. No graph
+    reads, no writes, no network, no clock beyond the caller-supplied
+    `valid_at`.
 
-    ``valid_at`` (default ``None``): the real-world date to stamp on every
-    `Signal` this writes, in place of the `valid_at` field's ingest-time
-    default — see `extract_document`'s docstring. Passed through, not
-    defaulted here: only present as an explicit kwarg on the `Signal(...)`
-    call below when the caller supplied one, so a caller that leaves this
-    `None` gets EXACTLY the pre-existing `Signal(default_factory=_now)`
-    behaviour, not a `valid_at=None` override of it (a dataclass field's
-    `default_factory` only fires when the kwarg is omitted, not when it is
-    passed explicitly as `None`)."""
-    if not items:
-        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+    Split out because projection and persistence were interleaved in one loop,
+    so the only way to ask "what Signals does this document produce" was to
+    write them into a tenant's knowledge graph and read them back. A
+    run-scoped reader — a file analysed once, which must reach `kg_signal`
+    under no circumstances — needs the first without the second.
 
-    # Defense in depth: `_finish_extract` guarantees `items` itself is a
-    # list (see MalformedLLMResultError), but an individual ELEMENT could
-    # still be the wrong shape (e.g. the model's `signals` array mixing a
-    # real object with a stray string). Drop just that element rather than
-    # letting `i["theme"]` / `i["content"]` below take an AttributeError/
-    # TypeError and lose every OTHER well-formed item in the same response.
-    malformed = [i for i in items if not isinstance(i, dict)]
-    if malformed:
-        logger.warning(
-            "dropping %d malformed (non-dict) signal item(s) for "
-            "enterprise=%s doc=%s: %r",
-            len(malformed), enterprise_id, doc_name, malformed,
-        )
-        items = [i for i in items if isinstance(i, dict)]
-    if not items:
-        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
-
-    # Batch-embed signal contents + theme labels.
-    theme_labels = sorted({i["theme"].strip() for i in items if i.get("theme")})
-    vectors = embed_texts([i["content"] for i in items] + theme_labels,
-                          enterprise_id=enterprise_id, purpose="kg_extract")
-    sig_vecs = vectors[: len(items)]
-    theme_vecs = dict(zip(theme_labels, vectors[len(items):]))
-
-    # Resolve / create each distinct theme once (find-or-create, #2).
-    theme_ids: dict[str, str] = {}
-    new_themes = 0
-    for label in theme_labels:
-        vec = theme_vecs[label]
-        candidates = facade.find_candidates(enterprise_id, "theme", vec, k=3)
-        if candidates and candidates[0][1] >= tau_high:
-            ent = candidates[0][0]
-            theme_ids[label] = ent.id
-            if label.lower() not in (a.lower() for a in ent.aliases) \
-               and label.lower() != ent.canonical_label.lower():
-                # record the new surface form as an alias (best-effort)
-                logger.info("theme alias: %r -> %s", label, ent.canonical_label)
-        else:
-            ent = Entity(
-                enterprise_id=enterprise_id, type="theme",
-                canonical_label=label, embedding=vec,
-                provenance={"source": "extractor", "doc": doc_name},
-                properties={"gray_zone": bool(candidates and candidates[0][1] >= tau_low)},
-            )
-            facade.create_entity(enterprise_id, ent)
-            theme_ids[label] = ent.id
-            new_themes += 1
-
-    written = skipped = 0
-    # Every id this document asserts (written + duplicate-skipped) — the
-    # keep-set for replace semantics. See extract_document's docstring.
-    signal_ids: list[str] = []
-    for item, vec in zip(items, sig_vecs):
+    `vectors` is positionally aligned with `items` (index i is the embedding of
+    `items[i]["content"]`), the alignment `_write_items` already relies on;
+    embedding is a network call and stays with the caller. `items` must already
+    have been through `drop_malformed_items`.
+    """
+    out: list[Signal] = []
+    for item, vec in zip(items, vectors):
         # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
         # cannot duplicate the same fact under a different doc name.
-        sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
+        sig_id = str(uuid.uuid5(
+            id_namespace, f"{enterprise_id}|{item['content']}"))
         # Scenario-noise guardrail (shared _SYSTEM): the model may lower
         # `reality_confidence` for a fact it is unsure is real vs stated only
         # inside a simulated/hypothetical scenario. Kept-not-dropped by design —
@@ -747,7 +747,7 @@ def _write_items(
             or source_type not in SIGNAL_SOURCE_TYPES
         ):
             source_type = source_type_default
-        signal = Signal(
+        out.append(Signal(
             id=sig_id,
             enterprise_id=enterprise_id,
             source_type=source_type,
@@ -779,7 +779,114 @@ def _write_items(
             skill_id=resolved_skill_id or "generic",
             origin=origin,
             channel=(provenance_extra or {}).get("channel"),
-        )
+        ))
+    return out
+
+
+def _write_items(
+    facade: GraphFacade,
+    enterprise_id: str,
+    items: list[dict],
+    *,
+    doc_name: str,
+    origin: str | None,
+    source_call_id: int | None,
+    source_prov: dict[str, str],
+    provenance_extra: dict[str, object] | None,
+    resolved_skill_id: str | None,
+    triage_category: str | None,
+    prompt_version: str,
+    tau_high: float,
+    tau_low: float,
+    force_source_type: str | None = None,
+    source_type_default: str | None = None,
+    valid_at: Optional[datetime] = None,
+) -> dict:
+    """Shared write path: signal-schema `items` -> embedded/theme-resolved
+    Signals + theme Relationships in the graph. Factored out of
+    `extract_document` so `run_checklist_pass` (the directed-checklist second
+    call) writes through the EXACT same idempotency, theme-resolution and
+    provenance logic rather than a parallel near-copy — one write path, one
+    place a future fix has to land.
+
+    Each item may carry an optional ``_provenance_extra`` key (used by the
+    checklist pass to stamp ``provenance["checklist_category"]`` per-item,
+    since a checklist batch mixes categories in one call unlike a normal
+    document's uniform `provenance_extra`); every pre-existing caller's items
+    never carry that key, so behaviour there is unchanged.
+
+    ``valid_at`` (default ``None``): the real-world date to stamp on every
+    `Signal` this writes, in place of the `valid_at` field's ingest-time
+    default — see `extract_document`'s docstring. Passed through, not
+    defaulted here: only present as an explicit kwarg on the `Signal(...)`
+    call below when the caller supplied one, so a caller that leaves this
+    `None` gets EXACTLY the pre-existing `Signal(default_factory=_now)`
+    behaviour, not a `valid_at=None` override of it (a dataclass field's
+    `default_factory` only fires when the kwarg is omitted, not when it is
+    passed explicitly as `None`)."""
+    if not items:
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    # Defense in depth — see `drop_malformed_items`, shared with the pure
+    # projection half so both apply the identical filter.
+    items = drop_malformed_items(
+        items, enterprise_id=enterprise_id, doc_name=doc_name)
+    if not items:
+        return {"signals": 0, "themes": 0, "skipped": 0, "signal_ids": []}
+
+    # Batch-embed signal contents + theme labels.
+    theme_labels = sorted({i["theme"].strip() for i in items if i.get("theme")})
+    vectors = embed_texts([i["content"] for i in items] + theme_labels,
+                          enterprise_id=enterprise_id, purpose="kg_extract")
+    sig_vecs = vectors[: len(items)]
+    theme_vecs = dict(zip(theme_labels, vectors[len(items):]))
+
+    # Resolve / create each distinct theme once (find-or-create, #2).
+    theme_ids: dict[str, str] = {}
+    new_themes = 0
+    for label in theme_labels:
+        vec = theme_vecs[label]
+        candidates = facade.find_candidates(enterprise_id, "theme", vec, k=3)
+        if candidates and candidates[0][1] >= tau_high:
+            ent = candidates[0][0]
+            theme_ids[label] = ent.id
+            if label.lower() not in (a.lower() for a in ent.aliases) \
+               and label.lower() != ent.canonical_label.lower():
+                # record the new surface form as an alias (best-effort)
+                logger.info("theme alias: %r -> %s", label, ent.canonical_label)
+        else:
+            ent = Entity(
+                enterprise_id=enterprise_id, type="theme",
+                canonical_label=label, embedding=vec,
+                provenance={"source": "extractor", "doc": doc_name},
+                properties={"gray_zone": bool(candidates and candidates[0][1] >= tau_low)},
+            )
+            facade.create_entity(enterprise_id, ent)
+            theme_ids[label] = ent.id
+            new_themes += 1
+
+    written = skipped = 0
+    # Every id this document asserts (written + duplicate-skipped) — the
+    # keep-set for replace semantics. See extract_document's docstring.
+    signal_ids: list[str] = []
+    # PROJECT, THEN WRITE. `signals_from_items` is the pure half — see its
+    # docstring; it returns exactly one Signal per item, in order, so zipping
+    # the items back on is what gives this loop the `theme`/`relationship`
+    # keys the edge write below still needs.
+    built = signals_from_items(
+        enterprise_id, items, sig_vecs,
+        doc_name=doc_name, origin=origin,
+        source_call_id=source_call_id, source_prov=source_prov,
+        provenance_extra=provenance_extra,
+        resolved_skill_id=resolved_skill_id,
+        triage_category=triage_category,
+        prompt_version=prompt_version,
+        force_source_type=force_source_type,
+        source_type_default=source_type_default,
+        valid_at=valid_at,
+    )
+    for item, signal in zip(items, built):
+        sig_id = signal.id
         try:
             facade.write_signal(enterprise_id, signal)
         except Exception as exc:  # noqa: BLE001 — see _is_duplicate_signal

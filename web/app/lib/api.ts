@@ -806,8 +806,9 @@ export type GoalRejection = {
  *  how many rectangles came out of it (a workbook is usually several).
  *
  *  ONLY THE FILES THAT YIELDED A TABLE APPEAR. A PDF carries prose, not
- *  columns, so a pack of seven documents and five spreadsheets lists five —
- *  which is the honest answer to "what did you actually read". */
+ *  columns, so a pack of seven documents and five spreadsheets lists five
+ *  here — the other seven are in `prose_uploads`, read as conversations
+ *  rather than as rectangles. */
 export type GoalPlanUpload = {
   name: string
   tables: number
@@ -826,6 +827,27 @@ export type GoalPlanUpload = {
 export type GoalPlanUnreadUpload = {
   name: string
   reason: string
+}
+
+/** One attached document read as PROSE — conversations, not rectangles.
+ *
+ *  THE THIRD THING A PLAN CAN SAY ABOUT AN ATTACHMENT. Before this there were
+ *  two: a workbook became a `GoalPlanUpload`, and everything else became a
+ *  `GoalPlanUnreadUpload` — so a reader who attached ten customer calls was
+ *  told, accurately, that their PDF was not a spreadsheet, and the run then
+ *  computed its answer without a word of it.
+ *
+ *  `how` IS THE FIELD THAT MATTERS, not `conversations`. A bare count is a
+ *  number a reader cannot check; the sentence says where the boundaries came
+ *  from and whether the split was verified against the count the document
+ *  states about itself, which is the only form of this a reader can disagree
+ *  with. Composed server-side, from the segmentation that actually ran, and
+ *  rendered verbatim — a client that recomposed it from `conversations` would
+ *  be a second implementation of the same statement, free to drift. */
+export type GoalPlanProseUpload = {
+  name: string
+  conversations: number
+  how: string
 }
 
 /** One source, and what THIS goal does with it. */
@@ -1009,6 +1031,9 @@ export type GoalRunPlan = {
    *  reader only when both are true, and this field is how the first becomes
    *  a statement rather than an inference from silence. */
   unread_uploads?: GoalPlanUnreadUpload[]
+  /** Attached documents read as prose, with how each was segmented. Absent on
+   *  every run without one and on plans stored before this existed. */
+  prose_uploads?: GoalPlanProseUpload[]
   /** How this goal routes the evidence, decided in code before composition. */
   routing?: GoalPlanRouting
   /** What this goal chose not to do, and why. */
