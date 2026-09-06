@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -1543,8 +1544,15 @@ def execute_run(
                        if r.get("source_type") not in excluded_sources]
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
+        # RESOLVED ONCE AND KEPT. The keys drive the exclusion; the names and
+        # their sources drive the coverage note that says what the exclusion
+        # did. Re-resolving for the note would let the two disagree, which is
+        # the one thing a disclosure may never do.
+        from app.crucible.claims import self_account_key_set
+
+        self_names = _self_names(company_id)
         claims, stats = project_signals(
-            signals, self_names=_self_account_keys(company_id))
+            signals, self_names=self_account_key_set(self_names))
         # SOURCES OF THE CLAIMS, not of the rows. Counting `signals` says "read
         # from 4 sources" on a tenant whose entire `docs` corpus was retired —
         # so a PM defending the ranking believes their documents are in it when
@@ -1796,7 +1804,7 @@ def execute_run(
         runs_db.update(
             run_id, company_id, status="ready",
             finished_at=datetime.now(timezone.utc).isoformat(),
-            coverage_notes=_coverage_notes(stats, result.stats),
+            coverage_notes=_coverage_notes(stats, result.stats, self_names),
         )
 
         # ── THE REPORT IS PUBLISHED BEFORE ANYTHING IS ASKED OF A MODEL. ────
@@ -2596,9 +2604,70 @@ def _progress(run_id: int, company_id: str, **fields) -> None:
         logger.warning("crucible: could not write progress for run %s", run_id)
 
 
-def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
+def _self_name_notes(claim_stats: dict, self_names) -> list[dict]:
+    """What the tenant's own-name exclusion did, in the three states it has.
+
+    THE SILENT STATES ARE THE WHOLE POINT. This exclusion shipped, worked, and
+    said nothing; then it went inert on a real tenant — its stored name did not
+    match what the graph called the company — and said nothing about that
+    either. Both runs rendered byte-identically to one where it had excluded a
+    third of the corpus, so there was no way to tell working from broken
+    without going to the database. The three states are therefore separate
+    notes with different words, not one note with a number in it.
+
+    NAMING THE KEYS AND THEIR SOURCES IS PART OF THE DISCLOSURE, not decoration
+    — widening the sources without saying which one fired would move the
+    silence rather than end it. A reader who sees `Contoso (product name)` can
+    confirm or reject the decision in a glance; `2,357 signals were excluded`
+    on its own is unauditable.
+    """
+    # NOTHING TO SAY. This caller did not resolve a name, so it must not
+    # imply that resolving one was attempted and failed.
+    if self_names is None:
+        return []
+
+    if not self_names:
+        return [{
+            "reason": "your own company's name could not be read",
+            "actual": "no name could be resolved for your own workspace, so "
+                      "signals naming your own company are counted as one of "
+                      "your accounts",
+        }]
+
+    named = ", ".join(f"{n.name} ({n.source})" for n in self_names)
+    excluded = claim_stats.get("self_excluded") or 0
+    seen = claim_stats.get("seen") or 0
+
+    if excluded:
+        return [{
+            "reason": "your own company was not counted as an account",
+            "actual": f"{excluded} of {seen} signals name your own company "
+                      f"and were not counted as one of your accounts — "
+                      f"read as {named}",
+        }]
+
+    # THE STATE THAT COST DAYS. A resolved name that matches nothing looks
+    # exactly like a corpus that never mentions the vendor, and the second
+    # sentence is the one that tells the reader which it is.
+    return [{
+        "reason": "your own company's name matched nothing",
+        "actual": f"your own company was read as {named}, and no signal in "
+                  f"these {seen} names it. If your evidence calls the "
+                  f"company something else, that name is still being counted "
+                  f"as one of your accounts",
+    }]
+
+
+def _coverage_notes(claim_stats: dict, pipeline_stats: dict,
+                    self_names=None) -> list[dict]:
     """Every degradation renders. A quietly thinner run is indistinguishable
-    from a complete one, which is worse than the failure it replaced."""
+    from a complete one, which is worse than the failure it replaced.
+
+    `self_names` is `_self_names`' output, and NONE IS NOT THE SAME AS EMPTY.
+    `None` means this caller never resolved the tenant's own name and has
+    nothing to say about it; `()` means the resolver ran and came back with
+    nothing, which is itself a degradation worth a note.
+    """
     notes = []
     # SUPERSEDED EVIDENCE, WHICH NOTHING WAS SAYING. `project_signals` counts
     # two independent drop reasons — `retired` and `no_timestamp` — and only
@@ -2662,6 +2731,10 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict) -> list[dict]:
                       f"so they are unsized rather than small — a missing "
                       f"number here is not a zero",
         })
+    # LAST, AND NEXT TO THE SIZING NOTE ON PURPOSE. "These findings name no
+    # account" and "these signals named you and were not counted as one" are
+    # the same reader's next two questions in that order.
+    notes.extend(_self_name_notes(claim_stats, self_names))
     return notes
 
 
@@ -2817,8 +2890,8 @@ def _stored_uploads(
         return ()
 
 
-def _self_account_keys(company_id: str) -> frozenset[str]:
-    """The tenant's own company name, as account keys, or nothing.
+def _self_names(company_id: str):
+    """Every name that means "the tenant", with where each was read from.
 
     THE VENDOR IS NOT ONE OF ITS OWN CUSTOMERS. The extractor writes the
     company's own name into `properties.account` on every row that mentions
@@ -2829,14 +2902,126 @@ def _self_account_keys(company_id: str) -> frozenset[str]:
     padding them to two, and satisfies the attribution gate on a corpus that
     should fail it.
 
+    ONE FIELD WAS NOT ENOUGH, MEASURED. This keyed only on
+    `companies.display_name`, and on the tenant the exclusion was BUILT for
+    that field held an operational label nobody says out loud, while every
+    call in the graph called the company by its product's name. The guard was
+    therefore inert for days and looked identical to a guard that was working,
+    because nothing counted what it had excluded. A workspace name is what
+    somebody typed into a settings form once; it is not necessarily what the
+    company is called. So the sources are a UNION now: the workspace name, the
+    primary product's name, the domain stem of either website, and any
+    hand-entered alias.
+
+    WIDER SOURCES, IDENTICAL MATCHING. Each source contributes exact
+    `account_key` keys and nothing loosens the comparison — see
+    `claims.self_account_key_set`. A tenant called `Salesforce Ventures` must
+    not swallow a customer called `Salesforce`, and no amount of extra source
+    coverage is worth a silent false exclusion.
+
+    NOT `business_context.identity.legal_name`. `_seed_from_known`
+    (`app.research.business_context_agent`) assigns it verbatim from
+    `display_name`, so it is the source already read here wearing a second
+    hat: it can only ever restate a key we have and would make the disclosure
+    claim two independent confirmations of one fact.
+
+    EVERY SOURCE FAILS INERT, SEPARATELY. Each read is wrapped on its own, so
+    a missing `products` row, an absent `website` column or an unparseable
+    context doc costs that one source and never the run — and never the other
+    sources either, which a single shared `try` would.
+    """
+    found: list = []
+    try:
+        _resolve_self_names(company_id, found)
+    except Exception:  # noqa: BLE001 — see the docstring
+        # BELT AND BRACES OVER THE PER-SOURCE GUARDS. Whatever was already
+        # resolved is kept: a later source failing must not cost an earlier
+        # source's key.
+        logger.warning("crucible: resolving the tenant's own names for %s "
+                       "failed after %d of them", company_id, len(found),
+                       exc_info=True)
+    return tuple(found)
+
+
+def _resolve_self_names(company_id: str, found: list) -> None:
+    """Append every resolvable self-name to `found`. See `_self_names`."""
+    from app.crucible.claims import self_name, domain_stem
+
+    def _add(value, source: str, *, allow_generic: bool = False) -> None:
+        resolved = self_name(value, source, allow_generic=allow_generic)
+        # FIRST SOURCE WINS ON A DUPLICATE KEY. The product is very often
+        # named after the company, and listing one key twice would read to
+        # a human as two independent confirmations of it.
+        if resolved and all(n.key != resolved.key for n in found):
+            found.append(resolved)
+
+    def _source(label: str, read):
+        try:
+            return read()
+        except Exception:  # noqa: BLE001 — see the docstring
+            logger.warning("crucible: could not read the %s for %s; it will "
+                           "not be excluded as the tenant's own name",
+                           label, company_id, exc_info=True)
+            return None
+
+    # THE WORKSPACE NAME FIRST, AND GENERIC-ALLOWED. If a workspace is
+    # literally called `Platform`, rows naming `Platform` really are it; the
+    # same string arriving from a PRODUCT is a guess and is filtered.
+    def _display():
+        from app.db.companies import display_name_for_company_id
+        return display_name_for_company_id(company_id)
+
+    _add(_source("workspace name", _display), "workspace name",
+         allow_generic=True)
+
+    # THE PRODUCT NAME. People say the product's name in calls far more often
+    # than the legal entity's, and on the tenant this exclusion was built for
+    # this source ALONE would have fixed it.
+    def _product():
+        from app.db.products import get_primary_product
+        return get_primary_product(company_id) or {}
+
+    product = _source("primary product", _product) or {}
+    _add(product.get("name"), "product name")
+
+    # THE DOMAIN STEM OF EITHER SITE. `example-corp.com` → `example corp` →
+    # the same key the graph would produce for `Example Corp`.
+    def _company_site():
+        from app.db.companies import website_for_company_id
+        return website_for_company_id(company_id)
+
+    _add(domain_stem(_source("company website", _company_site)),
+         "company website")
+    _add(domain_stem(product.get("website")), "product website")
+
+    # A GENUINE ALIAS LIST — the one field in the context doc that exists to
+    # hold "what else this company gets called", and the only one a human
+    # fills in by hand for that purpose.
+    def _aliases():
+        from app.business_context import load_business_context
+        doc = load_business_context(company_id)
+        raw = doc.identity.also_known_as.value if doc else None
+        if isinstance(raw, (list, tuple, set)):
+            return list(raw)
+        # One string may hold several. Every fragment still faces the full
+        # name guard, so a split that produces rubbish drops it.
+        return re.split(r"[,;\n]", raw) if isinstance(raw, str) else []
+
+    for alias in (_source("known-as names", _aliases) or []):
+        _add(alias, "also known as")
+
+
+def _self_account_keys(company_id: str) -> frozenset[str]:
+    """The tenant's own names as account keys — the key-only view of
+    `_self_names`, for the callers that do not disclose what they excluded.
+
     TOTAL, AND EMPTY ON ANY FAILURE. Losing the exclusion costs the old
     behaviour; raising here would cost the run.
     """
-    try:
-        from app.crucible.claims import self_account_keys
-        from app.db.companies import display_name_for_company_id
+    from app.crucible.claims import self_account_key_set
 
-        return self_account_keys(display_name_for_company_id(company_id))
+    try:
+        return self_account_key_set(_self_names(company_id))
     except Exception:  # noqa: BLE001 — see the docstring
         logger.warning("crucible: could not resolve the company name for %s; "
                        "its own name will be counted as an account",

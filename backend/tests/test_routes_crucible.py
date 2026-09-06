@@ -2922,3 +2922,318 @@ def test_the_open_gate_line_is_empty_for_a_conversation_without_one(ctx):
         ask_runner.reset_active_conversation(token)
     # …and with no conversation in scope at all.
     assert open_goal_gate_line(ctx.company_id) == ""
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# WHOSE NAME IS "US", AND SAYING WHAT THAT DID
+#
+# The vendor's own name was the single largest "account" in its own analysis —
+# 2,357 signals, 30.6% of everything attributed. The exclusion that fixed it
+# read ONE field, `companies.display_name`, and on the tenant it was built for
+# that field said one thing while every call in the graph said another. So the
+# guard was inert for days and looked exactly like a guard that was working,
+# because nothing counted or rendered what it had excluded.
+#
+# Two defects, one lesson: a mechanism that cannot say what it did cannot be
+# trusted to have done it. These tests hold both halves — the sources are a
+# union, and all three outcomes of the union are disclosed in different words.
+# ═══════════════════════════════════════════════════════════════════════════
+
+def _name_sources(monkeypatch, *, display=None, product=None, website=None,
+                  context=None):
+    """Stand in for the four places a tenant's own name can be read from.
+
+    Patched at the SOURCE modules because `_resolve_self_names` imports each
+    one inside its own function — which is what makes a missing table cost one
+    source instead of the run.
+    """
+    monkeypatch.setattr("app.db.companies.display_name_for_company_id",
+                        lambda _cid: display, raising=False)
+    monkeypatch.setattr("app.db.products.get_primary_product",
+                        lambda _cid: product, raising=False)
+    monkeypatch.setattr("app.db.companies.website_for_company_id",
+                        lambda _cid: website, raising=False)
+    monkeypatch.setattr("app.business_context.load_business_context",
+                        lambda _cid: context, raising=False)
+
+
+def _context(**identity):
+    from app.business_context import BusinessContext, Meta
+    doc = BusinessContext()
+    for field, value in identity.items():
+        setattr(doc.identity, field, Meta(value=value, src="user"))
+    return doc
+
+
+def test_the_product_name_excludes_the_vendor_when_the_workspace_name_cannot():
+    """THE DEFECT, EXACTLY. The tenant's stored workspace name was an
+    operational label; the graph called the company by its product's name.
+    Keying only on the workspace name made the exclusion inert while leaving
+    it indistinguishable from one that was working."""
+    from app.crucible.claims import account_key, normalise_account
+    from app.routes.crucible import _self_account_keys
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(
+            mp,
+            display="Northwind Operations",
+            product={"name": "Contoso", "website": ""},
+        )
+        keys = _self_account_keys("comp-1")
+    finally:
+        mp.undo()
+
+    assert account_key("Contoso") in keys, (
+        "the product's name is what the corpus calls this company")
+    # The workspace name is not replaced by it — the sources are a union.
+    assert account_key("Northwind Operations") in keys
+    # And the exclusion actually bites on the corpus spelling.
+    assert normalise_account("contoso", self_names=keys) is None
+    assert normalise_account("Fabrikam", self_names=keys) == "Fabrikam"
+
+
+def test_a_website_contributes_the_company_name_written_into_its_domain():
+    from app.crucible.claims import account_key
+    from app.routes.crucible import _self_account_keys
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(
+            mp,
+            display="Northwind Operations",
+            product={"name": "", "website": "https://www.example-corp.com/x"},
+            website="http://adventureworks.co.uk",
+        )
+        keys = _self_account_keys("comp-1")
+    finally:
+        mp.undo()
+
+    assert account_key("Example Corp") in keys
+    assert account_key("AdventureWorks") in keys
+
+
+def test_a_generic_product_name_is_not_promoted_to_an_exclusion_key():
+    """A product called `Analytics` is no evidence that a signal naming
+    `Analytics` is the vendor, and a false exclusion deletes a real account
+    with nothing on the page to show it happened."""
+    from app.crucible.claims import account_key
+    from app.routes.crucible import _self_account_keys
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(mp, display="Northwind Operations",
+                      product={"name": "Analytics Platform", "website": ""})
+        generic = _self_account_keys("comp-1")
+
+        # THE POSITIVE CONTROL, in the same shape: this cannot be passing
+        # because the product source is ignored.
+        _name_sources(mp, display="Northwind Operations",
+                      product={"name": "Contoso Analytics", "website": ""})
+        named = _self_account_keys("comp-1")
+    finally:
+        mp.undo()
+
+    assert account_key("Analytics Platform") not in generic
+    assert generic == {account_key("Northwind Operations")}
+    assert account_key("Contoso Analytics") in named
+
+
+def test_the_legal_name_contributes_no_key_beyond_the_workspace_name():
+    """PINNED SO NOBODY HELPFULLY ADDS IT. `identity.legal_name` is assigned
+    verbatim from `display_name` by `_seed_from_known`, so it is the source
+    already read here wearing a second hat: it can only restate a key we have,
+    while making the disclosure claim two confirmations of one fact."""
+    from app.crucible.claims import account_key
+    from app.routes.crucible import _self_names
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(
+            mp,
+            display="Northwind Operations",
+            # A legal_name that DIFFERS, so a reader of this test can see the
+            # key would be new if it were read — and an alias in the same doc,
+            # so the test cannot pass by the context never being loaded.
+            context=_context(legal_name="Fabrikam Holdings",
+                             also_known_as="Contoso"),
+        )
+        names = _self_names("comp-1")
+    finally:
+        mp.undo()
+
+    keys = {n.key for n in names}
+    assert account_key("Fabrikam Holdings") not in keys
+    assert not any("legal" in n.source for n in names)
+    # THE CONTROL: the alias list in the very same document IS read.
+    assert account_key("Contoso") in keys
+
+
+def test_the_alias_list_is_read_as_a_list_or_as_one_string():
+    from app.crucible.claims import account_key
+    from app.routes.crucible import _self_names
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(mp, display="Northwind Operations",
+                      context=_context(also_known_as=["Contoso", "Fabrikam"]))
+        listed = {n.key for n in _self_names("comp-1")}
+
+        _name_sources(mp, display="Northwind Operations",
+                      context=_context(also_known_as="Contoso, Fabrikam, Inc."))
+        joined = {n.key for n in _self_names("comp-1")}
+    finally:
+        mp.undo()
+
+    assert {account_key("Contoso"), account_key("Fabrikam")} <= listed
+    assert {account_key("Contoso"), account_key("Fabrikam")} <= joined
+    # The fragment a comma-split leaves behind is not a name and must not
+    # become a key that matches every `... Inc` account in the corpus.
+    assert "inc" not in joined
+
+
+def test_every_source_fails_inert_and_costs_only_itself():
+    """Unreadable or absent costs the EXCLUSION, never the run — and never the
+    other sources either, which one shared `try` would."""
+    from app.crucible.claims import account_key
+    from app.routes.crucible import _self_names, _self_account_keys
+
+    def _boom(_cid):
+        raise RuntimeError("table is gone")
+
+    import pytest as _pytest
+    for broken in ("app.db.companies.display_name_for_company_id",
+                   "app.db.products.get_primary_product",
+                   "app.db.companies.website_for_company_id",
+                   "app.business_context.load_business_context"):
+        mp = _pytest.MonkeyPatch()
+        try:
+            _name_sources(
+                mp,
+                display="Northwind Operations",
+                product={"name": "Contoso", "website": "https://fabrikam.com"},
+                website="https://adventureworks.com",
+                context=_context(also_known_as="Tailspin"),
+            )
+            mp.setattr(broken, _boom, raising=False)
+            keys = _self_account_keys("comp-1")
+        finally:
+            mp.undo()
+        assert keys, f"{broken} failing emptied every other source"
+        # Four independent sources; breaking one may cost at most two keys
+        # (the product row carries both a name and a website).
+        assert len(keys) >= 3, f"{broken} cost more than its own keys"
+
+    # ...and all four failing at once is empty, not an exception.
+    mp = _pytest.MonkeyPatch()
+    try:
+        for broken in ("app.db.companies.display_name_for_company_id",
+                       "app.db.products.get_primary_product",
+                       "app.db.companies.website_for_company_id",
+                       "app.business_context.load_business_context"):
+            mp.setattr(broken, _boom, raising=False)
+        assert _self_names("comp-1") == ()
+        assert _self_account_keys("comp-1") == frozenset()
+    finally:
+        mp.undo()
+    assert account_key("Contoso")  # the import above is real, not a typo
+
+
+def test_one_key_from_two_sources_is_reported_once():
+    """The product is very often named after the company. Listing the key
+    twice would read to a human as two independent confirmations of it."""
+    from app.routes.crucible import _self_names
+
+    import pytest as _pytest
+    mp = _pytest.MonkeyPatch()
+    try:
+        _name_sources(mp, display="Contoso",
+                      product={"name": "contoso", "website": ""})
+        names = _self_names("comp-1")
+    finally:
+        mp.undo()
+
+    assert [n.source for n in names] == ["workspace name"]
+
+
+# ── The disclosure: three states, three different sentences ─────────────────
+
+def _self(name, source):
+    from app.crucible.claims import self_name
+    return self_name(name, source, allow_generic=True)
+
+
+def test_an_exclusion_that_fired_says_how_many_and_which_name():
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 11402, "projected": 11402, "retired": 0, "no_timestamp": 0,
+         "self_excluded": 2357},
+        {},
+        (_self("Contoso", "product name"),),
+    )
+    said = [n for n in notes
+            if n["reason"] == "your own company was not counted as an account"]
+    assert said, [n["reason"] for n in notes]
+    assert "2357 of 11402" in said[0]["actual"]
+    # NAMED, AND ATTRIBUTED. `2,357 signals were excluded` on its own is
+    # unauditable; the reader has to be able to say "that is right" or "that
+    # is our biggest customer" in one glance.
+    assert "Contoso (product name)" in said[0]["actual"]
+
+
+def test_a_name_that_matched_nothing_says_that_instead():
+    """THE DEFECT THAT COST DAYS. A resolved name matching nothing renders
+    identically to a corpus that never mentions the vendor — unless the run
+    says which it is. This must be impossible to reintroduce silently."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 11402, "projected": 11402, "retired": 0, "no_timestamp": 0,
+         "self_excluded": 0},
+        {},
+        (_self("Northwind Operations", "workspace name"),),
+    )
+    said = [n for n in notes
+            if n["reason"] == "your own company's name matched nothing"]
+    assert said, [n["reason"] for n in notes]
+    assert "Northwind Operations (workspace name)" in said[0]["actual"]
+    # The sentence that would have saved the days: what to do about it.
+    assert "calls the company something else" in said[0]["actual"]
+
+
+def test_the_two_states_are_never_the_same_sentence():
+    """The whole point. A run where the guard fired and a run where it was
+    inert must not be able to render the same words."""
+    from app.routes.crucible import _coverage_notes
+    base = {"seen": 11402, "projected": 11402, "retired": 0, "no_timestamp": 0}
+    resolved = (_self("Contoso", "product name"),)
+    fired = _coverage_notes({**base, "self_excluded": 2357}, {}, resolved)
+    inert = _coverage_notes({**base, "self_excluded": 0}, {}, resolved)
+    assert [n["reason"] for n in fired] != [n["reason"] for n in inert]
+    assert [n["actual"] for n in fired] != [n["actual"] for n in inert]
+
+
+def test_no_name_resolved_at_all_is_disclosed_too():
+    """The third state, and the worst one: nothing resolved means the vendor
+    IS being counted as one of its own accounts."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 11402, "projected": 11402, "retired": 0, "no_timestamp": 0,
+         "self_excluded": 0},
+        {}, (),
+    )
+    assert [n["reason"] for n in notes] == [
+        "your own company's name could not be read"]
+
+
+def test_a_caller_that_did_not_resolve_a_name_says_nothing_about_it():
+    """`None` is not `()`. A note that fires where nothing was attempted
+    trains the reader to skip the section that matters."""
+    from app.routes.crucible import _coverage_notes
+    notes = _coverage_notes(
+        {"seen": 49, "projected": 44, "retired": 0, "no_timestamp": 5}, {})
+    assert [n["reason"] for n in notes] == ["undated evidence"]

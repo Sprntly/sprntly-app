@@ -31,9 +31,12 @@ from app.crucible.claims import (
     KIND_TO_CLAIM_TYPE,
     account_key,
     canonical_account_names,
+    domain_stem,
     infer_account_sides,
     normalise_account,
+    self_account_key_set,
     self_account_keys,
+    self_name,
     project_signal,
     project_signals,
 )
@@ -377,7 +380,8 @@ def test_the_drop_counts_are_what_a_coverage_note_is_built_from():
     one that read everything — the degradation the spec calls worse than an
     outright failure."""
     claims, stats = project_signals([sig(id=str(i)) for i in range(5)])
-    assert stats == {"seen": 5, "projected": 5, "no_timestamp": 0, "retired": 0}
+    assert stats == {"seen": 5, "projected": 5, "no_timestamp": 0,
+                     "retired": 0, "self_excluded": 0}
     assert len(claims) == stats["projected"]
 
 
@@ -755,3 +759,164 @@ def test_customer_side_is_decided_once_per_collapsed_account():
     by_id = {c.id: c for c in claims}
     assert by_id["a"].population.segments["accounts"] == ("Northwind Labs",)
     assert by_id["a"].population.segments["customer_side"] == ("Northwind Labs",)
+
+
+# ── What the self-name exclusion actually did, counted ───────────────────────
+#
+# The exclusion shipped, worked, and said nothing. Then on a real tenant it
+# went INERT — the stored workspace name did not match what the graph called
+# the company — and said nothing about that either. A working guard and a dead
+# guard produced byte-identical output, so the only way to tell them apart was
+# to open the database. These tests are the counting half of ending that.
+
+def test_the_exclusion_counts_the_rows_it_took_the_account_off():
+    """`self_excluded` is what the disclosure is built from. Without it a run
+    where the guard fired on a third of the corpus and one where it fired on
+    nothing render the same page."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"account": "AdventureWorks"}),
+            sig(id="b", properties={"account": "Adventure Works"}),
+            sig(id="c", properties={"customer": "Northwind"}),
+            sig(id="d", properties={})]
+    _claims, stats = project_signals(rows, self_names=selves)
+    assert stats["self_excluded"] == 2, (
+        "both spellings of the vendor's own name are one exclusion each")
+    assert stats["seen"] == 4
+
+
+def test_a_row_is_counted_once_however_many_fields_name_the_vendor():
+    """ROWS, NOT MENTIONS. `2 of 4 signals` has to be a share a reader can
+    reconcile against the corpus size; counting fields would let the number
+    exceed the denominator."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"account": "AdventureWorks",
+                                    "customer": "Adventure Works",
+                                    "organization": "adventureworks"})]
+    _claims, stats = project_signals(rows, self_names=selves)
+    assert stats["self_excluded"] == 1
+
+
+def test_nothing_excluded_is_counted_as_nothing_not_as_missing():
+    """The control, and the state that cost days: a resolved name that matches
+    NOTHING must report zero, not absence. A caller cannot tell a story about
+    a key that is not there."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"customer": "Northwind"})]
+    _claims, stats = project_signals(rows, self_names=selves)
+    assert stats["self_excluded"] == 0
+    # ...and with no name resolved at all, still a number.
+    _claims, stats = project_signals(rows)
+    assert stats["self_excluded"] == 0
+
+
+def test_the_count_equals_what_the_engine_really_dropped():
+    """A disclosed number that does not match the behaviour is a second wrong
+    number, not a fix. Every row counted here must be a row that lost its
+    account, and no row that kept one may be counted."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"account": "AdventureWorks"}),
+            sig(id="b", properties={"account": "Northwind"}),
+            # Names BOTH: it keeps a real account and is still a row the
+            # vendor's name was taken off.
+            sig(id="c", properties={"account": "AdventureWorks",
+                                    "customer": "Contoso"})]
+    claims, stats = project_signals(rows, self_names=selves)
+    named = {c.id: c.population.segments.get("accounts", ()) for c in claims}
+    assert named["a"] == ()
+    assert named["b"] == ("Northwind",)
+    assert named["c"] == ("Contoso",)
+    lost_the_vendor = sum(
+        1 for r in rows
+        if "AdventureWorks" in str(r["properties"]).replace(" ", ""))
+    assert stats["self_excluded"] == lost_the_vendor == 2
+
+
+# ── Which names may become an exclusion key ──────────────────────────────────
+
+def test_a_generic_product_name_never_becomes_an_exclusion_key():
+    """`Analytics` is a category, not a company. Promoting one to an exclusion
+    key deletes a real account from the analysis with nothing on the page to
+    say it happened — the exact damage this guard exists to prevent, wearing
+    the costume of a fix."""
+    for generic in ("Analytics", "Platform", "Dashboard", "reporting", "Inc.",
+                    # A leading article walked straight past a denylist that
+                    # compared against the whole key, so the test is of the
+                    # WORDS, not of the string.
+                    "The Platform", "Analytics Platform", "the data hub"):
+        assert self_name(generic, "product name") is None, generic
+    # THE POSITIVE CONTROL, so this cannot pass by the source being ignored.
+    real = self_name("Contoso", "product name")
+    assert real is not None and real.key == account_key("Contoso")
+    # ...and one generic word does not condemn a real name that contains it.
+    for named in ("Contoso Analytics", "The Contoso Group", "Northwind Cloud"):
+        assert self_name(named, "product name") is not None, named
+
+
+def test_the_workspace_own_name_is_not_filtered_for_being_generic():
+    """A guess about identity and the identity itself are not the same fact.
+    If a workspace is literally called `Platform`, rows naming `Platform` are
+    it, and dropping that key costs the exclusion its whole purpose."""
+    assert self_name("Platform", "workspace name", allow_generic=True) is not None
+    assert self_account_keys("Platform") == frozenset({"platform"})
+
+
+def test_a_placeholder_never_becomes_an_exclusion_key():
+    """The same guard the corpus side applies to a value it reads OFF a
+    signal, applied to a value read out of the tenant's own record — so the
+    exclusion can never be keyed on a string the corpus can never produce."""
+    for junk in ("n/a", "unknown", "TBD", "", "  ", None, 7, "AB"):
+        assert self_name(junk, "product name") is None, junk
+        assert self_name(junk, "workspace name", allow_generic=True) is None, junk
+
+
+def test_widening_the_sources_does_not_widen_the_match():
+    """THE LINE THAT MUST NOT MOVE. More places to read a name from is safe;
+    a looser comparison is not. A tenant called `Salesforce Ventures` must not
+    swallow a customer called `Salesforce`."""
+    selves = self_account_key_set([
+        self_name("AdventureWorks Ventures", "workspace name",
+                  allow_generic=True),
+        self_name("Contoso Capital", "product name"),
+    ])
+    assert normalise_account("AdventureWorks", self_names=selves) == "AdventureWorks"
+    assert normalise_account("Contoso", self_names=selves) == "Contoso"
+    # ...and the exact names still are excluded.
+    assert normalise_account("Adventure Works Ventures", self_names=selves) is None
+    assert normalise_account("contoso capital", self_names=selves) is None
+
+
+def test_a_union_of_sources_is_a_union_of_keys():
+    """Every source contributes; none replaces another. The tenant this was
+    built for needed the product name AND kept its workspace name."""
+    selves = self_account_key_set([
+        self_name("AdventureWorks", "workspace name", allow_generic=True),
+        self_name("Contoso", "product name"),
+        self_name("Fabrikam", "also known as"),
+    ])
+    assert selves == {account_key(n)
+                      for n in ("AdventureWorks", "Contoso", "Fabrikam")}
+    rows = [sig(id="a", properties={"account": "Adventure Works"}),
+            sig(id="b", properties={"account": "contoso"}),
+            sig(id="c", properties={"account": "FABRIKAM"}),
+            sig(id="d", properties={"account": "Northwind"})]
+    _claims, stats = project_signals(rows, self_names=selves)
+    assert stats["self_excluded"] == 3
+
+
+# ── A domain is a name people write down ─────────────────────────────────────
+
+def test_a_domain_stem_reads_as_the_company_name():
+    """`example-corp.com` and `Example Corp` have to collapse to one key or
+    the website source adds a key that matches nothing."""
+    assert account_key(domain_stem("https://www.example-corp.com/pricing")) \
+        == account_key("Example Corp")
+    assert domain_stem("http://contoso.co.uk") == "contoso"
+    assert domain_stem("app.adventureworks.com") == "adventureworks"
+    assert domain_stem("northwind.com") == "northwind"
+
+
+def test_a_domain_that_carries_no_name_resolves_to_nothing():
+    """Inert, not wrong. A hostname with no registrable stem must cost the
+    source, never produce a junk key."""
+    for junk in ("", "localhost", None, 7, "https://", "   "):
+        assert domain_stem(junk) is None, junk

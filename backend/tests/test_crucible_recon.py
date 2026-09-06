@@ -604,6 +604,35 @@ def test_the_attribution_gate_fails_once_the_vendor_is_excluded():
     assert gap[0].severity == "high"
 
 
+def test_what_the_exclusion_took_out_is_counted_not_just_taken():
+    """A presence count that silently drops rows renders a coverage figure the
+    reader cannot reconcile against their own corpus, with no way to see that
+    a deliberate exclusion is part of why it is low."""
+    signals = _attribution_corpus(n_self=2357, n_real=5354, n_bare=3691)
+    p = recon.signal_field_presence(
+        signals, path=("properties", "account"),
+        self_names=recon_self_keys("AdventureWorks Inc"))
+    assert p.excluded == 2357
+    # The three populations account for the whole corpus, so `excluded` is a
+    # real third number and not a re-spelling of the misses.
+    assert p.present + p.excluded + 3691 == p.signals == 11402
+    # THE CONTROL: no name resolved, nothing excluded, and NOT absent.
+    plain = recon.signal_field_presence(signals, path=("properties", "account"))
+    assert plain.excluded == 0 and plain.present == 7711
+
+
+def test_the_attribution_gap_says_how_many_were_the_vendors_own():
+    """The number has to reach a reader, not just a dataclass."""
+    signals = _attribution_corpus(n_self=2357, n_real=5354, n_bare=3691)
+    gap = [o for o in recon.observe(
+        [], signals=signals,
+        self_names=recon_self_keys("AdventureWorks Inc")).observations
+        if o.kind == "account_attribution_gap"]
+    assert gap, "the gate must fail once the vendor is not counted"
+    assert "2,357 name your own company" in gap[0].what
+    assert gap[0].figures["self_excluded"] == 2357
+
+
 def test_the_exclusion_does_not_touch_the_monetary_gap():
     """`signal_field_presence` is parameterised over the path and BOTH gaps
     use it. A company name is not a figure, and the money question must be

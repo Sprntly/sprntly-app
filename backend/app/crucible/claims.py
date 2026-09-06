@@ -31,6 +31,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -271,6 +272,45 @@ _LEGAL_SUFFIXES = frozenset({
 })
 
 
+#: A category, not a company. These are filtered out of the DERIVED self-name
+#: sources — the product's name, a website's domain stem, a hand-entered alias
+#: — because a product called `Analytics` is no evidence at all that a signal
+#: naming `Analytics` is about the vendor, and promoting one to an exclusion
+#: key would silently delete a real account from the analysis. The legal
+#: suffixes are in here for the same reason: an alias list split on its commas
+#: turns `Acme, Inc.` into a fragment `Inc.`, whose key would otherwise match
+#: every account whose own name collapses to `inc`.
+#:
+#: THE TENANT'S OWN COMPANY NAME IS DELIBERATELY NOT FILTERED THIS WAY. If a
+#: workspace is literally called `Hub`, then rows naming `Hub` really are it,
+#: and dropping that key would cost the exclusion the whole reason it exists.
+#: A generic PRODUCT name is a guess about identity; a generic COMPANY name is
+#: the identity.
+_GENERIC_SELF_NAMES = frozenset({
+    "admin", "ai", "analytics", "api", "app", "base", "beta", "cloud",
+    "company", "console", "core", "dashboard", "data", "demo", "desktop",
+    "engine", "enterprise", "home", "hub", "insights", "internal", "main",
+    "ml", "mobile", "network", "platform", "portal", "product", "production",
+    "report", "reporting", "reports", "sandbox", "service", "services",
+    "site", "software", "solutions", "staging", "studio", "suite", "system",
+    "test", "tool", "tools", "web", "workspace", "www",
+}) | _LEGAL_SUFFIXES
+
+
+#: Dropped before the generic test, never listed as generic themselves — an
+#: article carries no identity either way, but `The Contoso Group` is a
+#: company and `The Platform` is not.
+_ARTICLES = frozenset({"a", "an", "the"})
+
+
+#: Registry labels that sit UNDER a country TLD rather than being a name —
+#: `.co.uk`, `.com.au`, `.ac.nz`. Dropped so the stem of `acme.co.uk` is
+#: `acme` and not `co`.
+_PUBLIC_SECOND_LEVEL = frozenset({
+    "ac", "co", "com", "edu", "go", "gov", "mil", "ne", "net", "or", "org",
+})
+
+
 def account_key(value: str) -> str:
     """Collapse the spellings of one account name to a single key.
 
@@ -280,13 +320,123 @@ def account_key(value: str) -> str:
     STRING would have dropped one spelling and kept the other three, which is
     the same bug wearing a fix.
     """
+    return "".join(_account_tokens(value))
+
+
+def _account_tokens(value: Any) -> list[str]:
+    """`account_key`'s own tokens, before they are joined.
+
+    SPLIT OUT SO THE GENERIC-NAME GUARD SEES EXACTLY WHAT THE KEY IS MADE OF.
+    The guard asks a question about the WORDS in a candidate self-name; asking
+    it of a second, separately-written tokenizer is how a guard comes to
+    disagree with the key it is supposed to be guarding.
+    """
     tokens = [t for t in re.split(r"[^a-z0-9]+", str(value).lower()) if t]
     # NEVER THE ONLY TOKEN. "Inc" on its own is not a legal suffix attached to
     # a name, and returning "" here would make every such row match every
     # other one.
     if len(tokens) > 1 and tokens[-1] in _LEGAL_SUFFIXES:
         tokens = tokens[:-1]
-    return "".join(tokens)
+    return tokens
+
+
+def _clean_account_name(value: Any) -> Optional[str]:
+    """A tidied account name, or None when the value is not one.
+
+    LIFTED OUT SO BOTH DIRECTIONS SHARE IT. `normalise_account` decides whether
+    a value read OFF a signal is a name; `self_name` has to make the same
+    decision about a value read out of the tenant's OWN record. Two copies of
+    "is this a name" would drift, and the exclusion would end up keyed on
+    strings the corpus side can never produce — an exclusion that matches
+    nothing while looking like it works, which is the exact failure this whole
+    area exists to stop.
+    """
+    if not isinstance(value, str):
+        return None
+    name = " ".join(value.strip().split())
+    if name.lower() in _NOT_A_NAME or not 3 <= len(name) <= 80:
+        return None
+    return name
+
+
+@dataclass(frozen=True)
+class SelfName:
+    """One name that means "the tenant", and where it was read from.
+
+    THE SOURCE TRAVELS WITH THE KEY BECAUSE THE DISCLOSURE NEEDS IT. A reader
+    told only that "2,357 signals were excluded as your own company" cannot
+    check the decision; told that the name was `Contoso`, read from the
+    product name, they can say "that is right" or "that is our biggest
+    customer" in one glance.
+    """
+    #: `account_key` output — what the exclusion actually matches on.
+    key: str
+    #: The spelling a reader would recognise, for rendering.
+    name: str
+    #: The field it came out of, in the reader's words ("product name").
+    source: str
+
+
+def domain_stem(url: Any) -> Optional[str]:
+    """`https://www.example-corp.com/pricing` → `example corp`; else None.
+
+    People write the company's name into their domain, and a domain is one of
+    the few self-descriptions a workspace almost always has. The stem is
+    returned SPACED rather than keyed so it passes the same name guards as
+    every other source before `account_key` ever sees it.
+    """
+    if not isinstance(url, str):
+        return None
+    host = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", url.strip().lower())
+    host = host.split("/")[0].split("?")[0].split("#")[0]
+    host = host.split("@")[-1].split(":")[0]
+    labels = [part for part in host.split(".") if part]
+    # A bare word is a hostname, not a domain — there is no name in it.
+    if len(labels) < 2:
+        return None
+    labels = labels[:-1]                    # the TLD is never the name
+    if len(labels) > 1 and labels[-1] in _PUBLIC_SECOND_LEVEL:
+        labels = labels[:-1]                # ...nor is the `co` of `.co.uk`
+    # THE LAST REMAINING LABEL, not the first: `app.example-corp.com` is the
+    # same company as `example-corp.com`, and the subdomain is never the name.
+    return labels[-1].replace("-", " ").replace("_", " ").strip() or None
+
+
+def self_name(value: Any, source: str, *,
+              allow_generic: bool = False) -> Optional[SelfName]:
+    """Resolve one candidate self-name, or None if it is not usable as one.
+
+    `allow_generic` is TRUE ONLY FOR THE TENANT'S OWN COMPANY NAME — see
+    `_GENERIC_SELF_NAMES`. Every derived source goes through the filter.
+    """
+    name = _clean_account_name(value)
+    if name is None:
+        return None
+    key = account_key(name)
+    if not key:
+        return None
+    # ALL-GENERIC, NOT JUST EQUAL-TO-GENERIC. `The Platform` and `Analytics
+    # Platform` are as much a category as `Platform` is, and a denylist
+    # compared against the whole key lets a leading article walk straight past
+    # it. Articles are dropped rather than listed as generic so `The Contoso
+    # Group` still resolves.
+    if not allow_generic:
+        words = [t for t in _account_tokens(name) if t not in _ARTICLES]
+        if not words or all(w in _GENERIC_SELF_NAMES for w in words):
+            return None
+    return SelfName(key=key, name=name, source=source)
+
+
+def self_account_key_set(names: Iterable[SelfName]) -> frozenset[str]:
+    """The match set for `normalise_account`, from resolved `SelfName`s.
+
+    EXACT KEYS, AND THE UNION OF THEM. Widening the SOURCES a name can come
+    from is safe; widening the MATCH is not. A token-subset rule would let a
+    tenant called `Salesforce Ventures` swallow a customer called
+    `Salesforce`, and a false exclusion deletes a real account with nothing on
+    the page to show it happened.
+    """
+    return frozenset(n.key for n in names if n.key)
 
 
 def self_account_keys(display_name: Optional[str]) -> frozenset[str]:
@@ -299,11 +449,33 @@ def self_account_keys(display_name: Optional[str]) -> frozenset[str]:
     silently rescues one-account findings from the `single_account`
     refutation by padding them to two.
 
+    THE ONE-SOURCE ENTRY POINT, kept because the workspace name is the one
+    source every caller has. Callers that can read more of the tenant's record
+    resolve a list of `SelfName`s and take `self_account_key_set` of it; this
+    is that path with a single candidate.
+
     EMPTY IS THE SAFE DEFAULT AND MEANS "EXCLUDE NOTHING". A tenant whose
     display name will not load must lose the exclusion, never its accounts.
     """
-    key = account_key(display_name or "")
-    return frozenset({key}) if key else frozenset()
+    return self_account_key_set(
+        [n for n in (self_name(display_name, "workspace name",
+                               allow_generic=True),) if n])
+
+
+def names_self(props: Any, self_names: frozenset[str]) -> bool:
+    """True when this signal's account fields name the TENANT itself.
+
+    THE COUNTING SIDE OF `normalise_account`'s EXCLUSION, and deliberately the
+    same guards in the same order — a disclosed count that does not equal what
+    the engine actually dropped is a second wrong number rather than a fix.
+    """
+    if not self_names or not isinstance(props, Mapping):
+        return False
+    for field in (*CUSTOMER_KEYS, *PROSPECT_KEYS):
+        name = _clean_account_name(props.get(field))
+        if name is not None and account_key(name) in self_names:
+            return True
+    return False
 
 
 def canonical_account_names(
@@ -378,10 +550,8 @@ def normalise_account(
     returned unchanged. A corpus-wide map cannot be built from one row, so the
     default has to be the identity rather than a guess.
     """
-    if not isinstance(value, str):
-        return None
-    name = " ".join(value.strip().split())
-    if name.lower() in _NOT_A_NAME or not 3 <= len(name) <= 80:
+    name = _clean_account_name(value)
+    if name is None:
         return None
     key = account_key(name)
     if self_names and key in self_names:
@@ -580,6 +750,12 @@ def project_signals(
 ) -> tuple[tuple[Claim, ...], dict[str, int]]:
     """Project a corpus. Returns the claims and a count of what was dropped.
 
+    `self_excluded` counts ROWS, not names: a row naming the tenant under any
+    account field counts once, and a row whose ONLY account was the tenant
+    therefore lands in both `projected` and `self_excluded` — it is still a
+    claim, it just no longer names an account. That is the honest shape, since
+    the exclusion drops an ATTRIBUTION rather than a signal.
+
     THE CORPUS IS READ TWICE AND THAT IS THE POINT. `canonical_account_names`
     and `infer_account_sides` are both corpus-wide facts that no single row
     can answer — which spelling of a customer is the one to render, and which
@@ -600,7 +776,8 @@ def project_signals(
     sides = infer_account_sides(rows, self_names, canonical)
 
     claims: list[Claim] = []
-    stats = {"seen": len(rows), "projected": 0, "no_timestamp": 0, "retired": 0}
+    stats = {"seen": len(rows), "projected": 0, "no_timestamp": 0,
+             "retired": 0, "self_excluded": 0}
     for row in rows:
         props = row.get("properties")
         # THE REPO'S OWN DEFINITION, not a key invented here. Retirement is
@@ -611,6 +788,15 @@ def project_signals(
         if signal_is_retired(props if isinstance(props, dict) else None):
             stats["retired"] += 1
             continue
+        # COUNTED, NOT JUST DONE. The exclusion fired on 2,357 rows of a real
+        # tenant — 30.6% of everything attributed — and said nothing, so a run
+        # with it working and a run with it inert were byte-identical. This
+        # count is what lets the coverage note tell those two apart. Measured
+        # AFTER the retired drop so the two numbers do not double-count one
+        # row, and on the same guards `normalise_account` uses so it equals
+        # what was actually dropped rather than approximating it.
+        if names_self(props, self_names):
+            stats["self_excluded"] += 1
         claim = project_signal(row, sides, self_names, canonical)
         if claim is None:
             stats["no_timestamp"] += 1

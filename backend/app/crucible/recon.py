@@ -1344,6 +1344,14 @@ class FieldPresence:
     field_path: str
     signals: int
     present: int
+    #: Rows that DID carry the field and were still not counted, because the
+    #: value named the tenant itself. Separated from the plain misses because
+    #: the two are different facts about the corpus and only one of them is a
+    #: decision this engine made: "3,691 signals never named anyone" is the
+    #: data being thin, "2,357 named you" is us choosing not to count them.
+    #: Rolling them together renders one number for two causes and hides the
+    #: one a reader can act on.
+    excluded: int = 0
 
     @property
     def share(self) -> float:
@@ -1374,6 +1382,7 @@ def signal_field_presence(
     """
     present = 0
     total = 0
+    excluded = 0
     for row in signals:
         if not isinstance(row, Mapping):
             continue
@@ -1388,9 +1397,15 @@ def signal_field_presence(
         if self_names and isinstance(cursor, str):
             from app.crucible.claims import account_key
             if account_key(cursor) in self_names:
+                # COUNTED ON THE WAY PAST. Dropping it silently is how the
+                # measurement that justified this exclusion — 30.6% of the
+                # attributed corpus — became invisible the moment it started
+                # working.
+                excluded += 1
                 continue
         present += 1
-    return FieldPresence(field_path=".".join(path), signals=total, present=present)
+    return FieldPresence(field_path=".".join(path), signals=total,
+                         present=present, excluded=excluded)
 
 
 @dataclass(frozen=True)
@@ -1650,11 +1665,19 @@ def _observe_attribution(
             what=(
                 f"{p.present:,.0f} of {p.signals:,.0f} signals "
                 f"({_pct(p.share)}) {noun}. At that coverage {consequence}."
+                # NAMED WHENEVER IT MOVED THE NUMBER. Without this the reader
+                # sees a coverage figure they cannot reconcile against their
+                # own corpus and has no way to know a deliberate exclusion is
+                # part of why it is low.
+                + (f" A further {p.excluded:,.0f} name your own company and "
+                   f"are not counted as an account."
+                   if p.excluded else "")
             ),
             figures={
                 "signals": float(p.signals),
                 "present": float(p.present),
                 "share": p.share,
+                "self_excluded": float(p.excluded),
             },
         ))
     return out

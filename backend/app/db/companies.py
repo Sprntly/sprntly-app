@@ -307,6 +307,27 @@ def display_name_for_company_id(company_id: str) -> str | None:
 
 
 @retry_on_disconnect
+def website_for_company_id(company_id: str) -> str | None:
+    """Resolve a company id → `companies.website`. None if unset or missing.
+
+    THE COMPANY'S OWN SITE, NOT THE PRODUCT'S — the two are separate columns
+    (see migration 20260903150000_companies_website.sql) and only diverge once
+    a workspace fills both in. Raises like every other helper here if the
+    column is absent; callers that treat a self-description as optional catch
+    it themselves rather than making this one lie about a missing schema.
+    """
+    client = require_client()
+    result = (
+        client.table("companies")
+        .select("website")
+        .eq("id", company_id)
+        .limit(1)
+        .execute()
+    )
+    return (result.data[0].get("website") or None) if result.data else None
+
+
+@retry_on_disconnect
 def get_notification_settings(company_id: str) -> dict:
     """Read a company's `notification_settings` JSONB (per-company delivery
     config). Returns `{}` when the company is missing or the column is unset —
