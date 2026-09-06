@@ -1863,10 +1863,14 @@ def execute_run(
         # onto the RUN (never the graph) is what lets the sweep reconstitute
         # exactly the claims this pass had.
         #
-        # AND ONLY THE ONES A FINDING CITES, because that is precisely the set
-        # `_load_signals_by_id` asks for.
+        # AND ONLY THE ONES SOMETHING THE RUN PERSISTS CITES — a finding or
+        # the ledger. A cluster that dies at refutation (echo, single-account,
+        # no authoritative source, ...) never becomes a finding, so its claim
+        # ids are cited ONLY by `ledger`; leaving it out here is what used to
+        # leave those ids permanently unresolvable — not in `kg_signal`, not
+        # on the run.
         if prose_evidence.rows:
-            _remember_prose(run_id, company_id, prose_evidence.rows, rows)
+            _remember_prose(run_id, company_id, prose_evidence.rows, rows, ledger)
         # ENRICHMENT IS COMING, AND THE CLIENT HAS TO BE TOLD SO.
         #
         # `GoalAnalysisTab`'s poller treats "ready" as TERMINAL, so publishing
@@ -2013,8 +2017,10 @@ def _prose_theme_map(prose_evidence, graph_theme_map: dict) -> dict:
 
 def _remember_prose(
     run_id: int, company_id: str, prose_rows, finding_rows: list[dict],
+    ledger_rows: list[dict] = (),
 ) -> None:
-    """Store the prose rows a stalled-enrichment sweep would otherwise lose.
+    """Store the prose rows a stalled-enrichment sweep — or anything else that
+    later reads a citation off this run — would otherwise lose.
 
     ON THE RUN, NEVER IN THE GRAPH. `crucible_runs.prioritisation` is this
     run's own record, scoped to it and deleted with it; the whole point of the
@@ -2022,22 +2028,39 @@ def _remember_prose(
     that wrote there to make recovery easier would have removed the property it
     was protecting.
 
-    Total: a failure to store costs the sweep its citations for this run, which
-    is exactly where the sweep was before this existed — not a reason to fail a
-    run whose analysis is already published.
+    BOTH `finding_rows` AND `ledger_rows`, not findings alone. A cluster whose
+    every claim names one artifact within the echo window dies at refutation
+    before it ever becomes a finding — it is cited only by the ledger
+    `save_findings` writes to `crucible_ledger`. A referenced set built from
+    findings alone drops exactly those ids: not in `kg_signal` (prose is never
+    written there, by design), and now not on the run either. That is a
+    permanently dead reference the moment anything — today's report, a future
+    resolver — tries to look one up.
+
+    Total: a failure to store costs the sweep (and any later reader) its
+    citations for this run, which is exactly where things stood before this
+    existed — not a reason to fail a run whose analysis is already published.
     """
     try:
-        from app.crucible.prose import META_KEY, rows_for_recovery
+        from app.crucible.prose import META_KEY, TRUNCATED_KEY, rows_for_recovery
 
         referenced = {
-            str(cid) for row in finding_rows
+            str(cid)
+            for row in (*finding_rows, *ledger_rows)
             for cid in (row.get("claim_ids") or ()) if cid
         }
-        kept = rows_for_recovery(prose_rows, referenced)
-        if not kept:
+        kept, truncated = rows_for_recovery(prose_rows, referenced)
+        if not kept and not truncated:
             return
         meta = dict(_meta_of(run_id, company_id))
-        meta[META_KEY] = kept
+        if kept:
+            meta[META_KEY] = kept
+        # DISCLOSED, NEVER SILENT. `MAX_PERSISTED_ROWS` truncation already
+        # logs; this is the same fact carried on the run itself, so a
+        # cited-but-dropped id can be told apart from one that never existed
+        # without having to correlate against a log line after the fact.
+        if truncated:
+            meta[TRUNCATED_KEY] = truncated
         runs_db.update(run_id, company_id, prioritisation=meta)
     except Exception:  # noqa: BLE001 — see the docstring
         logger.warning("crucible: could not store the prose claims for run %s",
