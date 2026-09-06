@@ -216,6 +216,36 @@ class UnreadUpload:
 
 
 @dataclass(frozen=True)
+class ProseSource:
+    """A document attached to the message and read as PROSE, not as a table.
+
+    THE THIRD THING A PLAN CAN SAY ABOUT AN ATTACHMENT, and it existed as a
+    silence until now: a workbook became an `UploadedSource`, everything else
+    became an `UnreadUpload` — so the reader who attached ten customer calls
+    was told, accurately, that their PDF was not a spreadsheet, and the run
+    then computed its answer without a word of it.
+
+    `how` IS THE LOAD-BEARING FIELD, not `conversations`. A count on its own
+    ("read as 10 conversations") is a number the reader cannot check. The
+    sentence says where the boundaries came from and whether the split was
+    verified against the document's own stated count, which is the only form of
+    this disclosure someone can disagree with — and it is DERIVED from the
+    segmentation that actually ran (`prose.ProseDocument.how_it_was_read`), so
+    there is no path on which the sentence and the split can differ.
+
+    STILL SCOPED TO THIS RUN. Like `UploadedSource`, this is listed beside the
+    connected inventory and never inside it: nothing here is added to the
+    knowledge graph, and folding it into `sources` would let a file that will
+    not exist next time change which framework the run chooses.
+    """
+    name: str
+    #: How many conversations the document was read as. 1 means "read whole",
+    #: which `how` explains.
+    conversations: int
+    how: str
+
+
+@dataclass(frozen=True)
 class Gap:
     """Something this run will NOT be able to answer, and how to change that."""
     question: str
@@ -446,6 +476,11 @@ class RunPlan:
     #: jsonb blob with no version, so a rename strands every stored plan and
     #: an empty tuple is exactly what a plan written before this reads back as.
     unread_uploads: tuple[UnreadUpload, ...] = ()
+    #: THE ATTACHED DOCUMENTS READ AS PROSE, and how each was segmented.
+    #: Additive with a default, for the reason every field here is: the stored
+    #: plan is one unversioned jsonb blob, and an empty tuple is exactly what a
+    #: plan written before this existed reads back as.
+    prose_uploads: tuple[ProseSource, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
     total_signals: int = 0
@@ -635,6 +670,7 @@ class RunPlan:
             "sources": [asdict(s) for s in self.sources],
             "uploads": [asdict(u) for u in self.uploads],
             "unread_uploads": [asdict(u) for u in self.unread_uploads],
+            "prose_uploads": [asdict(u) for u in self.prose_uploads],
             "cannot_answer": [asdict(g) for g in self.cannot_answer],
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
@@ -765,6 +801,37 @@ def unread_uploads_from_report(
         seen.add(stem)
         out.append(UnreadUpload(
             name=stem, reason=str(getattr(u, "reason", "")).strip()))
+    return tuple(out)
+
+
+def prose_from_report(
+    recon_report: "Optional[object]",
+) -> tuple[ProseSource, ...]:
+    """The attached documents the pass read as prose, named and explained.
+
+    NAMED BY STEM, for the same reason `unread_uploads_from_report` is: the
+    three lists a reader sees side by side have to be in one vocabulary, and
+    `08_calls` beside `08_calls.pdf` reads as two different attachments.
+
+    DERIVED FROM THE REPORT, so a document that failed to convert appears in
+    `unread_uploads` and NOT here — the plan lists what it read, never what it
+    was handed.
+    """
+    out: list[ProseSource] = []
+    seen: set[str] = set()
+    for d in getattr(recon_report, "prose", ()) or ():
+        name = str(getattr(d, "name", "")).strip()
+        if not name:
+            continue
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem in seen:
+            continue
+        seen.add(stem)
+        out.append(ProseSource(
+            name=stem,
+            conversations=len(getattr(d, "segments", ()) or ()),
+            how=str(getattr(d, "how_it_was_read", "") or ""),
+        ))
     return tuple(out)
 
 
@@ -1103,6 +1170,7 @@ def build_plan(
         sources=tuple(kept),
         uploads=uploads_from_report(recon_report),
         unread_uploads=unread_uploads_from_report(recon_report),
+        prose_uploads=prose_from_report(recon_report),
         cannot_answer=tuple(gaps),
         will_produce=tuple(produce),
         total_signals=sum(s.signal_count for s in kept),

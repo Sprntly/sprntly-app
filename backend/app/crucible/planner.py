@@ -511,9 +511,11 @@ def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
         origins = [str(t).replace("_", " ") for t in source_types]
 
     if not origins:
-        return ("Everything below is computed over the sources you connected "
-                "and nothing else, so a figure in the finished document can "
-                "always be traced back to one of them.")
+        return _with_prose(
+            report,
+            "Everything below is computed over the sources you connected "
+            "and nothing else, so a figure in the finished document can "
+            "always be traced back to one of them.")
 
     shown = origins[:MAX_NAMED_SOURCES]
     named = ", ".join(shown[:-1]) + (" and " + shown[-1] if len(shown) > 1 else shown[0])
@@ -536,9 +538,11 @@ def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
     # BEFORE they approve. So the files are named, and the scoping is stated
     # in the same breath rather than left to a footnote.
     if not uploaded:
-        return (f"Everything below is computed over {scope} — {named} — and "
-                f"nothing else, so a figure in the finished document can always "
-                f"be traced back to something you connected.")
+        return _with_prose(
+            report,
+            f"Everything below is computed over {scope} — {named} — and "
+            f"nothing else, so a figure in the finished document can always "
+            f"be traced back to something you connected.")
 
     up_shown = uploaded[:MAX_NAMED_SOURCES]
     up_named = ", ".join(up_shown[:-1]) + (
@@ -550,13 +554,53 @@ def _evidence_sentence(report: ReconReport, source_types: Sequence[str]) -> str:
     which = (up_named if len(uploaded) == len(origins)
              else f"{up_named} of those")
 
-    return (f"Everything below is computed over {scope} — {named} — and "
-            f"nothing else, so a figure in the finished document can always "
-            f"be traced back to one of them. {which} {verb} you attached to "
-            f"this message: I am reading {'it' if len(uploaded) == 1 else 'them'} "
-            f"for this analysis only, and {'it is' if len(uploaded) == 1 else 'they are'} "
-            f"not added to your knowledge graph. Detach the {files_word} and "
-            f"this run reads your connected sources alone.")
+    return _with_prose(
+        report,
+        f"Everything below is computed over {scope} — {named} — and "
+        f"nothing else, so a figure in the finished document can always "
+        f"be traced back to one of them. {which} {verb} you attached to "
+        f"this message: I am reading {'it' if len(uploaded) == 1 else 'them'} "
+        f"for this analysis only, and {'it is' if len(uploaded) == 1 else 'they are'} "
+        f"not added to your knowledge graph. Detach the {files_word} and "
+        f"this run reads your connected sources alone.")
+
+
+def _with_prose(report: ReconReport, sentence: str) -> str:
+    """`sentence`, plus what was read out of any attached DOCUMENT.
+
+    THE SENTENCE ABOVE IS FALSE WITHOUT THIS ONE, which is why it is applied at
+    every return rather than at the interesting one. Every branch of
+    `_evidence_sentence` promises that the run is computed over the listed
+    tables "and nothing else"; a document read as prose contributes claims and
+    appears in none of them, because it produced no rectangle for `report.
+    sources` to hold. A run that reads ten customer calls and opens its method
+    by saying it read four spreadsheets and nothing else is overclaiming its
+    scope in the one place the reader is being asked to approve it.
+
+    HOW, NOT JUST WHETHER. The segmentation is the part a reader can disagree
+    with — "read as 10 separate conversations, split at the per-call headers"
+    invites the correction that the document holds eleven; "I also read your
+    PDF" does not.
+    """
+    docs = tuple(getattr(report, "prose", ()) or ())
+    if not docs:
+        return sentence
+    shown = docs[:MAX_NAMED_SOURCES]
+    parts = [f"{getattr(d, 'name', '')} was "
+             f"{getattr(d, 'how_it_was_read', 'read')}" for d in shown]
+    joined = ", ".join(parts[:-1]) + (
+        " and " + parts[-1] if len(parts) > 1 else parts[0])
+    more = (f", and {len(docs) - MAX_NAMED_SOURCES} further document"
+            f"{'s' if len(docs) - MAX_NAMED_SOURCES != 1 else ''}"
+            if len(docs) > MAX_NAMED_SOURCES else "")
+    return (
+        f"{sentence} You also attached "
+        f"{'a document' if len(docs) == 1 else f'{len(docs)} documents'} with "
+        f"no table in "
+        f"{'it' if len(docs) == 1 else 'them'}: {joined}{more}. What those "
+        f"conversations say is read as evidence for this run only and is not "
+        f"added to your knowledge graph."
+    )
 
 
 def _obs_step(

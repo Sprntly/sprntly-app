@@ -1558,6 +1558,37 @@ def execute_run(
                        if r.get("source_type") not in excluded_sources]
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
+        # ── THE SECOND CLAIM SOURCE: PROSE THE READER ATTACHED. ────────────
+        #
+        # AFTER THE EXCLUSION FILTER, AND THAT IS NOT AN OVERSIGHT.
+        # `excluded_sources` can only ever hold entries from the plan's
+        # `sources` list, which is the CONNECTED inventory — an attachment is
+        # listed beside it and has no tickbox, so there is no exclusion for
+        # these rows to honour. Filtering them by source type would silently
+        # discard the file a reader attached because they unticked a connector
+        # that happens to share the extractor's witness classification.
+        #
+        # AFTER APPROVAL, TOO. This is the only place the extraction can live:
+        # the plan gate returns in about a second and one model call per
+        # conversation is tens of seconds. `read_prose` already did the fast,
+        # local half at the gate, and the reader approved knowing what it found.
+        #
+        # THE BYTES MAY BE GONE, and that costs the claims and never the run —
+        # `_read_uploads` is total, `extract_documents` is total, and a run
+        # whose attachment was swept from storage between the gate and the go
+        # is a run over the connected corpus alone.
+        prose_evidence = _prose_evidence(uploads, workspace_id, company_id, now)
+        if prose_evidence.rows:
+            logger.info("crucible: %s prose claim rows from %s attached "
+                        "document(s) for %s", len(prose_evidence.rows),
+                        len(prose_evidence.read), company_id)
+        # ONE CORPUS, ONE PROJECTION. Appended to the same list rather than
+        # projected separately, because `project_signals` settles two
+        # corpus-wide facts before it reads a single row — which spelling of
+        # an account is the one to render, and which side of the funnel that
+        # account is on — and projecting the two sets apart would decide both
+        # questions twice and hand the two answers to one collapsed account.
+        signals = signals + list(prose_evidence.rows)
         # RESOLVED ONCE AND KEPT. The keys drive the exclusion; the names and
         # their sources drive the coverage note that says what the exclusion
         # did. Re-resolving for the note would let the two disagree, which is
@@ -1595,6 +1626,23 @@ def execute_run(
         # Measured on the test tenant: 165 findings and 3 of them sizeable
         # became 238 and 20 by reading the graph instead.
         theme_map = load_theme_map(company_id)
+        # AND THE PROSE CLAIMS GET THEIR THEMES FROM THE SAME MAP.
+        #
+        # WITHOUT THIS THE ATTACHMENT SILENTLY CONTRIBUTES NOTHING. A prose
+        # claim's id is not in `kg_signal`, so `load_theme_map` cannot know it
+        # and `_load_embeddings` has no vector for it — which lands every one
+        # of them in `assign_clusters` with nothing to cluster on, one
+        # pseudo-group each, and the anecdote rule then drops all of them. The
+        # run would report having read the document and produce not one
+        # finding from it, which is the most expensive kind of wrong: it looks
+        # exactly like a document with nothing in it.
+        #
+        # `prose.theme_map_for` folds the extractor's own labels ONTO the
+        # graph's theme entities where they name the same subject, using the
+        # repo's own label rules — so an attached call about billing joins the
+        # billing theme the connectors already built rather than starting a
+        # private one beside it.
+        theme_map = {**theme_map, **_prose_theme_map(prose_evidence, theme_map)}
         claims, unthemed_idx, cluster_stats = assign_themes(claims, theme_map)
         logger.info(
             "crucible: graph themed %s of %s claims for %s",
@@ -1796,6 +1844,22 @@ def execute_run(
         } for r in result.rejected]
 
         runs_db.save_findings(run_id, company_id, rows, ledger)
+        # ── THE PROSE ROWS, KEPT WHERE THE SWEEP CAN FIND THEM. ────────────
+        #
+        # `_reenrich_stalled_run` rebuilds claims from `kg_signal` BY ID, and a
+        # prose claim's id is deliberately not in `kg_signal`. So a run whose
+        # enrichment stalls — a deploy mid-flight is enough — would come back
+        # from the sweep having lost every prose-backed claim, and
+        # `recommend`'s claim-id gate would then drop the citations naming
+        # them: findings that still read as prose-backed, carrying
+        # recommendations the engine can no longer ground. Writing the rows
+        # onto the RUN (never the graph) is what lets the sweep reconstitute
+        # exactly the claims this pass had.
+        #
+        # AND ONLY THE ONES A FINDING CITES, because that is precisely the set
+        # `_load_signals_by_id` asks for.
+        if prose_evidence.rows:
+            _remember_prose(run_id, company_id, prose_evidence.rows, rows)
         # ENRICHMENT IS COMING, AND THE CLIENT HAS TO BE TOLD SO.
         #
         # `GoalAnalysisTab`'s poller treats "ready" as TERMINAL, so publishing
@@ -1818,7 +1882,8 @@ def execute_run(
         runs_db.update(
             run_id, company_id, status="ready",
             finished_at=datetime.now(timezone.utc).isoformat(),
-            coverage_notes=_coverage_notes(stats, result.stats, self_names),
+            coverage_notes=_coverage_notes(stats, result.stats, self_names,
+                                           prose_evidence=prose_evidence),
         )
 
         # ── THE REPORT IS PUBLISHED BEFORE ANYTHING IS ASKED OF A MODEL. ────
@@ -1884,6 +1949,88 @@ def execute_run(
     except Exception as exc:  # noqa: BLE001 — total by contract
         logger.exception("crucible: run %s failed", run_id)
         runs_db.fail(run_id, company_id, code="internal", detail=str(exc))
+
+
+def _prose_evidence(
+    uploads: tuple[tuple[str, str], ...], workspace_id: str,
+    company_id: str, now: datetime,
+):
+    """Claims from the documents attached to this run. TOTAL — never raises.
+
+    A run that died because an attachment could not be fetched, converted or
+    extracted would be strictly worse for the reader than one that analyses
+    their connected corpus and says what it could not read: the second answers
+    the question, the first answers nothing. So every failure below degrades to
+    fewer claims, and the disclosure carries the reason.
+    """
+    from app.crucible.prose import ProseEvidence, extract_documents
+
+    if not uploads or not workspace_id:
+        return ProseEvidence()
+    try:
+        _tables, unread, docs = _read_uploads(uploads, workspace_id)
+        if not docs:
+            return ProseEvidence(
+                unread=tuple((u.name, u.reason) for u in unread))
+        return extract_documents(
+            docs, enterprise_id=company_id, now=now, unread=unread)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception("crucible: could not read attached prose for %s",
+                         company_id)
+        return ProseEvidence()
+
+
+def _prose_theme_map(prose_evidence, graph_theme_map: dict) -> dict:
+    """`prose.theme_map_for`, guarded. A grouping failure costs the grouping.
+
+    Falling back to `{}` leaves the prose claims unthemed, which is a visible,
+    narrated degradation — they land in the ungroupable row of the funnel the
+    reader already sees — rather than an exception that kills a run whose
+    findings are otherwise ready.
+    """
+    if not getattr(prose_evidence, "items_by_id", None):
+        return {}
+    try:
+        from app.crucible.prose import theme_map_for
+
+        return theme_map_for(prose_evidence.items_by_id, graph_theme_map)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("crucible: could not theme the attached prose",
+                       exc_info=True)
+        return {}
+
+
+def _remember_prose(
+    run_id: int, company_id: str, prose_rows, finding_rows: list[dict],
+) -> None:
+    """Store the prose rows a stalled-enrichment sweep would otherwise lose.
+
+    ON THE RUN, NEVER IN THE GRAPH. `crucible_runs.prioritisation` is this
+    run's own record, scoped to it and deleted with it; the whole point of the
+    run-scoped path is that `kg_signal` is untouched, and a recovery mechanism
+    that wrote there to make recovery easier would have removed the property it
+    was protecting.
+
+    Total: a failure to store costs the sweep its citations for this run, which
+    is exactly where the sweep was before this existed — not a reason to fail a
+    run whose analysis is already published.
+    """
+    try:
+        from app.crucible.prose import META_KEY, rows_for_recovery
+
+        referenced = {
+            str(cid) for row in finding_rows
+            for cid in (row.get("claim_ids") or ()) if cid
+        }
+        kept = rows_for_recovery(prose_rows, referenced)
+        if not kept:
+            return
+        meta = dict(_meta_of(run_id, company_id))
+        meta[META_KEY] = kept
+        runs_db.update(run_id, company_id, prioritisation=meta)
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("crucible: could not store the prose claims for run %s",
+                       run_id, exc_info=True)
 
 
 def _run_enrichment(
@@ -2391,6 +2538,31 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
                 cid for f in findings for cid in f.claim_ids if cid
             }
             signals = _load_signals_by_id(company_id, all_claim_ids)
+            # ── AND THE CLAIMS THAT WERE NEVER IN `kg_signal`. ─────────────
+            #
+            # A prose claim comes out of a file attached to the message, is
+            # read for one run and is written to no table — so a lookup by id
+            # against `kg_signal` cannot find it, by design. Without this line
+            # the sweep would rebuild a strictly smaller claim set than the
+            # first pass had, and `recommend`'s claim-id gate would drop every
+            # citation naming one: the rescued run would come back with
+            # prose-backed findings whose recommendations no longer cite
+            # anything. The rows were stored on the run itself for exactly
+            # this moment (see `_remember_prose`).
+            from app.crucible.prose import rows_from_meta
+
+            stored_prose = [r for r in rows_from_meta(meta)
+                            if str(r.get("id") or "") in all_claim_ids]
+            if stored_prose:
+                logger.info("crucible: sweep restored %d prose claim row(s) "
+                            "for run %s", len(stored_prose), run_id)
+            elif rows_from_meta(meta):
+                # STORED, BUT NONE OF THEM CITED. Not a problem, and worth
+                # distinguishing in the log from "no prose at all" so the two
+                # do not look the same when a rescued run is being read back.
+                logger.info("crucible: run %s stored prose rows, none cited by "
+                            "its findings", run_id)
+            signals = signals + stored_prose
             from app.crucible.claims import project_signals
 
             claims, _stats = project_signals(
@@ -2672,8 +2844,50 @@ def _self_name_notes(claim_stats: dict, self_names) -> list[dict]:
     }]
 
 
+def _prose_notes(prose_evidence) -> list[dict]:
+    """What the finished report says about the documents it was handed.
+
+    THE PLAN SAID IT WOULD READ THEM; THE REPORT HAS TO SAY WHAT IT DID.
+    A reader who attached a ten-call pack and approved a plan promising to read
+    it as ten conversations comes back to a document ranked over a corpus they
+    cannot see the shape of. Two things they can act on go here and nowhere
+    else: how each document was actually segmented (which may differ from the
+    gate's answer only if the bytes changed, and saying it twice is how that
+    would be caught), and every attachment that produced nothing, with why.
+
+    A `reason`/`actual` pair, the same shape every other coverage note takes —
+    a second note shape would be a second thing for the renderer to learn.
+    """
+    if prose_evidence is None:
+        return []
+    notes: list[dict] = []
+    for name, how in getattr(prose_evidence, "read", ()) or ():
+        notes.append({
+            "reason": f"{name} was read for this run only",
+            "actual": (f"{name} was {how}. What it says was counted as "
+                       f"evidence here and was not added to your knowledge "
+                       f"graph, so it will not answer any later question"),
+        })
+    for name, why in getattr(prose_evidence, "unread", ()) or ():
+        notes.append({
+            "reason": f"{name} could not be read",
+            "actual": f"{name} was attached and nothing in it was counted, "
+                      f"because {why}",
+        })
+    failed = getattr(prose_evidence, "failed_segments", 0) or 0
+    if failed:
+        # A PARTIAL READ IS NOT A READ, and the note above would otherwise
+        # claim ten conversations on a run that got nine.
+        notes.append({
+            "reason": "part of an attached document could not be read",
+            "actual": f"{failed} conversation(s) in your attached documents "
+                      f"could not be read, so nothing they say was counted",
+        })
+    return notes
+
+
 def _coverage_notes(claim_stats: dict, pipeline_stats: dict,
-                    self_names=None) -> list[dict]:
+                    self_names=None, prose_evidence=None) -> list[dict]:
     """Every degradation renders. A quietly thinner run is indistinguishable
     from a complete one, which is worse than the failure it replaced.
 
@@ -2681,8 +2895,12 @@ def _coverage_notes(claim_stats: dict, pipeline_stats: dict,
     `None` means this caller never resolved the tenant's own name and has
     nothing to say about it; `()` means the resolver ran and came back with
     nothing, which is itself a degradation worth a note.
+
+    `prose_evidence` is `crucible.prose.ProseEvidence` — what the attached
+    documents contributed. `None` means this caller had no attachments to
+    speak of, which is every entry point that takes none.
     """
-    notes = []
+    notes = _prose_notes(prose_evidence)
     # SUPERSEDED EVIDENCE, WHICH NOTHING WAS SAYING. `project_signals` counts
     # two independent drop reasons — `retired` and `no_timestamp` — and only
     # the second one was ever rendered. A corpus that is mostly superseded
@@ -2847,19 +3065,30 @@ def _upload_tables(uploads: tuple[tuple[str, str], ...], workspace_id: str):
 
 
 def _read_uploads(uploads: tuple[tuple[str, str], ...], workspace_id: str):
-    """`_upload_tables`, plus every attached file that produced no table.
+    """`(tables, unread, prose)` — every attached file, sorted into what this
+    run can do with it.
 
-    BOTH HALVES, BECAUSE THE PLAN OWES THE READER BOTH. Each failure below is
-    still soft — one bad attachment costs its own table and never the run —
-    but soft used to mean silent, and a plan that lists three files when six
-    were attached is telling the reader it read everything it was given. The
-    reasons are prose from `recon`, which is the only layer that knows why a
-    given file did not become a table.
+    THREE HALVES, BECAUSE THE PLAN OWES THE READER ALL THREE. Each failure
+    below is still soft — one bad attachment costs its own table and never the
+    run — but soft used to mean silent, and a plan that lists three files when
+    six were attached is telling the reader it read everything it was given.
+    The reasons are prose from `recon`, which is the only layer that knows why
+    a given file did not become a table.
+
+    THE PROSE HALF IS NEW AND IT REMOVES A FILE FROM `unread`. A PDF has always
+    landed there, correctly, with the reason "this pass reads the structure of
+    spreadsheets and CSVs" — and now it is read, as conversations, by
+    `crucible.prose`. Leaving the old entry in place beside the new one would
+    have the same plan tell the reader it read a document and could not read
+    it, which is worse than either statement alone. So a file the prose pass
+    took responsibility for is dropped from the tabular pass's unread list, and
+    nothing else is.
     """
+    from app.crucible.prose import read_prose
     from app.crucible.recon import UnreadFile, read_uploads, upload_filename
 
     if not uploads or not workspace_id:
-        return [], ()
+        return [], (), ()
     files: list[tuple[str, bytes]] = []
     unread: list = []
     for key, name in uploads:
@@ -2879,8 +3108,14 @@ def _read_uploads(uploads: tuple[tuple[str, str], ...], workspace_id: str):
             ))
             continue
         files.append((upload_filename(name, key), data))
+    prose, prose_unread = read_prose(files)
     tables, skipped = read_uploads(files)
-    return tables, tuple(unread) + skipped
+    # NAMED BY THE PROSE PASS, SO NOT NAMED BY THE TABULAR ONE. Matched on the
+    # filename `read_uploads` was handed, which is the same string
+    # `read_prose` was handed — one list, one name per attachment.
+    read_as_prose = {d.name for d in prose}
+    skipped = tuple(u for u in skipped if u.name not in read_as_prose)
+    return tables, tuple(unread) + skipped + prose_unread, prose
 
 
 def _stored_uploads(
@@ -3070,7 +3305,7 @@ def _recon_report(company_id: str, *,
     # query would otherwise be shown a plan that read nothing at all, when
     # everything they actually handed over was sitting in storage, readable.
     # `_upload_tables` is itself total, so this cannot raise.
-    uploaded, unread = _read_uploads(uploads, workspace_id)
+    uploaded, unread, prose = _read_uploads(uploads, workspace_id)
 
     try:
         from app.db.client import require_client
@@ -3102,7 +3337,7 @@ def _recon_report(company_id: str, *,
         return replace(
             observe(tables, signals=rows,
                     self_names=_self_account_keys(company_id)),
-            unread=unread + displaced)
+            unread=unread + displaced, prose=prose)
     except Exception:  # noqa: BLE001 — see the constant above
         logger.warning("crucible: reconnaissance pass failed for %s; the plan "
                        "will be built without a method section", company_id,
@@ -3110,7 +3345,7 @@ def _recon_report(company_id: str, *,
         # What survived: the uploads, observed on their own. An empty report
         # when there is nothing else is the same object this used to return.
         tables, displaced = reserve_for_uploads(uploaded, [])
-        return replace(observe(tables), unread=unread + displaced)
+        return replace(observe(tables), unread=unread + displaced, prose=prose)
 
 
 def _load_signals(company_id: str) -> list[dict]:

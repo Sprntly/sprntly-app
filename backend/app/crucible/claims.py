@@ -632,6 +632,45 @@ def _parse_ts(value: Any) -> Optional[datetime]:
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 
 
+#: `provenance["channel"]` on a signal that was read out of a file attached to
+#: a chat message rather than pulled from a connected source. Written by
+#: `crucible.prose.ATTACHMENT_CHANNEL`; read here, and only here, to apply the
+#: strength ceiling below.
+ATTACHMENT_CHANNEL = "chat_attachment"
+
+
+def _provenance(signal: Mapping) -> Mapping:
+    """A signal's `provenance` as a mapping, whatever shape it arrived in.
+
+    Factored out because two things now read it — document identity and the
+    attachment ceiling — and a second inline `json.loads` fallback beside the
+    first is a second place for the string case to be forgotten.
+    """
+    provenance = signal.get("provenance")
+    if isinstance(provenance, str):
+        import json
+
+        try:
+            provenance = json.loads(provenance)
+        except Exception:  # noqa: BLE001 — unreadable provenance is no
+            # provenance, which is the honest reading of it
+            provenance = None
+    return provenance if isinstance(provenance, Mapping) else {}
+
+
+def came_from_an_attachment(signal: Mapping) -> bool:
+    """Did this row come out of a file someone attached to a message?
+
+    THE TRANSPORT, WHICH IS NOT THE WITNESS. `AUTHORITATIVE_FOR` and
+    `DEFAULT_STRENGTH` are keyed on WHO is speaking — an analytics platform, a
+    customer on a call, a PM writing down the company's own constraints — and
+    "upload" is none of those, it is how the bytes arrived. So the source type
+    is left exactly as the extractor classified it, and this is used for the
+    one thing the transport genuinely does bear on: the ceiling.
+    """
+    return _provenance(signal).get("channel") == ATTACHMENT_CHANNEL
+
+
 def _artifact_id(signal: Mapping) -> str:
     """Which source DOCUMENT this signal came out of.
 
@@ -646,18 +685,9 @@ def _artifact_id(signal: Mapping) -> str:
     answers "yes" every time and the ledger asserts a provenance the system
     does not have.
     """
-    provenance = signal.get("provenance")
-    if isinstance(provenance, str):
-        import json
-
-        try:
-            provenance = json.loads(provenance)
-        except Exception:  # noqa: BLE001 — unreadable provenance is no doc
-            provenance = None
-    if isinstance(provenance, Mapping):
-        doc = provenance.get("doc")
-        if doc:
-            return str(doc)
+    doc = _provenance(signal).get("doc")
+    if doc:
+        return str(doc)
     return str(signal.get("source_id") or "")
 
 
@@ -709,6 +739,30 @@ def project_signal(
     # body speculates about why users churn — precisely the failure §4.5 exists
     # to prevent, wearing the strength of a structured field.
     if not authoritative and STRENGTH_SCORE[strength] > STRENGTH_SCORE["reported"]:
+        strength = "reported"
+
+    # AND A FILE SOMEBODY ATTACHED MAY NOT EXCEED `reported` EITHER, whatever
+    # witness the extractor read in it.
+    #
+    # THE CEILING IS ABOUT PROVENANCE, NOT ABOUT PROSE. A connector is a
+    # standing agreement: the tenant wired up their analytics platform once and
+    # every row it produces carries that platform's standing. A document handed
+    # over inside one message carries no such standing — it may be a customer
+    # transcript, and it may equally be a deck the reader wrote last night
+    # arguing for the thing they are about to ask the engine to rank. Nothing
+    # in the bytes distinguishes those, which is exactly why the extractor's
+    # answer is kept (it is the best read available of WHO is speaking) and the
+    # confidence it can carry is capped (nothing available says how much that
+    # speaker should be trusted).
+    #
+    # A CEILING RATHER THAN A REFUSAL, in both directions and deliberately.
+    # Dropping to `inferred` — or refusing authority outright — would kill every
+    # upload-only cluster at `no_authority` and hand back a run that read the
+    # document and found nothing in it. Leaving `measured` reachable would let
+    # an attached spreadsheet-turned-narrative size a finding as measured fact,
+    # outranking the connected corpus it is supposed to be weighed against.
+    if (came_from_an_attachment(signal)
+            and STRENGTH_SCORE[strength] > STRENGTH_SCORE["reported"]):
         strength = "reported"
 
     return Claim(
