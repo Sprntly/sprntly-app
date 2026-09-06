@@ -2576,3 +2576,56 @@ def test_no_observation_forecasts_the_unit_the_run_has_not_settled():
         "restates it verbatim into a document that may contradict it:\n"
         + "\n".join(f"  [{k}] {f!r}" for k, f in offenders)
     )
+
+
+# ─── Account naming: one true sentence, carried at both sites ──────────────
+
+def test_the_account_naming_sentence_is_true_and_identical_at_both_sites():
+    """The report used to say two DIFFERENT, both false, things about naming
+    accounts: the head of "Each one, in full" claimed "this reading ... does
+    not keep their names", and the appendix claimed "where a name appears in
+    this document it is a source document". Neither survives a weighted run
+    with unpriced accounts, where the pipeline names them ON PURPOSE
+    (`pipeline._named_unpriced`) so a reader can see whether their biggest
+    accounts are the ones a value could not reach.
+
+    THE FIXTURE IS THE POINT. A finding with no pricing at all would let this
+    sentence pass while being false on exactly the runs it has to be true on
+    — a weighted run that names unpriced accounts in its own basis line."""
+    from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
+
+    weighted_with_named_unpriced = _finding(assumed_params=[{
+        "name": "value_per_account",
+        "basis": ("weighted by 500,000 of contracted value across 2 of 4 "
+                  "accounts; not priced: Northwind Rivets, Acme Trading Co "
+                  "and 1 more"),
+    }])
+    html = render_report_html(_run(), [weighted_with_named_unpriced])
+
+    # The old, false sentences are gone outright.
+    assert "never which ones" not in html
+    assert "does not keep their names" not in html
+    assert ("Where a name appears in this document it is a source document"
+            not in html)
+    # Neither old sentence called anything a "quotation" or "quoted" claim we
+    # are replacing it with, either.
+    assert "We count accounts, we never name them" not in html
+
+    # The one true sentence renders, identically, at both sites that owe it.
+    assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
+
+    # And it is not contradicted by what the same run actually renders: the
+    # named unpriced accounts are right there on the page.
+    assert "Northwind Rivets" in html
+
+
+def test_the_account_naming_sentence_survives_a_run_with_no_pricing_at_all():
+    """The control: on a run that never weights anything, the same identical
+    sentence still has to hold — it must not silently depend on the weighted
+    fixture above to be true."""
+    from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
+
+    html = render_report_html(_run(), [_finding()])
+    assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
+
+

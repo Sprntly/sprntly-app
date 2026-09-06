@@ -1315,6 +1315,40 @@ KILL_SIGNAL_CAVEAT = (
     "this on your behalf. Someone has to go and look."
 )
 
+#: THE ONE TRUE SENTENCE ON ACCOUNT NAMING, CARRIED VERBATIM AT BOTH SITES
+#: THAT OWE IT (the head of "Each one, in full" and the appendix). It used to
+#: be two DIFFERENT sentences, both false: neither "this reading ... does not
+#: keep their names" nor "where a name appears it is a source document"
+#: survives contact with what the pipeline actually does. Names reach the
+#: reader by (at least) four routes: the strongest claim's assertion, cut at
+#: a connective, becomes a finding's rendered example (`pipeline.example_for`
+#: / `_THEME_LEAD_IN`); the same assertions are fed to both recommendation
+#: prompts and copied back as `cited_claim`; a set-aside reason can quote an
+#: account by way of `example`; and a weighted run's unpriced-account list
+#: (`pipeline._named_unpriced`) names accounts ON PURPOSE, by design, so the
+#: reader can see whether their biggest accounts are the ones a value could
+#: not reach. What is never true is that a NAMED LIST of every account behind
+#: a finding is the answer we hand back — `pipeline.build_findings` keeps
+#: `len(accounts_named)` and drops the tuple itself.
+#:
+#: SAYS "BIGGEST", NOT "LARGEST" — a word choice, not a synonym swap.
+#: `_decision_section` owns "largest" for a single, load-bearing claim ("it
+#: is the largest thing this reading found" / "the largest of the ones we
+#: could size"), and `test_an_unsized_finding_ranked_above_a_sized_one_denies
+#: _neither` asserts that exact word never appears on a run where the top row
+#: is unsized — a real guard against a real defect. This sentence renders on
+#: every run with findings, unsized or not, so reusing "largest" here would
+#: make that guard fire on a sentence it was never written to catch.
+ACCOUNT_NAMING_DISCLOSURE = (
+    "We size a finding by how many accounts it touches, and never produce a "
+    "roster of them as the answer. Names that occur in the evidence may "
+    "appear wherever that evidence is summarised — in the example under a "
+    "finding, in a reason for setting a theme aside, and in a "
+    "recommendation. And where a value could not reach some accounts, those "
+    "accounts are named on purpose, so you can see whether the biggest ones "
+    "are the ones missing."
+)
+
 
 #: An inline claim-id reference in model-authored prose: `[<uuid>]`, usually
 #: several in a row. The deep pass is asked to cite, and it cites INLINE as
@@ -2518,16 +2552,17 @@ def _findings_section(
     # ── THE TWO CAVEATS THIS SECTION OWES, STATED ONCE AT ITS HEAD. ───────
     #
     # Both used to travel as a clause inside individual lines — "Summarising
-    # one source:" opening every blockquote, and the naming limit buried in
-    # the appendix while the write-ups above it read as though they named
-    # accounts. Neither is dropped. Said once, at the top, they are out of the
-    # way of the prose and still unmissable, which is the whole trade.
+    # one source:" opening every blockquote, and the naming caveat buried in
+    # the appendix while the write-ups above it read as though no name could
+    # ever reach the page. Neither is dropped. Said once, at the top, they
+    # are out of the way of the prose and still unmissable, which is the
+    # whole trade. The naming sentence is `ACCOUNT_NAMING_DISCLOSURE`,
+    # carried verbatim here and in the appendix — see its definition for why.
     out.append(_p(
-        "Two things to know before you read these. We can tell you how many "
-        "accounts sit behind a finding, never which ones — this reading "
-        "counts accounts and does not keep their names. And anything set "
-        "apart below is a summary of what one source said rather than a "
-        "quotation: the raw text is checked, used, and never stored."
+        "Two things to know before you read these. " + ACCOUNT_NAMING_DISCLOSURE
+        + " And anything set apart below is a summary of what one source "
+        "said rather than a quotation: the raw text is checked, used, and "
+        "never stored."
     ))
 
     # THE UNSIZED COUNT, STATED UNCONDITIONALLY. It used to be suppressed
@@ -3375,17 +3410,15 @@ def _provenance_section(
         _placement_note_section(kept),
         _recommendation_basis_section(recommendation_basis),
         _set_aside_section(set_aside),
-        # SAID ONCE, AND SAID PLAINLY, because the memo above is read as
-        # though it named accounts and it does not. A finding carries how MANY
-        # accounts a theme touches; which ones is never stored (`pipeline`
-        # keeps `len(accounts_named)` and drops the names). Stating the limit
-        # here is the alternative to a write-up that implies a customer list
-        # it cannot produce.
-        _p(
-            "We count accounts, we never name them: this reading records how "
-            "many accounts a theme touches and not which ones. Where a name "
-            "appears in this document it is a source document."
-        ),
+        # SAID ONCE, AND SAID PLAINLY, and carried VERBATIM identical to the
+        # sentence at the head of "Each one, in full" — see
+        # `ACCOUNT_NAMING_DISCLOSURE`'s definition for the four routes a name
+        # actually reaches this document by. The old wording here claimed
+        # "where a name appears in this document it is a source document",
+        # which is false: a real run named organisations and people in its
+        # recommendation prose, not only in quoted source material. That
+        # carve-out is deleted outright rather than qualified.
+        _p(ACCOUNT_NAMING_DISCLOSURE),
         # LAST IN THE APPENDIX, DELIBERATELY, AND THE REASON IS MECHANICAL.
         # Four of the blocks above emit no heading of their own — the funnel
         # chart, the funnel sentence, the relevance coverage and the
