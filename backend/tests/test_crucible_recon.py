@@ -625,3 +625,117 @@ def test_no_company_name_leaves_every_count_exactly_as_it_was():
     empty = recon.signal_field_presence(
         signals, path=("properties", "account"), self_names=frozenset())
     assert plain.present == empty.present == 7711
+
+
+# ─── The per-account value map, and whether the run may weight by it ────────
+#
+# The map is a copy of the reader's contract rows and is never persisted; what
+# the plan carries is the VERDICT it produces. Both halves are tested here:
+# that the join is keyed the way the graph names accounts, and that the gate
+# says no on a corpus the book cannot reach.
+
+
+def _priced_signal(account: str, sid: str) -> dict:
+    return {"id": sid, "kind": "sentiment", "source_type": "customer_voice",
+            "content": "an assertion", "valid_at": "2026-08-01T12:00:00+00:00",
+            "properties": {"account": account}}
+
+
+def test_the_value_map_is_keyed_the_way_the_graph_names_accounts():
+    """The contracts sheet writes `Account B` and the graph writes whatever a
+    speaker said. Joining on the raw strings matches neither; one
+    normalisation used on both sides is the entire value of the join."""
+    from app.crucible.claims import account_key
+
+    book = recon.account_value_map([fx.contracts()])
+    assert book is not None
+    assert book.source == "08_sales_data:contracts"
+    assert book.field == "total_acv_usd"
+    assert book.key_field == "account"
+    assert book.values[account_key("account b")] == 546844
+    assert book.values[account_key("Account B Inc.")] == 546844
+    assert book.accounts == 8
+
+
+def test_two_spellings_in_the_contracts_file_are_added_together_and_named():
+    """Summing two rows into one account is the one operation here that can
+    silently overstate a customer, so the raw spellings are carried."""
+    rows = [{"account": a, "total_acv_usd": v} for a, v in (
+        ("Northwind", 100.0), ("Northwind Inc.", 25.0),
+        ("Contoso", 50.0), ("AdventureWorks", 75.0), ("Fabrikam", 10.0))]
+    book = recon.account_value_map(
+        [recon.make_table("08_sales_data:contracts", rows,
+                          columns=("account", "total_acv_usd"))])
+    from app.crucible.claims import account_key
+
+    assert book.values[account_key("Northwind")] == 125.0
+    assert book.merged == ("Northwind", "Northwind Inc.")
+
+
+def test_nothing_carrying_a_per_account_value_yields_no_map():
+    """The negative twin, and the normal case: no contracts, no map, and the
+    run stays counted."""
+    assert recon.account_value_map([fx.tickets()]) is None
+    assert recon.account_value_map([]) is None
+
+
+def test_a_corpus_the_book_can_price_clears_the_gate():
+    signals = [_priced_signal("Account B", f"s{i}") for i in range(9)]
+    signals.append(_priced_signal("Someone Else", "s9"))
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == 0.9
+    assert o.figures["threshold"] == recon.WEIGHTING_MIN_PRICEABLE_SHARE
+    assert o.figures["priced_accounts"] == 1
+    assert o.figures["named_accounts"] == 2
+    assert o.figures["book_accounts"] == 8
+    assert o.severity == "medium"
+    assert "weighted by the revenue behind them" in o.what
+
+
+def test_a_corpus_the_book_cannot_reach_is_counted_and_says_so():
+    """THE HONEST HALF, AND THE ONE THAT SHIPS FIRST. Measured on a real
+    tenant the join reaches 3.9% of attributed signals; the plan has to say
+    that in those words rather than degrade to a count in silence."""
+    signals = [_priced_signal("Account B", "s0")]
+    signals += [_priced_signal(f"Stranger {i}", f"s{i + 1}") for i in range(24)]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == 0.04
+    assert o.severity == "high"
+    assert "counted, not weighted" in o.what
+    assert "4.0% of what I read could be priced" in o.what
+
+
+def test_the_priceable_share_ignores_signals_that_name_nobody():
+    """The denominator is what NAMES an account, not the whole corpus — a
+    share taken over every row would be a statement about attribution, which
+    the attribution gate already makes."""
+    signals = [_priced_signal("Account B", "s0"),
+               {"id": "s1", "kind": "sentiment", "source_type": "customer_voice",
+                "content": "x", "valid_at": "2026-08-01T12:00:00+00:00",
+                "properties": {}}]
+    cov = recon.priceable_coverage(
+        signals, recon.account_value_map([fx.contracts()]).values)
+    assert cov.attributed_signals == 1
+    assert cov.share == 1.0
+
+
+def test_the_vendors_own_name_cannot_satisfy_the_priceable_gate():
+    """Same defect as the attribution gate, one join over: a contracts file
+    that lists the vendor would otherwise price the vendor's own rows."""
+    rows = [{"account": a, "total_acv_usd": v} for a, v in (
+        ("AdventureWorks", 900.0), ("Contoso", 50.0),
+        ("Fabrikam", 10.0), ("Northwind", 20.0))]
+    book = recon.account_value_map(
+        [recon.make_table("08_sales_data:contracts", rows,
+                          columns=("account", "total_acv_usd"))])
+    signals = [_priced_signal("AdventureWorks", f"s{i}") for i in range(9)]
+    signals.append(_priced_signal("Contoso", "s9"))
+    cov = recon.priceable_coverage(
+        signals, book.values, recon_self_keys("AdventureWorks"))
+    assert cov.attributed_signals == 1
+    assert cov.priced_names == ("contoso",)
+
+
+def test_the_gate_says_nothing_at_all_when_there_is_no_book():
+    assert "priceable_coverage" not in _kinds(
+        [fx.tickets()], signals=[_priced_signal("Account B", "s0")])

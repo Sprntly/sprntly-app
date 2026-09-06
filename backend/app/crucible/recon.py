@@ -166,6 +166,7 @@ KINDS: tuple[str, ...] = (
     "monetary_coverage_gap",
     "source_concentration",
     "claim_mix",
+    "priceable_coverage",
 )
 
 SEVERITIES: tuple[str, ...] = ("high", "medium", "low")
@@ -1227,6 +1228,19 @@ INGEST_CLOCK_TOLERANCE_S = 120.0
 #: happen to carry the field, which is a worse answer than an honest count.
 ATTRIBUTABLE_MIN_SHARE = 0.5
 
+#: Below this share of what was read being PRICEABLE, a run counts rather than
+#: weights, and says so.
+#:
+#: A DECISION, NOT A MEASUREMENT, and it is one constant rather than two on
+#: purpose. It is set to `ATTRIBUTABLE_MIN_SHARE` because the engine should
+#: tell one story about when it may weight: "below half of what I read, the
+#: total is decided by whichever rows happen to carry the field" is the same
+#: argument whether the field is an account name or a contract value, and two
+#: different bars for two flavours of one question is a difference a reader
+#: would have to be told about and could not check. It is disclosed as an
+#: `AssumedParam` on every run rather than living only here.
+WEIGHTING_MIN_PRICEABLE_SHARE = 0.5
+
 #: How much of the corpus one document may account for before the row count
 #: stops being a count of independent observations.
 SOURCE_CONCENTRATION_MIN_RATIO = 1.5
@@ -2160,6 +2174,282 @@ def _observe_concentration(tables: Sequence[Table]) -> list[Observation]:
     return out
 
 
+#: How many priced accounts a sheet must carry before it is a BOOK rather than
+#: a handful of rows. Four is the existing bar `unit_value_derivable` has always
+#: applied, kept identical so the figure the plan quotes and the map the run
+#: weights by can never come from two different columns.
+MIN_PRICED_ACCOUNTS = 4
+
+
+@dataclass(frozen=True)
+class AccountBook:
+    """One table's per-account value column, and the totals it yields.
+
+    EXTRACTED SO THERE IS EXACTLY ONE ANSWER TO "WHICH COLUMN IS THE MONEY".
+    The plan tells the reader the figure was taken from a named column of a
+    named sheet; if the weighting then read a different column the sentence
+    would be false in the one place a reader cannot check it. Both callers go
+    through here.
+    """
+    table: Table
+    key_field: str
+    field: str
+    totals: Mapping[str, float]
+
+
+def _per_account_books(tables: Sequence[Table]) -> list[AccountBook]:
+    """Every table that carries a per-account recurring value, in table order.
+
+    The column choice is the one `unit_value_derivable` has always made: the
+    first text column that looks like an account and is one row per account,
+    and the recurring-value column carrying the largest total.
+    """
+    books: list[AccountBook] = []
+    for t in tables:
+        prof = profiles(t)
+        keys = [c for c in t.columns
+                if prof[c].kind == "text" and _looks_like_account(c)
+                and prof[c].distinct == prof[c].filled
+                and prof[c].filled >= MIN_PRICED_ACCOUNTS]
+        money = [c for c in t.columns
+                 if prof[c].kind == "number" and _is_recurring_value(c)]
+        if not keys or not money:
+            continue
+        key = keys[0]
+        best = max(money, key=lambda c: sum(
+            v for v in (_as_number(x) for x in t.values(c)) if v is not None))
+        totals = aggregate_by_group(t, key, best)
+        if len(totals) < MIN_PRICED_ACCOUNTS:
+            continue
+        books.append(AccountBook(table=t, key_field=key, field=best,
+                                 totals=totals))
+    return books
+
+
+@dataclass(frozen=True)
+class AccountValues:
+    """What each account is worth, keyed the way the graph names accounts.
+
+    RUN-SCOPED, AND NEVER PERSISTED. This is a copy of the reader's contract
+    rows: sixty account names against sixty annual values. It is derived from
+    the uploaded bytes each time it is needed and it does not go into
+    `prioritisation.plan` — what IS stored is the distilled per-finding sum and
+    the names that could not be priced, which is an output of the analysis
+    rather than a copy of the input.
+
+    KEYED ON `claims.account_key`, NOT ON THE SPELLING IN THE SPREADSHEET. The
+    contracts sheet writes `Northwind Labs Inc.` and the graph writes
+    `NorthwindLabs`; joining on the raw strings matches neither. One
+    normalisation, used on both sides, is the whole reason the join is worth
+    anything — and it is the same function the self-name exclusion uses, so
+    there is no second definition of what makes two names one account.
+    """
+    values: Mapping[str, float]
+    #: The table and column the figures came from, so the plan can say where.
+    source: str = ""
+    field: str = ""
+    key_field: str = ""
+    #: Raw spellings that collapsed onto the same key and were ADDED together.
+    #: Named rather than counted because summing two rows into one account is
+    #: the one operation here that can silently overstate a customer.
+    merged: tuple[str, ...] = ()
+
+    @property
+    def accounts(self) -> int:
+        return len(self.values)
+
+    @property
+    def total(self) -> float:
+        return float(sum(self.values.values()))
+
+
+def account_value_map(tables: Sequence[Table]) -> Optional[AccountValues]:
+    """`account_key -> annual value`, from the reader's own contracts.
+
+    ONE BOOK, CHOSEN THE SAME WAY `unit_value_derivable` CHOOSES IT: most
+    accounts covered, then largest total, then name. Several sheets can carry
+    a per-account figure and they will not agree; picking here, once, and
+    naming the column is the disclosed version of that choice.
+
+    `None` when nothing read carries one, which is the normal case for a
+    tenant with no contracts attached and is what keeps the run counted.
+    """
+    ranked = sorted(
+        _per_account_books(tables),
+        key=lambda b: (-len(b.totals), -sum(b.totals.values()), b.table.name),
+    )
+    if not ranked:
+        return None
+    book = ranked[0]
+    from app.crucible.claims import account_key
+
+    values: dict[str, float] = {}
+    seen: dict[str, list[str]] = {}
+    for name, amount in book.totals.items():
+        key = account_key(name)
+        if not key:
+            continue
+        values[key] = values.get(key, 0.0) + float(amount)
+        seen.setdefault(key, []).append(str(name))
+    merged = tuple(sorted(
+        n for names in seen.values() if len(names) > 1 for n in names))
+    return AccountValues(
+        values=values, source=book.table.name, field=book.field,
+        key_field=book.key_field, merged=merged,
+    )
+
+
+@dataclass(frozen=True)
+class PriceableCoverage:
+    """How much of what was READ could be priced from the contracts.
+
+    THE DENOMINATOR IS NAMED, because two defensible ones differ by more than
+    two-fold on real data: the share of ATTRIBUTED SIGNALS (what this measures)
+    and the share of DISTINCT ACCOUNTS. On the tenant this was measured against
+    they are 3.9% and 1.5%. Signals is the one used, because the sentence the
+    reader is shown is "N% of what I read could be priced" and what was read is
+    signals — an account share would answer a question nobody asked and would
+    weight a customer with four hundred rows the same as one with two.
+    """
+    attributed_signals: int
+    priceable_signals: int
+    named_accounts: int
+    priced_accounts: int
+    #: The keys, so the plan can say which it could price and which it could
+    #: not. Bounded by the caller when rendered, never when counted.
+    priced_names: tuple[str, ...] = ()
+    unpriced_names: tuple[str, ...] = ()
+
+    @property
+    def share(self) -> float:
+        return (0.0 if not self.attributed_signals
+                else self.priceable_signals / self.attributed_signals)
+
+    @property
+    def denominator(self) -> str:
+        return "signals naming at least one account other than your own"
+
+
+def priceable_coverage(
+    signals: Sequence[Mapping[str, Any]],
+    values: Mapping[str, float],
+    self_names: frozenset[str] = frozenset(),
+) -> PriceableCoverage:
+    """Of the evidence that names an account, how much names a PRICED one.
+
+    A signal counts as priceable if ANY account it names is in the book. That
+    is the generous reading and it is the right one here: this gate decides
+    whether the run may weight at all, and a theme reached through one priced
+    account of three is still a theme the money can speak to. The per-finding
+    disclosure carries the harder truth — how many of THAT finding's accounts
+    were priced — where a reader can see it beside the number.
+    """
+    from app.crucible.claims import (
+        CUSTOMER_KEYS, PROSPECT_KEYS, account_key, normalise_account,
+    )
+
+    attributed = 0
+    priceable = 0
+    named: set[str] = set()
+    priced: set[str] = set()
+    for row in signals:
+        props = row.get("properties") if isinstance(row, Mapping) else None
+        if not isinstance(props, Mapping):
+            continue
+        keys = set()
+        for field_name in (*CUSTOMER_KEYS, *PROSPECT_KEYS):
+            name = normalise_account(props.get(field_name), self_names)
+            if name:
+                keys.add(account_key(name))
+        if not keys:
+            continue
+        attributed += 1
+        named |= keys
+        hit = keys & set(values)
+        if hit:
+            priceable += 1
+            priced |= hit
+    return PriceableCoverage(
+        attributed_signals=attributed,
+        priceable_signals=priceable,
+        named_accounts=len(named),
+        priced_accounts=len(priced),
+        priced_names=tuple(sorted(priced)),
+        unpriced_names=tuple(sorted(named - priced)),
+    )
+
+
+def _observe_priceable_coverage(
+    tables: Sequence[Table],
+    signals: Sequence[Mapping[str, Any]],
+    self_names: frozenset[str] = frozenset(),
+) -> list[Observation]:
+    """Could the evidence actually be weighted by revenue, and by how much?
+
+    THE VERDICT THE READER APPROVES, AND THE ONE THING ON THIS PLAN THAT MUST
+    NOT BE RECOMPUTED LATER. A connector that syncs every twenty minutes moves
+    the denominator between the gate and the run, so a share taken again at
+    execute can cross the threshold in either direction — the reader would
+    approve a counted run and receive a weighted one. It is measured once,
+    here, and carried on the plan as an observation exactly like every other
+    fact the gate shows.
+
+    EMITTED WHETHER THE ANSWER IS YES OR NO, which is the difference between a
+    disclosure and a boast. The interesting case on real data is the negative
+    one: on the tenant this was measured against 3.9% of attributed signals
+    name an account the contracts can price, so the run counts, and the plan
+    says so in those words instead of degrading to a count in silence.
+    """
+    book = account_value_map(tables)
+    if book is None or not signals:
+        return []
+    cov = priceable_coverage(signals, book.values, self_names)
+    if not cov.attributed_signals:
+        return []
+    weighted = cov.share >= WEIGHTING_MIN_PRICEABLE_SHARE
+    conc = _concentration(dict(book.values), book.key_field, book.field,
+                          DEFAULT_TOP_N)
+    if weighted:
+        headline = (
+            f"{_pct(cov.share)} of what names an account names one your "
+            f"contracts can price, so themes here are weighted by the revenue "
+            f"behind them rather than by how many accounts raised them."
+        )
+    else:
+        headline = (
+            f"Only {_pct(cov.share)} of what I read could be priced, so this "
+            f"is counted, not weighted: a theme's size is the number of "
+            f"accounts it touches, and never money."
+        )
+    return [Observation(
+        id=f"{book.source}:priceable_coverage:{book.field}",
+        kind="priceable_coverage",
+        severity="medium" if weighted else "high",
+        source=book.source,
+        fields=(book.key_field, book.field),
+        what=(
+            f"{headline} `{book.field}` prices {book.accounts:,} accounts; "
+            f"{cov.priced_accounts:,} of the {cov.named_accounts:,} accounts "
+            f"named in your evidence are among them, covering "
+            f"{cov.priceable_signals:,} of {cov.attributed_signals:,} "
+            f"attributed signals. In the file itself the top "
+            f"{min(DEFAULT_TOP_N, book.accounts)} accounts hold "
+            f"{_pct(conc.share)} of the book."
+        ),
+        figures={
+            "priceable_share": cov.share,
+            "threshold": WEIGHTING_MIN_PRICEABLE_SHARE,
+            "attributed_signals": float(cov.attributed_signals),
+            "priceable_signals": float(cov.priceable_signals),
+            "named_accounts": float(cov.named_accounts),
+            "priced_accounts": float(cov.priced_accounts),
+            "book_accounts": float(book.accounts),
+            "top_n": float(min(DEFAULT_TOP_N, book.accounts)),
+            "top_share": conc.share,
+        },
+    )]
+
+
 def _observe_unit_value(tables: Sequence[Table]) -> list[Observation]:
     """Is what one account is worth already in the evidence?
 
@@ -2179,22 +2469,9 @@ def _observe_unit_value(tables: Sequence[Table]) -> list[Observation]:
     smaller sibling is smaller, so the choice is disclosed rather than hidden.
     """
     candidates: list[tuple[int, float, str, Observation]] = []
-    for t in tables:
-        prof = profiles(t)
-        keys = [c for c in t.columns
-                if prof[c].kind == "text" and _looks_like_account(c)
-                and prof[c].distinct == prof[c].filled and prof[c].filled >= 4]
-        money = [c for c in t.columns
-                 if prof[c].kind == "number" and _is_recurring_value(c)]
-        if not keys or not money:
-            continue
-        key = keys[0]
-        best = max(money, key=lambda c: sum(
-            v for v in (_as_number(x) for x in t.values(c)) if v is not None))
-        totals = aggregate_by_group(t, key, best)
+    for book in _per_account_books(tables):
+        t, key, best, totals = book.table, book.key_field, book.field, book.totals
         values = sorted(totals.values())
-        if len(values) < 4:
-            continue
         mid = len(values) // 2
         median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
         obs = Observation(
@@ -2535,6 +2812,18 @@ def observe(
             observations.extend(_observe_evidence_mix(evidence_mix(signals)))
         except Exception:  # noqa: BLE001
             logger.warning("crucible recon: evidence mix failed", exc_info=True)
+
+    # THE ONE CHECK THAT NEEDS BOTH SIDES. Every other observation reads either
+    # the tables or the graph; this one asks whether they JOIN — how much of
+    # what was read names an account the uploaded book can price — so it sits
+    # outside both loops rather than being bent into either.
+    try:
+        observations.extend(
+            _observe_priceable_coverage(readable, signals, self_names))
+    except Exception:  # noqa: BLE001 — a run that cannot answer this counts,
+        # which is the same thing it did before this check existed.
+        logger.warning("crucible recon: priceable coverage failed",
+                       exc_info=True)
 
     missing = tuple(sorted(
         str(s) for s in expected_sources if str(s) not in present_types))
