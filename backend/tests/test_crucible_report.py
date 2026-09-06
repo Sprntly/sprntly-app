@@ -2784,3 +2784,83 @@ def test_reach_not_narrowed_note_does_not_characterise_the_evidence():
             f"{overclaim!r} found in the disclosure sentence — it must speak "
             f"about the method, not about the evidence: {para!r}"
         )
+
+
+# ─── The chain summary: a compact map, rendered above the answer ───────────
+
+
+def _chain_html(html: str) -> str:
+    """The chain-summary block alone, isolated the same way `_ranking_html`
+    isolates the ranking: from its own heading to the next heading at or
+    above its level."""
+    m = re.search(r"<h2>The chain, in six lines</h2>", html)
+    assert m, "the chain summary did not render"
+    rest = html[m.start():]
+    nxt = re.search(r"<h[12][^>]*>", rest[1:])
+    return rest[:nxt.start() + 1] if nxt else rest
+
+
+def test_the_chain_summary_renders_before_the_answer():
+    """The whole point of this addition: a reader sees the chain reconstructs
+    before reaching the recommendation that rests on it, not after."""
+    html = render_report_html(_run(), [_finding()])
+    assert html.index("The chain, in six lines") < html.index(
+        "What we recommend"
+    )
+
+
+def test_the_chain_summary_names_all_six_links_when_the_run_has_them():
+    """Every element the chain is supposed to reconstruct, present as its own
+    line, on a run that actually has all six: a kept finding, a recorded
+    ranking framework, and a theme set aside for the goal."""
+    findings = [_finding(statement="a", label="kept"),
+                _finding(statement="b", label="dropped")]
+    run = _with_aside(_rice_run(), [None, "off-topic"])
+    chain = _plain(_chain_html(render_report_html(run, findings)))
+    for label in ("The goal", "The data used", "What was found",
+                  "How it was weighted", "What was ruled out",
+                  "The conclusion"):
+        assert label in chain, f"{label!r} is missing from the chain summary"
+
+
+def test_the_chain_summary_does_not_claim_a_link_the_run_has_nothing_for():
+    """THE DEGRADED CASE THIS ADDITION EXISTS FOR. A run with no surviving
+    findings has nothing found, nothing to weigh and no conclusion to draw —
+    the summary must say so rather than pointing a reader at "What we
+    recommend" or a ranking table that then is not there."""
+    chain = _plain(_chain_html(render_report_html(_run(), [])))
+    assert (
+        "nothing survived to this point on this run, so nothing is written "
+        "up below" in chain
+    )
+    assert (
+        "this run recorded no ranking framework, or nothing survived to "
+        "rank" in chain
+    )
+    assert "there is nothing to conclude without a finding" in chain
+    # And the summary never claims the opposite anywhere in its own six
+    # lines — the positive branches must not also be present.
+    assert "written up individually further below" not in chain
+
+
+def test_the_chain_summary_says_nothing_was_ruled_out_when_nothing_was():
+    """A run that kept every finding and recorded no ledger rejection has
+    nothing to rule out — the line says so, rather than naming two appendix
+    sections that would not be there."""
+    findings = [_finding(statement="a"), _finding(statement="b")]
+    chain = _plain(_chain_html(render_report_html(_run(), findings)))
+    assert "nothing was ruled out on this run" in chain
+    assert "Considered and set aside" not in chain
+
+
+def test_the_chain_summary_finds_ruled_out_from_the_ledger_alone():
+    """A run can rule candidates out at verification with no goal-relevance
+    gate ever having run — `set_aside` stays empty and only the ledger
+    carries the rejection. The line has to be earned from either, not from
+    `set_aside` alone."""
+    ledger = [{"label": "a one-off", "reason": "a single claim"}]
+    chain = _plain(
+        _chain_html(render_report_html(_run(), [_finding()], ledger))
+    )
+    assert "Considered and set aside" in chain
+    assert "nothing was ruled out on this run" not in chain

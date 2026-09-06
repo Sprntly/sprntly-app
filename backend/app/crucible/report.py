@@ -2836,6 +2836,114 @@ def _reach_not_narrowed_note(goal_class: str) -> str:
     )
 
 
+def _chain_line(present: bool, present_text: str, absent_text: str) -> str:
+    """One line of `_chain_summary_section`: what to say when its section
+    rendered, and what to say honestly when it did not."""
+    return present_text if present else absent_text
+
+
+def _chain_summary_section(
+    run: dict,
+    plan: dict,
+    kept: list[dict],
+    set_aside: list,
+    ledger: list[dict],
+) -> str:
+    """Six lines, above the answer, naming where each link of the chain is
+    answered: the goal, the data used, what was found, how it was weighted,
+    what was ruled out, the conclusion.
+
+    A MAP, NOT A SECOND COPY. Every fact this points at already has a full
+    section of its own — most of them below the recommendation, in
+    `_provenance_section`, moved there rather than deleted on the customer's
+    own instruction (see that function's docstring). This exists so a reader
+    can see the chain reconstructs without scrolling past the recommendation
+    to find out; it says WHERE a link is answered, and never repeats what
+    that section itself says.
+
+    EVERY LINE IS DERIVED FROM WHETHER ITS OWN SECTION ACTUALLY RENDERS ON
+    THIS RUN, NEVER FROM A CONSTANT. This feature has already shipped seven
+    sentences that claimed more than the engine did, six of them hand-written
+    and drifted from behaviour; a fixed six-line summary is exactly that
+    shape, because the day a section starts returning "" on some run —
+    several already do — a hardcoded line would still promise it. So `found`,
+    `weighed` and `ruled_out` below are the SAME guard the section they name
+    already renders under (`_findings_section`'s `if not findings`,
+    `_framework_section`'s `if not findings or not framework`,
+    `_set_aside_section`'s and `_ledger_section`'s `if not pairs` / `if not
+    ledger`), read off the same data those functions read, rather than a new
+    judgement invented here.
+
+    NOT DERIVED BY RE-PARSING THE OTHER SECTION'S OWN HTML. `_ask_section` and
+    `_what_was_read_section` never return "" — each always has a branch that
+    states the honest fallback rather than nothing — so a truthiness check on
+    their output would report every run as having both, which is true only
+    of the SHAPE, not of whether either found anything. Only the two lines
+    that genuinely never fail (the goal, the data used) are `True` outright;
+    the rest are checked against the run's own findings, framework and cut
+    lists, the same way the sections themselves are gated.
+
+    A MISSING LINK IS STATED, NOT DROPPED. `_nothing_cut_note` and
+    `_reach_not_narrowed_note` already refuse to leave a real absence silent
+    ("absent is not zero", same file); a map that quietly shrank to five
+    lines on a run with nothing to rank would ask a reader to notice the gap
+    by counting, which nobody does. So this always renders six lines, and a
+    link with nothing behind it says so in its own line instead of vanishing
+    from the map.
+    """
+    framework = str(plan.get("framework") or "").strip()
+    found = bool(kept)
+    weighed = found and bool(framework)
+    ruled_out = bool(set_aside) or bool(ledger)
+
+    items = [
+        "<strong>The goal</strong> - answered in "
+        '"What you asked, and what you said it meant."',
+        "<strong>The data used</strong> - answered in "
+        '"What was read" and, where anything was missing, '
+        '"What was missing from it."',
+        _chain_line(
+            found,
+            "<strong>What was found</strong> - answered in "
+            '"What we recommend," and written up individually further '
+            "below.",
+            "<strong>What was found</strong> - nothing survived to this "
+            "point on this run, so nothing is written up below.",
+        ),
+        _chain_line(
+            weighed,
+            "<strong>How it was weighted</strong> - answered in "
+            '"The ranking" and "How the ranking works," in the appendix.',
+            "<strong>How it was weighted</strong> - this run recorded no "
+            "ranking framework, or nothing survived to rank, so no ranking "
+            "table renders below.",
+        ),
+        _chain_line(
+            ruled_out,
+            "<strong>What was ruled out</strong> - answered in "
+            '"Considered and set aside" and "Considered and ruled out," '
+            "in the appendix.",
+            "<strong>What was ruled out</strong> - nothing was ruled out on "
+            "this run, so neither list renders below.",
+        ),
+        _chain_line(
+            found,
+            "<strong>The conclusion</strong> - answered in "
+            '"Why the first finding is first."',
+            "<strong>The conclusion</strong> - there is nothing to "
+            "conclude without a finding; see the line above.",
+        ),
+    ]
+    return "".join([
+        "<h2>The chain, in six lines</h2>",
+        _p(
+            "Where each part of this reading is answered, in order. The "
+            "full detail is below the recommendation, not repeated here."
+        ),
+        _ul(items),
+    ])
+
+
 def _answer_section(
     kept: list[dict], full_cap: int, one_topic: bool,
     population_note: str = "",
@@ -3679,6 +3787,13 @@ def render_report_html(
         # describes HOW the run worked — including what was asked and what the
         # definition was — is below all of that, in `_provenance_section`.
         #
+        # `_chain_summary_section` renders ONE SCREEN ABOVE the answer, not
+        # instead of any of this: six lines naming where each link of the
+        # chain — goal, data, findings, weighting, what was ruled out,
+        # conclusion — is actually answered, so a reader can see the chain
+        # reconstructs before reading the recommendation, without moving a
+        # single one of these sections from where they already are.
+        #
         # WHAT MOVED, AND WHY. "No one is really going to read all of this,
         # people are going to skim." Six sections used to sit between the
         # title and the first option — the ask, the definition, the problem,
@@ -3694,6 +3809,7 @@ def render_report_html(
         one_topic = options_are_one_topic(written)
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
+            _chain_summary_section(run, plan, kept, set_aside, ledger),
             _answer_section(kept, full_cap, one_topic, population_note),
             _why_this_section(synthesized_recommendation, written),
             _decision_section(plan, kept),
