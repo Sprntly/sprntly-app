@@ -1171,6 +1171,47 @@ def test_no_literal_ask_is_unaffected_ac4(ctx):
     ), meta.get("recommendation_basis")
 
 
+def test_the_relevance_gate_is_told_the_goals_population(ctx, monkeypatch):
+    """THE FIX. A "reduce churn" run ranked a pre-purchase theme ("deal
+    blockers") above two retention-relevant ones because `judge_relevance`
+    was never told which population the goal is about — `_input` built its
+    whole prompt from just the goal text and the definition. `classify_goal`
+    already computes this reading deterministically (`routing.py`) and the
+    plan already stores it; `_run_enrichment` must read it back and hand it
+    to the gate, not leave it on the plan unread.
+
+    THE NO-METRIC GATE, NOT THE FOLDED PATH, so this test can hand
+    `/confirm` a clean retention definition of its own choosing. The folded
+    convention definition for "reduce churn" itself says "...rather than
+    revenue churn" to rule that reading OUT, and `classify_goal` checks the
+    definition text first — so that disambiguating mention of "revenue"
+    reads as `book_wide` on its own. That is a fact about `classify_goal`'s
+    existing, out-of-scope behaviour on that specific sentence, not about the
+    wiring this test exists to prove.
+    """
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
+    _confirm(ctx, run_id,
+             text="accounts that cancel or fail to renew, measured over "
+                  "accounts held at the start of the period")
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["routing"]["goal_class"] == "retention", plan.get("routing")
+
+    seen = {}
+    import app.crucible.relevance as relevance_mod
+    real = relevance_mod.judge_relevance
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(relevance_mod, "judge_relevance", spy)
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    assert seen.get("goal_class") == "retention", seen
+
+
 def test_the_literal_ask_never_changes_which_metric_convention_is_adopted(ctx):
     """I9: `asked_text` must never become a back door to inferring the
     definition from words the extraction itself dropped. A sentence naming a

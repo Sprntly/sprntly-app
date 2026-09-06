@@ -1941,6 +1941,7 @@ def _run_enrichment(
             VERDICTS_KEY, dump_verdicts, judge_relevance,
             load_verdicts, partition,
         )
+        from app.crucible.routing import UNCLASSIFIED
 
         # THE RUN'S OWN BLOB, READ ONCE and used for both halves of the
         # decision: `judge_relevance` reads any verdicts already drawn for
@@ -1949,12 +1950,29 @@ def _run_enrichment(
         # worth storing or the stored one coming home.
         run_meta_now = _meta_of(run_id, company_id)
         already_judged = load_verdicts(run_meta_now) is not None
+        # WHICH POPULATION THE GOAL IS ABOUT — READ BACK, NOT RE-DERIVED.
+        # `classify_goal` already ran once, deterministically, when the plan
+        # was built; this is the same accessor `report.py`'s observations
+        # section uses (`plan["routing"]["goal_class"]`), so the relevance
+        # gate and the report agree on what the goal is about rather than
+        # each computing its own answer. A plan with no stored routing (or
+        # one built before routing existed) falls back to `UNCLASSIFIED`,
+        # which the gate treats as "add no population statement at all" —
+        # never an invented population to filter by.
+        plan_now = run_meta_now.get("plan")
+        plan_now = plan_now if isinstance(plan_now, dict) else {}
+        routing_now = plan_now.get("routing")
+        routing_now = routing_now if isinstance(routing_now, dict) else {}
+        goal_class = (
+            str(routing_now.get("goal_class") or "").strip() or UNCLASSIFIED
+        )
         verdicts = judge_relevance(
             enterprise_id=company_id,
             goal_text=goal_text,
             definition_text=definition_text,
             findings=findings,
             run_meta=run_meta_now,
+            goal_class=goal_class,
         )
         # PERSISTED ONLY ON A FRESH DRAW THAT PRODUCED SOMETHING, and only
         # from inside the `try`. Three conditions, each earning its place:

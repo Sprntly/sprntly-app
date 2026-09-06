@@ -175,6 +175,94 @@ def test_the_prompt_numbers_themes_and_never_leaks_the_real_id():
     assert "finding_id" not in text
 
 
+def test_the_prompt_states_the_goal_population_when_known():
+    """A goal classified `retention` must tell the judge what population that
+    is — the wiring gap that let a pre-purchase theme ("deal blockers") beat
+    two retention-relevant ones on a churn goal, because the judge was never
+    told the goal was about the accounts already won."""
+    from app.crucible.relevance import _input
+    from app.crucible.routing import RETENTION
+
+    text = _input("reduce churn", "accounts lost over accounts held",
+                   [_f("a")], RETENTION)
+    assert "THE POPULATION THIS GOAL IS ABOUT: keeping the accounts you " \
+        "already have" in text
+
+
+def test_the_prompt_adds_no_population_line_when_unclassified():
+    """UNCLASSIFIED MUST NOT START FILTERING. A goal this engine could not
+    place against one part of the book gets the exact prompt it got before
+    goal-population-awareness existed — no invented population statement."""
+    from app.crucible.relevance import _input
+
+    text = _input("grow revenue", "definition", [_f("a")])
+    assert "THE POPULATION THIS GOAL IS ABOUT" not in text
+
+
+def test_an_unrecognised_goal_class_also_adds_no_population_line():
+    """Defensive: a stray or future class string with no note must not crash
+    or print a garbled line — it behaves exactly like `UNCLASSIFIED`."""
+    from app.crucible.relevance import _input
+
+    text = _input("grow revenue", "definition", [_f("a")], "not-a-real-class")
+    assert "THE POPULATION THIS GOAL IS ABOUT" not in text
+
+
+def test_the_chunk_threads_goal_class_into_the_prompt():
+    """`_judge_chunk` must hand `goal_class` to `_input` rather than judging
+    every run as if the population were unknown."""
+    from app.crucible.relevance import _judge_chunk
+    from app.crucible.routing import RETENTION
+    import app.graph.gateway as gw
+
+    seen = {}
+
+    def spy(**kw):
+        seen.update(kw)
+
+        class _R:
+            output = {"verdicts": []}
+        return _R()
+
+    real = gw.llm_call
+    try:
+        gw.llm_call = spy
+        _judge_chunk(enterprise_id="e", goal_text="reduce churn",
+                     definition_text="d", findings=[_f("a")],
+                     goal_class=RETENTION)
+    finally:
+        gw.llm_call = real
+    assert "THE POPULATION THIS GOAL IS ABOUT" in seen.get("input", "")
+
+
+def test_judge_relevance_threads_goal_class_through_to_chunks():
+    """The public entry point must pass `goal_class` all the way down to each
+    chunked call, not just accept it and drop it."""
+    import app.crucible.relevance as mod
+    import app.graph.gateway as gw
+
+    seen = {}
+
+    def spy(**kw):
+        seen.update(kw)
+
+        class _R:
+            output = {"verdicts": []}
+        return _R()
+
+    real, off = gw.llm_call, mod._offline
+    try:
+        gw.llm_call = spy
+        mod._offline = lambda: False
+        mod.judge_relevance(
+            enterprise_id="e", goal_text="reduce churn", definition_text="d",
+            findings=[_f("a")], goal_class="retention",
+        )
+    finally:
+        gw.llm_call, mod._offline = real, off
+    assert "THE POPULATION THIS GOAL IS ABOUT" in seen.get("input", "")
+
+
 def test_the_chunk_calls_the_fast_model():
     """`judge_goal_relevance` is exactly the shape `FAST_MODEL`'s own
     charter names — high-volume, closed-set, short-output — not the
