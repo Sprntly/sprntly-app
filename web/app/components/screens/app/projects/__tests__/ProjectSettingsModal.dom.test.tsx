@@ -107,7 +107,7 @@ function modalProps(overrides: Partial<ProjectSettingsModalProps> = {}): Project
 afterEach(() => {
   cleanup()
   candidateSearchMock.mockReset()
-  candidateSearchMock.mockResolvedValue([])
+  candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
   tagCandidateMock.mockReset()
   instructionsMock.mockReset()
   instructionsMock.mockResolvedValue({ instructions: null })
@@ -270,19 +270,23 @@ describe("ProjectSettingsModal — Members tab", () => {
 
 describe("ProjectSettingsModal — Invite tab", () => {
   it("test_settings_invite_renders_picker_body — project-invite-search + at least one project-invite-add render from the reused body (AC8)", async () => {
-    candidateSearchMock.mockResolvedValue([
-      { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
-    ])
+    candidateSearchMock.mockResolvedValue({
+      candidates: [{ kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" }],
+      pending_invites: [],
+    })
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "invite" })))
     expect(screen.getByTestId("project-invite-search")).toBeTruthy()
     expect(await screen.findByTestId("project-invite-add")).toBeTruthy()
   })
 
   it("test_settings_invite_shows_not_yet_count — settings-invite-count equals the workspace-candidate count (AC8)", async () => {
-    candidateSearchMock.mockResolvedValue([
-      { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
-      { kind: "workspace", user_id: "u4", name: "Priya", email: "priya@example.com" },
-    ])
+    candidateSearchMock.mockResolvedValue({
+      candidates: [
+        { kind: "workspace", user_id: "u3", name: "Fortune", email: "fortune@example.com" },
+        { kind: "workspace", user_id: "u4", name: "Priya", email: "priya@example.com" },
+      ],
+      pending_invites: [],
+    })
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "invite" })))
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
     const count = await screen.findByTestId("settings-invite-count")
@@ -291,7 +295,7 @@ describe("ProjectSettingsModal — Invite tab", () => {
   })
 
   it("test_settings_invite_email_needle_shows_invite_by_email — an email query renders project-invite-by-email (AC8)", async () => {
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     render(React.createElement(ProjectSettingsModal, modalProps({ initialTab: "invite" })))
     await waitFor(() => expect(candidateSearchMock).toHaveBeenCalled())
     await act(async () => {

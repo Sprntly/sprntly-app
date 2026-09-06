@@ -223,11 +223,18 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
    * restored as the sentence announcing twelve PRDs with nothing underneath
    * it. Optional, so a caller with nothing structured to save (and every
    * existing test double) writes exactly the same row as before.
+   *
+   * `clientMessageId` (optional): a project chat's ask-completion dedup key
+   * (see `useProjectConversation.ts`'s `finalizeConversationTurn`) — passed
+   * straight through to `addTurn`, which sends it on the wire only when
+   * given. Omitted by every other caller (main chat), byte-identical to
+   * before this ticket.
    */
   function pushAssistantTurn(
     tabId: string,
     replyText: string,
     reply?: PersistedTurnReply | null,
+    clientMessageId?: string,
   ): Promise<void> {
     return enqueueAppend(tabId, async () => {
       try {
@@ -238,7 +245,7 @@ export function createChatPersistence(deps: ChatPersistenceDeps) {
         }
         if (convId == null) return
         const api = await deps.getApi()
-        await api.addTurn(convId, "assistant", replyText, undefined, reply)
+        await api.addTurn(convId, "assistant", replyText, undefined, reply, clientMessageId)
       } catch {
         /* fire-and-forget */
       }

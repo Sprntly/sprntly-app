@@ -728,6 +728,252 @@ def test_find_existing_prd_auto_project_is_company_scoped(tenant_client, isolate
     assert find_existing_prd_auto_project(prd_id, other.company_id) is None
 
 
+# ── Backfill: sweep a thread's ALREADY-created artifacts onto the new project ─
+# The auto-create hook attaches only the triggering PRD; the reports / ticket
+# sets / team docs the user made EARLIER in that same thread were left off the
+# rail. `backfill_conversation_artifacts_to_project` sweeps them in at fork
+# time (report / ticket_set / custom_artifact — the three types that carry a
+# per-conversation column; PRDs/evidence/prototypes have none and stay out).
+
+
+def _seed_report(company_id: str, conversation_id: int, title: str = "VoC report") -> int:
+    from app.db.reports import save_report
+
+    return save_report(
+        company_id, skill="voice-of-customer-report", title=title,
+        html="<h2>Themes</h2>", conversation_id=conversation_id,
+    )
+
+
+def _seed_ticket_set(company_id: str, conversation_id: int) -> int:
+    from app.db.ticket_sets import create_set
+
+    return create_set(company_id, conversation_id=conversation_id, source_text="build X")
+
+
+def _seed_custom_artifact(company_id: str, conversation_id: int) -> int:
+    from app.db.custom_artifacts import create_artifact
+
+    return create_artifact(
+        company_id, kind="leadership-update", title="Weekly update",
+        body_html="<p>hello</p>", conversation_id=conversation_id,
+    )["id"]
+
+
+def _bare_project(company_id: str, user_id: str) -> int:
+    from app.db.projects import create_project
+
+    return create_project(
+        company_id=company_id, workspace_id="ws-1", name="P",
+        created_by=user_id, origin="manual",
+    )["id"]
+
+
+_VALID_ARTIFACT_TYPES = {
+    "prd", "evidence", "prototype", "report", "ticket_set", "custom_artifact",
+}
+
+
+def test_backfill_attaches_report_ticket_set_and_custom_artifact(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    report_id = _seed_report(t.company_id, conv_id)
+    set_id = _seed_ticket_set(t.company_id, conv_id)
+    doc_id = _seed_custom_artifact(t.company_id, conv_id)
+    project_id = _bare_project(t.company_id, t.user_id)
+
+    from app.project_from_prd import backfill_conversation_artifacts_to_project
+
+    backfill_conversation_artifacts_to_project(
+        conversation_id=conv_id, company_id=t.company_id, project_id=project_id,
+    )
+
+    artifacts = (
+        require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+    )
+    refs = {(a["artifact_type"], a["artifact_id"]) for a in artifacts}
+    assert ("report", report_id) in refs
+    assert ("ticket_set", set_id) in refs
+    assert ("custom_artifact", doc_id) in refs
+    # Only ever the valid CHECK literals — no stray/foreign type slips through.
+    assert {a["artifact_type"] for a in artifacts} <= _VALID_ARTIFACT_TYPES
+
+
+def test_backfill_is_company_scoped(tenant_client, isolated_settings):
+    """A foreign tenant's rows sharing the same conversation id must never be
+    swept in — every enumeration is company+conversation scoped."""
+    t = tenant_client.make(slug="acme")
+    other = tenant_client.make(slug="widgets")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    mine = _seed_report(t.company_id, conv_id)
+    _foreign = _seed_report(other.company_id, conv_id, title="not mine")
+    project_id = _bare_project(t.company_id, t.user_id)
+
+    from app.project_from_prd import backfill_conversation_artifacts_to_project
+
+    backfill_conversation_artifacts_to_project(
+        conversation_id=conv_id, company_id=t.company_id, project_id=project_id,
+    )
+
+    report_refs = {
+        a["artifact_id"]
+        for a in require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+        if a["artifact_type"] == "report"
+    }
+    assert report_refs == {mine}
+    assert _foreign not in report_refs
+
+
+def test_backfill_is_idempotent(tenant_client, isolated_settings):
+    t = tenant_client.make(slug="acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    report_id = _seed_report(t.company_id, conv_id)
+    project_id = _bare_project(t.company_id, t.user_id)
+
+    from app.project_from_prd import backfill_conversation_artifacts_to_project
+
+    for _ in range(3):
+        backfill_conversation_artifacts_to_project(
+            conversation_id=conv_id, company_id=t.company_id, project_id=project_id,
+        )
+
+    rows = (
+        require_client().table("project_artifacts")
+        .select("artifact_id").eq("project_id", project_id)
+        .eq("artifact_type", "report").eq("artifact_id", report_id).execute().data
+    )
+    assert len(rows) == 1
+
+
+def test_backfill_is_best_effort_one_type_failing_does_not_block_others(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """If listing one type raises, the other two still attach — and the whole
+    sweep never raises."""
+    t = tenant_client.make(slug="acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    set_id = _seed_ticket_set(t.company_id, conv_id)
+    doc_id = _seed_custom_artifact(t.company_id, conv_id)
+    project_id = _bare_project(t.company_id, t.user_id)
+
+    import app.project_from_prd as pfp
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("forced list failure")
+
+    monkeypatch.setattr(pfp, "list_reports_for_conversation", _boom)
+
+    # Must not raise.
+    pfp.backfill_conversation_artifacts_to_project(
+        conversation_id=conv_id, company_id=t.company_id, project_id=project_id,
+    )
+
+    refs = {
+        (a["artifact_type"], a["artifact_id"])
+        for a in require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+    }
+    assert ("ticket_set", set_id) in refs
+    assert ("custom_artifact", doc_id) in refs
+
+
+def test_backfill_never_raises_when_add_artifact_fails(tenant_client, isolated_settings, monkeypatch):
+    """A per-row attach failure is swallowed too — the sweep can never break
+    the project creation it runs alongside."""
+    t = tenant_client.make(slug="acme")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    _seed_report(t.company_id, conv_id)
+    project_id = _bare_project(t.company_id, t.user_id)
+
+    import app.project_from_prd as pfp
+
+    monkeypatch.setattr(
+        pfp, "add_artifact",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    # No exception propagates.
+    pfp.backfill_conversation_artifacts_to_project(
+        conversation_id=conv_id, company_id=t.company_id, project_id=project_id,
+    )
+
+
+def test_auto_create_new_project_branch_backfills_prior_thread_artifacts(
+    tenant_client, isolated_settings
+):
+    """End-to-end (David's scenario): a thread that already produced a report,
+    a ticket set, and a team doc, then generates a PRD — the auto-created
+    project holds ALL of them, not just the PRD."""
+    t = tenant_client.make(slug="acme")
+    prd_id = _seed_brief_and_prd(isolated_settings["db"], "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+    report_id = _seed_report(t.company_id, conv_id)
+    set_id = _seed_ticket_set(t.company_id, conv_id)
+    doc_id = _seed_custom_artifact(t.company_id, conv_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=prd_id, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    refs = {
+        (a["artifact_type"], a["artifact_id"])
+        for a in require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+    }
+    assert refs == {
+        ("prd", prd_id),
+        ("report", report_id),
+        ("ticket_set", set_id),
+        ("custom_artifact", doc_id),
+    }
+
+
+def test_auto_create_already_bound_branch_does_not_backfill(tenant_client, isolated_settings):
+    """The backfill runs in the NEW-project branch only. A SECOND PRD in an
+    already-bound conversation attaches just that PRD — it does not re-sweep
+    (or first-time-sweep) the thread's other artifacts, matching the scoping
+    guard in the dispatch."""
+    t = tenant_client.make(slug="acme")
+    db_mod = isolated_settings["db"]
+    first_prd = _seed_brief_and_prd(db_mod, "acme", title="Dark mode")
+    conv_id = _new_conversation(t.company_id, t.user_id)
+
+    from app.project_from_prd import maybe_auto_create_project_for_prd
+
+    project_id = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=first_prd, prd_title="Dark mode", conversation_id=conv_id,
+    )
+    assert project_id is not None
+
+    # A report is produced AFTER the project already exists, then a second PRD
+    # re-issues in the same (already-bound) thread.
+    late_report = _seed_report(t.company_id, conv_id, title="later report")
+    second_prd = _seed_brief_and_prd(db_mod, "acme", title="Offline mode")
+    result = maybe_auto_create_project_for_prd(
+        company_id=t.company_id, workspace_id="ws-1", user_id=t.user_id,
+        prd_id=second_prd, prd_title="Offline mode", conversation_id=conv_id,
+    )
+    assert result == project_id
+
+    refs = {
+        (a["artifact_type"], a["artifact_id"])
+        for a in require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+    }
+    # Both PRDs attached; the late report did NOT get swept by the already-bound
+    # branch (it is the forward-pin path's job, not the backfill's).
+    assert ("prd", first_prd) in refs
+    assert ("prd", second_prd) in refs
+    assert ("report", late_report) not in refs
+
+
 # ── Real local-Supabase round-trip (ship-gate tier) ────────────────────────
 #
 # `[[reference_local-supabase-real-db-verification]]` — proves the helper

@@ -431,7 +431,7 @@ def test_delegate_task_unchanged_alongside_execute(isolated_settings, monkeypatc
         company_id="unused-in-fake-db",
         tool_input={"assignee": "Fortune", "task_summary": "Draft the pricing page"},
     )
-    assert "Sent the brief" in result
+    assert "Assigned to" in result
 
     delegations = (
         require_client()

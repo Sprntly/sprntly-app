@@ -234,11 +234,16 @@ def test_cross_tenant_refuse_through_real_route_two_tenants(
     )
 
     # Tag an identity belonging to tenant B (a real account in the foreign
-    # company) → opaque 403, zero writes in BOTH tenants.
+    # company) → the clear cross-company message (B5b), 409, zero writes in
+    # BOTH tenants. (Was an opaque 403 before B5b — `other_company` is now
+    # the one t_refuse reason that discloses.)
     r = client.post(
         f"/v1/projects/{project['id']}/tag", json={"needle": fixture_ids["foreign_email"]}
     )
-    assert r.status_code == 403, r.text
+    assert r.status_code == 409, r.text
+    from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
+
+    assert r.json()["detail"] == CROSS_COMPANY_INVITE_MESSAGE
 
     invites_after = len(
         sb.table("workspace_invites").select("id").eq("project_id", project["id"]).execute().data
@@ -267,7 +272,7 @@ def test_workspace_add_and_newuser_invite_live(
     # Avoid real email / auth-user side effects — the DB mutation is the proof.
     from app.routes import projects as projects_routes
 
-    monkeypatch.setattr(projects_routes, "send_invite_email", lambda email, **kw: "sent")
+    monkeypatch.setattr(projects_routes, "dispatch_invite_email", lambda email, **kw: "sent")
 
     project = _new_project(client, project_ids, f"Tag live B {uuid.uuid4().hex[:8]}")
 
@@ -569,16 +574,17 @@ def test_seat_and_membership_gates_hold_live(client, sb, fixture_ids, project_id
     )
     assert len(landed) == 1, "idempotent re-tag must not duplicate the project_members row"
 
-    # Existing-user `other_company` carve-out (AC15) — unchanged by this
-    # ticket, still refuses through the real route.
+    # Existing-user `other_company` carve-out (AC15) — still refuses through
+    # the real route; now the clear cross-company message + 409 (B5b) rather
+    # than the opaque 403 it returned before this ticket.
     r_other = client.post(
         f"/v1/projects/{project['id']}/tag", json={"needle": fixture_ids["foreign_email"]}
     )
-    assert r_other.status_code == 403, r_other.text
+    assert r_other.status_code == 409, r_other.text
 
     # Seat-limit 409 — stub the seat check itself (real DB stays real for
     # every other assertion in this test); mirrors this file's own
-    # `send_invite_email` stub pattern above.
+    # `dispatch_invite_email` stub pattern above.
     monkeypatch.setattr(projects_routes, "get_seat_limit", lambda company_id: 0)
     new_email = f"tag-live-seatlimit-{uuid.uuid4().hex[:8]}@{fixture_ids['owning_domain']}"
     r_seat = client.post(f"/v1/projects/{project['id']}/tag", json={"needle": new_email})

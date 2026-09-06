@@ -317,6 +317,93 @@ async def test_a_capture_that_wrote_nothing_attaches_nothing(monkeypatch):
 # ── AC5: best-effort — a capture/attach failure never breaks the answer ─────
 
 
+# ── Forked-thread report: a MAIN-chat report whose conversation was auto-forked
+# into a project attaches too (David's scenario) ────────────────────────────
+# The `kind == "project"` block keys on the project SURFACE; a thread forked
+# into a project by an earlier PRD is still a MAIN-chat surface, so that block
+# never fires for it. The `elif` keys on the CONVERSATION being project-bound,
+# reusing `maybe_pin_conversation_artifact_to_project` exactly as
+# evidence/ticket_set/custom_artifact do.
+
+
+def _patch_conversation_pin(monkeypatch, *, bound_project_id):
+    """Stub the conversation→project resolver and capture the `add_artifact`
+    calls the conversation-keyed forward-pin makes. Both names are patched on
+    `app.project_from_prd`, because `maybe_pin_conversation_artifact_to_project`
+    resolves and attaches through names bound in THAT module (not through
+    `app.db.projects` the surface block imports fresh)."""
+    import app.project_from_prd as pfp
+
+    attaches: list = []
+    monkeypatch.setattr(pfp, "_conversation_project_id", lambda conv, comp: bound_project_id)
+    monkeypatch.setattr(
+        pfp, "add_artifact",
+        lambda project_id, artifact_type, artifact_id: attaches.append(
+            (project_id, artifact_type, artifact_id)
+        ),
+    )
+    return attaches
+
+
+async def test_forked_main_chat_report_pins_to_bound_project(monkeypatch):
+    """David's case: a report generated in a MAIN chat whose conversation was
+    auto-forked into project 77 by an earlier PRD gets pinned to 77 — even
+    with no project `context_source` (main-chat surface)."""
+    _wire_common(monkeypatch, answer_payload=_payload(
+        _REPORT_BODY, "voice-of-customer-report", report=True,
+    ))
+    _patch_capture(monkeypatch, report_id=501)
+    attaches = _patch_conversation_pin(monkeypatch, bound_project_id=77)
+
+    await ajr.run_ask_job(
+        ask_id=20, enterprise_id="c1", question="give me a voice-of-customer report",
+        dataset="d", conversation_id=5, user_id="u1",
+    )
+
+    assert attaches == [(77, "report", 501)]
+
+
+async def test_forked_main_chat_report_no_op_when_conversation_unbound(monkeypatch):
+    """An ORDINARY main-chat thread (conversation not bound to any project)
+    pins nothing — the forward-pin is a no-op, main chat is unaffected."""
+    _wire_common(monkeypatch, answer_payload=_payload(
+        _REPORT_BODY, "voice-of-customer-report", report=True,
+    ))
+    _patch_capture(monkeypatch, report_id=501)
+    attaches = _patch_conversation_pin(monkeypatch, bound_project_id=None)
+
+    await ajr.run_ask_job(
+        ask_id=21, enterprise_id="c1", question="give me a voice-of-customer report",
+        dataset="d", conversation_id=5, user_id="u1",
+    )
+
+    assert attaches == []
+
+
+async def test_project_surface_report_does_not_double_pin_via_conversation(monkeypatch):
+    """A genuine project-CHAT report attaches once via the surface block; the
+    `elif` (conversation-keyed pin) must NOT also fire for it — the two are
+    mutually exclusive (if/elif), so no redundant second attach."""
+    _wire_common(monkeypatch, answer_payload=_payload(
+        _REPORT_BODY, "voice-of-customer-report", report=True,
+    ))
+    calls = _patch_capture(monkeypatch, report_id=501)
+    # If the elif erroneously fired for a project surface, this would record an
+    # extra attach through pfp.add_artifact.
+    attaches = _patch_conversation_pin(monkeypatch, bound_project_id=999)
+
+    await ajr.run_ask_job(
+        ask_id=22, enterprise_id="c1", question="give me a voice-of-customer report",
+        dataset="d", conversation_id=5, user_id="u1",
+        context_source=_PROJECT_CONTEXT_SOURCE,
+    )
+
+    # Surface block attached to project 9; the conversation-keyed pin (999) did
+    # NOT fire.
+    assert calls["attach"] == [(9, "report", 501)]
+    assert attaches == []
+
+
 async def test_attach_failure_does_not_break_the_answer(monkeypatch):
     _wire_common(monkeypatch, answer_payload=_payload(
         _REPORT_BODY, "voice-of-customer-report", report=True,

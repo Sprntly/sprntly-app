@@ -169,11 +169,11 @@ def test_lt2_multiparty_transcript_live(scene):
 
 def test_lt3_project_awareness_parity_live(scene):
     """LT-3 — the private surface's context block is seen, the 4 read
-    tools + delegate/execute are callable; no project-blindness."""
+    tools + delegate/execute/complete are callable; no project-blindness."""
     from app.qa_agent import answer
 
     scope = _private_scope(scene)
-    assert len(scope.extra_tools) == 6
+    assert len(scope.extra_tools) == 7
     result = answer(
         enterprise_id=scene["company_id"],
         question="What tools do you have for this project, and what's the task ledger say?",

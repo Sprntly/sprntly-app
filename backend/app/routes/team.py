@@ -37,10 +37,11 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.auth import CompanyContext, require_company, require_session
 from app import team_email as team_email_mod
-from app.team_email import send_invite_email
+from app.team_email import dispatch_invite_email
 from app.db.authcache import invalidate_user, invalidate_workspace_caches
 from app.db.companies import get_seat_limit
 from app.db.team import (
+    CROSS_COMPANY_INVITE_MESSAGE,
     accept_invite_for_user,
     count_owners,
     create_invite,
@@ -217,9 +218,12 @@ def _public_invite(
 
 
 def _invite_result(row: dict, send_status: str) -> dict:
-    """Map a send_invite_email() status onto the invite response. Both SENT
-    and SENT_EXISTING mean an email went out (email_sent=True); only FAILED
-    surfaces the "email didn't send" warning in the UI."""
+    """Map a send_invite_email()/dispatch_invite_email() status onto the
+    invite response. Both SENT and SENT_EXISTING mean an email went out
+    (email_sent=True); only FAILED surfaces the "email didn't send" warning
+    in the UI. In production `send_status` is the optimistic QUEUED (B5a) —
+    treated the same as SENT here (not FAILED), so `existing_user` is simply
+    never set on the backgrounded path; it is unread by the frontend today."""
     return _public_invite(
         row,
         email_sent=send_status != team_email_mod.FAILED,
@@ -228,10 +232,11 @@ def _invite_result(row: dict, send_status: str) -> dict:
 
 
 def _send_invite_for_row(row: dict, *, company: CompanyContext) -> str:
-    """Send the Day-0 invite email for a workspace_invites row, personalised
-    with the inviter's first name, the workspace (company) name, and the
-    invitee's first name (when they already have a profile). Best-effort name
-    resolution — a failed lookup just falls back to a friendly default."""
+    """Dispatch the Day-0 invite email for a workspace_invites row OFF the
+    request thread (B5a), personalised with the inviter's first name, the
+    workspace (company) name, and the invitee's first name (when they already
+    have a profile). Best-effort name resolution — a failed lookup just falls
+    back to a friendly default."""
     from app.db.companies import display_name_for_company_id
     from app.db.profiles import first_name_for_email, first_name_for_user
 
@@ -247,7 +252,8 @@ def _send_invite_for_row(row: dict, *, company: CompanyContext) -> str:
         invitee_first = first_name_for_email(row.get("email") or "")
     except Exception:  # noqa: BLE001
         invitee_first = ""
-    return send_invite_email(
+    # Off the request thread (B5a) — see team_email.dispatch_invite_email.
+    return dispatch_invite_email(
         row.get("email"),
         inviter_first_name=inviter_first,
         workspace_name=workspace_name,
@@ -274,12 +280,7 @@ def post_team_invite(
     if email_belongs_to_other_company(
         company_id=company.company_id, email=body.email
     ):
-        raise HTTPException(
-            409,
-            "That email already belongs to another company on Sprntly. An "
-            "account can only be part of one company for now, so they can't "
-            "be invited to this workspace — try a different email for them.",
-        )
+        raise HTTPException(409, CROSS_COMPANY_INVITE_MESSAGE)
 
     # Duplicate pending invite → unique(company_id, email).
     if get_pending_invite_by_email(
@@ -309,11 +310,14 @@ def post_team_invite(
         workspace_ids=body.workspace_ids,
         job_role=(body.job_role or "").strip() or None,
     )
-    # Fire the invite email. Best-effort: if it fails we still return 201 so
-    # the workspace_invites row stays visible in the UI, but `email_sent:
-    # false` lets the frontend nudge the inviter to resend or share the link
-    # manually. Already-registered invitees get a magic-link sign-in instead
-    # (email_sent stays true; `existing_user` flags the different path).
+    # Fire the invite email OFF the request thread (B5a — see
+    # team_email.dispatch_invite_email). `_send_invite_for_row` returns the
+    # optimistic QUEUED status in production, so `email_sent` reads True
+    # immediately and `existing_user` is never set on this path any more (it
+    # can only be known once the backgrounded send resolves); best-effort, so
+    # a later-discovered failure still leaves the workspace_invites row
+    # visible in the UI and re-sendable from Team settings — same
+    # degrade-not-error contract as before, just discoverable later.
     return _invite_result(row, _send_invite_for_row(row, company=company))
 
 

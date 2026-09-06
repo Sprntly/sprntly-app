@@ -276,7 +276,19 @@ def test_greeting_signature_and_callers_stable(repo_root):
     assert list(sig.parameters) == ["project_id", "user_id", "dataset", "company_id"]
 
     routes_src = (repo_root / "app" / "routes" / "projects.py").read_text()
-    assert routes_src.count("project_join_greeting.post_join_greeting(") == 2
+    # The member-add post-insert side effects (this call among them) are now
+    # DEFERRED off the request thread (see `_dispatch_member_add_side_
+    # effects`/`_run_member_add_side_effects`) — both surfaces that grow the
+    # roster (`add_member`'s new-membership branch, `tag_candidate_route`'s
+    # TIER_WORKSPACE branch) route through the ONE shared dispatcher rather
+    # than each calling `post_join_greeting` directly, so the literal call
+    # site count dropped from 2 to 1. The real "two callers" invariant this
+    # test originally pinned now lives in the dispatcher-call count instead.
+    assert routes_src.count("project_join_greeting.post_join_greeting(") == 1
+    # 3 total occurrences of the identifier: the `def`, plus the two call
+    # sites (`add_member`, `tag_candidate_route`) — isolate the CALLS.
+    assert routes_src.count("_dispatch_member_add_side_effects(") == 3
+    assert routes_src.count("def _dispatch_member_add_side_effects(") == 1
 
     team_src = (repo_root / "app" / "db" / "team.py").read_text()
     assert "post_join_greeting(pid, user_id, dataset=dataset, company_id=company_id)" in team_src

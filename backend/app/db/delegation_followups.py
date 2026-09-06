@@ -40,6 +40,7 @@ def upsert_followup(
     last_checked_in: datetime | None = _UNSET,  # type: ignore[assignment]
     muted: bool = _UNSET,  # type: ignore[assignment]
     pending_done_since: datetime | None = _UNSET,  # type: ignore[assignment]
+    last_insession_ask_at: datetime | None = _UNSET,  # type: ignore[assignment]
 ) -> dict:
     """Partial upsert (`on_conflict=delegation_id`). Only the EXPLICITLY
     passed fields are written — a kwarg left at the `_UNSET` sentinel is
@@ -59,6 +60,8 @@ def upsert_followup(
         payload["muted"] = muted
     if pending_done_since is not _UNSET:
         payload["pending_done_since"] = _iso(pending_done_since)
+    if last_insession_ask_at is not _UNSET:
+        payload["last_insession_ask_at"] = _iso(last_insession_ask_at)
 
     return (
         require_client()

@@ -57,6 +57,7 @@ const EMPTY: AppContentState = {
   evidencePartialHtml: null,
   conversationId: null,
   activeProjectId: null,
+  pendingComposerDraft: null,
   reportFocusId: null,
   reportFocusStandalone: false,
   reportGenerating: false,

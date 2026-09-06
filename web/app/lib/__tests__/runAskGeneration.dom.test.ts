@@ -88,6 +88,28 @@ describe("runAskGeneration", () => {
     expect(getPendingJob("ask", "acme", askScope("tab-7"))).toEqual({ id: "99" })
   })
 
+  it("persists a given replyClientMessageId alongside the ask_id", async () => {
+    vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 200, status: "generating" } as never)
+    vi.spyOn(askApi, "get").mockResolvedValue({ ...READY, status: "generating", answer: "" } as never)
+
+    void runAskGeneration("Q?", "acme", "tab-reply-key", { replyClientMessageId: "ask-200-reply" })
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Round-trips via the SAME jobResume record the ask_id itself rides.
+    expect(getPendingJob("ask", "acme", askScope("tab-reply-key")))
+      .toEqual({ id: "200", clientMessageId: "ask-200-reply" })
+  })
+
+  it("omits the clientMessageId envelope entirely when replyClientMessageId is not given (main chat, unchanged)", async () => {
+    vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 201, status: "generating" } as never)
+    vi.spyOn(askApi, "get").mockResolvedValue({ ...READY, status: "generating", answer: "" } as never)
+
+    void runAskGeneration("Q?", "acme", "tab-no-key")
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(getPendingJob("ask", "acme", askScope("tab-no-key"))).toEqual({ id: "201" })
+  })
+
   it("surfaces a backend error status as a thrown error (drives the error UX)", async () => {
     vi.spyOn(askApi, "start").mockResolvedValue({ ask_id: 5, status: "generating" } as never)
     vi.spyOn(askApi, "get").mockResolvedValue({

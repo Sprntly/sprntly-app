@@ -38,7 +38,10 @@ import logging
 
 from app.db.client import require_client
 from app.db.conversations import bind_conversation_to_project
+from app.db.custom_artifacts import list_artifacts_for_conversation
 from app.db.projects import add_artifact, create_project
+from app.db.reports import list_reports_for_conversation
+from app.db.ticket_sets import list_sets_for_conversation
 from app.project_origin_seed import seed_project_origin_memory
 from app.project_title import generate_project_title
 
@@ -192,6 +195,19 @@ def maybe_auto_create_project_for_prd(
         add_artifact(project_id, "prd", prd_id)
         if conversation_id is not None:
             bind_conversation_to_project(conversation_id, project_id, company_id, user_id)
+            # Sweep the reports / ticket sets / team docs the user ALREADY
+            # generated earlier in this same thread onto the new project — the
+            # PRD attached above is the trigger, but it is not the only work the
+            # thread produced, and without this only the PRD would land on the
+            # rail. New-project branch ONLY (David's fork scenario); an
+            # already-bound conversation returned above and is never re-swept.
+            # Self-contained best-effort: never raises, so a backfill miss can't
+            # turn a created project into a None return.
+            backfill_conversation_artifacts_to_project(
+                conversation_id=conversation_id,
+                company_id=company_id,
+                project_id=project_id,
+            )
             # Seed the NEW project's memory with the origin context — the
             # decisions/reasoning from the originating chat + a brief of what
             # the PRD is. Best-effort and self-contained: it never raises, so a
@@ -214,6 +230,68 @@ def maybe_auto_create_project_for_prd(
             exc_info=True,
         )
         return None
+
+
+def backfill_conversation_artifacts_to_project(
+    conversation_id: int,
+    company_id: str,
+    project_id: int,
+) -> None:
+    """Attach a conversation's ALREADY-created reports, ticket sets, and custom
+    (team) documents to a freshly auto-created project.
+
+    Closes the auto-create gap: `maybe_auto_create_project_for_prd` attaches
+    ONLY the triggering PRD, so the reports / ticket sets / team docs the user
+    generated EARLIER in that same thread — before the PRD forked it into a
+    project — were left off the project's artifact rail. This sweeps them in at
+    fork time so a project opens holding all of its originating thread's work,
+    not just the PRD.
+
+    Each of the three types is enumerated with its company+conversation-scoped
+    `list_*_for_conversation` helper (never by conversation id alone — a foreign
+    tenant's rows must never be swept in) and upserted via `add_artifact` under
+    the matching `project_artifacts` CHECK literal (`report` / `ticket_set` /
+    `custom_artifact`). PRDs / evidence / prototypes have NO per-conversation
+    column and are out of scope here (the PRD is already attached by the
+    caller; evidence/prototypes are pinned at their own generation loci).
+
+    Idempotent by virtue of `add_artifact`'s `(project_id, artifact_type,
+    artifact_id)` upsert — re-running attaches nothing new, and the PRD the
+    caller already pinned is untouched.
+
+    Best-effort and granular: each type, and each row within a type, is wrapped
+    so one failing list read or one bad row can never block the others, and the
+    sweep as a whole never raises — so it can never break the PRD generation /
+    project creation it runs alongside. Mirrors this module's swallow-and-log
+    posture (`maybe_auto_create_project_for_prd`'s outer guard)."""
+    enumerations = (
+        ("report", lambda: list_reports_for_conversation(conversation_id, company_id)),
+        ("ticket_set", lambda: list_sets_for_conversation(company_id, conversation_id)),
+        (
+            "custom_artifact",
+            lambda: list_artifacts_for_conversation(company_id, conversation_id),
+        ),
+    )
+    for artifact_type, list_rows in enumerations:
+        try:
+            rows = list_rows()
+        except Exception:  # noqa: BLE001 — best-effort; one type failing must not block the others
+            logger.warning(
+                "Backfill: failed to list %s rows for conversation %s (project %s)",
+                artifact_type, conversation_id, project_id, exc_info=True,
+            )
+            continue
+        for row in rows:
+            artifact_id = row.get("id")
+            if artifact_id is None:
+                continue
+            try:
+                add_artifact(project_id, artifact_type, artifact_id)
+            except Exception:  # noqa: BLE001 — best-effort; one bad row must not block the rest
+                logger.warning(
+                    "Backfill: failed to attach %s %s to project %s",
+                    artifact_type, artifact_id, project_id, exc_info=True,
+                )
 
 
 def maybe_pin_conversation_artifact_to_project(

@@ -1830,7 +1830,7 @@ CREATE TABLE project_members (
 CREATE TABLE project_artifacts (
     project_id    INTEGER NOT NULL REFERENCES projects (id) ON DELETE CASCADE,
     artifact_type TEXT NOT NULL
-                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set')),
+                    CHECK (artifact_type IN ('prd', 'evidence', 'prototype', 'report', 'ticket_set', 'custom_artifact')),
     artifact_id   INTEGER NOT NULL,
     added_at      TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (project_id, artifact_type, artifact_id)
@@ -1923,6 +1923,10 @@ CREATE TABLE conversation_read_cursors (
 -- test_delegation_followups.py, not sqlite. This mirror exists only so
 -- `delegation_status_ingest.py`'s fast-lane tests can upsert/read against
 -- FakeSupabaseClient.
+--
+-- `last_insession_ask_at` mirrors
+-- 20260902120000_delegation_followups_insession_ask.sql — the in-session
+-- "are you done?" check's per-task throttle marker.
 CREATE TABLE delegation_followups (
     delegation_id       INTEGER PRIMARY KEY REFERENCES project_delegations (id) ON DELETE CASCADE,
     expected_completion TEXT,
@@ -1930,6 +1934,7 @@ CREATE TABLE delegation_followups (
     last_checked_in     TEXT,
     muted               INTEGER NOT NULL DEFAULT 0,
     pending_done_since  TEXT,
+    last_insession_ask_at TEXT,
     updated_at          TEXT NOT NULL DEFAULT (datetime('now'))
 );
 

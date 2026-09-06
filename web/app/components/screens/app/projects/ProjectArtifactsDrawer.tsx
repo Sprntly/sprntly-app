@@ -547,17 +547,21 @@ export function ProjectArtifactsDrawerView({
 // content panel's own drag handle; the list has no iframes, so this is the
 // simpler pointer-capture + rAF form without the frame-swallowing guards.
 const DRAWER_WIDTH_KEY = "sprntly-proj-artifacts-drawer-width"
-const DRAWER_WIDTH_MIN = 360
-const DRAWER_WIDTH_MAX_VW = 0.6
+// The drawer holds the artifacts LIST (a column of one-line rows), so it is
+// capped — matching the CSS default band `clamp(240px, 30vw, 450px)` in
+// ProjectDetailScreen.module.css. A too-wide list drawer was the root cause of
+// the three-panel squeeze (chat + list + content-panel couldn't fit), so this
+// cap is enforced here too: any persisted/dragged width is clamped into
+// [240, 450] on restore, so an old wide value can never re-widen it past 450.
+const DRAWER_WIDTH_MIN = 240
+const DRAWER_WIDTH_MAX = 450
 const DRAWER_VAR = "--proj-drawer-w"
 // Below this the layout drops to a full-width drawer (no chat column to trade
 // against), matching ProjectDetailScreen.module.css's <=960px rule.
 const DRAWER_RESIZE_MIN_VIEWPORT = 960
 
 function clampDrawerWidth(px: number): number {
-  const max = Math.round(window.innerWidth * DRAWER_WIDTH_MAX_VW)
-  const min = Math.min(DRAWER_WIDTH_MIN, max)
-  return Math.min(max, Math.max(min, Math.round(px)))
+  return Math.min(DRAWER_WIDTH_MAX, Math.max(DRAWER_WIDTH_MIN, Math.round(px)))
 }
 
 // ── Container: fetch on open + list ⇆ add state ──

@@ -52,15 +52,23 @@ export const PROJECTS_PATH = "/projects"
  *  which chat tab to land on (`"individual"` for the fork-to-private-chat
  *  nav; `"group"` for parity) — but ONLY when a project id is present; with
  *  no id, `chat` is ignored (there is no detail view to select a tab on).
- *  The no-`opts` call is byte-identical to the base single-arg form — every
- *  existing caller is unaffected. Pure → unit-testable. */
+ *  `opts.prd` additionally appends `&prd=<id>` — the PRD to land the
+ *  project's content panel on, consumed by `ProjectDetailScreen`'s one-shot
+ *  `?prd=` restore effect (accepts a bare `prd_id`; the same param also
+ *  accepts a `public_id` uuid when built elsewhere, but this helper always
+ *  threads whichever value the caller passes through verbatim). Ignored
+ *  when there is no project id, same as `chat`. The no-`opts` call and the
+ *  `chat`-only call are byte-identical to the base forms — every existing
+ *  caller is unaffected. Pure → unit-testable. */
 export function projectPath(
   projectId?: number | string | null,
-  opts?: { chat?: "group" | "individual" },
+  opts?: { chat?: "group" | "individual"; prd?: number | string | null },
 ): string {
   if (projectId == null || projectId === "") return PROJECTS_PATH
-  const base = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
-  return opts?.chat ? `${base}&chat=${opts.chat}` : base
+  let path = `${PROJECTS_PATH}?id=${encodeURIComponent(String(projectId))}`
+  if (opts?.chat) path += `&chat=${opts.chat}`
+  if (opts?.prd != null && opts.prd !== "") path += `&prd=${encodeURIComponent(String(opts.prd))}`
+  return path
 }
 
 /** App routes (no basePath). Onboarding uses `/onboarding/[slug]`. */

@@ -738,6 +738,16 @@ export interface AppContentState {
    *  for every non-project chat) leaves the panel byte-identical to before. Cleared
    *  on thread-switch / new-chat alongside the other thread-scoped fields. */
   activeProjectId: number | null
+  /** A main-chat composer draft carried across the seamless PRD-create →
+   *  project auto-nav (client decision D1, 2026-09-02): the main-chat
+   *  conversation effectively becomes the project's private chat, so
+   *  whatever the user had half-typed moves with them instead of being lost
+   *  on the page transition. Set (and the main-chat composer cleared) by
+   *  `ChatScreen`'s `bindActiveProject` right before it navigates; consumed
+   *  exactly once — read into the project chat's composer and cleared back
+   *  to null — by `useProjectConversation` on mount. Null in every other
+   *  case (nothing to hand off). */
+  pendingComposerDraft: string | null
   /** A specific report to open in the Reports tab, set when the user arrived by
    *  clicking that exact document (e.g. an Artifacts row). The tab consumes it
    *  once — selecting the report and clearing this — so the user lands on what

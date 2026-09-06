@@ -75,15 +75,19 @@ def _pin_resolver(monkeypatch, result: dict) -> None:
 
 
 def _capture_invite_email(monkeypatch, status: str = "sent") -> list[dict]:
-    """Replace the invite-email send bound INTO the routes module (it imports
-    the name directly) and record every call's kwargs."""
+    """Replace the invite-email dispatch bound INTO the routes module (it
+    imports the name directly) and record every call's kwargs. `dispatch_
+    invite_email` runs INLINE under pytest (B5a), so this still exercises the
+    route's per-tier dispatch synchronously — this patches out the dispatcher
+    itself rather than the underlying `send_invite_email`, so `status` here
+    is exactly the value the route's `email_status` response field carries."""
     calls: list[dict] = []
 
     def _fake(email, **kwargs):
         calls.append({"email": email, **kwargs})
         return status
 
-    monkeypatch.setattr(projects_routes, "send_invite_email", _fake)
+    monkeypatch.setattr(projects_routes, "dispatch_invite_email", _fake)
     return calls
 
 
@@ -167,11 +171,13 @@ def test_tag_newuser_creates_full_invite_with_project(isolated_settings, monkeyp
 
 
 def test_tag_refuse_403_no_write_no_disclosure(isolated_settings, monkeypatch):
+    """Every t_refuse reason EXCEPT `other_company` (covered separately below,
+    B5b) stays opaque — same 403, same body, no hint which reason applied."""
     ctx = company_client(monkeypatch)
     project = _new_project(ctx)
 
     bodies = []
-    for reason in ("cross_company", "other_company"):
+    for reason in ("cross_company", "no_match"):
         _pin_resolver(monkeypatch, {"tier": projects_db.TIER_REFUSE, "reason": reason})
         r = ctx.client.post(f"/v1/projects/{project['id']}/tag", json={"needle": "x@evil.example"})
         assert r.status_code == 403
@@ -180,6 +186,29 @@ def test_tag_refuse_403_no_write_no_disclosure(isolated_settings, monkeypatch):
     # Identical opaque body — no disclosure of which refuse reason applied.
     assert bodies[0] == bodies[1]
     # Only the creator is a member; nothing was added.
+    assert {m["user_id"] for m in _project_member_rows(project["id"])} == {ctx.user_id}
+
+
+def test_tag_refuse_other_company_returns_clear_cross_company_message(
+    isolated_settings, monkeypatch
+):
+    """B5b: the ONE t_refuse reason that DOES disclose — the invitee's email
+    already belongs to a different Sprntly company — mirrors routes/team.py's
+    direct-invite wording exactly (same shared constant), 409 not 403, and
+    still writes nothing."""
+    ctx = company_client(monkeypatch)
+    project = _new_project(ctx)
+    _pin_resolver(monkeypatch, {"tier": projects_db.TIER_REFUSE, "reason": "other_company"})
+
+    r = ctx.client.post(
+        f"/v1/projects/{project['id']}/tag", json={"needle": "foreign@evil.example"}
+    )
+    assert r.status_code == 409, r.text
+    assert "another company" in r.json()["detail"].lower()
+    from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
+
+    assert r.json()["detail"] == CROSS_COMPANY_INVITE_MESSAGE
+    assert _invite_rows(ctx.company_id) == []
     assert {m["user_id"] for m in _project_member_rows(project["id"])} == {ctx.user_id}
 
 
@@ -220,12 +249,22 @@ def test_resolver_forced_workspace_route_backstop(isolated_settings, monkeypatch
 
 
 def test_refuse_writes_nothing_all_reasons(isolated_settings, monkeypatch):
+    """No t_refuse reason ever writes — regardless of which status code it
+    returns (409 for `other_company`, the clear-message case; 403 opaque for
+    everything else)."""
     ctx = company_client(monkeypatch)
     project = _new_project(ctx)
-    for reason in ("cross_company", "other_company", "no_match", "ambiguous", "no_project"):
+    expected_status = {
+        "cross_company": 403,
+        "other_company": 409,
+        "no_match": 403,
+        "ambiguous": 403,
+        "no_project": 403,
+    }
+    for reason, status_code in expected_status.items():
         _pin_resolver(monkeypatch, {"tier": projects_db.TIER_REFUSE, "reason": reason})
         r = ctx.client.post(f"/v1/projects/{project['id']}/tag", json={"needle": "x@evil.example"})
-        assert r.status_code == 403, reason
+        assert r.status_code == status_code, reason
         assert {m["user_id"] for m in _project_member_rows(project["id"])} == {ctx.user_id}, reason
         assert _invite_rows(ctx.company_id) == [], reason
 
@@ -237,12 +276,16 @@ def test_add_member_route_rejects_cross_company(isolated_settings, monkeypatch):
     ctx = company_client(monkeypatch)
     project = _new_project(ctx)
 
-    # Fix ON: a foreign email classifies as t_refuse → 404, no write.
+    # Fix ON: a foreign email classifies as t_refuse(other_company) → 409
+    # with the clear cross-company message (B5b), no write.
     _pin_resolver(monkeypatch, {"tier": projects_db.TIER_REFUSE, "reason": "other_company"})
     r = ctx.client.post(
         f"/v1/projects/{project['id']}/members", json={"email": "foreign@evil.example"}
     )
-    assert r.status_code == 404
+    assert r.status_code == 409, r.text
+    from app.db.team import CROSS_COMPANY_INVITE_MESSAGE
+
+    assert r.json()["detail"] == CROSS_COMPANY_INVITE_MESSAGE
     assert {m["user_id"] for m in _project_member_rows(project["id"])} == {ctx.user_id}
 
     # Fix OFF (regression proof): if resolution fails open and hands the route

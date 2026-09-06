@@ -292,7 +292,7 @@ afterEach(() => {
   emitDelegationEventMock.mockReset()
   emitDelegationEventMock.mockResolvedValue({ delegation_id: 1, status: "accepted" })
   candidateSearchMock.mockReset()
-  candidateSearchMock.mockResolvedValue([])
+  candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
   tagCandidateMock.mockReset()
   instructionsMock.mockReset()
   instructionsMock.mockResolvedValue({ instructions: null })
@@ -406,16 +406,35 @@ describe("ProjectDetailView — top-bar layout (redesign)", () => {
     expect(screen.getByTestId("project-main-thread-host")).toBeTruthy()
   })
 
-  it("test_thread_host_stretches_the_mounted_chat_not_centers_it — .threadHost (the group⇆private swap host's wrapper) keeps its scroll-region sizing (flex/min-height/overflow-y) but no longer carries the deleted .threadPlaceholder's center/center alignment, so the live ChatShell it wraps fills the box on the flex default (stretch) instead of resting on height:100% alone against a non-stretch cross-axis — the group surface's taller multi-party rows are what actually exercise that gap; private's shorter rows never did (project-scroll fix)", () => {
+  it("test_thread_host_only_bounds_the_mounted_chat — .threadHost (the group⇆private swap host's wrapper) just BOUNDS the mounted ChatShell to its flex track (flex/min-height/display:flex) and must NOT be a second scroll container: the ChatShell already scrolls internally and pins its own composer, so an outer overflow-y + padding here let the user drag past the pinned composer into a dead grey band during the working state. It also never carries the deleted .threadPlaceholder's center/center alignment, so the shell fills the box on the flex default (stretch) (project-scroll fix)", () => {
     render(React.createElement(ProjectDetailView, viewProps({ openArtifact: null })))
     expect(screen.getByTestId("project-main-thread-host").className).toMatch(/threadHost/)
     const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
     const rule = css.match(/\.threadHost\s*\{[^}]*\}/)?.[0] ?? ""
     expect(rule).toMatch(/flex:\s*1/)
     expect(rule).toMatch(/min-height:\s*0/)
-    expect(rule).toMatch(/overflow-y:\s*auto/)
+    expect(rule).toMatch(/display:\s*flex/)
+    // The redundant outer scroller + its padding are gone — the shell is the
+    // only scroller and the composer stays pinned (no dead band below it).
+    expect(rule).not.toMatch(/overflow-y/)
+    expect(rule).not.toMatch(/padding/)
     expect(rule).not.toMatch(/align-items/)
     expect(rule).not.toMatch(/justify-content/)
+  })
+
+  it("test_body_grid_grows_so_short_chat_composer_stays_pinned — .body carries a filling grid row (minmax(0,1fr)) so the chat column (.main, a grid ITEM whose own flex is inert) fills the viewport height even when the transcript is SHORTER than the view; without it the row is auto/content-sized and the composer floats above dead space (project-scroll fix, short-content case)", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    const rule = css.match(/\.body\s*\{[^}]*\}/)?.[0] ?? ""
+    expect(rule).toMatch(/display:\s*grid/)
+    expect(rule).toMatch(/grid-template-rows:\s*minmax\(0,\s*1fr\)/)
+    expect(rule).toMatch(/min-height:\s*0/)
+  })
+
+  it("test_main_clips_so_composer_stays_pinned_during_working — .main is overflow:hidden so the mounted ChatShell's scroll-content height can't leak past this bounded column up to the app's .main-column (overflow:auto) during the answer render. Without the clip, .main-column's scrollHeight inflated to ~full-transcript height, became scrollable, and an auto-scroll shifted the whole column up — the composer floated above dead space for the entire 'Working' state (measured live: .main-column 20180/855 → 855/855 after the clip)", () => {
+    const css = readFileSync(join(__dirname, "../ProjectDetailScreen.module.css"), "utf8")
+    const rule = css.match(/^\.main\s*\{[^}]*\}/m)?.[0] ?? ""
+    expect(rule).toMatch(/overflow:\s*hidden/)
+    expect(rule).toMatch(/min-height:\s*0/)
   })
 })
 
@@ -724,7 +743,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -746,7 +765,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })
@@ -770,7 +789,7 @@ describe("ProjectDetailScreen — data fetch", () => {
     artifactsMock.mockResolvedValue(ARTIFACTS)
     memorySummaryMock.mockResolvedValue(MEMORY)
     memoryInsightMock.mockResolvedValue(null)
-    candidateSearchMock.mockResolvedValue([])
+    candidateSearchMock.mockResolvedValue({ candidates: [], pending_invites: [] })
     await act(async () => {
       renderWithContent(React.createElement(ProjectDetailScreen, { projectId: "101" }))
     })

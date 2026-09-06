@@ -73,7 +73,7 @@ def _capture_invite_email(monkeypatch, status: str = "sent") -> list[dict]:
         calls.append({"email": email, **kwargs})
         return status
 
-    monkeypatch.setattr(projects_routes, "send_invite_email", _fake)
+    monkeypatch.setattr(projects_routes, "dispatch_invite_email", _fake)
     return calls
 
 

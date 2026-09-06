@@ -46,6 +46,30 @@ describe("jobResume store", () => {
     expect(getPendingJob("evidence", "_", scope)).toEqual({ id: "2" })
     expect(getPendingJob("prd", "_", insightScope(99, 0))).toEqual({ id: "3" })
   })
+
+  it("round-trips an ask job's clientMessageId alongside its id", () => {
+    setPendingJob("ask", "_", scope, 2044, "ask-2044-reply")
+    expect(getPendingJob("ask", "_", scope)).toEqual({ id: "2044", clientMessageId: "ask-2044-reply" })
+    clearPendingJob("ask", "_", scope)
+    expect(getPendingJob("ask", "_", scope)).toBeNull()
+  })
+
+  it("omits clientMessageId entirely when none is given (byte-identical to a bare id)", () => {
+    setPendingJob("ask", "_", scope, 2044)
+    expect(getPendingJob("ask", "_", scope)).toEqual({ id: "2044" })
+  })
+
+  it("reads a raw pre-ticket bare-id value as if clientMessageId were never given", () => {
+    // Every non-ask caller (and every ask persisted before this ticket)
+    // writes the ORIGINAL bare-string shape directly — never the JSON
+    // envelope. `setPendingJob` with no clientMessageId argument writes
+    // EXACTLY that legacy shape (asserted by the byte-identical test above);
+    // this asserts the READ side handles it identically to a fresh read of
+    // that same legacy value.
+    setPendingJob("ask", "_", scope, 2044)
+    expect(getPendingJob("ask", "_", scope)).toEqual({ id: "2044" })
+    expect(getPendingJob("ask", "_", scope)).not.toHaveProperty("clientMessageId")
+  })
 })
 
 describe("resumePrdGeneration", () => {

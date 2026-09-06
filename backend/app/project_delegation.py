@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from app.db.artifacts import list_artifacts_for_project
 from app.db.conversations import (
     create_individual_project_chat,
+    get_individual_project_chat,
     list_individual_turns,
     post_individual_turn,
 )
@@ -44,9 +45,17 @@ from app.db.delegation_events import (
     status_dto,
 )
 from app.db.delegation_followups import upsert_followup
+from app.db.profiles import emails_for_user_ids
 from app.db.project_delegations import record_delegation
-from app.db.projects import _match_keys, is_project_member, resolve_member
+from app.db.projects import (
+    _match_keys,
+    get_project,
+    is_project_member,
+    list_members,
+    resolve_member,
+)
 from app.delegation_cadence import MIN_INTERVAL
+from app.delegation_followup_email import send_assignment_email, send_completion_email
 from app.llm import DEFAULT_MODEL, call_md
 from app.llm_telemetry import RunUsage, log_llm_run
 from app.project_context import assemble_project_context
@@ -268,6 +277,108 @@ def _publish_mention_signal(
         )
 
 
+def _member_first_name(project_id: int, user_id: str | None) -> str:
+    """Best-effort first name off the project roster. Mirrors
+    `delegation_status_ingest._display_first_name`'s lookup shape exactly
+    but is kept as its own tiny copy here (not imported) so this module
+    never imports FROM `delegation_status_ingest` — that module already
+    imports FROM this one (`_publish_brief_delivered`/
+    `_publish_delegation_event`), and a reverse import would be a cycle."""
+    if not user_id:
+        return "Someone"
+    try:
+        roster = list_members(project_id)
+        member = next((m for m in roster if m.get("user_id") == user_id), None)
+        name = (member or {}).get("name")
+        return name.split()[0] if name else "Someone"
+    except Exception:  # noqa: BLE001 — best-effort
+        return "Someone"
+
+
+def _project_display_name(project_id: int) -> str:
+    """Project name for email copy — falls back to the literal "Sprntly"
+    (the locked fallback) whenever the row or its `name` is unavailable."""
+    try:
+        project = get_project(project_id)
+        name = (project or {}).get("name")
+        return name.strip() if name and name.strip() else "Sprntly"
+    except Exception:  # noqa: BLE001 — best-effort
+        return "Sprntly"
+
+
+def _notify_assignee_task_assigned_email(
+    project_id: int, assignee_user_id: str, assigner_name: str | None
+) -> None:
+    """Best-effort transactional email nudging the ASSIGNEE that a
+    task landed in their chat — fires once per delegation, right after the
+    brief is delivered + recorded. Own try/except: a send failure must
+    never roll back the already-committed delivery above it. NAME/project
+    only — never task_summary/task text (the raw task text never reaches
+    this function at all)."""
+    try:
+        to_email = emails_for_user_ids([assignee_user_id]).get(assignee_user_id)
+        if not to_email:
+            logger.info(
+                "send_assignment_email skipped: no email for assignee_user_id=%s",
+                assignee_user_id,
+            )
+            return
+        send_assignment_email(
+            to_email=to_email,
+            assigner_name=assigner_name or "A teammate",
+            project_id=project_id,
+            project_name=_project_display_name(project_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a delivered handoff
+        logger.warning(
+            "assignment_email_failed project_id=%s assignee_user_id=%s error_class=%s",
+            project_id, assignee_user_id, type(exc).__name__,
+        )
+
+
+def _notify_assigner_task_completed_email(
+    project_id: int, delegation_id: int, *, assignee_user_id: str
+) -> None:
+    """ONE DRY best-effort transactional email to the delegation's
+    ASSIGNER when the assignee's task completes — invoked from ALL THREE
+    completion paths (the inbound explicit-done classifier and the
+    outbound soft-done finalize, both via
+    `delegation_status_ingest.notify_requester_task_completed`; and
+    `handle_complete_task` below directly — which pairs it with its own
+    in-app assigner notice via `_post_completion_notice_to_assigner`, so
+    all three paths emit exactly one email + one in-app turn).
+
+    Resolves the assigner off `load_delegation_for_authz(delegation_id)` —
+    never trusts a caller-supplied assigner id for this cross-user email
+    recipient. Entirely best-effort/never-raising: a failed or skipped
+    send must never affect the already-recorded completion. NAME/project
+    only — never task_summary/task text (the raw task text never reaches
+    this function at all)."""
+    try:
+        fact = load_delegation_for_authz(delegation_id)
+        assigner_user_id = (fact or {}).get("assigner_user_id")
+        if not assigner_user_id:
+            return
+        to_email = emails_for_user_ids([assigner_user_id]).get(assigner_user_id)
+        if not to_email:
+            logger.info(
+                "send_completion_email skipped: no email for assigner_user_id=%s",
+                assigner_user_id,
+            )
+            return
+        send_completion_email(
+            to_email=to_email,
+            assignee_name=_member_first_name(project_id, assignee_user_id),
+            project_id=project_id,
+            project_name=_project_display_name(project_id),
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort, never blocks a recorded completion
+        logger.warning(
+            "completion_email_failed project_id=%s delegation_id=%s error_class=%s",
+            project_id, delegation_id, type(exc).__name__,
+        )
+
+
 # How many of the project's most-recently-touched artifacts to fold into
 # the brief — bounded the same way the reply path bounds its own group
 # transcript (`_GROUP_CONTEXT_TURNS`), so a heavily-artifacted project
@@ -286,6 +397,18 @@ _ARTIFACT_LIMIT = 5
 # refers to ("send this to Fortune to prioritize") is almost always what was
 # just said, not the start of a long thread.
 _SOURCE_CONTENT_CHARS = 6000
+
+# The tail of the ASSIGNEE's OWN individual project chat (their welcome turn
+# plus whatever they've most recently been discussing) folded into the brief
+# so the hand-off lands INTELLIGENTLY into an ongoing conversation — it can
+# transition from what they were just doing and stop re-explaining the project
+# overview + artifacts they were already shown in their welcome. Bounded the
+# same way every other user-derived block here is: the last few turns only
+# (`_RECIPIENT_CHAT_TURNS`), then a hard char cap in the spirit of
+# `_SOURCE_CONTENT_CHARS` (`_RECIPIENT_CHAT_CHARS`). Read READ-ONLY and
+# owner-gated (see `_recipient_chat_tail`); best-effort, degrades to None.
+_RECIPIENT_CHAT_TURNS = 8
+_RECIPIENT_CHAT_CHARS = 4000
 
 DELEGATE_TASK_TOOL = {
     "name": "delegate_task",
@@ -330,21 +453,32 @@ DELEGATE_TASK_TOOL = {
 
 _BRIEF_SYSTEM = """\
 You write a short brief handing a task from one project teammate to
-another. It is delivered straight into the assignee's private chat with
-Sprntly — a one-way notification, not a live conversation turn a reply
-could land on.
+another. It is delivered straight into the assignee's private, ONGOING
+chat with Sprntly — a one-way notification, not a live conversation turn
+a reply could land on.
 
-Write in plain prose (short paragraphs or a few brief bullets — no
-heading dump). State, in this order:
-  - the task itself, clearly and concretely
-  - who assigned it — name AND role — so the assignee knows who to ask
-    for more context
+You are dropping this task into the recipient's ongoing chat. Their
+recent conversation is given below when available (their welcome, and
+whatever they were just discussing). Introduce the task so it fits
+naturally with what they were just doing — acknowledge or transition from
+it when relevant, rather than arriving cold.
+
+Lead with the task. State, in this order:
+  - the task itself, clearly and concretely, first
   - the actual content the task is ABOUT, when given below (the feedback,
     the themes, the specifics the requester supplied) — quote or closely
     paraphrase it, never a vaguer restatement that drops the substance
-  - the relevant project context and any linked artifacts given below,
-    ONLY what is actually provided — never invent a fact, a name, a
-    deadline, or an artifact that is not in the material given to you
+  - who assigned it — name AND role — so the assignee knows who to ask
+    for more context
+
+Do NOT re-explain the project's purpose, its history, or the artifacts
+they have already seen — they were shown these in their welcome and their
+own chat. Reference them in a few words at most, and never invent a fact,
+a name, a deadline, or an artifact that is not in the material given to
+you.
+
+Keep the whole brief SHORT: under about 120 words, three or four short
+sentences. Write in plain prose — no heading dump.
 
 You are handing off a task, not doing it. Never perform the task yourself
 and never write the deliverable the assignee is being asked to produce —
@@ -391,6 +525,46 @@ def _log_brief_run(
         logger.warning("delegation_brief_cost_log_failed project_id=%s", project_id)
 
 
+def _recipient_chat_tail(project_id: int, assignee_user_id: str | None) -> str | None:
+    """READ-ONLY, owner-gated tail of the ASSIGNEE's OWN individual project
+    chat — their welcome turn plus whatever they've most recently been
+    discussing — so the brief can land intelligently into an ongoing
+    conversation instead of arriving cold and re-explaining what they were
+    already shown in their welcome.
+
+    Resolved with the read-only `get_individual_project_chat` (never the
+    `create_individual_project_chat` the delivery path uses — this must NOT
+    mint a chat as a side effect of building the brief), then the owner-gated
+    `list_individual_turns`, to which `assignee_user_id` is passed EXPLICITLY,
+    server-side — never a model-supplied id (the read-side counterpart of the
+    delegation cross-user write gate). Bounded to the last
+    `_RECIPIENT_CHAT_TURNS` turns, then char-capped from the tail in the
+    spirit of `_SOURCE_CONTENT_CHARS`.
+
+    Best-effort: on no chat yet (None), no turns, or ANY read failure it
+    returns None and the brief degrades to "no prior recipient context" —
+    exactly the way the `assemble_project_context` and artifact folds degrade
+    in `_build_brief` below."""
+    if not assignee_user_id:
+        return None
+    try:
+        conv = get_individual_project_chat(project_id, assignee_user_id)
+        if not conv:
+            return None
+        turns = list_individual_turns(conv["id"], assignee_user_id)
+    except Exception:  # noqa: BLE001 — best-effort recipient-context fold
+        return None
+    if not turns:
+        return None
+    tail = turns[-_RECIPIENT_CHAT_TURNS:]
+    rendered = "\n".join(
+        f"{t.get('role', '')}: {(t.get('content') or '').strip()}".strip()
+        for t in tail
+    ).strip()
+    rendered = rendered[-_RECIPIENT_CHAT_CHARS:].strip()
+    return rendered or None
+
+
 def _render_brief_user(
     task_summary: str,
     assigner: dict | None,
@@ -398,6 +572,7 @@ def _render_brief_user(
     context_block: str,
     artifacts: list[dict],
     source_content: str | None = None,
+    recipient_context: str | None = None,
 ) -> str:
     assigner_name = (assigner or {}).get("name") or "a teammate"
     assigner_role = (assigner or {}).get("job_role") or "no role set"
@@ -421,6 +596,12 @@ def _render_brief_user(
             for a in artifacts
         )
         lines.append(f"\nLinked artifacts:\n{art_lines}")
+    if recipient_context:
+        lines.append(
+            "\nThe recipient's recent chat (their welcome and whatever "
+            "they've been discussing — transition from it, don't repeat "
+            f"it):\n{recipient_context}"
+        )
     return "\n".join(lines)
 
 
@@ -441,9 +622,12 @@ def _build_brief(
     `source_content`: the tail of the actual triggering conversation, so the
     brief carries the requester's real material (the feedback, the themes)
     rather than only general project memory and an unrelated artifact
-    fan-out. Context/artifact folding degrades silently to "none" on a read
-    failure — only the LLM call itself can fail the brief outright (returns
-    None, never raises)."""
+    fan-out. ALSO folds a READ-ONLY, owner-gated tail of the assignee's OWN
+    individual chat (`_recipient_chat_tail`) so the brief lands intelligently
+    into their ongoing conversation instead of arriving cold and re-explaining
+    what they were already shown in their welcome. Context/artifact/recipient
+    folding all degrade silently to "none" on a read failure — only the LLM
+    call itself can fail the brief outright (returns None, never raises)."""
     start = time.monotonic()
     meta: dict = {}
     assignee_user_id = assignee.get("user_id")
@@ -464,8 +648,16 @@ def _build_brief(
 
     trimmed_source = (source_content or "").strip()[-_SOURCE_CONTENT_CHARS:] or None
 
+    # READ-ONLY, owner-gated fold of the assignee's OWN recent chat (welcome +
+    # what they were just discussing) so the brief transitions naturally
+    # instead of arriving cold and re-explaining what they've already seen.
+    # `assignee_user_id` is server-side (the resolved assignee), never a
+    # model-supplied id; degrades silently to None like the folds above.
+    recipient_context = _recipient_chat_tail(project_id, assignee_user_id)
+
     user = _render_brief_user(
-        task_summary, assigner, assignee, context_block, artifacts, trimmed_source
+        task_summary, assigner, assignee, context_block, artifacts,
+        trimmed_source, recipient_context,
     )
 
     try:
@@ -611,6 +803,13 @@ def handle_delegate_task(
         # every other member. Entirely best-effort (AD-P22): see
         # `_publish_brief_delivered`.
         _publish_brief_delivered(project_id, assignee["user_id"], conv["id"], turn)
+        # Best-effort transactional email nudge to the ASSIGNEE — own
+        # try/except lives inside the helper; a send failure must never
+        # roll back the already-delivered+recorded handoff above.
+        assigner_name = next(
+            (m.get("name") for m in roster if m.get("user_id") == assigner_user_id), None
+        )
+        _notify_assignee_task_assigned_email(project_id, assignee["user_id"], assigner_name)
         # Ledger-create liveness: mirror the emit route's publish so the Task
         # ledger updates LIVE on CREATION too (not only on later status
         # changes). Publish the shaped `assigned` status DTO to BOTH parties'
@@ -632,8 +831,21 @@ def handle_delegate_task(
                 "delegation_create_event_publish_prep_failed delegation_id=%s error_class=%s",
                 deleg["id"], type(exc).__name__,
             )
-        first = (assignee.get("name") or "").split()[0] if assignee.get("name") else "their"
-        return f"Sent the brief to {first}'s chat."
+        # Richer confirmation, emitted ONLY here — after the delegation row
+        # (`deleg["id"]`) is persisted and the brief delivered above. This is
+        # still the SAME grounded handler string the anti-confabulation gate
+        # relies on (never LLM-composed, never emitted without a real row); only
+        # the wording is enriched. Echo the assignee + the actual task, and keep
+        # the completion promise (now genuinely backed by the completion
+        # email/notice + realtime). Flatten whitespace and cap the echoed task
+        # so a huge task_summary can't blow up the one-line confirmation.
+        assignee_name = (assignee.get("name") or "").strip() or "your teammate"
+        task_flat = " ".join(task.split())
+        task_echo = task_flat if len(task_flat) <= 120 else task_flat[:119].rstrip() + "…"
+        return (
+            f'Assigned to {assignee_name} — "{task_echo}". '
+            "I'll let you know when they've marked it done."
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never block the group reply
         logger.warning(
             "delegation_failed project_id=%s error=%s", project_id, type(exc).__name__
@@ -686,6 +898,45 @@ def _score_task_match(task_ref: str, summary: str) -> int:
         return 0
     _stop = {"the", "a", "an", "task", "this", "that", "it", "for", "to", "of", "and", "with"}
     return len((ref & tgt) - _stop)
+
+
+def _post_completion_notice_to_assigner(
+    project_id: int, delegation_id: int, *, completer_user_id: str, task_summary: str | None
+) -> None:
+    """Post the in-app "✓ {name} finished: {summary}" completion turn into the
+    ASSIGNER's own project chat (and broadcast it for realtime), matching the
+    background classifier path's assigner notice
+    (`delegation_status_ingest.notify_requester_task_completed` →
+    `_route_to_requester` → `_post_to_own_chat`) VERBATIM — same wording, same
+    `brief.delivered` broadcast — so the two completion paths are
+    indistinguishable to the assigner. The `complete_task`-tool path used to
+    fire ONLY the completion email and drop this in-app turn.
+
+    Reimplemented on THIS module's own primitives (`_member_first_name`,
+    `create_individual_project_chat`, `post_individual_turn`,
+    `_publish_brief_delivered`) rather than importing
+    `delegation_status_ingest`'s helper — that module already imports FROM this
+    one, and a reverse import would be a cycle (see `_member_first_name`).
+    Deliberately does NOT email: `handle_complete_task` already fires the DRY
+    completion email itself, so posting here keeps the net result at exactly
+    one in-app assigner turn + one email. Best-effort/never-raising: a post
+    failure must never roll back the already-recorded completion."""
+    try:
+        fact = load_delegation_for_authz(delegation_id) or {}
+        assigner_id = fact.get("assigner_user_id")
+        if not assigner_id:
+            return
+        name = _member_first_name(project_id, completer_user_id)
+        summary = (task_summary or "").strip()
+        text = f"✓ {name} finished: {summary}" if summary else f"✓ {name} finished the task."
+        conv = create_individual_project_chat(project_id, assigner_id)
+        turn = post_individual_turn(conv["id"], "assistant", text)
+        _publish_brief_delivered(project_id, assigner_id, conv["id"], turn)
+    except Exception as exc:  # noqa: BLE001 — best-effort, AD-P7: never blocks a recorded completion
+        logger.warning(
+            "delegation_complete_inapp_notice_failed project_id=%s delegation_id=%s error_class=%s",
+            project_id, delegation_id, type(exc).__name__,
+        )
 
 
 def handle_complete_task(
@@ -750,6 +1001,19 @@ def handle_complete_task(
         logger.info(
             "delegation_completed project_id=%s delegation_id=%s actor=%s",
             project_id, delegation_id, completer_user_id,
+        )
+        # Assigner completion signals — the SAME pair the background classifier
+        # path fires, so the deterministic tool path is indistinguishable to the
+        # assigner: (1) the DRY best-effort transactional email (own try/except
+        # inside the helper), and (2) the in-app "✓ {name} finished: {summary}"
+        # turn posted into the assigner's chat + broadcast for realtime. Exactly
+        # ONE of each — the in-app helper deliberately does not email.
+        _notify_assigner_task_completed_email(
+            project_id, delegation_id, assignee_user_id=completer_user_id
+        )
+        _post_completion_notice_to_assigner(
+            project_id, delegation_id,
+            completer_user_id=completer_user_id, task_summary=target.get("task_summary"),
         )
         # Ledger liveness: publish the shaped completed status DTO to BOTH
         # parties' per-user channels (best-effort, AD-P22) so the Task ledger

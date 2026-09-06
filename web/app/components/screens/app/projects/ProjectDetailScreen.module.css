@@ -214,20 +214,30 @@
      rail any more. The only second column the grid ever gets is the
      in-place artifact drawer (`.bodyDrawerOpen` below). */
   grid-template-columns: minmax(0, 1fr);
+  /* A single GROWING row (mirrors main chat's `.od-layout` `grid-template-rows:
+     auto 1fr` growing track). Without it the row defaults to `auto` = content
+     height, so `.main` (a grid item — `flex` on it is inert) collapses to the
+     transcript's height with a SHORT chat, leaving the composer floating above
+     empty space. `minmax(0, 1fr)` fills the bounded `.body` height and lets the
+     `min-height:0` chain below scroll internally, so `.od-center-scroll` always
+     fills and `.bc-dock` pins to the bottom regardless of content length. */
+  grid-template-rows: minmax(0, 1fr);
 }
 
-/* AD-HOC (live-rig): artifact drawer open — [ chat | drawer ] side-by-side.
-   The drawer takes a wide right region so the artifact is readable, the
-   chat keeps a workable min width to its left, both scroll independently.
+/* AD-HOC (live-rig): artifact drawer open — [ chat | list-drawer ] side-by-side.
+   The right column is the artifacts LIST (a column of one-line rows), so it is
+   capped TIGHT — a list of rows reads fine at ~240-300px and does not need the
+   420-600px band it used to take (that width was the root cause of the
+   three-panel squeeze: it left no room for the chat + the content panel).
    `--proj-drawer-w` is the user's dragged width (set on :root by the drawer's
-   own resize handle, persisted); with none it falls back to the default band.
+   own resize handle, persisted); with none it falls back to the capped band.
    The chat column stays `minmax(360px, 1fr)`, so widening the drawer NARROWS
    the chat rather than covering it (same push-not-overlay posture as the
    content panel). The narrow-viewport rules below drop the var entirely. */
 .bodyDrawerOpen {
   grid-template-columns:
     minmax(360px, 1fr)
-    var(--proj-drawer-w, clamp(420px, 42vw, 600px));
+    var(--proj-drawer-w, clamp(240px, 30vw, 450px));
 }
 
 @media (max-width: 1080px) {
@@ -247,13 +257,65 @@
   }
 }
 
+/* AD-HOC (live-rig, three-panel state): when the fixed-overlay content panel
+   (Evidence/PRD/Tickets — `ContentPanel`) is ALSO open, the page reserves its
+   width by putting `padding-right: clamp(420px, 35vw, 60vw)` on `.main-column`
+   (globals.css, never edited here) — the ANCESTOR of this whole `.body` grid.
+   That padding shrinks the box `.body` lays out in to
+   `viewport − nav − cpanel-width`; the list drawer is in-flow to the LEFT of
+   that reserved region, so `list.right <= cpanel.left` holds BY CONSTRUCTION
+   as long as the `.body` grid never overflows its (now smaller) container.
+   With the list column capped tight (see `.bodyDrawerOpen` above), chat(min
+   380) + list(cap ~240-300) fit inside that container on a laptop, so no
+   overflow, no clipping, no overlap — a clean three-column layout. This
+   override only nudges the chat column's min from 360 to 380 (matching
+   `.main`'s own min-width) for the three-panel case and re-states the same
+   capped list band; it deliberately carries NO `overflow-x` hack — the tight
+   cap removes the horizontal-scroll last-resort the earlier fix needed, and
+   `overflow-x` would have forced `overflow-y: auto` too (clipping this
+   surface's absolutely-positioned menus). Scoped to the global
+   `.app--cpanel-open` ancestor class (set by AppLayout ONLY while the content
+   panel is open, never by this drawer alone) so a single drawer open is
+   untouched, and main chat's own `.main-column` reflow is byte-identical
+   since it never carries `.bodyDrawerOpen`. Guarded to `min-width: 1081px` —
+   the two narrower breakpoints above already collapse the drawer to
+   full-width-no-chat (960px) or a fixed band (1080px), and this override must
+   never outrank either (a bare `:global()`+class selector has HIGHER
+   specificity than a plain media-scoped class selector, so without the guard
+   it would win regardless of source order and undo the narrow handling). */
+@media (min-width: 1081px) {
+  :global(.app--cpanel-open) .bodyDrawerOpen {
+    grid-template-columns:
+      minmax(380px, 1fr)
+      var(--proj-drawer-w, clamp(240px, 30vw, 450px));
+  }
+}
+
 /* ── Main pane (chat host + composer shell — AD-P13: no bespoke bubbles) */
 
 .main {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 380px;
   background: var(--surface);
+  /* CLIP the leak. The mounted ChatShell (`.od-center`) bounds itself to this
+     column and scrolls internally (`.od-center-scroll`, overflow:auto). But in
+     THIS flex chain — unlike main chat, whose ChatShell sits in `.od-layout`'s
+     rigid grid `1fr` cell — the ChatShell's scroll-content height leaks past the
+     bounded `.od-center` up through the `overflow:visible` wrappers
+     (`.host`/`.threadHost`/`.main`/`.body`/`.shell`), inflating the app's
+     `.main-column` (overflow:auto) scrollHeight to ~full-transcript height DURING
+     the answer render. That makes `.main-column` scrollable, and an auto-scroll
+     then shifts the whole column up — the composer floats above a dead-space band
+     for the entire "Working" state, snapping back only when the answer settles.
+     `overflow: hidden` here clips that phantom overflow at this bounded column
+     (the visible chat all lives inside `.od-center`'s own height, so nothing real
+     is hidden), so `.body`/`.shell`/`.main-column` stay bounded and the composer
+     stays pinned throughout. Not a user scroller (no wheel/scrollbar) — distinct
+     from the outer `overflow-y:auto` the composer-pin fix removed from
+     `.threadHost`. */
+  overflow: hidden;
 }
 
 .chatNote {
@@ -288,12 +350,19 @@
  * stretch so the host fills `.threadHost` the same way regardless of
  * content — the group surface's taller multi-party rows are what actually
  * exercise this, not private's shorter single-party ones. */
+/* This host only BOUNDS the mounted ChatShell to its flex track (exactly like
+   main chat's grid `1fr` cell) — it must NOT scroll. ChatShell already scrolls
+   internally (`.od-center-scroll`) and pins its own composer (`.bc-dock`), so a
+   second `overflow-y: auto` here made a redundant outer scroller: dragging it
+   pushed the pinned composer up and exposed this container's own `padding` as a
+   dead grey band below the composer during the "working" state. Removed both
+   the outer scroll and the 24px padding (the shell carries its own inner
+   gutters); if the chat ever reads too flush, add a gutter to the INNER scroll
+   content, never back onto this outer host. */
 .threadHost {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
   display: flex;
-  padding: 24px;
 }
 
 .threadPlaceholder {

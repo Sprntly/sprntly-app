@@ -14,6 +14,7 @@ import { IconLoader2 } from "@tabler/icons-react"
 
 export function ConfirmDialog({
   open, title, body, confirmLabel, busyLabel, tone = "default", busy = false,
+  elevated = false,
   onConfirm, onCancel,
 }: {
   open: boolean
@@ -28,6 +29,12 @@ export function ConfirmDialog({
   tone?: "default" | "danger"
   /** The action is in flight: buttons lock and the confirm reports progress. */
   busy?: boolean
+  /** Lift this overlay ABOVE the standard modal layer. Set when the confirm is
+   *  opened from inside another `modal-overlay` (e.g. the project settings
+   *  modal's Members tab): both share the base `modal-overlay` z-index, so a
+   *  same-layer confirm rendered earlier in the DOM would paint BEHIND its
+   *  parent modal. Default false — a standalone confirm keeps the base layer. */
+  elevated?: boolean
   onConfirm: () => void
   onCancel: () => void
 }) {
@@ -55,6 +62,10 @@ export function ConfirmDialog({
   return (
     <div
       className="modal-overlay open"
+      // `modal-overlay` is z-index 200; a confirm opened from within another
+      // modal must sit above it (300) so it is never buried. Standalone
+      // confirms leave the class's own z-index untouched.
+      style={elevated ? { zIndex: 300 } : undefined}
       // Same rule as Escape: a click-away must not dismiss an in-flight action.
       onClick={(e) => { if (e.target === e.currentTarget && !busy) onCancel() }}
     >
