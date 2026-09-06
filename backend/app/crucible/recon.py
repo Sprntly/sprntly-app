@@ -1237,9 +1237,27 @@ ATTRIBUTABLE_MIN_SHARE = 0.5
 #: total is decided by whichever rows happen to carry the field" is the same
 #: argument whether the field is an account name or a contract value, and two
 #: different bars for two flavours of one question is a difference a reader
-#: would have to be told about and could not check. It is disclosed as an
-#: `AssumedParam` on every run rather than living only here.
+#: would have to be told about and could not check.
+#:
+#: IT IS DISCLOSED AS `weighting_threshold` ON THE STORED PLAN, beside the
+#: share it was compared against — not as an `AssumedParam`, which this
+#: comment used to claim. The only assumed parameters this engine emits are
+#: `value_per_account`, so that sentence named a mechanism that does not
+#: exist. The disclosure is real and the sentence was the wrong description of
+#: it, which in a feature whose whole rule is "say only what you do" is not a
+#: comment-level mistake.
 WEIGHTING_MIN_PRICEABLE_SHARE = 0.5
+
+#: What that share is a share OF, in words, declared ONCE.
+#:
+#: The plan states the denominator to the reader and the observation states it
+#: too. Two copies of a sentence that names a unit is exactly the kind of
+#: duplication that drifts silently: change the arithmetic in one place and the
+#: other keeps describing the old one, with nothing to catch it because both
+#: sentences still read fine.
+WEIGHTING_DENOMINATOR = (
+    "distinct accounts named in your evidence, other than your own"
+)
 
 #: How much of the corpus one document may account for before the row count
 #: stops being a count of independent observations.
@@ -2303,13 +2321,40 @@ def account_value_map(tables: Sequence[Table]) -> Optional[AccountValues]:
 class PriceableCoverage:
     """How much of what was READ could be priced from the contracts.
 
-    THE DENOMINATOR IS NAMED, because two defensible ones differ by more than
-    two-fold on real data: the share of ATTRIBUTED SIGNALS (what this measures)
-    and the share of DISTINCT ACCOUNTS. On the tenant this was measured against
-    they are 3.9% and 1.5%. Signals is the one used, because the sentence the
-    reader is shown is "N% of what I read could be priced" and what was read is
-    signals — an account share would answer a question nobody asked and would
-    weight a customer with four hundred rows the same as one with two.
+    THE DENOMINATOR IS DISTINCT ACCOUNTS, AND THE ALTERNATIVE IS CIRCULAR.
+
+    Two are defensible and they differ by more than twofold on real data: the
+    share of ATTRIBUTED SIGNALS and the share of DISTINCT ACCOUNTS — 3.9% and
+    1.5% on the tenant this was measured against. Accounts is the one used.
+
+    A signal share is a LOUDNESS-WEIGHTED denominator, and loudness is the
+    exact variable this feature exists to stop trusting. The gate asks "may I
+    stop ranking by how often something was mentioned?", and answering it with
+    a mention-count is asking the question in the units of the answer it is
+    meant to check.
+
+    The risk the gate exists to prevent is also per-ACCOUNT. A quiet, large,
+    unpriced customer is precisely what a signal share cannot see — it
+    contributes almost nothing to the denominator while carrying real revenue
+    the weighting would then miss. An account share counts it once, like every
+    other account.
+
+    AND THE TWO DIVERGE IN THE UNSAFE DIRECTION. On that tenant the priced
+    accounts carry roughly 2.6x the average signal volume, because contracted
+    customers talk more than prospects and long-tail names do. So the signal
+    share reads systematically HIGHER and errs toward weighting a run that
+    should have counted. A false count is honest and disclosed; a false weight
+    is the invariant violation.
+
+    NO MINIMUM-SIGNALS FLOOR, deliberately. Trimming the long tail out of the
+    denominator would reintroduce loudness through the back door and quietly
+    raise the share. If the prospect and residue names in the account set ever
+    need excluding, the honest instrument is the customer-side split
+    `infer_account_sides` already computes, not a volume cut-off.
+
+    The signal counts are still measured and still reported — they are a true
+    fact about the corpus and a reader wants them. They are simply not what
+    the gate divides by.
     """
     attributed_signals: int
     priceable_signals: int
@@ -2322,12 +2367,18 @@ class PriceableCoverage:
 
     @property
     def share(self) -> float:
+        return (0.0 if not self.named_accounts
+                else self.priced_accounts / self.named_accounts)
+
+    @property
+    def signal_share(self) -> float:
+        """Reported, never divided by — see the class docstring."""
         return (0.0 if not self.attributed_signals
                 else self.priceable_signals / self.attributed_signals)
 
     @property
     def denominator(self) -> str:
-        return "signals naming at least one account other than your own"
+        return WEIGHTING_DENOMINATOR
 
 
 def priceable_coverage(
@@ -2411,15 +2462,16 @@ def _observe_priceable_coverage(
                           DEFAULT_TOP_N)
     if weighted:
         headline = (
-            f"{_pct(cov.share)} of what names an account names one your "
-            f"contracts can price, so themes here are weighted by the revenue "
-            f"behind them rather than by how many accounts raised them."
+            f"{_pct(cov.share)} of the accounts named in your evidence are "
+            f"ones your contracts can price, so themes here are weighted by "
+            f"the revenue behind them rather than by how many accounts raised "
+            f"them."
         )
     else:
         headline = (
-            f"Only {_pct(cov.share)} of what I read could be priced, so this "
-            f"is counted, not weighted: a theme's size is the number of "
-            f"accounts it touches, and never money."
+            f"Only {_pct(cov.share)} of the accounts named in your evidence "
+            f"could be priced, so this is counted, not weighted: a theme's "
+            f"size is the number of accounts it touches, and never money."
         )
     return [Observation(
         id=f"{book.source}:priceable_coverage:{book.field}",
@@ -2428,16 +2480,21 @@ def _observe_priceable_coverage(
         source=book.source,
         fields=(book.key_field, book.field),
         what=(
-            f"{headline} `{book.field}` prices {book.accounts:,} accounts; "
-            f"{cov.priced_accounts:,} of the {cov.named_accounts:,} accounts "
-            f"named in your evidence are among them, covering "
-            f"{cov.priceable_signals:,} of {cov.attributed_signals:,} "
-            f"attributed signals. In the file itself the top "
+            f"{headline} `{book.field}` prices {book.accounts:,} accounts, "
+            f"and {cov.priced_accounts:,} of the {cov.named_accounts:,} "
+            f"accounts named in your evidence are among them. Those accounts "
+            f"account for {cov.priceable_signals:,} of "
+            f"{cov.attributed_signals:,} attributed signals — reported "
+            f"because it is worth knowing, and deliberately not what the "
+            f"decision above divides by. In the file itself the top "
             f"{min(DEFAULT_TOP_N, book.accounts)} accounts hold "
             f"{_pct(conc.share)} of the book."
         ),
         figures={
             "priceable_share": cov.share,
+            #: The loudness-weighted view of the same join. REPORTED, NEVER
+            #: THE GATE — see `PriceableCoverage`.
+            "priceable_signal_share": cov.signal_share,
             "threshold": WEIGHTING_MIN_PRICEABLE_SHARE,
             "attributed_signals": float(cov.attributed_signals),
             "priceable_signals": float(cov.priceable_signals),

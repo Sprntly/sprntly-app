@@ -432,7 +432,8 @@ def test_below_the_bar_counts_and_states_the_share_in_the_readers_words():
     v = weighting_verdict([_coverage_obs(0.039)],
                           business_model=WEIGHTING_UNIT_VALUE)
     assert v.unit == WEIGHTING_UNIT_COUNT
-    assert "Only 3.9% of what I read could be priced" in v.because
+    assert ("Only 3.9% of the accounts named in your evidence could be priced"
+            in v.because)
     assert v.priceable_share == 0.039
     assert v.threshold == 0.5
     assert v.denominator
@@ -445,6 +446,7 @@ def test_an_unrecorded_business_model_counts_rather_than_assuming_how_you_sell()
     v = weighting_verdict([_coverage_obs(0.9)], business_model="")
     assert v.unit == WEIGHTING_UNIT_COUNT
     assert "your business model is not recorded" in v.because
+    assert "accounts named in your evidence" in v.because
 
 
 def test_a_self_serve_business_counts_and_states_the_deviation_with_its_reason():
@@ -463,7 +465,8 @@ def test_a_sales_assisted_business_with_coverage_weighs():
                           business_model=WEIGHTING_UNIT_VALUE)
     assert v.unit == WEIGHTING_UNIT_VALUE
     assert v.weighted
-    assert "62.0% of what I read names an account" in v.because
+    assert ("62.0% of the accounts named in your evidence are ones your "
+            "contracts can price" in v.because)
 
 
 def test_the_business_model_is_read_from_free_text_and_never_guessed():

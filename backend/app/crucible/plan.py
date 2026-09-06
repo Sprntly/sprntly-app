@@ -358,7 +358,9 @@ def weighting_verdict(
     "counted" with no reason attached reads as a limitation of the engine when
     it is usually a fact about the evidence.
     """
-    from app.crucible.recon import WEIGHTING_MIN_PRICEABLE_SHARE
+    from app.crucible.recon import (
+        WEIGHTING_DENOMINATOR, WEIGHTING_MIN_PRICEABLE_SHARE,
+    )
 
     priceable = [o for o in observations
                  if getattr(o, "kind", "") == "priceable_coverage"]
@@ -373,12 +375,13 @@ def weighting_verdict(
     figures = dict(getattr(priceable[0], "figures", {}) or {})
     share = float(figures.get("priceable_share") or 0.0)
     threshold = float(figures.get("threshold") or WEIGHTING_MIN_PRICEABLE_SHARE)
-    denominator = ("signals naming at least one account other than your own")
+    denominator = WEIGHTING_DENOMINATOR
     if share < threshold:
         return WeightingVerdict(
             unit=WEIGHTING_UNIT_COUNT,
-            because=(f"Only {share * 100:.1f}% of what I read could be priced, "
-                     f"so this is counted, not weighted."),
+            because=(f"Only {share * 100:.1f}% of the accounts named in your "
+                     f"evidence could be priced, so this is counted, not "
+                     f"weighted."),
             priceable_share=share, threshold=threshold,
             denominator=denominator, business_model=business_model,
         )
@@ -402,17 +405,19 @@ def weighting_verdict(
     if not business_model:
         return WeightingVerdict(
             unit=WEIGHTING_UNIT_COUNT,
-            because=(f"Your contracts could price {share * 100:.1f}% of what I "
-                     f"read, but your business model is not recorded — so this "
-                     f"counts accounts rather than assuming how you sell."),
+            because=(f"Your contracts could price {share * 100:.1f}% of the "
+                     f"accounts named in your evidence, but your business "
+                     f"model is not recorded — so this counts accounts rather "
+                     f"than assuming how you sell."),
             priceable_share=share, threshold=threshold,
             denominator=denominator, business_model=business_model,
         )
     return WeightingVerdict(
         unit=WEIGHTING_UNIT_VALUE,
-        because=(f"{share * 100:.1f}% of what I read names an account your "
-                 f"contracts can price, so themes are ranked by the revenue "
-                 f"behind them rather than by how many accounts raised them."),
+        because=(f"{share * 100:.1f}% of the accounts named in your evidence "
+                 f"are ones your contracts can price, so themes are ranked by "
+                 f"the revenue behind them rather than by how many accounts "
+                 f"raised them."),
         priceable_share=share, threshold=threshold,
         denominator=denominator, business_model=business_model,
     )

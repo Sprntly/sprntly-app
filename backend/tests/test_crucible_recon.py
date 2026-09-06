@@ -680,13 +680,16 @@ def test_nothing_carrying_a_per_account_value_yields_no_map():
 
 
 def test_a_corpus_the_book_can_price_clears_the_gate():
-    signals = [_priced_signal("Account B", f"s{i}") for i in range(9)]
-    signals.append(_priced_signal("Someone Else", "s9"))
+    """Three of four named accounts are in the book. Deliberately not two of
+    four — a fixture sitting exactly on the bar is satisfied by a `>` rule and
+    a `>=` rule alike, and proves neither."""
+    signals = [_priced_signal(a, f"s{i}") for i, a in enumerate(
+        ("Account B", "Account C", "Account D", "Someone Else"))]
     o = _only([fx.contracts()], "priceable_coverage", signals=signals)
-    assert o.figures["priceable_share"] == 0.9
+    assert o.figures["priceable_share"] == 0.75
     assert o.figures["threshold"] == recon.WEIGHTING_MIN_PRICEABLE_SHARE
-    assert o.figures["priced_accounts"] == 1
-    assert o.figures["named_accounts"] == 2
+    assert o.figures["priced_accounts"] == 3
+    assert o.figures["named_accounts"] == 4
     assert o.figures["book_accounts"] == 8
     assert o.severity == "medium"
     assert "weighted by the revenue behind them" in o.what
@@ -694,15 +697,71 @@ def test_a_corpus_the_book_can_price_clears_the_gate():
 
 def test_a_corpus_the_book_cannot_reach_is_counted_and_says_so():
     """THE HONEST HALF, AND THE ONE THAT SHIPS FIRST. Measured on a real
-    tenant the join reaches 3.9% of attributed signals; the plan has to say
-    that in those words rather than degrade to a count in silence."""
+    tenant the join reaches a small fraction of the accounts named; the plan
+    has to say so rather than degrade to a count in silence."""
     signals = [_priced_signal("Account B", "s0")]
     signals += [_priced_signal(f"Stranger {i}", f"s{i + 1}") for i in range(24)]
     o = _only([fx.contracts()], "priceable_coverage", signals=signals)
     assert o.figures["priceable_share"] == 0.04
     assert o.severity == "high"
     assert "counted, not weighted" in o.what
-    assert "4.0% of what I read could be priced" in o.what
+    assert "4.0% of the accounts named in your evidence could be priced" in o.what
+
+
+def test_the_gate_divides_by_accounts_and_not_by_how_loud_they_are():
+    """THE DENOMINATOR, PINNED — and pinned on the case where the two answers
+    DISAGREE, because on any fixture where they agree this asserts nothing.
+
+    One priced account that talks twenty times, five unpriced accounts that
+    speak once each. By signal share the book covers 80% and the run would
+    WEIGH; by account share it covers 17% and the run COUNTS.
+
+    Signal share is loudness-weighted, and loudness is the exact variable this
+    feature exists to stop trusting — asking "may I stop ranking by mention
+    count?" and answering in mention counts is circular. It also fails in the
+    unsafe direction: contracted customers talk more than prospects, so the
+    signal view reads systematically higher and errs toward weighting a run
+    that should have counted. A false count is honest and disclosed; a false
+    weight is the invariant violation."""
+    signals = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    signals += [_priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    cov = recon.priceable_coverage(
+        signals, recon.account_value_map([fx.contracts()]).values)
+
+    assert cov.signal_share == 0.8, "the fixture must actually diverge"
+    assert round(cov.share, 4) == round(1 / 6, 4)
+    assert cov.share < recon.WEIGHTING_MIN_PRICEABLE_SHARE < cov.signal_share
+
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == cov.share
+    assert o.figures["priceable_signal_share"] == 0.8
+    assert "counted, not weighted" in o.what, (
+        "the loud priced account weighted a run that should have counted")
+
+
+def test_the_signal_counts_are_still_reported_just_not_divided_by():
+    """They are a true fact about the corpus and a reader wants them. Dropping
+    them would trade one silence for another."""
+    signals = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    signals += [_priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_signals"] == 20
+    assert o.figures["attributed_signals"] == 25
+    assert "20 of 25 attributed signals" in o.what
+    assert "not what the decision above divides by" in o.what
+
+
+def test_no_minimum_signal_floor_trims_the_long_tail():
+    """A floor would reintroduce loudness through the back door: dropping
+    one-signal accounts from the denominator quietly RAISES the share and
+    walks the gate back toward the measure it just stopped using."""
+    loud_only = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    with_tail = loud_only + [
+        _priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    book = recon.account_value_map([fx.contracts()]).values
+    assert recon.priceable_coverage(loud_only, book).share == 1.0
+    assert recon.priceable_coverage(with_tail, book).share < 0.2, (
+        "a quiet unpriced account must count exactly as much as a loud one")
 
 
 def test_the_priceable_share_ignores_signals_that_name_nobody():
