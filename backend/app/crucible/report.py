@@ -2368,17 +2368,14 @@ def _findings_heading(findings: list[dict]) -> str:
     return claim
 
 
-def _ordering_note(findings: list[dict]) -> str:
-    """What the order actually is. METHOD, so it reads with the method.
+def _bucket_and_conflict_parts(findings: list[dict]) -> tuple[str, str]:
+    """The two clauses every ordering note ends with, written once.
 
-    `_rank`'s key is (conflict, claim-type bucket, reach, confidence). Each
-    clause is stated only when the term it names did work on this run: on a
-    corpus of nothing but blockers the bucket term ordered nothing, and
-    claiming it did would be an overstatement in the other direction.
+    Shared by the counted and the weighted branches because they describe
+    `_rank`'s FIRST TWO key terms, which weighting does not touch: the claim
+    bucket and the authoritative conflict sit above size on both paths. Two
+    copies would be two sentences about one rule, free to disagree.
     """
-    if not findings:
-        return ""
-    anything_sized = any(f.get("impact_value") is not None for f in findings)
     buckets = {
         type_bucket([str(t) for t in _as_list(f.get("claim_types"))])
         for f in findings
@@ -2394,6 +2391,66 @@ def _ordering_note(findings: list[dict]) -> str:
         + ": two sources that may both speak contradicting each other is "
         "worth more than either alone."
     )
+    return bucket_clause, conflict_clause
+
+
+def _bucket_and_conflict_clauses(findings: list[dict]) -> str:
+    return "".join(_bucket_and_conflict_parts(findings))
+
+
+def _weighted_counts(findings: list[dict]) -> tuple[int, int]:
+    """How many findings were ranked by revenue, and how many could not be.
+
+    DERIVED FROM THE ROWS, NOT FROM THE PLAN. A weighted run writes the money
+    unit onto exactly the findings it could price, so the rows already say
+    which list each one is in — and reading the plan here would let a document
+    describe an ordering different from the one its own numbers were produced
+    by. `(0, 0)` on every counted run and on every row written before
+    weighting existed, which is what those runs were.
+    """
+    from app.crucible.pipeline import ACCOUNT_VALUE_UNIT
+
+    priced = 0
+    for f in findings:
+        impact = f.get("impact")
+        units = impact.get("native_units") if isinstance(impact, dict) else None
+        if isinstance(units, dict) and units.get(ACCOUNT_VALUE_UNIT) is not None:
+            priced += 1
+    return (priced, len(findings) - priced) if priced else (0, 0)
+
+
+def _ordering_note(findings: list[dict]) -> str:
+    """What the order actually is. METHOD, so it reads with the method.
+
+    `_rank`'s key is (conflict, claim-type bucket, reach, confidence). Each
+    clause is stated only when the term it names did work on this run: on a
+    corpus of nothing but blockers the bucket term ordered nothing, and
+    claiming it did would be an overstatement in the other direction.
+
+    AND WHICH UNIT THE REACH TERM WAS IN. "Ranked by reach — how many accounts
+    each theme touches" is simply false on a weighted run, where the order is
+    the contracted value of those accounts and the count was deliberately
+    excluded from it. A document that misstates its own ordering is the same
+    overclaim as one that promises a capability the engine lacks, and it is
+    the sentence a reader checks the ranking against.
+    """
+    if not findings:
+        return ""
+    priced, unpriced = _weighted_counts(findings)
+    if priced:
+        return _p(
+            f"Ranked by the revenue behind them — the contracted value of the "
+            f"accounts each theme touches, not how many raised it."
+            + (f" {unpriced:,} further "
+               f"{'theme' if unpriced == 1 else 'themes'} could not be priced "
+               f"from your contracts; they follow the priced ones and are "
+               f"ranked among themselves by accounts touched, because a size "
+               f"we could not measure is not a size of zero."
+               if unpriced else "")
+            + _bucket_and_conflict_clauses(findings)
+        )
+    anything_sized = any(f.get("impact_value") is not None for f in findings)
+    bucket_clause, conflict_clause = _bucket_and_conflict_parts(findings)
     if anything_sized:
         return _p(
             "Ranked by reach — how many accounts each theme touches."
