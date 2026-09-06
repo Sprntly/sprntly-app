@@ -814,6 +814,20 @@ export type GoalPlanUpload = {
   records: number
 }
 
+/** One file that WAS attached and was NOT read, with the reason.
+ *
+ *  THE OTHER HALF OF `GoalPlanUpload`, AND NOT A NICETY. That list is the
+ *  honest answer to "what did you actually read"; on its own it is also the
+ *  honest answer to a question nobody asked, because a reader who attached six
+ *  files and is shown three cannot tell whether the other three were
+ *  unopenable, over a limit, or never arrived. `reason` is prose composed
+ *  server-side — the only layer that knows why a given file produced no
+ *  table — and is rendered verbatim rather than mapped from a code. */
+export type GoalPlanUnreadUpload = {
+  name: string
+  reason: string
+}
+
 export type GoalPlanSource = {
   source_type: string
   signal_count: number
@@ -939,6 +953,13 @@ export type GoalRunPlan = {
    *  Absent on every run without attachments and on plans stored before this
    *  existed. */
   uploads?: GoalPlanUpload[]
+  /** Files that were attached and could NOT be read, each with the reason.
+   *  Absent on every run where everything was read and on plans stored before
+   *  this existed — both of which render as no note at all, which is correct:
+   *  "nothing was unreadable" and "we did not track it" look the same to a
+   *  reader only when both are true, and this field is how the first becomes
+   *  a statement rather than an inference from silence. */
+  unread_uploads?: GoalPlanUnreadUpload[]
   cannot_answer: GoalPlanGap[]
   will_produce: string[]
   /** Source types the user dropped at the plan step. */

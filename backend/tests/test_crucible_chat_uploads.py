@@ -441,3 +441,154 @@ def test_a_plan_built_before_this_existed_still_renders():
     assert plan_mod.RunPlan(
         goal_text="g", definition_text="d", currency="accounts",
     ).to_json()["uploads"] == []
+
+
+# ─── 7. A file that was NOT read is named, never silently absent ────────────
+#
+# ONE ATTACHMENT PER RUN, THROUGHOUT THIS SECTION. A run carrying twelve files
+# cannot attribute a failure to any one of them: the symptom that produced
+# these tests was three files missing from a twelve-file pack, and the only
+# reason it was ever diagnosable is that the same files attached ALONE
+# succeeded. A test that asserts an aggregate count would have passed against
+# the broken engine as readily as the fixed one.
+
+
+def _corpus_signals(n_tables: int) -> list[dict]:
+    """Signals shaped into exactly `n_tables` structured tables.
+
+    `tables_from_signals` buckets by (source_type, kind) and keeps a bucket
+    with two or more rows, so this is the smallest corpus that occupies a
+    given number of table slots. The real tenant this reproduces carries
+    11,402 signals and yields enough buckets to fill the budget on its own.
+    """
+    out: list[dict] = []
+    for i in range(n_tables):
+        for row in range(2):
+            out.append({
+                "id": f"s{i}-{row}", "source_type": "analytics",
+                "kind": f"metric_{i:03d}",
+                "properties": {"value": float(row), "delta": float(i)},
+            })
+    return out
+
+
+def test_one_unreadable_attachment_is_named_in_the_plan_rather_than_omitted(
+    monkeypatch,
+):
+    """THE INVARIANT, AT ITS SMALLEST. One file in, nothing readable out — and
+    the reader is told which file and why, instead of being handed a plan that
+    mentions no attachment at all and reads as though none was sent."""
+    key = "chat-attachments/ws-1/a.pdf"
+    routes = _recon_env(monkeypatch, signals=[],
+                        uploads_bytes={key: b"%PDF-1.4 prose, not columns"})
+    report = routes._recon_report(
+        "co-1", uploads=((key, "09_crm_win_loss.pdf"),), workspace_id="ws-1")
+
+    unread = plan_mod.unread_uploads_from_report(report)
+    assert [u.name for u in unread] == ["09_crm_win_loss"]
+    assert "spreadsheets" in unread[0].reason
+    # And it is not claimed as read in the same breath.
+    assert plan_mod.uploads_from_report(report) == ()
+
+
+def test_one_attachment_swept_from_storage_is_named_rather_than_dropped(
+    monkeypatch,
+):
+    """The fetch that fails is the one failure the reader can actually act on
+    — re-attach the file — and it was the most silent of the lot."""
+    import app.routes.crucible as routes
+
+    monkeypatch.setattr(routes, "_signal_page", lambda *a, **k: [])
+    monkeypatch.setattr("app.db.client.require_client", lambda: object())
+
+    def _read(*, workspace_id, key):
+        raise RuntimeError("object missing")
+
+    monkeypatch.setattr(attachments_storage, "read_attachment", _read)
+    report = routes._recon_report(
+        "co-1", uploads=(("chat-attachments/ws-1/b.xlsx", "10_nps_responses.xlsx"),),
+        workspace_id="ws-1")
+
+    unread = plan_mod.unread_uploads_from_report(report)
+    assert [u.name for u in unread] == ["10_nps_responses"]
+    assert "storage" in unread[0].reason
+
+
+def test_one_attachment_is_still_read_when_the_corpus_fills_the_budget(
+    monkeypatch, contracts_xlsx,
+):
+    """THE ROOT CAUSE, AS A TEST.
+
+    `observe` reads at most `MAX_TABLES` tables and the reconnaissance pass
+    used to hand it the knowledge-graph tables first, so on a tenant whose
+    graph fills the budget the reader's own attachment was truncated off the
+    end — silently, with the plan then listing whatever survived as though it
+    were everything sent. Measured on staging: this exact file attached ALONE
+    was read correctly and lost a sheet when it followed others.
+
+    The corpus here is sized to fill the budget on its own, which is what
+    makes the assertion new-path-only: before the fix there is no room left
+    and the upload appears nowhere.
+    """
+    _, data, n_rows = contracts_xlsx
+    key = "chat-attachments/ws-1/u.xlsx"
+    routes = _recon_env(monkeypatch,
+                        signals=_corpus_signals(recon.MAX_TABLES),
+                        uploads_bytes={key: data})
+    report = routes._recon_report(
+        "co-1", uploads=((key, "09_crm_win_loss.xlsx"),), workspace_id="ws-1")
+
+    assert [u.name for u in plan_mod.uploads_from_report(report)] == [
+        "09_crm_win_loss"]
+    # Read in full, not partly: a file that keeps two of its three sheets is
+    # the same defect one sheet smaller.
+    assert plan_mod.uploads_from_report(report)[0].records == n_rows
+    assert plan_mod.unread_uploads_from_report(report) == ()
+    # And the corpus was TRIMMED, not thrown away: the two populations still
+    # go into one `observe` call, which is what the cross-table checks need.
+    assert any(s.source_type == "analytics" for s in report.sources)
+
+
+def test_a_sheet_that_does_not_fit_even_first_is_named_rather_than_lost(
+    monkeypatch, tmp_path,
+):
+    """The bound still exists, and now it speaks. One workbook carrying more
+    sheets than the whole pass reads keeps as many as fit and SAYS how many it
+    did not — which is the difference between a stated limit and a file that
+    quietly came back smaller than it went in."""
+    sheets = {
+        f"sheet{i:02d}": (["stage", "n"], [["a", i], ["b", i + 1]])
+        for i in range(recon.MAX_TABLES + 3)
+    }
+    data = _workbook(tmp_path / "03_product_analytics.xlsx", sheets)
+    key = "chat-attachments/ws-1/big.xlsx"
+    routes = _recon_env(monkeypatch, signals=[], uploads_bytes={key: data})
+    report = routes._recon_report(
+        "co-1", uploads=((key, "03_product_analytics.xlsx"),),
+        workspace_id="ws-1")
+
+    unread = plan_mod.unread_uploads_from_report(report)
+    assert [u.name for u in unread] == ["03_product_analytics"]
+    assert "3 of its sheets" in unread[0].reason
+    # It is listed on BOTH lists on purpose: partly read is neither "read" nor
+    # "not read", and a reader deciding whether to approve needs both facts.
+    assert [u.name for u in plan_mod.uploads_from_report(report)] == [
+        "03_product_analytics"]
+
+
+def test_the_plan_carries_what_it_could_not_read_into_its_stored_json():
+    """The gate renders from this blob. A disclosure absent here is a
+    disclosure the reader never sees."""
+    built = plan_mod.RunPlan(
+        goal_text="g", definition_text="d", currency="accounts",
+        unread_uploads=(plan_mod.UnreadUpload(
+            name="11_third_party_feedback", reason="it could not be opened"),),
+    )
+    assert built.to_json()["unread_uploads"] == [
+        {"name": "11_third_party_feedback", "reason": "it could not be opened"}]
+
+
+def test_a_plan_built_before_this_existed_reads_back_as_nothing_unread():
+    assert plan_mod.RunPlan(
+        goal_text="g", definition_text="d", currency="accounts",
+    ).to_json()["unread_uploads"] == []

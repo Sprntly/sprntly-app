@@ -262,12 +262,33 @@ def tables_from_workbook(path: "str | Path", *, source_type: str = "") -> list[T
     longer answer "is this column numeric", which is the first question every
     check here asks.
     """
+    return read_workbook(path, source_type=source_type)[0]
+
+
+def read_workbook(
+    path: "str | Path", *, source_type: str = "",
+) -> tuple[list[Table], tuple["UnreadFile", ...]]:
+    """`tables_from_workbook`, plus the sheets the bound would not let it read.
+
+    A WORKBOOK CAN BE BIGGER THAN THE WHOLE PASS. `wb.sheetnames[:MAX_TABLES]`
+    is a real limit and a correct one, and taken alone it is also invisible:
+    the file appears on the plan as read, with a table count that is simply
+    smaller than the file. Reporting the remainder costs one comparison and
+    turns a silent truncation into a stated one.
+    """
     import openpyxl
 
     out: list[Table] = []
+    unread: list[UnreadFile] = []
     wb = openpyxl.load_workbook(str(path), data_only=True, read_only=True)
     try:
         stem = Path(str(path)).stem
+        if len(wb.sheetnames) > MAX_TABLES:
+            unread.append(UnreadFile(
+                name=Path(str(path)).name,
+                reason=f"{len(wb.sheetnames) - MAX_TABLES} of its sheets were "
+                       f"not read — this run reads at most {MAX_TABLES} tables",
+            ))
         for sheet_name in wb.sheetnames[:MAX_TABLES]:
             ws = wb[sheet_name]
             rows = list(ws.iter_rows(values_only=True))
@@ -285,27 +306,99 @@ def tables_from_workbook(path: "str | Path", *, source_type: str = "") -> list[T
             ))
     finally:
         wb.close()
-    return out
+    return out, tuple(unread)
 
 
-def tables_from_dir(directory: "str | Path", *, source_type: str = "") -> list[Table]:
-    """Every workbook and CSV in a directory, as tables.
+@dataclass(frozen=True)
+class UnreadFile:
+    """A file this run was handed and could NOT turn into a table.
+
+    THE HALF THAT USED TO BE SILENT, AND WHY IT IS NOT OPTIONAL. Every reader
+    below fails soft — an unreadable file costs its own table and never the
+    pass — which is the right posture and was, on its own, a way of lying by
+    omission: the plan lists what it read, so a file that produced nothing
+    simply vanished, and a reader who attached six workbooks was shown three
+    with nothing to say the other three were not among them. A plan may only
+    promise what the engine does; it must equally state what it could not do.
+
+    `reason` is PROSE, authored here rather than a code the client maps. The
+    reason a file was not read is a fact this module holds and nothing
+    downstream can reconstruct — a renderer given `"unsupported"` would have
+    to re-derive "because it is a .pdf and this run reads spreadsheets", which
+    is a second implementation of the same statement, free to drift.
+    """
+    name: str
+    reason: str
+
+    def to_json(self) -> dict:
+        return {"name": self.name, "reason": self.reason}
+
+
+#: The suffixes there is a reader for below. Anything else is a file this pass
+#: has nothing to do with — not a failure, but not silence either.
+TABULAR_SUFFIXES: tuple[str, ...] = (".xlsx", ".xls", ".csv")
+
+
+def read_dir(
+    directory: "str | Path", *, source_type: str = "",
+) -> tuple[list[Table], tuple[UnreadFile, ...]]:
+    """Every workbook and CSV in a directory, as tables — AND every file that
+    did not become one, with the reason.
 
     Reuses `app.ds.staging`'s reading of what counts as an analysable upload
     rather than re-deciding it, so the plan gate and the data-science chat
     paths cannot disagree about which files an analysis "saw".
+
+    Returns both halves because the caller needs both. `tables_from_dir` keeps
+    the old single-value signature for the callers that only ever wanted the
+    tables; nothing that needs to DISCLOSE what it skipped can use it.
     """
     from app.ds.staging import MAX_FILE_BYTES
 
     out: list[Table] = []
-    for src in sorted(Path(str(directory)).iterdir()):
-        if not src.is_file() or src.stat().st_size > MAX_FILE_BYTES:
+    unread: list[UnreadFile] = []
+    #: The file whose sheets are currently at the end of `out` — so an
+    #: overflow is attributed to the file that caused it rather than to
+    #: whichever name happened to sort last.
+    overflowed_by = ""
+    files = [p for p in sorted(Path(str(directory)).iterdir()) if p.is_file()]
+    for i, src in enumerate(files):
+        if len(out) >= MAX_TABLES:
+            # THE BOUND IS REPORTED, NOT MERELY APPLIED. Everything after this
+            # point is a file the reader handed over and this pass will not
+            # look at; stopping quietly is how an attachment becomes invisible.
+            for rest in files[i:]:
+                unread.append(UnreadFile(
+                    name=rest.name,
+                    reason=f"this run reads at most {MAX_TABLES} tables and "
+                           f"had already reached that before this file",
+                ))
+            break
+        if src.stat().st_size > MAX_FILE_BYTES:
+            unread.append(UnreadFile(
+                name=src.name,
+                reason=f"it is larger than the "
+                       f"{MAX_FILE_BYTES // (1024 * 1024)} MB a single file "
+                       f"may be for this pass",
+            ))
             continue
         suffix = src.suffix.lower()
+        if suffix not in TABULAR_SUFFIXES:
+            unread.append(UnreadFile(
+                name=src.name,
+                reason=(f"this pass reads the structure of spreadsheets and "
+                        f"CSVs, and this is "
+                        + (f"a {suffix} file" if suffix else "a file with no "
+                           "extension")),
+            ))
+            continue
+        before = len(out)
         try:
             if suffix in (".xlsx", ".xls"):
-                out.extend(tables_from_workbook(src, source_type=source_type))
-            elif suffix == ".csv":
+                sheets, over_sheets = read_workbook(src, source_type=source_type)
+                out.extend(sheets)
+                unread.extend(over_sheets)
+            else:
                 import csv as _csv
 
                 with src.open(newline="", encoding="utf-8-sig") as fh:
@@ -319,9 +412,34 @@ def tables_from_dir(directory: "str | Path", *, source_type: str = "") -> list[T
             # table, never a failed plan. Same posture `ds.staging` takes.
             logger.warning("crucible recon: could not read %s", src.name,
                            exc_info=True)
-        if len(out) >= MAX_TABLES:
-            break
-    return out[:MAX_TABLES]
+            unread.append(UnreadFile(
+                name=src.name, reason="it could not be opened"))
+            continue
+        if len(out) == before:
+            # OPENED AND EMPTY IS NOT THE SAME AS UNOPENABLE, and the reader
+            # can act on the difference: a workbook whose sheets are all one
+            # row deep is a file to fix, not a file to re-attach.
+            unread.append(UnreadFile(
+                name=src.name,
+                reason="it opened, but held no sheet with a header row and at "
+                       "least one row of data under it",
+            ))
+        else:
+            overflowed_by = src.name
+    if len(out) > MAX_TABLES:
+        # A single workbook can carry more sheets than the whole pass reads.
+        unread.append(UnreadFile(
+            name=overflowed_by,
+            reason=f"{len(out) - MAX_TABLES} of its sheets were not read — "
+                   f"this run reads at most {MAX_TABLES} tables",
+        ))
+        out = out[:MAX_TABLES]
+    return out, tuple(unread)
+
+
+def tables_from_dir(directory: "str | Path", *, source_type: str = "") -> list[Table]:
+    """`read_dir`, tables only. Kept for callers that do not disclose."""
+    return read_dir(directory, source_type=source_type)[0]
 
 
 #: The `source_type` carried by a table that came from a file attached in
@@ -376,16 +494,31 @@ def tables_from_uploads(
 
     The directory is removed when this returns; nothing here persists.
     """
+    return read_uploads(files, source_type=source_type)[0]
+
+
+def read_uploads(
+    files: Sequence[tuple[str, bytes]], *, source_type: str = UPLOAD_SOURCE_TYPE,
+) -> tuple[list[Table], tuple[UnreadFile, ...]]:
+    """`tables_from_uploads`, plus every file that did not become a table.
+
+    The disclosing half of the same pass — see `UnreadFile`. A caller that
+    shows the reader what was read has to be able to show them what was not,
+    and this is the only place that knows.
+    """
     if not files:
-        return []
+        return [], ()
     import tempfile
 
     out: list[Table] = []
+    unread: list[UnreadFile] = []
     with tempfile.TemporaryDirectory(prefix="crucible-upload-") as tmp:
         root = Path(tmp)
         used: set[str] = set()
         for name, data in files:
             if not data:
+                unread.append(UnreadFile(
+                    name=name, reason="the file arrived empty"))
                 continue
             fname = name
             # Two attachments can share a filename; a second write would
@@ -403,8 +536,10 @@ def tables_from_uploads(
                 # file, never the pass. Same posture as every reader here.
                 logger.warning("crucible recon: could not stage upload %s", fname,
                                exc_info=True)
-        out = tables_from_dir(root, source_type=source_type)
-    return out
+                unread.append(UnreadFile(
+                    name=fname, reason="it could not be staged for reading"))
+        out, skipped = read_dir(root, source_type=source_type)
+    return out, tuple(unread) + skipped
 
 
 def tables_from_signals(signals: Sequence[Mapping[str, Any]]) -> list[Table]:
@@ -858,6 +993,15 @@ class ReconReport:
     #: absence the reader has to infer is not a disclosure.
     missing: tuple[str, ...] = ()
     total_records: int = 0
+    #: FILES THIS PASS WAS HANDED AND COULD NOT READ, with the reason.
+    #:
+    #: THE SAME DISCLOSURE RULE AS `missing`, APPLIED ONE LEVEL DOWN. That
+    #: field exists because an absent source type inferred from a gap in a
+    #: list is not a disclosure; an attachment that produced no table is the
+    #: identical failure with a worse blast radius, because the reader CHOSE
+    #: the file and is entitled to assume it was read. Empty on every report
+    #: built before this field existed and on every pass that read everything.
+    unread: tuple[UnreadFile, ...] = ()
 
     def summary(self) -> dict:
         """The coverage facts a reader needs in one line, aggregated.
@@ -916,6 +1060,7 @@ class ReconReport:
             "sources": [s.to_json() for s in self.sources],
             "missing": list(self.missing),
             "total_records": self.total_records,
+            "unread": [u.to_json() for u in self.unread],
         }
 
 
@@ -2173,6 +2318,71 @@ def is_rectangular(table: Table) -> bool:
     properties keeps its own, because it costs nothing to look.
     """
     return density(table) >= RECTANGULAR_MIN_DENSITY
+
+
+def reserve_for_uploads(
+    uploaded: Sequence[Table], corpus: Sequence[Table],
+) -> tuple[list[Table], tuple[UnreadFile, ...]]:
+    """The two populations, fitted into `observe`'s table budget with the
+    ATTACHMENTS FIRST — and whatever still did not fit, named.
+
+    THE BUG THIS EXISTS TO REMOVE. `observe` takes `tables[:MAX_TABLES]`, and
+    the reconnaissance pass used to hand it the knowledge-graph tables
+    followed by the reader's attachments. On a small tenant that is invisible;
+    on a real one the graph filled the budget first and the attachments were
+    truncated off the end — measured on a tenant whose graph yielded 31
+    tables, a twelve-file pack lost three files outright and a fourth lost its
+    last sheet, silently, with the plan then listing the three survivors as
+    though they were everything sent. The reader's own evidence was the first
+    thing discarded, which is the exact inversion of what anyone would expect:
+    a connected source is standing and re-readable, an attachment is a
+    deliberate act of this one message.
+
+    NOT A BIGGER NUMBER. Raising the bound moves the cliff and leaves the fall
+    silent; the bound is there for the gate's wall clock and profiling is
+    cubic in columns, so it stays exactly where it is. What changes is WHO
+    gets the budget when it runs out, and that whatever is displaced says so.
+
+    THE TWO POPULATIONS STILL GO INTO ONE `observe` CALL. Splitting them would
+    lose every cross-population check, which is the whole reason they are
+    observed together — this only decides the order and the split of a single
+    budget.
+
+    The corpus half is truncated silently, as it always was: a signal bucket
+    is not named anywhere in the plan, so there is no claim about it to
+    correct, and `observe`'s knowledge-graph checks read the raw signals
+    rather than these tables and are untouched by the trim.
+    """
+    kept = list(uploaded)[:MAX_TABLES]
+    over = list(uploaded)[MAX_TABLES:]
+    room = max(0, MAX_TABLES - len(kept))
+    trimmed = list(corpus)[:room]
+    if len(corpus) > room:
+        logger.info(
+            "crucible recon: %d of %d corpus tables did not fit beside %d "
+            "uploaded tables", len(corpus) - room, len(corpus), len(kept),
+        )
+
+    #: One entry per FILE, not per sheet — several sheets of one workbook are
+    #: one upload to the person who attached it, which is the same grouping
+    #: `plan.uploads_from_report` uses for the files that WERE read.
+    #: THE RAW STEM, not `origin_label`. `plan.uploads_from_report` names a
+    #: read upload by the stem of the filename the reader chose, and a list of
+    #: files that were NOT read has to sit beside it in the same vocabulary —
+    #: "08_sales_data" read and "sales data" not read reads as two files.
+    lost: dict[str, int] = {}
+    for t in over:
+        stem = str(t.name).split(":")[0].strip()
+        lost[stem] = lost.get(stem, 0) + 1
+    unread = tuple(
+        UnreadFile(
+            name=stem,
+            reason=f"{n} of its sheets did not fit — this run reads at most "
+                   f"{MAX_TABLES} tables and the files ahead of it filled them",
+        )
+        for stem, n in lost.items()
+    )
+    return kept + trimmed, unread
 
 
 def observe(

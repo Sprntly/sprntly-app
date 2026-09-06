@@ -2559,11 +2559,25 @@ def _upload_tables(uploads: tuple[tuple[str, str], ...], workspace_id: str):
     exactly as it found it, which is the difference between this and the
     connector upload that ingests the same spreadsheet permanently.
     """
-    from app.crucible.recon import tables_from_uploads, upload_filename
+    return _read_uploads(uploads, workspace_id)[0]
+
+
+def _read_uploads(uploads: tuple[tuple[str, str], ...], workspace_id: str):
+    """`_upload_tables`, plus every attached file that produced no table.
+
+    BOTH HALVES, BECAUSE THE PLAN OWES THE READER BOTH. Each failure below is
+    still soft — one bad attachment costs its own table and never the run —
+    but soft used to mean silent, and a plan that lists three files when six
+    were attached is telling the reader it read everything it was given. The
+    reasons are prose from `recon`, which is the only layer that knows why a
+    given file did not become a table.
+    """
+    from app.crucible.recon import UnreadFile, read_uploads, upload_filename
 
     if not uploads or not workspace_id:
-        return []
+        return [], ()
     files: list[tuple[str, bytes]] = []
+    unread: list = []
     for key, name in uploads:
         try:
             data = attachments_storage.read_attachment(
@@ -2575,9 +2589,14 @@ def _upload_tables(uploads: tuple[tuple[str, str], ...], workspace_id: str):
             # than a plan that reads eleven and says so in its own inventory.
             logger.warning("crucible: could not read attachment for %s; "
                            "continuing without it", workspace_id, exc_info=True)
+            unread.append(UnreadFile(
+                name=upload_filename(name, key),
+                reason="it could not be fetched back from storage",
+            ))
             continue
         files.append((upload_filename(name, key), data))
-    return tables_from_uploads(files)
+    tables, skipped = read_uploads(files)
+    return tables, tuple(unread) + skipped
 
 
 def _recon_report(company_id: str, *,
@@ -2597,7 +2616,9 @@ def _recon_report(company_id: str, *,
     structural findings within their upload and within their graph while
     silently discarding every finding that spans the two.
     """
-    from app.crucible.recon import observe, tables_from_signals
+    from dataclasses import replace
+
+    from app.crucible.recon import observe, reserve_for_uploads, tables_from_signals
 
     # OUTSIDE THE TRY, AND DELIBERATELY. The uploads do not depend on the
     # graph, so a corpus read that fails must not take them with it: a reader
@@ -2605,7 +2626,7 @@ def _recon_report(company_id: str, *,
     # query would otherwise be shown a plan that read nothing at all, when
     # everything they actually handed over was sitting in storage, readable.
     # `_upload_tables` is itself total, so this cannot raise.
-    uploaded = _upload_tables(uploads, workspace_id)
+    uploaded, unread = _read_uploads(uploads, workspace_id)
 
     try:
         from app.db.client import require_client
@@ -2624,14 +2645,26 @@ def _recon_report(company_id: str, *,
         # writing the answer to `provenance.triage_category` — and both signal
         # reads here already select `provenance`, so reading it costs no extra
         # query, no tokens and no latency.
-        return observe(tables_from_signals(rows) + uploaded, signals=rows)
+        # THE ATTACHMENTS TAKE THE BUDGET FIRST. `observe` reads at most
+        # `MAX_TABLES` tables and this list used to arrive graph-first, so on
+        # a tenant whose graph fills the budget the reader's own files were
+        # truncated off the end without a word — see
+        # `recon.reserve_for_uploads`, which is where the reasoning and the
+        # measurement live. Still ONE `observe` call: the split is of a
+        # budget, not of the population, and every cross-table check still
+        # sees both.
+        tables, displaced = reserve_for_uploads(
+            uploaded, tables_from_signals(rows))
+        return replace(
+            observe(tables, signals=rows), unread=unread + displaced)
     except Exception:  # noqa: BLE001 — see the constant above
         logger.warning("crucible: reconnaissance pass failed for %s; the plan "
                        "will be built without a method section", company_id,
                        exc_info=True)
         # What survived: the uploads, observed on their own. An empty report
         # when there is nothing else is the same object this used to return.
-        return observe(uploaded)
+        tables, displaced = reserve_for_uploads(uploaded, [])
+        return replace(observe(tables), unread=unread + displaced)
 
 
 def _load_signals(company_id: str) -> list[dict]:

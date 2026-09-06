@@ -194,6 +194,28 @@ class UploadedSource:
 
 
 @dataclass(frozen=True)
+class UnreadUpload:
+    """A file the reader attached that this run could NOT read, and why.
+
+    THE OTHER HALF OF `UploadedSource`, AND THE REASON IT IS NOT OPTIONAL.
+    `uploads_from_report` lists what was read, deliberately and correctly —
+    echoing the twelve filenames it was handed would claim seven PDFs it never
+    opened. But a list of survivors with nothing beside it is the same lie
+    from the other end: a reader who attached six workbooks and is shown three
+    has no way to tell whether the other three were unreadable, over a limit,
+    or never arrived. Measured on staging, that is exactly what happened —
+    three files were dropped for a budget and the plan simply did not mention
+    them.
+
+    So the gate says both: this is what I read, and this is what I could not,
+    with the reason. `reason` is prose authored in `recon`, where the reason is
+    actually known.
+    """
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Gap:
     """Something this run will NOT be able to answer, and how to change that."""
     question: str
@@ -261,6 +283,11 @@ class RunPlan:
     #: that had none, and on every plan stored before this field existed —
     #: which renders exactly as it did then.
     uploads: tuple[UploadedSource, ...] = ()
+    #: THE FILES THAT WERE ATTACHED AND NOT READ. Additive with a default, for
+    #: the reason every field here is: `crucible_runs.prioritisation` is one
+    #: jsonb blob with no version, so a rename strands every stored plan and
+    #: an empty tuple is exactly what a plan written before this reads back as.
+    unread_uploads: tuple[UnreadUpload, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
     total_signals: int = 0
@@ -406,6 +433,7 @@ class RunPlan:
             "total_signals": self.total_signals,
             "sources": [asdict(s) for s in self.sources],
             "uploads": [asdict(u) for u in self.uploads],
+            "unread_uploads": [asdict(u) for u in self.unread_uploads],
             "cannot_answer": [asdict(g) for g in self.cannot_answer],
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
@@ -495,6 +523,36 @@ def uploads_from_report(recon_report: "Optional[object]") -> tuple[UploadedSourc
         UploadedSource(name=stem, tables=tables[stem], records=records[stem])
         for stem in tables
     )
+
+
+def unread_uploads_from_report(
+    recon_report: "Optional[object]",
+) -> tuple[UnreadUpload, ...]:
+    """The attached files the reconnaissance pass could NOT read.
+
+    NAMED BY STEM, to sit in the same vocabulary as `uploads_from_report`:
+    that function lists `08_sales_data` and a sibling list saying
+    `08_sales_data.xlsx` reads as a different file. The extension is dropped
+    here rather than in `recon`, where a name is a real filename on a real
+    temporary directory and the extension is what chose the reader.
+
+    One entry per file, deduplicated on the stem, keeping the FIRST reason: a
+    file that hits two limits has one story a reader needs, and a list that
+    named it twice would read as two attachments.
+    """
+    out: list[UnreadUpload] = []
+    seen: set[str] = set()
+    for u in getattr(recon_report, "unread", ()) or ():
+        name = str(getattr(u, "name", "")).strip()
+        if not name:
+            continue
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem in seen:
+            continue
+        seen.add(stem)
+        out.append(UnreadUpload(
+            name=stem, reason=str(getattr(u, "reason", "")).strip()))
+    return tuple(out)
 
 
 def derive_gaps_and_promises(
@@ -733,6 +791,7 @@ def build_plan(
         currency=currency,
         sources=tuple(kept),
         uploads=uploads_from_report(recon_report),
+        unread_uploads=unread_uploads_from_report(recon_report),
         cannot_answer=tuple(gaps),
         will_produce=tuple(produce),
         total_signals=sum(s.signal_count for s in kept),

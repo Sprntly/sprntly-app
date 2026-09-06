@@ -583,6 +583,11 @@ function PlanBody({
   //  them. Not filtered by `effectiveExcluded`: exclusion is keyed on
   //  `source_type`, which an upload deliberately does not have.
   const uploads = plan.uploads ?? []
+  //: And the ones it could NOT read. Rendered in the same block as the ones
+  //  it did, because they are the same act by the reader and separating them
+  //  would let a reader who scans the list of ticks leave with the impression
+  //  that the list is complete.
+  const unreadUploads = plan.unread_uploads ?? []
 
   // THE VERDICT, IN A SENTENCE, BEFORE ANY NUMBER. A reader arriving at a plan
   // asks whether this can be answered at all; the strip below answers "off how
@@ -911,7 +916,7 @@ function PlanBody({
               </button>
             )}
           </>
-        ) : uploads.length ? null : (
+        ) : uploads.length || unreadUploads.length ? null : (
           <p className="ga-empty" data-testid="goal-plan-no-sources">
             Nothing is connected for this to read.
           </p>
@@ -932,12 +937,14 @@ function PlanBody({
             the plan; "dropping" an upload means detaching it from the message,
             which is a different act in a different place — a control here
             would imply this screen could undo it. */}
-        {uploads.length ? (
+        {uploads.length || unreadUploads.length ? (
           <div className={s.uploads} data-testid="goal-plan-uploads">
             <div className={s.roleHead}>
               <span className={s.rolePill}>Attached to this message</span>
               <span className={s.roleNote}>
-                Read for this analysis only — not added to your knowledge graph
+                {uploads.length
+                  ? "Read for this analysis only — not added to your knowledge graph"
+                  : "Nothing here could be read — see the reason on each file"}
               </span>
             </div>
             <ul className={s.tickList}>
@@ -957,7 +964,41 @@ function PlanBody({
                   </span>
                 </li>
               ))}
+              {/* ── WHAT WAS ATTACHED AND NOT READ. ────────────────────────
+                  IN THE SAME LIST, NOT A FOOTNOTE UNDER IT. The failure this
+                  fixes is one of omission: a reader who attached six files
+                  and saw three ticks had nothing on screen to tell them the
+                  list was short, so the plan said "I read your files" and
+                  meant "I read half of them". A separate section further down
+                  would reproduce that at one scroll's distance. A dash rather
+                  than a tick, the reason in the reader's own line, and the
+                  name in the same position — the eye finds the gap in the
+                  column of ticks without being told to look for it. */}
+              {unreadUploads.map((u) => (
+                <li
+                  key={`unread-${u.name}`}
+                  className={s.tickRow}
+                  data-testid="goal-plan-upload-unread"
+                >
+                  <span className={s.tickOff} aria-hidden>
+                    {"\u2013"}
+                  </span>
+                  <span>
+                    <b className={s.tickLabelOff}>{u.name}</b>{" "}
+                    <span className="ga-doc-source-count">not read</span>
+                  </span>
+                  <span className={s.tickWitness}>{u.reason}</span>
+                </li>
+              ))}
             </ul>
+            {unreadUploads.length ? (
+              <p className={s.roleNote} data-testid="goal-plan-unread-note">
+                {unreadUploads.length === 1
+                  ? "1 file you attached was not read. Nothing below rests on it."
+                  : `${unreadUploads.length} files you attached were not read. `
+                    + "Nothing below rests on them."}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </section>
