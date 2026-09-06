@@ -583,6 +583,17 @@ function PlanBody({
   //  them. Not filtered by `effectiveExcluded`: exclusion is keyed on
   //  `source_type`, which an upload deliberately does not have.
   const uploads = plan.uploads ?? []
+  //: And the ones it could NOT read. Rendered in the same block as the ones
+  //  it did, because they are the same act by the reader and separating them
+  //  would let a reader who scans the list of ticks leave with the impression
+  //  that the list is complete.
+  const unreadUploads = plan.unread_uploads ?? []
+  //: HOW THIS GOAL ROUTES THE EVIDENCE, and what it therefore chose not to
+  //  do. Both decided in code server-side and frozen before composition —
+  //  rendered here because they are decisions the reader is being asked to
+  //  approve, and a decision they cannot see is one they cannot argue with.
+  const routing = plan.routing
+  const setAside = plan.set_aside ?? []
 
   // THE VERDICT, IN A SENTENCE, BEFORE ANY NUMBER. A reader arriving at a plan
   // asks whether this can be answered at all; the strip below answers "off how
@@ -912,6 +923,13 @@ function PlanBody({
             )}
           </>
         ) : uploads.length ? null : (
+          // AN UNREAD ATTACHMENT DOES NOT SUPPRESS THIS LINE, and a read one
+          // does. "Nothing is connected for this to read" is false over a
+          // spreadsheet that was read and TRUE over a workspace with no
+          // connectors whose only attachment was a PDF — that reader has
+          // nothing to analyse, and the block below tells them which file and
+          // why. Suppressing it there would leave a plan that answers a
+          // question from evidence it does not have.
           <p className="ga-empty" data-testid="goal-plan-no-sources">
             Nothing is connected for this to read.
           </p>
@@ -932,12 +950,14 @@ function PlanBody({
             the plan; "dropping" an upload means detaching it from the message,
             which is a different act in a different place — a control here
             would imply this screen could undo it. */}
-        {uploads.length ? (
+        {uploads.length || unreadUploads.length ? (
           <div className={s.uploads} data-testid="goal-plan-uploads">
             <div className={s.roleHead}>
               <span className={s.rolePill}>Attached to this message</span>
               <span className={s.roleNote}>
-                Read for this analysis only — not added to your knowledge graph
+                {uploads.length
+                  ? "Read for this analysis only — not added to your knowledge graph"
+                  : "Nothing here could be read — see the reason on each file"}
               </span>
             </div>
             <ul className={s.tickList}>
@@ -957,10 +977,121 @@ function PlanBody({
                   </span>
                 </li>
               ))}
+              {/* ── WHAT WAS ATTACHED AND NOT READ. ────────────────────────
+                  IN THE SAME LIST, NOT A FOOTNOTE UNDER IT. The failure this
+                  fixes is one of omission: a reader who attached six files
+                  and saw three ticks had nothing on screen to tell them the
+                  list was short, so the plan said "I read your files" and
+                  meant "I read half of them". A separate section further down
+                  would reproduce that at one scroll's distance. A dash rather
+                  than a tick, the reason in the reader's own line, and the
+                  name in the same position — the eye finds the gap in the
+                  column of ticks without being told to look for it. */}
+              {unreadUploads.map((u) => (
+                <li
+                  key={`unread-${u.name}`}
+                  className={s.tickRow}
+                  data-testid="goal-plan-upload-unread"
+                >
+                  <span className={s.tickOff} aria-hidden>
+                    {"\u2013"}
+                  </span>
+                  <span>
+                    <b className={s.tickLabelOff}>{u.name}</b>{" "}
+                    <span className="ga-doc-source-count">not read</span>
+                  </span>
+                  <span className={s.tickWitness}>{u.reason}</span>
+                </li>
+              ))}
             </ul>
+            {unreadUploads.length ? (
+              <p className={s.roleNote} data-testid="goal-plan-unread-note">
+                {unreadUploads.length === 1
+                  ? "1 file you attached was not read. Nothing below rests on it."
+                  : `${unreadUploads.length} files you attached were not read. `
+                    + "Nothing below rests on them."}
+              </p>
+            ) : null}
           </div>
         ) : null}
       </section>
+
+      {/* ── HOW THIS GOAL READS THE EVIDENCE ────────────────────────────
+          AFTER THE SOURCES AND BEFORE THE LIMITS, because that is the order
+          the questions arrive in: what have you got, what are you doing with
+          it, what can you therefore not answer. The old plan answered the
+          first and third and left the middle to be inferred from a list of
+          steps — which is how two different goals over the same evidence
+          produced the same twenty-five steps and nothing on screen to show
+          that the engine had not looked at the question. */}
+      {routing ? (
+        <section className="ga-plan-section" data-testid="goal-plan-routing">
+          <h2 className={s.sectionLabel}>How I am reading this</h2>
+          <p className="ga-doc-note" data-testid="goal-plan-goal-class">
+            I am treating this as a question about {routing.goal_class_note}.
+          </p>
+          {routing.sources.length ? (
+            <ul className={s.tickList}>
+              {routing.sources.map((r) => (
+                <li
+                  key={r.source_type}
+                  className={s.tickRow}
+                  data-testid="goal-plan-routed-source"
+                >
+                  <span
+                    className={r.disposition === "use" ? s.tick : s.tickOff}
+                    aria-hidden
+                  >
+                    {r.disposition === "use" ? "\u2713" : "\u2013"}
+                  </span>
+                  <span>
+                    <b
+                      className={
+                        r.disposition === "ignore" ? s.tickLabelOff : undefined
+                      }
+                    >
+                      {r.label}
+                    </b>{" "}
+                    <span className={s.rolePill}>{r.disposition}</span>
+                  </span>
+                  <span className={s.tickWitness}>{r.why}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {routing.notes.map((n) => (
+            <p key={n} className="ga-doc-note" data-testid="goal-plan-routing-note">
+              {n}
+            </p>
+          ))}
+        </section>
+      ) : null}
+
+      {/* ── WHAT I AM NOT DOING, AND WHY ────────────────────────────────
+          THE SAME DISCIPLINE THE CUT LIST APPLIES TO A FINDING, APPLIED TO A
+          STEP. An omission the reader cannot see is indistinguishable from a
+          check that quietly failed — and the reader is the only person who
+          can say "no, that one does matter here", which is the whole reason
+          this is a gate and not a progress bar. */}
+      {setAside.length ? (
+        <section className="ga-plan-section" data-testid="goal-plan-set-aside">
+          <h2 className={s.sectionLabel}>What I am setting aside</h2>
+          <ul className="ga-doc-gaps">
+            {setAside.map((sa) => (
+              <li key={sa.observation} data-testid="goal-plan-set-aside-item">
+                <p className="ga-doc-gap-q">{sa.what}</p>
+                <p className="ga-doc-gap-why">{sa.why}</p>
+                {sa.source ? (
+                  <p className="ga-doc-gap-fix">
+                    <span className="ga-sources-label">Found in</span>{" "}
+                    {sa.source}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* WHAT THE PLAN STILL NEEDS — a forward reference, not the questions
           themselves. They come after the approval, because they are about the

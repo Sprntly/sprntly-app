@@ -194,6 +194,28 @@ class UploadedSource:
 
 
 @dataclass(frozen=True)
+class UnreadUpload:
+    """A file the reader attached that this run could NOT read, and why.
+
+    THE OTHER HALF OF `UploadedSource`, AND THE REASON IT IS NOT OPTIONAL.
+    `uploads_from_report` lists what was read, deliberately and correctly —
+    echoing the twelve filenames it was handed would claim seven PDFs it never
+    opened. But a list of survivors with nothing beside it is the same lie
+    from the other end: a reader who attached six workbooks and is shown three
+    has no way to tell whether the other three were unreadable, over a limit,
+    or never arrived. Measured on staging, that is exactly what happened —
+    three files were dropped for a budget and the plan simply did not mention
+    them.
+
+    So the gate says both: this is what I read, and this is what I could not,
+    with the reason. `reason` is prose authored in `recon`, where the reason is
+    actually known.
+    """
+    name: str
+    reason: str
+
+
+@dataclass(frozen=True)
 class Gap:
     """Something this run will NOT be able to answer, and how to change that."""
     question: str
@@ -261,6 +283,11 @@ class RunPlan:
     #: that had none, and on every plan stored before this field existed —
     #: which renders exactly as it did then.
     uploads: tuple[UploadedSource, ...] = ()
+    #: THE FILES THAT WERE ATTACHED AND NOT READ. Additive with a default, for
+    #: the reason every field here is: `crucible_runs.prioritisation` is one
+    #: jsonb blob with no version, so a rename strands every stored plan and
+    #: an empty tuple is exactly what a plan written before this reads back as.
+    unread_uploads: tuple[UnreadUpload, ...] = ()
     cannot_answer: tuple[Gap, ...] = ()
     will_produce: tuple[str, ...] = ()
     total_signals: int = 0
@@ -396,6 +423,32 @@ class RunPlan:
     #: is visible rather than silent — a question that stops being asked with
     #: no explanation reads as a feature that broke.
     account_value_derived_note: str = ""
+    #: ── WHAT THIS PARTICULAR GOAL MAKES OF THE EVIDENCE. ────────────────
+    #:
+    #: `app.crucible.routing`: which part of the book the goal is about, what
+    #: each source is therefore being used for, and what the run can and
+    #: cannot state given the unit, the business model and the window. Decided
+    #: in code and frozen before the composition runs; the model may narrate
+    #: it and may not change it.
+    #:
+    #: WHY IT IS ON THE PLAN AND NOT ONLY IN THE PROMPT. It is a decision the
+    #: reader is being asked to approve. A routing that existed only as prompt
+    #: material would be a set of choices made about their evidence that they
+    #: could neither see nor argue with, which is the opposite of what this
+    #: gate is for — and it could not be re-derived from a stored plan either.
+    #:
+    #: `None` on every plan built before this existed and on any run whose
+    #: reconnaissance pass produced nothing, both of which render as no
+    #: routing section at all.
+    routing: "Optional[object]" = None
+    #: THE STEPS THIS GOAL DELIBERATELY DID NOT WRITE, each with its reason.
+    #:
+    #: The same discipline `list_cut_candidates` applies to a finding, applied
+    #: to a step: an omission a reader cannot see is indistinguishable from a
+    #: check that silently failed, and the reader is the only person who can
+    #: say "no, that one does matter here". Empty is the common case and the
+    #: default.
+    set_aside: tuple = ()
 
     def to_json(self) -> dict:
         return {
@@ -406,6 +459,7 @@ class RunPlan:
             "total_signals": self.total_signals,
             "sources": [asdict(s) for s in self.sources],
             "uploads": [asdict(u) for u in self.uploads],
+            "unread_uploads": [asdict(u) for u in self.unread_uploads],
             "cannot_answer": [asdict(g) for g in self.cannot_answer],
             "will_produce": list(self.will_produce),
             "excluded_sources": list(self.excluded_sources),
@@ -426,6 +480,12 @@ class RunPlan:
             "observations": [o.to_json() for o in self.observations],
             "account_value_derived": self.account_value_derived,
             "account_value_derived_note": self.account_value_derived_note,
+            # `{}` rather than `None` for the routing, so a client can read it
+            # with the same `.get()`-and-check-length shape every other
+            # optional block here uses.
+            "routing": (self.routing.to_json()
+                        if hasattr(self.routing, "to_json") else {}),
+            "set_aside": [asdict(sa) for sa in self.set_aside],
         }
 
 
@@ -495,6 +555,36 @@ def uploads_from_report(recon_report: "Optional[object]") -> tuple[UploadedSourc
         UploadedSource(name=stem, tables=tables[stem], records=records[stem])
         for stem in tables
     )
+
+
+def unread_uploads_from_report(
+    recon_report: "Optional[object]",
+) -> tuple[UnreadUpload, ...]:
+    """The attached files the reconnaissance pass could NOT read.
+
+    NAMED BY STEM, to sit in the same vocabulary as `uploads_from_report`:
+    that function lists `08_sales_data` and a sibling list saying
+    `08_sales_data.xlsx` reads as a different file. The extension is dropped
+    here rather than in `recon`, where a name is a real filename on a real
+    temporary directory and the extension is what chose the reader.
+
+    One entry per file, deduplicated on the stem, keeping the FIRST reason: a
+    file that hits two limits has one story a reader needs, and a list that
+    named it twice would read as two attachments.
+    """
+    out: list[UnreadUpload] = []
+    seen: set[str] = set()
+    for u in getattr(recon_report, "unread", ()) or ():
+        name = str(getattr(u, "name", "")).strip()
+        if not name:
+            continue
+        stem = name.rsplit(".", 1)[0] if "." in name else name
+        if stem in seen:
+            continue
+        seen.add(stem)
+        out.append(UnreadUpload(
+            name=stem, reason=str(getattr(u, "reason", "")).strip()))
+    return tuple(out)
 
 
 def derive_gaps_and_promises(
@@ -696,14 +786,60 @@ def build_plan(
     coverage: dict = {}
     derived_value: Optional[float] = None
     derived_note = ""
+    goal_routing: Optional[object] = None
+    set_aside: tuple = ()
     if recon_report is not None:
+        from app.crucible import routing as routing_mod
         from app.crucible.framework import derived_account_value
-        from app.crucible.planner import build_steps
+        from app.crucible.planner import (
+            MAX_DETERMINISTIC_PER_KIND, build_steps, compose_deterministic,
+        )
 
         observations = tuple(getattr(recon_report, "observations", ()) or ())
         summary = getattr(recon_report, "summary", None)
         coverage = summary() if callable(summary) else {}
         derived_value, derived_note = derived_account_value(observations)
+
+        # ── WHAT THIS GOAL MAKES OF THE EVIDENCE, DECIDED BEFORE ANY MODEL
+        # CALL. Deterministic, from facts already in hand: the kept inventory,
+        # the company's recorded business model, whether the evidence carries
+        # a per-account value, and the window the pass actually read.
+        #
+        # `business_type` IS READ HERE AND HAS NEVER BEEN READ BY THIS ENGINE
+        # BEFORE. It is populated at onboarding and every other reasoning path
+        # in the product uses it; a plan that decides what a source is for
+        # without it was deciding with less than the product knows. Read
+        # exactly as the declared framework is read a few lines above —
+        # failing to "" rather than raising, because a company row that will
+        # not load must never fail a plan, and "not recorded" is a statement
+        # the routing is already required to be able to make.
+        business_type = ""
+        try:
+            from app.db.companies import business_type_for_company
+
+            business_type = business_type_for_company(company_id)
+        except Exception:  # noqa: BLE001 — see above
+            logger.warning(
+                "crucible plan: could not read business type for %s", company_id)
+        goal_routing = routing_mod.resolve(
+            goal_text=goal_text,
+            definition_text=definition_text,
+            sources=kept,
+            business_type=business_type,
+            unit_value_available=derived_value is not None,
+            coverage=coverage,
+            dating_unreliable=bool(
+                [o for o in observations if o.kind == "dating_unreliable"]),
+        )
+        # DERIVED FROM THE REPORT AND THE READING, NEVER FROM THE DRAW. A
+        # set-aside is a deterministic consequence of what was observed and
+        # which part of the book was asked about, so it is the same on the
+        # composed path and the deterministic one — and a plan whose
+        # composition failed still tells the reader what it chose not to do.
+        set_aside = routing_mod.set_asides_for(
+            recon_report, goal_routing.goal_class,
+            per_kind=MAX_DETERMINISTIC_PER_KIND,
+        )
         if compose:
             steps = build_steps(
                 enterprise_id=enterprise_id or company_id,
@@ -717,14 +853,16 @@ def build_plan(
                 # name a source the way the reader will see it named.
                 sources=kept,
                 run_meta=run_meta,
+                routing=goal_routing,
+                set_aside=set_aside,
             )
         else:
-            from app.crucible.planner import minimal_plan
-
-            steps = tuple(minimal_plan(
+            steps, _same = compose_deterministic(
                 goal_text=goal_text, currency=currency, report=recon_report,
                 source_types=tuple(sv.source_type for sv in kept),
-            ))
+                goal_class=goal_routing.goal_class,
+            )
+            steps = tuple(steps)
 
     return RunPlan(
         goal_text=goal_text,
@@ -733,6 +871,7 @@ def build_plan(
         currency=currency,
         sources=tuple(kept),
         uploads=uploads_from_report(recon_report),
+        unread_uploads=unread_uploads_from_report(recon_report),
         cannot_answer=tuple(gaps),
         will_produce=tuple(produce),
         total_signals=sum(s.signal_count for s in kept),
@@ -753,4 +892,6 @@ def build_plan(
         steps_pending=bool(recon_report is not None and not compose),
         account_value_derived=derived_value,
         account_value_derived_note=derived_note,
+        routing=goal_routing,
+        set_aside=set_aside,
     )

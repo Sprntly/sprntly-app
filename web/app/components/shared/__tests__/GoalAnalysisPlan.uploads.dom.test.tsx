@@ -114,6 +114,94 @@ describe("uploads on the plan gate", () => {
     expect(screen.getByTestId("goal-plan-no-sources")).toBeTruthy()
   })
 
+  // ── What was attached and NOT read ──────────────────────────────────────
+  //
+  // ONE FILE PER CASE. The defect that produced these was three files missing
+  // from a twelve-file pack, and it was only ever diagnosable because the
+  // same files attached ALONE came back correctly. An assertion over an
+  // aggregate would have been satisfied by the broken engine too.
+
+  it("names a file it could not read, rather than leaving it off the list", () => {
+    renderPlan(base({
+      uploads: [{ name: "08_sales_data", tables: 3, records: 74 }],
+      unread_uploads: [{
+        name: "09_crm_win_loss",
+        reason: "it could not be opened",
+      }],
+    }))
+    const block = screen.getByTestId("goal-plan-uploads")
+    expect(within(block).getByText("09_crm_win_loss")).toBeTruthy()
+    expect(within(block).getByText("it could not be opened")).toBeTruthy()
+  })
+
+  it("does not present an unread file as one of the files it read", () => {
+    // THE ASSERTION THAT MAKES THE ONE ABOVE WORTH HAVING. A renderer that
+    // appended the unread names to the tick list would satisfy "the name is
+    // on screen" while telling the reader the file was read.
+    renderPlan(base({
+      uploads: [{ name: "08_sales_data", tables: 3, records: 74 }],
+      unread_uploads: [{ name: "09_crm_win_loss", reason: "it could not be opened" }],
+    }))
+    const read = screen.getAllByTestId("goal-plan-upload")
+    expect(read).toHaveLength(1)
+    expect(within(read[0]).getByText("08_sales_data")).toBeTruthy()
+    expect(screen.getAllByTestId("goal-plan-upload-unread")).toHaveLength(1)
+  })
+
+  it("says how many files were not read, in the reader's own terms", () => {
+    renderPlan(base({
+      uploads: [],
+      unread_uploads: [{ name: "00_readme", reason: "this pass reads spreadsheets" }],
+    }))
+    expect(
+      screen.getByTestId("goal-plan-unread-note").textContent,
+    ).toContain("1 file you attached was not read")
+  })
+
+  it("does not claim it read anything when every attachment failed", () => {
+    // A plan whose upload block says "read for this analysis only" over a
+    // list on which nothing was read is the screen asserting the thing this
+    // whole disclosure exists to correct.
+    renderPlan(base({
+      uploads: [],
+      unread_uploads: [{ name: "00_readme", reason: "this pass reads spreadsheets" }],
+    }))
+    const block = screen.getByTestId("goal-plan-uploads")
+    expect(within(block).queryByText(/not added to your knowledge graph/i)).toBeNull()
+    expect(screen.queryByTestId("goal-plan-no-sources")).toBeNull()
+  })
+
+  it("shows a PDF-only run the block naming the file, and still says nothing is connected", () => {
+    // MEASURED ON STAGING: a strategy PDF attached on its own produced a plan
+    // with no attachment block at all — the run presented exactly as if
+    // nothing had been sent. Both halves are asserted, because the fix is
+    // only correct if it adds the disclosure WITHOUT also claiming there is
+    // something to read: this workspace has no connectors and the one file it
+    // was given carries prose.
+    renderPlan(base({
+      sources: [], uploads: [],
+      unread_uploads: [{
+        name: "07_company_strategy_FY2027",
+        reason: "this pass reads the structure of spreadsheets and CSVs, and "
+          + "this is a .pdf file",
+      }],
+    }))
+    const block = screen.getByTestId("goal-plan-uploads")
+    expect(within(block).getByText("07_company_strategy_FY2027")).toBeTruthy()
+    expect(within(block).getByText(/this is a \.pdf file/)).toBeTruthy()
+    expect(screen.getByTestId("goal-plan-no-sources")).toBeTruthy()
+  })
+
+  it("renders a plan stored before this disclosure existed exactly as before", () => {
+    const { unread_uploads: _u, ...legacy } = base({
+      uploads: UPLOADS, unread_uploads: [],
+    }) as Record<string, unknown>
+    renderPlan(legacy as unknown as GoalRunPlan)
+    expect(screen.queryByTestId("goal-plan-upload-unread")).toBeNull()
+    expect(screen.queryByTestId("goal-plan-unread-note")).toBeNull()
+    expect(screen.getAllByTestId("goal-plan-upload")).toHaveLength(2)
+  })
+
   it("renders a plan stored before uploads existed exactly as before", () => {
     // `uploads` is absent, not empty, on every plan written before this
     // shipped — and those plans are re-rendered whenever an old run is opened.

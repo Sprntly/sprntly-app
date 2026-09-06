@@ -355,6 +355,16 @@ def verify(
     #: See `ReconReport.inventory_figures`: a step may say how much it is
     #: about to read without that being a claim about what is in it.
     inventory: Sequence[float] = (),
+    #: Observation ids this goal SET ASIDE (`app.crucible.routing`). A step
+    #: drawn from one is dropped.
+    #:
+    #: THE GATE BEHIND THE PROMPT, EXACTLY AS EVERY OTHER RULE HERE. The
+    #: prompt is what stops the model writing the step; this is what stops it
+    #: shipping if the prompt ever drifts. Without it the plan could set a
+    #: check aside in one section and carry out the same check four steps
+    #: later — describing work it said it would not do, which is the mirror
+    #: image of the failure this whole stage exists to remove.
+    set_aside_observations: Sequence[str] = (),
 ) -> tuple[list[PlanStep], list[str]]:
     """Keep the steps that survive both gates; say why the others did not.
 
@@ -379,6 +389,14 @@ def verify(
 
     for i, step in enumerate(steps):
         if i in bad_indexes:
+            continue
+        withheld = [oid for oid in step.observations
+                    if oid in set(set_aside_observations)]
+        if withheld:
+            dropped.append(
+                f"step {i + 1} ({step.primitive}): rests on "
+                f"{', '.join(withheld)}, which this goal set aside"
+            )
             continue
         unknown = [oid for oid in step.observations if oid not in obs_by_id]
         if unknown:
@@ -567,8 +585,33 @@ def minimal_plan(
     currency: str,
     report: Optional[ReconReport] = None,
     source_types: Sequence[str] = (),
+    goal_class: str = "",
 ) -> list[PlanStep]:
-    """The plan the engine can write without a model at all.
+    """`compose_deterministic`, steps only. Kept for callers that do not
+    render what was set aside."""
+    return compose_deterministic(
+        goal_text=goal_text, currency=currency, report=report,
+        source_types=source_types, goal_class=goal_class,
+    )[0]
+
+
+def compose_deterministic(
+    *,
+    goal_text: str,
+    currency: str,
+    report: Optional[ReconReport] = None,
+    source_types: Sequence[str] = (),
+    #: WHICH PART OF THE BOOK THIS GOAL IS ABOUT (`app.crucible.routing`).
+    #: Empty — the default, and every caller that predates this — behaves
+    #: exactly as `UNCLASSIFIED` does: nothing is set aside and this function
+    #: returns the plan it has always returned. That default is deliberate
+    #: rather than defensive: the failure mode of a narrowing decision is a
+    #: run that quietly stopped looking, so the absence of a reading must
+    #: never narrow anything.
+    goal_class: str = "",
+) -> tuple[list[PlanStep], tuple[Any, ...]]:
+    """The plan the engine can write without a model at all, PLUS the steps it
+    deliberately did not write for this goal.
 
     NOT A FAILURE STATE. This is a real, complete, runnable plan: every step
     names an implemented primitive, the observation-driven steps carry the
@@ -581,9 +624,30 @@ def minimal_plan(
     It is also what runs under test and offline, so it is exercised far more
     than the generated path and cannot quietly rot.
     """
+    from app.crucible.routing import bears_on, set_asides_for
+
     report = report or ReconReport()
     obs = report.observations
     steps: list[PlanStep] = []
+    set_aside = set_asides_for(report, goal_class or "unclassified",
+                               per_kind=MAX_DETERMINISTIC_PER_KIND)
+
+    def _acting(kind: str):
+        """The observations of `kind` this goal will actually write a step for.
+
+        ONE CHOKE POINT, SO A NEW POPULATION-SHAPED CHECK IS ROUTED THE DAY IT
+        LANDS. Every observation-driven step below reads its evidence through
+        here, so adding a kind to `routing._BEARS_ON` is the whole change —
+        there is no second place that would keep emitting the step.
+
+        A kind that does not bear on this goal returns nothing here and turns
+        up in `set_aside` instead. It is NOT removed from `report
+        .observations`: the finding is real, it stays on the plan where the
+        reader can see it, and only the STEP is withheld.
+        """
+        if not bears_on(kind, goal_class or "unclassified"):
+            return ()
+        return report.of_kind(kind)[:MAX_DETERMINISTIC_PER_KIND]
 
     # ── Get the unit right. ────────────────────────────────────────────────
     #
@@ -609,7 +673,7 @@ def minimal_plan(
     # quietly failed. Stated here it is the opposite: the run says what it
     # would have taken, what it actually has, and which of the two it is
     # therefore doing.
-    for o in report.of_kind("account_attribution_gap")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("account_attribution_gap"):
         steps.append(_obs_step(
             "audit_signal_field_coverage", o,
             "Check how much of the evidence names an account",
@@ -622,7 +686,7 @@ def minimal_plan(
             f"valuation.",
             params={"field": (list(o.fields) or ["properties.account"])[0]},
         ))
-    for o in report.of_kind("monetary_coverage_gap")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("monetary_coverage_gap"):
         steps.append(_obs_step(
             "audit_signal_field_coverage", o,
             "Check whether anything here carries a figure",
@@ -632,7 +696,7 @@ def minimal_plan(
             f"is unimportant, but because nothing connected here measures it.",
             params={"field": (list(o.fields) or ["properties.amount"])[0]},
         ))
-    for o in report.of_kind("dating_unreliable")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("dating_unreliable"):
         steps.append(_obs_step(
             "check_dating_reliability", o,
             "Check whether the dates mean anything",
@@ -646,7 +710,7 @@ def minimal_plan(
             params={},
             part=PARTS[1],
         ))
-    for o in report.of_kind("source_concentration")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("source_concentration"):
         steps.append(_obs_step(
             "check_source_concentration", o,
             "Count how many documents this actually rests on",
@@ -659,7 +723,7 @@ def minimal_plan(
             params={},
             part=PARTS[1],
         ))
-    for o in report.of_kind("claim_mix")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("claim_mix"):
         steps.append(_obs_step(
             "characterise_claim_mix", o,
             "Say what kind of thing this evidence mostly is",
@@ -668,7 +732,7 @@ def minimal_plan(
             f"shape, and you should know which one before you read the order.",
             params={},
         ))
-    for o in report.of_kind("evidence_mix")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("evidence_mix"):
         steps.append(_obs_step(
             "characterise_evidence_mix", o,
             "Say what kind of evidence this actually is",
@@ -703,7 +767,7 @@ def minimal_plan(
         ))
 
     # ── Work out where the money is. ───────────────────────────────────────
-    for o in report.of_kind("value_columns_disagree")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("value_columns_disagree"):
         base, total, explained = (list(o.fields) + ["", "", ""])[:3]
         steps.append(_obs_step(
             "reconcile_value_columns", o,
@@ -727,7 +791,7 @@ def minimal_plan(
             params={"source": o.source, "prefer": total, "over": base},
             part=PARTS[1],
         ))
-    for o in report.of_kind("concentration_divergence")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("concentration_divergence"):
         group, value = (list(o.fields) + ["", ""])[:2]
         steps.append(_obs_step(
             "compare_measures_across_groups", o,
@@ -745,7 +809,7 @@ def minimal_plan(
         ))
 
     # ── Understand why. ────────────────────────────────────────────────────
-    for o in report.of_kind("censored_periods")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("censored_periods"):
         key, size, last = (list(o.fields) + ["", "", ""])[:3]
         steps.append(_obs_step(
             "check_period_censoring", o,
@@ -763,7 +827,7 @@ def minimal_plan(
             params={"source": o.source, "period_field": key},
             part=PARTS[1],
         ))
-    for o in report.of_kind("coding_gap")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("coding_gap"):
         coded, text = (list(o.fields) + ["", ""])[:2]
         steps.append(_obs_step(
             "audit_field_coverage", o,
@@ -776,7 +840,7 @@ def minimal_plan(
             f"it were everything.",
             params={"source": o.source, "field": coded},
         ))
-    for o in report.of_kind("stage_collapse")[:MAX_DETERMINISTIC_PER_KIND]:
+    for o in _acting("stage_collapse"):
         a, b = (list(o.fields) + ["", ""])[:2]
         steps.append(_obs_step(
             "check_stage_collapse", o,
@@ -906,7 +970,7 @@ def minimal_plan(
         "trust — and it is where you look first if something you expected to "
         "see is missing.",
     ))
-    return _renumber(steps)
+    return _renumber(steps), set_aside
 
 
 # ── THE GENERATED PLAN ──────────────────────────────────────────────────────
@@ -1016,6 +1080,12 @@ those are handles for the machine and a reader who meets one learns only that \
 they are reading a database. The one place an id belongs is the `observations` \
 list on the step, which is not prose.
 
+THE ROUTING IS ALREADY DECIDED. THIS IS THE OTHER RULE YOU CANNOT BEND.
+Below, under HOW THIS GOAL ROUTES THE EVIDENCE, is a set of decisions made in code before you were asked anything: what this goal is about, what each source is being used for, what unit sizes are stated in, and what the dates allow. Your job is to SAY those decisions in the reader's language. You do not make them, revisit them or improve on them.
+- Do not re-route a source. If a source is marked `discount`, no step may count it towards a finding; if it is marked `weight`, no step may size anything with it.
+- Do not restate a decision as something weaker or stronger than it is. "Every size is stated in accounts touched, never in money" may become better prose; it may not become "sizes are approximate".
+- SET ASIDE MEANS SET ASIDE. Anything under "SET ASIDE FOR THIS GOAL" gets no step. Not a shorter step, not a step with a caveat. It is already reported to the reader as something this run is not doing, and a step doing it anyway makes the plan contradict itself.
+
 WHAT YOU MUST NOT DO:
 - Do not invent an operation. You may only name a primitive from the catalogue.
 - Do not state a number that is NOT in an observation below. No scores, no \
@@ -1052,6 +1122,12 @@ def _prompt(
     *, goal_text: str, definition_text: str, currency: str,
     report: ReconReport, source_types: Sequence[str],
     sources: Sequence[Any] = (),
+    #: The frozen decision structure from `app.crucible.routing`, and the
+    #: checks this goal set aside. Both are settled in code BEFORE this runs —
+    #: see the block at the bottom of the returned prompt and the paragraph in
+    #: `_SYSTEM` that forbids changing either.
+    routing: Any = None,
+    set_aside: Sequence[Any] = (),
 ) -> str:
     """The material the model composes from.
 
@@ -1094,12 +1170,24 @@ def _prompt(
         lines.append("NOT CONNECTED AT ALL: " + ", ".join(
             _source_prose(m) for m in report.missing))
     lines += ["", "OBSERVATIONS — the ONLY numbers you may use, each with an id:"]
-    for o in report.observations:
+    # SET-ASIDE OBSERVATIONS ARE NOT LISTED AS MATERIAL TO COMPOSE FROM. They
+    # appear once, lower down, under the heading that says not to write a step
+    # for them — a model shown a finding in the "here is what you may use"
+    # block writes a step for it, and being told elsewhere not to is a weaker
+    # instruction than not being handed it in the first place.
+    withheld = {getattr(sa, "observation", "") for sa in set_aside}
+    shown = [o for o in report.observations if o.id not in withheld]
+    for o in shown:
         figures = ", ".join(f"{k}={v:g}" for k, v in o.figures.items())
         lines.append(f"  [{o.id}] ({o.severity}) {o.what}")
         lines.append(f"      figures: {figures}")
-    if not report.observations:
+    if not shown:
         lines.append("  (none — so write no numbers at all)")
+    from app.crucible.routing import prompt_block
+
+    routed = prompt_block(routing, set_aside)
+    if routed:
+        lines += ["", routed]
     lines += [
         "", "PARTS, in order: " + " | ".join(PARTS),
         "", "OPERATIONS YOU MAY NAME:", prim.catalogue(),
@@ -1208,6 +1296,11 @@ def build_steps(
     #: never has to name one by its storage key.
     sources: Sequence[Any] = (),
     run_meta: Optional[Mapping[str, Any]] = None,
+    #: THE FROZEN DECISIONS AND WHAT THIS GOAL SET ASIDE — both computed in
+    #: `app.crucible.routing` before this is called, both additive with
+    #: defaults that reproduce the pre-routing plan exactly.
+    routing: Any = None,
+    set_aside: Sequence[Any] = (),
 ) -> tuple[PlanStep, ...]:
     """The plan for this run: drawn once, validated, and never re-sampled.
 
@@ -1222,9 +1315,10 @@ def build_steps(
         return stored
 
     report = report or ReconReport()
+    goal_class = str(getattr(routing, "goal_class", "") or "")
     fallback = tuple(minimal_plan(
         goal_text=goal_text, currency=currency, report=report,
-        source_types=source_types,
+        source_types=source_types, goal_class=goal_class,
     ))
     if _offline():
         return fallback
@@ -1247,7 +1341,7 @@ def build_steps(
     prompt = _prompt(
         goal_text=goal_text, definition_text=definition_text,
         currency=currency, report=report, source_types=source_types,
-        sources=sources,
+        sources=sources, routing=routing, set_aside=set_aside,
     )
     for attempt in range(MAX_REGENERATIONS + 1):
         try:
@@ -1274,9 +1368,13 @@ def build_steps(
             source_labels=[getattr(x, "label", "") for x in sources
                            if getattr(x, "label", "")] or list(source_types),
         )
-        kept, dropped = verify(drawn, report.observations,
-                               available_sources=sorted(available),
-                               inventory=report.inventory_figures())
+        kept, dropped = verify(
+            drawn, report.observations,
+            available_sources=sorted(available),
+            inventory=report.inventory_figures(),
+            set_aside_observations=[
+                getattr(sa, "observation", "") for sa in set_aside],
+        )
         if dropped:
             logger.warning("crucible_plan_steps_dropped attempt=%s dropped=%s",
                            attempt, "; ".join(dropped))

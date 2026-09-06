@@ -664,6 +664,42 @@ def declared_prioritization_framework(company_id: str) -> str | None:
     return value.strip() if isinstance(value, str) and value.strip() else None
 
 
+def business_type_for_company(company_id: str) -> str:
+    """The business MODEL this company recorded at onboarding
+    (`companies.business_type`) — "B2B SaaS", "marketplace", "self-serve".
+
+    READ VERBATIM AND NOT NORMALISED. It is free-ish text written by the
+    onboarding website analysis (`app.onboarding.website_analysis`) or by the
+    wizard, and a caller that canonicalised it here would be a second
+    classifier of the same field, free to disagree with the first. Callers
+    that need to reason about it lower-case it themselves and must treat an
+    unrecognised value exactly as they treat an absent one.
+
+    Empty string when unset, missing, or unreadable — never None, because the
+    only callers use it in prose and `""` renders as "not recorded" while
+    `None` renders as the word None.
+    """
+    try:
+        rows = (
+            require_client()
+            .table("companies")
+            .select("business_type")
+            .eq("id", company_id)
+            .limit(1)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — a company row that will not read must
+        # never fail a run; an absent business type is a statement the caller
+        # is already required to be able to make.
+        return ""
+    if not rows:
+        return ""
+    value = rows[0].get("business_type")
+    return value.strip() if isinstance(value, str) else ""
+
+
 @retry_on_disconnect
 def memberships_for_user(user_id: str) -> list[dict]:
     """All company memberships for a Supabase user id.
