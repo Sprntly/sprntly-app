@@ -387,14 +387,40 @@ def test_the_pipeline_and_the_plan_share_one_dating_answer():
     assert recon.dates_are_ingest_clock([]) is False
 
 
+#: Verdicts an observation is not entitled to state. `weighting_verdict` makes
+#: this decision, later, from `priceable_coverage` and the recorded business
+#: model — a different ratio over a different denominator, plus a column this
+#: pass never reads. An observation that forecasts it is right by luck.
+_UNIT_VERDICTS = (
+    "themes can only be counted",
+    "never weighted by the revenue",
+    "the report will say that is what happened",
+    "every size is stated in accounts touched",
+)
+
+
 def test_evidence_that_names_almost_no_account():
     """THE HONEST VERSION OF GRACEFUL DEGRADATION. The engine already counts
     rather than weighting, on every corpus, silently — and a reader cannot tell
-    a considered count from a weighting that quietly failed."""
+    a considered count from a weighting that quietly failed.
+
+    THE MEASUREMENT IS THIS PASS'S; THE CONSEQUENCE IS THE PLANNER'S. The
+    sentence used to end "themes can only be counted, never weighted by the
+    revenue behind them — and the report will say that is what happened",
+    which is a verdict this pass has no standing to make: it is settled from
+    a different ratio and from a business-model column nothing here reads.
+    Both directions are asserted so the correction cannot be a deletion.
+    """
     o = _only([], "account_attribution_gap", signals=fx.kg_signals())
     assert o.figures["present"] == 0
     assert o.figures["signals"] == 200
     assert o.severity == "high"
+    assert "0 of 200 signals" in o.what, (
+        "the measurement must survive the correction or this is vacuous")
+    assert "would rest on that share of what was read" in o.what
+    for verdict in _UNIT_VERDICTS:
+        assert verdict not in o.what, (
+            f"the observation forecasts the run's unit: {verdict!r}")
 
 
 def test_a_corpus_that_does_name_its_accounts_raises_no_attribution_gap():
@@ -403,9 +429,24 @@ def test_a_corpus_that_does_name_its_accounts_raises_no_attribution_gap():
 
 
 def test_evidence_that_carries_no_figure_at_all():
+    """THE SAME CORRECTION, ONE KEY OVER.
+
+    This used to assert "accounts touched" — the clause telling a reader every
+    size in the finished document was stated in accounts. That is the
+    weighting verdict, and this pass does not make it: a tenant whose
+    transcripts carry no amounts and whose contracts price every account is
+    weighted, and was being told otherwise. What this pass DID establish is
+    that the evidence itself cannot supply an amount, which is true at either
+    unit, and that is what it now says.
+    """
     o = _only([], "monetary_coverage_gap", signals=fx.kg_signals())
     assert o.figures["present"] == 0
-    assert "accounts touched" in o.what
+    assert "0 of 200 signals" in o.what, (
+        "the measurement must survive the correction or this is vacuous")
+    assert "the evidence itself cannot supply an amount" in o.what
+    for verdict in _UNIT_VERDICTS:
+        assert verdict not in o.what, (
+            f"the observation forecasts the run's unit: {verdict!r}")
 
 
 def test_a_corpus_carrying_figures_raises_no_monetary_gap():
@@ -722,6 +763,39 @@ def test_a_corpus_the_book_can_price_clears_the_gate():
     assert o.figures["book_accounts"] == 8
     assert o.severity == "medium"
     assert "weighted by the revenue behind them" in o.what
+
+
+def test_clearing_the_bar_is_not_stated_as_the_verdict_it_does_not_settle():
+    """THE GAP BETWEEN THE THRESHOLD AND THE UNIT, PINNED ON THE CASE WHERE
+    THEY DISAGREE — which is the default state of a tenant, not an edge.
+
+    This observation tests `share >= WEIGHTING_MIN_PRICEABLE_SHARE` and
+    nothing else. `plan.weighting_verdict` reads the same share and still
+    returns a COUNT when the business model is recorded as self-serve, and
+    when it is not recorded at all — and an unrecorded business model is what
+    a company has until somebody fills the column in. So the headline that
+    stood here, "so themes here are weighted by the revenue behind them",
+    asserted a verdict the run had not reached and would commonly contradict.
+
+    Asserted against the verdict itself rather than against a phrase, so this
+    cannot pass by the wording drifting somewhere else.
+    """
+    from app.crucible.plan import weighting_verdict
+
+    signals = [_priced_signal(a, f"s{i}") for i, a in enumerate(
+        ("Account B", "Account C", "Account D", "Someone Else"))]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] >= o.figures["threshold"], (
+        "this fixture must clear the bar or the disagreement cannot arise")
+
+    verdict = weighting_verdict([o], business_model="")
+    assert verdict.unit == "count", (
+        "the premise moved: a cleared bar with no recorded business model no "
+        "longer counts, so this test needs rewriting rather than keeping")
+    assert "themes here are weighted" not in o.what, (
+        f"the observation states a unit the verdict contradicts: {o.what}")
+    assert "clears the bar" in o.what, (
+        "the measurement must survive the correction or this is vacuous")
 
 
 def test_a_corpus_the_book_cannot_reach_is_counted_and_says_so():

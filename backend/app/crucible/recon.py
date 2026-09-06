@@ -1635,21 +1635,51 @@ def _observe_attribution(
     silently, and a reader has no way to tell a considered count from a
     weighting that quietly failed. Stated up front, it is the difference
     between a plan that is trustworthy on a thin corpus and one that flatters
-    itself: "weighting would cover 0.3% of what I read, so I will count, and
-    the report will say so."
+    itself: "weighting would cover 0.3% of what I read."
+
+    WHERE THE SENTENCE STOPS IS THE POINT. It stops at the coverage and what
+    the coverage means, and hands the consequence to the planner — which is
+    the only layer that has the settled unit to condition it on. See the
+    comment on the table below.
     """
     out: list[Observation] = []
     # `exclude_self` IS SET ON THE ACCOUNT PATH ONLY. The tenant's own name
     # disqualifies a row from having attributed anything; it says nothing
     # about whether that row carries a figure, so the monetary gap is counted
     # exactly as it always was.
+    # AN OBSERVATION SAYS WHAT IT MEASURED. IT DOES NOT SAY WHAT THE RUN WILL
+    # DO ABOUT IT, AND THESE TWO USED TO.
+    #
+    # The clauses that stood here — "themes can only be counted, never
+    # weighted by the revenue behind them — and the report will say that is
+    # what happened", and "nothing can be sized in money; every size is stated
+    # in accounts touched" — are decisions, not measurements, and this pass is
+    # not the thing that makes them. `weighting_verdict` does, later, from
+    # `priceable_coverage` (priced accounts over accounts NAMED in the
+    # evidence) and the recorded business model. Both are different ratios
+    # over different denominators from the one measured here, and they move
+    # independently: a transcript-heavy tenant with a contracts export has
+    # most signals unattributed AND every named account priceable, which is
+    # the common shape and is settled at `value`.
+    #
+    # So these sentences asserted a count on runs that weight. The planner's
+    # own copies of them are gated on the settled unit; these were not, and
+    # were invisible for as long as nothing rendered an observation outside
+    # the gate. `report._observations_section` renders `what` verbatim, so
+    # they would have reached the finished document of a weighted run — the
+    # count claim in the same report whose findings are ranked by revenue.
+    #
+    # What is left is what this pass actually established: a coverage share,
+    # and what that share means for anything that would rest on it. True at
+    # either unit, because it is a fact about the evidence rather than a
+    # forecast about the run.
     for path, kind, noun, consequence, exclude_self in (
         (("properties", "account"), "account_attribution_gap", "name an account",
-         "themes can only be counted, never weighted by the revenue behind "
-         "them — and the report will say that is what happened", True),
+         "weighting a theme by the revenue behind it would rest on that share "
+         "of what was read and no more", True),
         (("properties", "amount"), "monetary_coverage_gap", "carry a figure",
-         "nothing can be sized in money; every size is stated in accounts "
-         "touched", False),
+         "the evidence itself cannot supply an amount — a figure in money has "
+         "to come from somewhere else, or not at all", False),
     ):
         p = signal_field_presence(
             signals, path=path,
@@ -2484,11 +2514,30 @@ def _observe_priceable_coverage(
     conc = _concentration(dict(book.values), book.key_field, book.field,
                           DEFAULT_TOP_N)
     if weighted:
+        # CLEARS THE BAR — IT DOES NOT SETTLE THE UNIT, AND THE TWO ARE NOT
+        # THE SAME THING. This branch is `share >= threshold` and nothing
+        # more; `plan.weighting_verdict` reads the same share and STILL
+        # returns a count on two of its branches — a business recorded as
+        # self-serve, and a business model not recorded at all, which is the
+        # default state of the column. So "themes here are weighted by the
+        # revenue behind them", which is what stood here, asserted a verdict
+        # this pass does not make and is wrong on the commonest tenant shape
+        # there is: one that cleared the bar and never filled in how it sells.
+        #
+        # It was invisible while the gate was the only surface that rendered
+        # an observation and the verdict sat two lines below it. It is not
+        # invisible now: `report._observations_section` restates `what` in the
+        # finished document, where nothing contradicts it.
+        #
+        # The BELOW-threshold branch needs no such care and gets none:
+        # `weighting_verdict`'s first branch is exactly this test, so a share
+        # under the bar really does mean counted, and saying so is a
+        # measurement rather than a forecast.
         headline = (
             f"{_pct(cov.share)} of the accounts named in your evidence are "
-            f"ones your contracts can price, so themes here are weighted by "
-            f"the revenue behind them rather than by how many accounts raised "
-            f"them."
+            f"ones your contracts can price, which clears the bar for themes "
+            f"to be weighted by the revenue behind them rather than by how "
+            f"many accounts raised them."
         )
     else:
         headline = (
