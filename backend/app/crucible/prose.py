@@ -666,22 +666,30 @@ def _extract_segment(text: str, *, artifact_id: str,
                      enterprise_id: str) -> Any:
     """One extraction call, cached on `(sha256(text), PROMPT_VERSION)`.
 
-    THE CACHE IS WHAT MAKES "SAME EVIDENCE, SAME RANKING" TRUE OF AN
-    ATTACHMENT. A model call is a draw, not a lookup — the same discipline
-    `figure_class.classify_figures` states for the same reason — so without
-    this the identical PDF attached to two runs produces two different claim
-    sets, two different clusterings and two different rankings, and the engine
-    would be asserting a reproducibility it does not have.
+    A MODEL CALL IS A DRAW, NOT A LOOKUP — the discipline
+    `figure_class.classify_figures` states for the same reason — so the same
+    bytes read twice inside this process get the first answer rather than a
+    second sample.
 
-    Keyed on the SEGMENT's text rather than the file's bytes, and that is the
-    stronger key: a reader who attaches the same ten-call pack with an
-    eleventh call appended keeps the ten cached answers instead of paying for
-    all eleven again, and the prompt version is in the key so a prompt change
+    IN-PROCESS ONLY, AND DELIBERATELY. `prose_cache` holds the whole argument
+    for why this is not a durable table; the short version is that within-run
+    recovery is already solved by `routes.crucible._remember_prose` writing the
+    cited rows onto the run, so a table would buy only ACROSS-run
+    reproducibility — a guarantee the relevance gate does not make either, and
+    not one to give attached prose alone through a cache.
+
+    So the honest statement of what this does: a second run over the same
+    document, in a fresh worker, re-extracts and may produce a slightly
+    different claim set. That is the same variability the rest of the engine
+    has.
+
+    Keyed on the SEGMENT's text rather than the file's bytes, which is the
+    stronger key either way: a reader who attaches the same ten-call pack with
+    an eleventh call appended keeps the ten answers instead of paying for all
+    eleven again, and the prompt version is in the key so a prompt change
     correctly invalidates everything.
-
-    Cache failures are invisible: a miss on a broken store is a normal miss.
     """
-    from app.db import crucible_prose_cache as prose_cache
+    from app.crucible import prose_cache
     from app.graph.extractor import (
         _EXTRACT_SCHEMA, PROMPT_VERSION, extract_prompt,
     )

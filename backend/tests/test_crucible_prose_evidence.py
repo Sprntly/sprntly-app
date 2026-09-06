@@ -667,17 +667,18 @@ def test_nothing_reaches_the_knowledge_graph(monkeypatch):
     assert len(result.findings) == 1
 
 
-def test_the_extraction_cache_is_the_only_table_this_path_writes(monkeypatch):
-    """THE ONE DELIBERATE WRITE, ENUMERATED RATHER THAN EXEMPTED.
+def test_this_path_writes_to_no_table_at_all(monkeypatch):
+    """STRICTER THAN THE GUARD ABOVE, AND IT IS THE WHOLE CLAIM NOW.
 
-    `crucible_prose_extractions` is not the graph — it is keyed by the sha256
-    of text the reader has just handed over again, and it exists because a
-    model call is a draw rather than a lookup, so without it the identical
-    document attached to two runs ranks two different ways. This test is
-    STRICTER than a blanket ban would be: every `kg_*` mutation still raises,
-    and everything else is recorded and checked against a list of exactly one.
+    The extraction cache was a Postgres table when this was first built, so
+    this test used to enumerate exactly one permitted write. It does not any
+    more: the cache is in-process (see `crucible.prose_cache` for why the table
+    was dropped), so the run-scoped path writes to NOTHING. Every `kg_*`
+    mutation still raises, and every mutation on any other table is recorded
+    and asserted empty — which catches a future durable cache arriving quietly
+    as well as it catches a graph write.
     """
-    from app.db import crucible_prose_cache as cache
+    from app.crucible import prose_cache
 
     touched: list[tuple[str, str]] = []
 
@@ -705,47 +706,106 @@ def test_the_extraction_cache_is_the_only_table_this_path_writes(monkeypatch):
             return _Recorded(name)
 
     monkeypatch.setattr("app.db.client.require_client", _Client)
-    cache.put(enterprise_id=CO, content_sha256="abc", prompt_version="v1",
-              output={"signals": [{"kind": "finding"}]})
-    assert touched == [("crucible_prose_extractions", "upsert")]
+    monkeypatch.setattr(
+        "app.graph.gateway.llm_call",
+        lambda **kw: type("R", (), {
+            "output": {"signals": [dict(CALLS[0][2])]}})())
+    prose_cache.clear()
+
+    # THE REAL EXTRACTION PATH, not just the cache's own put(). An earlier
+    # version of this test called `prose_cache.put` directly, which meant a
+    # durable cache added inside `_extract_segment` would have sailed straight
+    # past it — the exact regression this test exists to catch.
+    docs, _unread = prose.read_prose(
+        [("calls.txt", _transcript(3, stated=3).encode())], now=NOW)
+    evidence = prose.extract_documents(docs, enterprise_id=CO, now=NOW)
+
+    # AND IT DID THE WORK, so the empty `touched` below is a statement about
+    # where the answer went rather than about nothing having happened.
+    #
+    # `failed_segments` IS ASSERTED SEPARATELY AND ON PURPOSE.
+    # `extract_documents` is total by contract, so a write raised by the guard
+    # above is CAUGHT there and turns into a failed segment rather than into a
+    # test failure naming the table. Without this line the test still goes red
+    # (no rows), but on a symptom two steps from the cause; with it, the run
+    # says a segment failed, which is what actually happened.
+    assert evidence.failed_segments == 0
+    assert evidence.rows
+    assert prose_cache.get(
+        enterprise_id=CO,
+        content_sha256=__import__("hashlib").sha256(
+            docs[0].segments[0].text.encode()).hexdigest(),
+        prompt_version=__import__(
+            "app.graph.extractor", fromlist=["PROMPT_VERSION"]).PROMPT_VERSION,
+    ) is not None
+    assert touched == []
 
 
-# ─── 8. The cache never fails a run ─────────────────────────────────────────
+# ─── 8. The cache, and the guarantee it does NOT make ───────────────────────
 
 
-def test_a_broken_cache_read_is_an_ordinary_miss(monkeypatch):
-    from app.db import crucible_prose_cache as cache
+def test_the_cache_is_keyed_on_the_tenant_as_well_as_the_bytes():
+    """ONE PROCESS SERVES EVERY WORKSPACE. Keyed on the document hash alone,
+    this would hand one tenant's extracted claims to another tenant's
+    identically-worded file — the worst failure available to a cache in a
+    multi-tenant worker, and silent."""
+    from app.crucible import prose_cache
 
-    def _boom():
-        raise RuntimeError("no such table")
-
-    monkeypatch.setattr("app.db.client.require_client", _boom)
-    assert cache.get(enterprise_id=CO, content_sha256="a",
-                     prompt_version="v1") is None
-    # And a write that cannot land is silent — the caller already has its
-    # answer and paying for the extraction again next run is the whole cost.
-    cache.put(enterprise_id=CO, content_sha256="a", prompt_version="v1",
-              output={"signals": []})
+    prose_cache.clear()
+    prose_cache.put(enterprise_id=CO, content_sha256="same",
+                    prompt_version="v1", output={"signals": [{"a": 1}]})
+    assert prose_cache.get(enterprise_id="another-company",
+                           content_sha256="same",
+                           prompt_version="v1") is None
 
 
-def test_a_cache_row_of_the_wrong_shape_is_a_miss_not_an_error(monkeypatch):
-    from app.db import crucible_prose_cache as cache
+def test_a_prompt_change_invalidates_by_construction():
+    from app.crucible import prose_cache
 
-    class _Client:
-        def table(self, name):
-            return self
+    prose_cache.clear()
+    prose_cache.put(enterprise_id=CO, content_sha256="same",
+                    prompt_version="v1", output={"signals": []})
+    assert prose_cache.get(enterprise_id=CO, content_sha256="same",
+                           prompt_version="v2") is None
 
-        def __getattr__(self, item):
-            return lambda *a, **k: self
 
-        def execute(self):
-            class _R:
-                data = [{"output": {"signals": "not a list"}}]
-            return _R()
+def test_an_entry_of_the_wrong_shape_is_a_miss_not_an_error():
+    from app.crucible import prose_cache
 
-    monkeypatch.setattr("app.db.client.require_client", _Client)
-    assert cache.get(enterprise_id=CO, content_sha256="a",
-                     prompt_version="v1") is None
+    prose_cache.clear()
+    prose_cache.put(enterprise_id=CO, content_sha256="a", prompt_version="v1",
+                    output={"signals": "not a list"})
+    assert prose_cache.get(enterprise_id=CO, content_sha256="a",
+                           prompt_version="v1") is None
+    # A non-dict never lands either, so a caller handed a malformed model
+    # response caches nothing rather than caching a wrong shape.
+    prose_cache.put(enterprise_id=CO, content_sha256="b", prompt_version="v1",
+                    output="not a dict")
+    assert prose_cache.get(enterprise_id=CO, content_sha256="b",
+                           prompt_version="v1") is None
+
+
+def test_the_cache_is_bounded_and_evicts_the_least_recently_used(monkeypatch):
+    """IT LIVES FOR THE LIFE OF THE PROCESS, so an unbounded dict of extraction
+    results is a slow leak on a long-lived worker. LRU rather than
+    first-in-first-out because the entry worth keeping is the one a run is
+    still re-reading, not the one that happens to be newest."""
+    from app.crucible import prose_cache
+
+    monkeypatch.setattr(prose_cache, "MAX_ENTRIES", 2)
+    prose_cache.clear()
+    for name in ("a", "b"):
+        prose_cache.put(enterprise_id=CO, content_sha256=name,
+                        prompt_version="v1", output={"signals": [{"n": name}]})
+    # Touch "a", so "b" becomes the least recently used.
+    assert prose_cache.get(enterprise_id=CO, content_sha256="a",
+                           prompt_version="v1") is not None
+    prose_cache.put(enterprise_id=CO, content_sha256="c", prompt_version="v1",
+                    output={"signals": []})
+    assert prose_cache.get(enterprise_id=CO, content_sha256="a",
+                           prompt_version="v1") is not None
+    assert prose_cache.get(enterprise_id=CO, content_sha256="b",
+                           prompt_version="v1") is None
 
 
 # ─── 9. What the plan says it did ───────────────────────────────────────────
@@ -948,19 +1008,13 @@ def prose_ctx(isolated_settings, monkeypatch):
     monkeypatch.setattr(attachments_storage, "read_attachment",
                         lambda *, workspace_id, key: data)
 
-    # THE CACHE TABLE, so the durable-cache path is exercised rather than
-    # left permanently fail-soft. Its absence is tested separately.
-    _fake_supabase.get_fake_db().executescript("""
-CREATE TABLE IF NOT EXISTS crucible_prose_extractions (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    enterprise_id  TEXT NOT NULL,
-    content_sha256 TEXT NOT NULL,
-    prompt_version TEXT NOT NULL,
-    output         TEXT NOT NULL DEFAULT '{}',
-    created_at     TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE (enterprise_id, content_sha256, prompt_version)
-);
-""")
+    # A COLD CACHE PER TEST. `prose_cache` lives for the life of the PROCESS,
+    # so without this a test would inherit the extractions of whichever test
+    # ran before it and its call counts would depend on ordering — the exact
+    # shape of flake that makes a cache assertion worthless.
+    from app.crucible import prose_cache
+
+    prose_cache.clear()
 
     # THE EXTRACTION, STUBBED — and only the extraction. Everything between
     # the stub and the findings is the production path. ONE ITEM PER
@@ -1059,31 +1113,41 @@ def test_approving_turns_the_document_into_claims_the_run_actually_reads(
     assert {r["id"] for r in stored} <= cited
 
 
-def test_the_extraction_is_cached_so_the_same_bytes_rank_the_same_way(
-    prose_ctx,
-):
-    """A MODEL CALL IS A DRAW, NOT A LOOKUP.
+def test_the_same_bytes_are_extracted_once_while_the_worker_lives(prose_ctx):
+    """WHAT THE CACHE ACTUALLY DELIVERS, AND WHAT IT DOES NOT.
 
-    Without a cache that outlives the call, the identical document attached to
-    two runs produces two claim sets, two clusterings and two rankings — and
-    the engine would be asserting a reproducibility it does not have. Asserted
-    by counting the calls: three conversations, three calls on the first run,
-    and none at all on the second.
+    A model call is a draw, not a lookup, so the same document read twice must
+    not be sampled twice. Inside one process it is not: three conversations
+    cost three calls, and a second run over the identical attachment costs
+    none — which covers the repeats that actually happen, a retry or a re-read
+    or a second run before the worker recycles.
+
+    THE LIMIT IS PINNED IN THE SAME TEST, deliberately. `prose_cache` is
+    in-process, so a run in a FRESH worker re-extracts and may produce a
+    slightly different claim set. That is a real cost and the product must not
+    imply otherwise; clearing the cache stands in for that worker, and the
+    assertion below is the cost stated as a fact rather than as a caveat.
+
+    It is also not a weakness peculiar to this path: the relevance gate judges
+    fresh on a new run for the same reason. Making attached prose reproducible
+    ACROSS runs is a decision about the whole engine, and `prose_cache`'s
+    docstring is where the argument lives.
     """
-    from app.db.client import require_client
+    from app.crucible import prose_cache
 
     run_id = prose_ctx.start().json()["id"]
     prose_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
     assert prose_ctx.llm_calls.count("extract_run_scoped_prose") == 3
 
-    rows = (require_client().table("crucible_prose_extractions")
-            .select("content_sha256,prompt_version").execute()).data
-    assert len(rows) == 3
-    assert len({r["prompt_version"] for r in rows}) == 1
-
     second = prose_ctx.start().json()["id"]
     prose_ctx.client.post(f"/v1/crucible/{second}/approve", json={})
     assert prose_ctx.llm_calls.count("extract_run_scoped_prose") == 3
+
+    # AND THE COST, ASSERTED. A fresh worker has an empty cache and pays again.
+    prose_cache.clear()
+    third = prose_ctx.start().json()["id"]
+    prose_ctx.client.post(f"/v1/crucible/{third}/approve", json={})
+    assert prose_ctx.llm_calls.count("extract_run_scoped_prose") == 6
 
 
 def test_a_run_with_no_attachment_reads_exactly_what_it_read_before(prose_ctx):
