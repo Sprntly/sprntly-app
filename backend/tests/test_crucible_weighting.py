@@ -588,6 +588,55 @@ def test_the_bucket_and_conflict_clauses_are_identical_on_both_paths():
          _row(claim_types=("constraint",))])
 
 
+def test_the_unprinted_score_is_disclosed_on_every_ordering_shape():
+    """B106. `_rank`'s last term is a confidence SCORE that is never printed
+    anywhere in this document — only when nothing was sized AND every band
+    matched did the old sentence say so. On a priced run, or a reach-ranked
+    run, or an all-unsized run with more than one band, two NEIGHBOURS can
+    still tie on every earlier term and be ordered by that unprinted score,
+    and nothing said so before this.
+
+    THIS DOES NOT REQUIRE ANY TWO ROWS TO ACTUALLY TIE — the score is
+    unprinted on every run regardless, so the disclosure is owed whenever
+    there is more than one finding to order, not only on the corpus where a
+    tie happens to be provable from the outside."""
+    from app.crucible.report import _ordering_note
+
+    disclosure = "confidence score this report does not print"
+
+    # Priced/weighted — the old sentence never carried this at all.
+    priced = _ordering_note([_row(priced_value=2.0), _row(priced_value=1.0)])
+    assert disclosure in priced
+
+    # Reach-ranked (something sized, not weighted) — same gap.
+    reach_ranked = _ordering_note([_row(reach=5.0), _row(reach=9.0)])
+    assert disclosure in reach_ranked
+
+    # Nothing sized, MULTIPLE bands — the old sentence was silent here too,
+    # because it only fired when every band matched.
+    multi_band = _ordering_note([
+        {**_row(), "impact_value": None, "confidence_band": "high"},
+        {**_row(), "impact_value": None, "confidence_band": "low"},
+    ])
+    assert disclosure in multi_band
+    # And it must not claim a false uniformity it does not have.
+    assert "carries the same band" not in multi_band
+
+    # The control this file already had: nothing sized, ONE band — keeps its
+    # stronger sentence (the score is the WHOLE of the gap, not a tie-break
+    # among several), unchanged.
+    one_band = _ordering_note([
+        {**_row(), "impact_value": None, "confidence_band": "medium"},
+        {**_row(), "impact_value": None, "confidence_band": "medium"},
+    ])
+    assert disclosure in one_band
+    assert "carries the same band" in one_band
+
+    # A single finding: nothing to tie against, so nothing to disclose.
+    solo = _ordering_note([_row()])
+    assert disclosure not in solo
+
+
 # ── A QUESTION MAY ONLY BE ASKED IF ITS ANSWER IS READ ─────────────────────
 
 

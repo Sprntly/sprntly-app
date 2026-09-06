@@ -2578,6 +2578,128 @@ def test_no_observation_forecasts_the_unit_the_run_has_not_settled():
     )
 
 
+# ─── Account naming: one true sentence, carried at both sites ──────────────
+
+def test_the_account_naming_sentence_is_true_and_identical_at_both_sites():
+    """The report used to say two DIFFERENT, both false, things about naming
+    accounts: the head of "Each one, in full" claimed "this reading ... does
+    not keep their names", and the appendix claimed "where a name appears in
+    this document it is a source document". Neither survives a weighted run
+    with unpriced accounts, where the pipeline names them ON PURPOSE
+    (`pipeline._named_unpriced`) so a reader can see whether their biggest
+    accounts are the ones a value could not reach.
+
+    THE FIXTURE IS THE POINT. A finding with no pricing at all would let this
+    sentence pass while being false on exactly the runs it has to be true on
+    — a weighted run that names unpriced accounts in its own basis line."""
+    from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
+
+    weighted_with_named_unpriced = _finding(assumed_params=[{
+        "name": "value_per_account",
+        "basis": ("weighted by 500,000 of contracted value across 2 of 4 "
+                  "accounts; not priced: Northwind Rivets, Acme Trading Co "
+                  "and 1 more"),
+    }])
+    html = render_report_html(_run(), [weighted_with_named_unpriced])
+
+    # The old, false sentences are gone outright.
+    assert "never which ones" not in html
+    assert "does not keep their names" not in html
+    assert ("Where a name appears in this document it is a source document"
+            not in html)
+    # Neither old sentence called anything a "quotation" or "quoted" claim we
+    # are replacing it with, either.
+    assert "We count accounts, we never name them" not in html
+
+    # The one true sentence renders, identically, at both sites that owe it.
+    assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
+
+    # And it is not contradicted by what the same run actually renders: the
+    # named unpriced accounts are right there on the page.
+    assert "Northwind Rivets" in html
+
+
+def test_the_account_naming_sentence_survives_a_run_with_no_pricing_at_all():
+    """The control: on a run that never weights anything, the same identical
+    sentence still has to hold — it must not silently depend on the weighted
+    fixture above to be true."""
+    from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
+
+    html = render_report_html(_run(), [_finding()])
+    assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
+
+
+# ─── A recommendation set says when nothing was cut ────────────────────────
+
+#: Every `NARRATED_DROPS` reason at zero — the shape `_progress` writes when
+#: the pipeline ran clustering and rejected nothing.
+_ZERO_DROPPED = {
+    "ungroupable": 0, "anecdote": 0, "echo": 0,
+    "single_account": 0, "no_authority": 0, "uncausal": 0,
+}
+
+
+def _run_with_progress(dropped, *, set_aside_by_rank=None) -> dict:
+    prioritisation = {"plan": _plan()}
+    if dropped is not None:
+        prioritisation["progress"] = {"dropped": dropped}
+    if set_aside_by_rank is not None:
+        prioritisation["set_aside_by_rank"] = set_aside_by_rank
+    return _run(prioritisation=prioritisation)
+
+
+def test_nothing_cut_is_said_out_loud_when_the_run_can_defend_it():
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED), [_finding()], [])
+    assert "Nothing here was cut" in html
+    assert "no candidate theme was ruled out after grouping" in html
+    # NOT "at verification" — five of the six NARRATED_DROPS reasons are not
+    # verification-stage, so naming that one stage would be false for them.
+    assert "at verification" not in html
+
+
+def test_nothing_cut_says_nothing_when_progress_was_never_written():
+    """ABSENT IS NOT ZERO. A run predating `_progress`, or one whose progress
+    write failed, has no `dropped` key at all — and printing "nothing was
+    cut" on a run that cannot defend the claim is the overclaim this note
+    exists to remove."""
+    html = render_report_html(_run_with_progress(None), [_finding()], [])
+    assert "Nothing here was cut" not in html
+
+
+def test_nothing_cut_says_nothing_when_something_actually_was():
+    dropped = dict(_ZERO_DROPPED, anecdote=3)
+    html = render_report_html(_run_with_progress(dropped), [_finding()], [])
+    assert "Nothing here was cut" not in html
+
+
+def test_nothing_cut_says_nothing_when_a_finding_was_set_aside():
+    """Even with zero rejections at grouping, a finding set aside for this
+    goal is itself a cut — and a populated set-aside table right below
+    "nothing was cut" would contradict it on the same page."""
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED,
+                          set_aside_by_rank=["not about this goal"]),
+        [_finding()], [],
+    )
+    assert "Nothing here was cut" not in html
+    assert "Considered and set aside for this goal" in html
+
+
+def test_nothing_cut_says_nothing_when_the_kept_list_overflowed():
+    """The third trap: `_other_considered_section` renders its own populated
+    cut table once the kept list exceeds the write-up cap, and this note
+    must not co-render beside it."""
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
+
+    findings = [_finding(claim_ids=[f"c{i}"])
+                for i in range(MAX_WRITTEN_UP_FINDINGS + 3)]
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED), findings, [])
+    assert "Nothing here was cut" not in html
+    assert "we did not choose" in html
+
+
 # ─── Reach not narrowed to the goal's population ─────────────────────────────
 #
 # `_reach_not_narrowed_note` is a METHOD fact, read back from what

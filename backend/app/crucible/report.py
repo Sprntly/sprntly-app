@@ -1315,6 +1315,40 @@ KILL_SIGNAL_CAVEAT = (
     "this on your behalf. Someone has to go and look."
 )
 
+#: THE ONE TRUE SENTENCE ON ACCOUNT NAMING, CARRIED VERBATIM AT BOTH SITES
+#: THAT OWE IT (the head of "Each one, in full" and the appendix). It used to
+#: be two DIFFERENT sentences, both false: neither "this reading ... does not
+#: keep their names" nor "where a name appears it is a source document"
+#: survives contact with what the pipeline actually does. Names reach the
+#: reader by (at least) four routes: the strongest claim's assertion, cut at
+#: a connective, becomes a finding's rendered example (`pipeline.example_for`
+#: / `_THEME_LEAD_IN`); the same assertions are fed to both recommendation
+#: prompts and copied back as `cited_claim`; a set-aside reason can quote an
+#: account by way of `example`; and a weighted run's unpriced-account list
+#: (`pipeline._named_unpriced`) names accounts ON PURPOSE, by design, so the
+#: reader can see whether their biggest accounts are the ones a value could
+#: not reach. What is never true is that a NAMED LIST of every account behind
+#: a finding is the answer we hand back — `pipeline.build_findings` keeps
+#: `len(accounts_named)` and drops the tuple itself.
+#:
+#: SAYS "BIGGEST", NOT "LARGEST" — a word choice, not a synonym swap.
+#: `_decision_section` owns "largest" for a single, load-bearing claim ("it
+#: is the largest thing this reading found" / "the largest of the ones we
+#: could size"), and `test_an_unsized_finding_ranked_above_a_sized_one_denies
+#: _neither` asserts that exact word never appears on a run where the top row
+#: is unsized — a real guard against a real defect. This sentence renders on
+#: every run with findings, unsized or not, so reusing "largest" here would
+#: make that guard fire on a sentence it was never written to catch.
+ACCOUNT_NAMING_DISCLOSURE = (
+    "We size a finding by how many accounts it touches, and never produce a "
+    "roster of them as the answer. Names that occur in the evidence may "
+    "appear wherever that evidence is summarised — in the example under a "
+    "finding, in a reason for setting a theme aside, and in a "
+    "recommendation. And where a value could not reach some accounts, those "
+    "accounts are named on purpose, so you can see whether the biggest ones "
+    "are the ones missing."
+)
+
 
 #: An inline claim-id reference in model-authored prose: `[<uuid>]`, usually
 #: several in a row. The deep pass is asked to cite, and it cites INLINE as
@@ -2437,6 +2471,30 @@ def _weighted_counts(findings: list[dict]) -> tuple[int, int]:
     return (priced, len(findings) - priced) if priced else (0, 0)
 
 
+def _confidence_score_clause(findings: list[dict]) -> str:
+    """The tie-break every ordering sentence owes, not only the one corpus
+    shape where it used to be visible.
+
+    `_rank`'s key is (conflict, claim-type bucket, reach, confidence), and
+    the confidence term is a raw SCORE that is never rendered anywhere in
+    this document — `Confidence.score` is annotated "internal only, NEVER
+    rendered" at its definition, and the reader sees only the band. Whenever
+    the terms ahead of it tie between two findings — which does not require
+    every band on the page to match, only the two NEIGHBOURS in question to
+    tie on conflict, bucket, and reach — that unprinted score is what put one
+    ahead of the other. That can happen on a priced run, a reach-ranked run,
+    or an all-unsized run alike, so the disclosure travels with all three
+    rather than the single "nothing sized, one band" shape it used to be
+    conditioned on.
+    """
+    if len(findings) <= 1:
+        return ""
+    return (
+        " Within a kind, findings are ordered by a confidence score this "
+        "report does not print."
+    )
+
+
 def _ordering_note(findings: list[dict]) -> str:
     """What the order actually is. METHOD, so it reads with the method.
 
@@ -2454,6 +2512,7 @@ def _ordering_note(findings: list[dict]) -> str:
     """
     if not findings:
         return ""
+    score_clause = _confidence_score_clause(findings)
     priced, unpriced = _weighted_counts(findings)
     if priced:
         return _p(
@@ -2466,6 +2525,7 @@ def _ordering_note(findings: list[dict]) -> str:
                f"we could not measure is not a size of zero."
                if unpriced else "")
             + _bucket_and_conflict_clauses(findings)
+            + score_clause
         )
     anything_sized = any(f.get("impact_value") is not None for f in findings)
     bucket_clause, conflict_clause = _bucket_and_conflict_parts(findings)
@@ -2473,12 +2533,14 @@ def _ordering_note(findings: list[dict]) -> str:
         return _p(
             "Ranked by reach — how many accounts each theme touches."
             + bucket_clause + conflict_clause
+            + score_clause
         )
     # Nothing could be sized, so the reach term is constant and the BUCKET is
-    # what orders the list. `_rank`'s last term is a confidence SCORE, which
-    # is real and never rendered — the reader sees bands — so when every band
-    # is the same, the gap between neighbours in one group rests on something
-    # this document does not print, and that is owed a sentence.
+    # what orders the list. Every band matching is the ONE case worth a
+    # stronger sentence than the generic score clause above: when there is
+    # only one band on the page, the score is the WHOLE of what separates any
+    # two neighbours, not merely a tie-break among several, so the reader is
+    # also told to read that gap as narrow.
     bands = {(f.get("confidence_band") or "").strip() for f in findings}
     one_band = len(bands) == 1 and len(findings) > 1
     return _p(
@@ -2489,7 +2551,7 @@ def _ordering_note(findings: list[dict]) -> str:
             "report does not print, and every finding here carries the same "
             "band — so read the gap between two neighbours in one group as "
             "narrow."
-            if one_band else ""
+            if one_band else score_clause
         )
     )
 
@@ -2518,16 +2580,17 @@ def _findings_section(
     # ── THE TWO CAVEATS THIS SECTION OWES, STATED ONCE AT ITS HEAD. ───────
     #
     # Both used to travel as a clause inside individual lines — "Summarising
-    # one source:" opening every blockquote, and the naming limit buried in
-    # the appendix while the write-ups above it read as though they named
-    # accounts. Neither is dropped. Said once, at the top, they are out of the
-    # way of the prose and still unmissable, which is the whole trade.
+    # one source:" opening every blockquote, and the naming caveat buried in
+    # the appendix while the write-ups above it read as though no name could
+    # ever reach the page. Neither is dropped. Said once, at the top, they
+    # are out of the way of the prose and still unmissable, which is the
+    # whole trade. The naming sentence is `ACCOUNT_NAMING_DISCLOSURE`,
+    # carried verbatim here and in the appendix — see its definition for why.
     out.append(_p(
-        "Two things to know before you read these. We can tell you how many "
-        "accounts sit behind a finding, never which ones — this reading "
-        "counts accounts and does not keep their names. And anything set "
-        "apart below is a summary of what one source said rather than a "
-        "quotation: the raw text is checked, used, and never stored."
+        "Two things to know before you read these. " + ACCOUNT_NAMING_DISCLOSURE
+        + " And anything set apart below is a summary of what one source "
+        "said rather than a quotation: the raw text is checked, used, and "
+        "never stored."
     ))
 
     # THE UNSIZED COUNT, STATED UNCONDITIONALLY. It used to be suppressed
@@ -3001,6 +3064,60 @@ def _other_considered_section(
     return "".join(out)
 
 
+def _nothing_cut_note(
+    run: dict,
+    ledger: list[dict],
+    set_aside: list,
+    kept: list[dict],
+    written: list[dict],
+) -> str:
+    """The absence of a cut list, said out loud rather than left silent.
+
+    A run with few findings and nothing rejected renders `_set_aside_section`,
+    `_other_considered_section` and `_ledger_section` all empty, and none of
+    the three says so — the reader sees a recommendation with no cut list and
+    cannot tell "there was nothing to cut" from "the cut list did not
+    render". This says which one it was, and only when it can defend it.
+
+    ABSENT IS NOT ZERO. `progress.dropped` is written once, at the end of
+    grouping (`routes.crucible._progress`), with every `NARRATED_DROPS` key
+    present even at zero — but a run whose progress write failed, or one from
+    before `_progress` existed, has no such key at all, and this document has
+    never read `progress` before this note. An absent key says NOTHING,
+    because guessing zero is the exact overclaim this note exists to remove.
+
+    "AFTER GROUPING", NOT "AT VERIFICATION". `NARRATED_DROPS` spans grouping
+    (`ungroupable`), clustering (`anecdote`, `echo`, `single_account`) and
+    rendering (`uncausal`) as well as verification (`no_authority`) — so the
+    only stage-neutral phrase that covers every reason this counts is "ruled
+    out after grouping"; naming verification specifically would be false for
+    five of the six reasons.
+
+    AND THE OTHER TWO CUT LISTS MUST ALSO BE EMPTY, OR THIS CONTRADICTS THE
+    TABLE NEXT TO IT. `set_aside` is this run's goal-relevance cut; `written`
+    shorter than `kept` is `_other_considered_section`'s own truncation
+    signal; a non-empty `ledger` is the same candidates `_ledger_section`
+    would otherwise name. Any one of the three populates a cut table
+    elsewhere on this page, and "nothing was cut" beside a populated table
+    is not a caveat, it is a contradiction.
+    """
+    dropped = _as_dict(_as_dict(
+        _as_dict(run.get("prioritisation")).get("progress")
+    ).get("dropped"))
+    if not dropped:
+        return ""
+    if any((v or 0) for v in dropped.values()):
+        return ""
+    if ledger or set_aside:
+        return ""
+    if len(written) < len(kept):
+        return ""
+    return _p(
+        "Nothing here was cut: no candidate theme was ruled out after "
+        "grouping."
+    )
+
+
 def _hypotheses_section(plan: dict) -> str:
     hypotheses = [h for h in _as_list(plan.get("hypotheses")) if h]
     if not hypotheses:
@@ -3425,17 +3542,15 @@ def _provenance_section(
         _placement_note_section(kept),
         _recommendation_basis_section(recommendation_basis),
         _set_aside_section(set_aside),
-        # SAID ONCE, AND SAID PLAINLY, because the memo above is read as
-        # though it named accounts and it does not. A finding carries how MANY
-        # accounts a theme touches; which ones is never stored (`pipeline`
-        # keeps `len(accounts_named)` and drops the names). Stating the limit
-        # here is the alternative to a write-up that implies a customer list
-        # it cannot produce.
-        _p(
-            "We count accounts, we never name them: this reading records how "
-            "many accounts a theme touches and not which ones. Where a name "
-            "appears in this document it is a source document."
-        ),
+        # SAID ONCE, AND SAID PLAINLY, and carried VERBATIM identical to the
+        # sentence at the head of "Each one, in full" — see
+        # `ACCOUNT_NAMING_DISCLOSURE`'s definition for the four routes a name
+        # actually reaches this document by. The old wording here claimed
+        # "where a name appears in this document it is a source document",
+        # which is false: a real run named organisations and people in its
+        # recommendation prose, not only in quoted source material. That
+        # carve-out is deleted outright rather than qualified.
+        _p(ACCOUNT_NAMING_DISCLOSURE),
         # LAST IN THE APPENDIX, DELIBERATELY, AND THE REASON IS MECHANICAL.
         # Four of the blocks above emit no heading of their own — the funnel
         # chart, the funnel sentence, the relevance coverage and the
@@ -3587,6 +3702,7 @@ def render_report_html(
             _before_you_spend_section(written),
             _framework_section(kept, plan),
             _other_considered_section(kept, full_cap, overflow_cap),
+            _nothing_cut_note(run, ledger, set_aside, kept, written),
             _hypotheses_section(plan),
             _provenance_section(
                 run, plan, findings, kept, set_aside,
