@@ -916,7 +916,14 @@ function PlanBody({
               </button>
             )}
           </>
-        ) : uploads.length || unreadUploads.length ? null : (
+        ) : uploads.length ? null : (
+          // AN UNREAD ATTACHMENT DOES NOT SUPPRESS THIS LINE, and a read one
+          // does. "Nothing is connected for this to read" is false over a
+          // spreadsheet that was read and TRUE over a workspace with no
+          // connectors whose only attachment was a PDF — that reader has
+          // nothing to analyse, and the block below tells them which file and
+          // why. Suppressing it there would leave a plan that answers a
+          // question from evidence it does not have.
           <p className="ga-empty" data-testid="goal-plan-no-sources">
             Nothing is connected for this to read.
           </p>

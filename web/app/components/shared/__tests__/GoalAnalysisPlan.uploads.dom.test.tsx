@@ -171,6 +171,27 @@ describe("uploads on the plan gate", () => {
     expect(screen.queryByTestId("goal-plan-no-sources")).toBeNull()
   })
 
+  it("shows a PDF-only run the block naming the file, and still says nothing is connected", () => {
+    // MEASURED ON STAGING: a strategy PDF attached on its own produced a plan
+    // with no attachment block at all — the run presented exactly as if
+    // nothing had been sent. Both halves are asserted, because the fix is
+    // only correct if it adds the disclosure WITHOUT also claiming there is
+    // something to read: this workspace has no connectors and the one file it
+    // was given carries prose.
+    renderPlan(base({
+      sources: [], uploads: [],
+      unread_uploads: [{
+        name: "07_company_strategy_FY2027",
+        reason: "this pass reads the structure of spreadsheets and CSVs, and "
+          + "this is a .pdf file",
+      }],
+    }))
+    const block = screen.getByTestId("goal-plan-uploads")
+    expect(within(block).getByText("07_company_strategy_FY2027")).toBeTruthy()
+    expect(within(block).getByText(/this is a \.pdf file/)).toBeTruthy()
+    expect(screen.getByTestId("goal-plan-no-sources")).toBeTruthy()
+  })
+
   it("renders a plan stored before this disclosure existed exactly as before", () => {
     const { unread_uploads: _u, ...legacy } = base({
       uploads: UPLOADS, unread_uploads: [],
