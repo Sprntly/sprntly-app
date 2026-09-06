@@ -1118,6 +1118,33 @@ export function ChatScreen() {
   // destructure) reading the LIVE draft/setDraft rather than a stale closure.
   draftHandoffRef.current = { get: () => draft, clear: () => setDraft("") }
 
+  // ── WHAT THE COMPOSER HOLDS BELONGS TO THE CONVERSATION IT WAS TYPED IN ──
+  //
+  // There is ONE composer instance for every tab, so nothing in it is scoped to
+  // a conversation unless a switch explicitly says so. The draft has always
+  // been cleared on a switch; the ATTACHMENTS were cleared at exactly one of
+  // the switch sites (the tab chip) and at none of the others — so staging
+  // files and then opening a new chat carried the chips across, and attaching
+  // the same pack again stacked them past MAX_RUN_ATTACHMENTS and failed at the
+  // validator. To the user that reads as the product rejecting their files
+  // rather than as duplicates it silently kept.
+  //
+  // ONE FUNCTION RATHER THAN A LINE AT EACH SITE, because a line at each site
+  // is precisely how this happened: the tab chip was fixed and the other six
+  // switches were not. Anything that changes which conversation the composer is
+  // pointed at calls this, and the two halves of a message can no longer come
+  // apart.
+  //
+  // NOT USED ON THE SEND-COUPLED PATHS (`openTab`, `openInTab`). Those clear
+  // the draft because the send CONSUMED it, and the send owns the attachments
+  // on its own path — `useConversation` clears them when it dispatches and puts
+  // them BACK if the dispatch fails. Clearing here as well would throw away a
+  // failed send's files on the way to restoring them.
+  const clearComposerForConversationSwitch = useCallback(() => {
+    setDraft("")
+    setAttachments([])
+  }, [setDraft, setAttachments])
+
   // Persist tabs to sessionStorage (session-scoped; see the key comment above) —
   // strip large/transient fields (prd, evidence, *Generating). Placed AFTER the
   // `composer` destructure because it also folds in the optimistic `pendingSend`.
@@ -2827,9 +2854,9 @@ export function ChatScreen() {
   useEffect(() => {
     if (currentScreen === "brief") {
       setActiveTabId(BRIEF_TAB_ID)
-      setDraft("")
+      clearComposerForConversationSwitch()
     }
-  }, [currentScreen])
+  }, [currentScreen, clearComposerForConversationSwitch])
 
   const pushPendingConversation = useCallback(
     (
@@ -5878,14 +5905,14 @@ export function ChatScreen() {
       }])
     }
     setActiveTabId(targetId)
-    setDraft("")
+    clearComposerForConversationSwitch()
     setActiveConv(null)
     // A new tab is opened to say something, so put the cursor where that starts.
     // Covers the sidebar's "New chat" too — it routes through `/?new=1`, which
     // lands here.
     focusComposerNextFrame()
     // No shared conv-id to reset — each tab tracks its own dbConvId.
-  }, [focusComposerNextFrame])
+  }, [focusComposerNextFrame, clearComposerForConversationSwitch])
 
   // ── "New chat" hand-off (`/?new=1`) ───────────────────────────────────────
   // The sidebar's "New chat" affordance pushes `/?new=1` (goToNewChat). The home
@@ -5948,12 +5975,13 @@ export function ChatScreen() {
           : null
     if (target) {
       setActiveTabId(target)
-      setDraft("")
+      clearComposerForConversationSwitch()
     } else {
       startNewThread()
     }
     router.replace("/")
-  }, [searchParams, lastTabKey, startNewThread, router])
+  }, [searchParams, lastTabKey, startNewThread, router,
+      clearComposerForConversationSwitch])
 
   const hasThread = thread.length > 0
   // A tab bound to a PRD or brief insight opens with the insight itself as the
@@ -6562,7 +6590,10 @@ export function ChatScreen() {
                 className="chat-tab chat-tab--pinned"
                 data-tab-active={isBriefTab ? "true" : undefined}
                 data-tab-pinned="true"
-                onClick={() => { setActiveTabId(BRIEF_TAB_ID); setDraft("") }}
+                onClick={() => {
+                  setActiveTabId(BRIEF_TAB_ID)
+                  clearComposerForConversationSwitch()
+                }}
                 style={{
                   position: "sticky", left: 0, zIndex: 3,
                   display: "flex", alignItems: "center", gap: 6,
@@ -6592,15 +6623,13 @@ export function ChatScreen() {
                     className="chat-tab"
                     data-tab-active={isActive ? "true" : undefined}
                     /* The composer is ONE instance for every tab, so what is
-                       in it belongs to whichever tab you are looking at. The
-                       draft has always been cleared here; the attachment was
-                       not, so a file picked on one tab followed the reader to
-                       the next and looked like it had been sent there. Both go
-                       together now — they are two halves of the same message. */
+                       in it belongs to whichever tab you are looking at. This
+                       was the first site to clear the attachment alongside the
+                       draft; it now shares that clear with every other switch
+                       instead of being the only one that does it. */
                     onClick={() => {
                       setActiveTabId(tab.id)
-                      setDraft("")
-                      setAttachments([])
+                      clearComposerForConversationSwitch()
                       focusComposerNextFrame()
                     }}
                     style={{
