@@ -525,6 +525,24 @@ def _finish_extract(
     )
 
 
+def extract_prompt(*, doc_name: str, text: str,
+                   source_hint: str | None = None) -> tuple[str, str]:
+    """The `(system, user)` pair every main-pass extraction sends, for a caller
+    that has to reach `llm_call` (or the batch API) itself rather than through
+    `extract_document`.
+
+    THERE IS ONE EXTRACTION PROMPT AND THIS IS HOW A SECOND CALLER GETS IT.
+    `_SYSTEM` and `_extract_input` are module-private on purpose — a caller
+    that assembled its own approximation of them would be a second classifier,
+    free to drift from the one the knowledge graph was built with, and the
+    whole point of a run-scoped reader is that a sentence in an attached file
+    is typed the SAME WAY a sentence arriving through a connector is. So the
+    pair is exported, and `build_extract_request` below is now built from it
+    rather than from the two names directly.
+    """
+    return _SYSTEM, _extract_input(doc_name, text, source_hint)
+
+
 def build_extract_request(*, doc_name: str, text: str,
                           source_hint: str | None = None) -> dict:
     """Build the `messages.create` kwargs for one `extract_document` main-pass
@@ -545,9 +563,11 @@ def build_extract_request(*, doc_name: str, text: str,
     backfill DOES need a bound skill or a non-default model should extend
     this rather than build kwargs by hand.
     """
+    system, user = extract_prompt(
+        doc_name=doc_name, text=text, source_hint=source_hint)
     return build_json_kwargs(
-        system=_SYSTEM,
-        user=_extract_input(doc_name, text, source_hint),
+        system=system,
+        user=user,
         model=DEFAULT_MODEL,
         schema=_EXTRACT_SCHEMA,
     )
@@ -636,6 +656,18 @@ def signals_from_items(
     force_source_type: str | None = None,
     source_type_default: str | None = None,
     valid_at: Optional[datetime] = None,
+    #: THE UUID5 NAMESPACE THE SIGNAL ID IS DRAWN FROM. Defaults to the graph's
+    #: own, so every pre-existing caller derives exactly the id it always did.
+    #:
+    #: A RUN-SCOPED READER MUST PASS ITS OWN, and the reason is a collision
+    #: rather than tidiness. The id below is keyed on `enterprise_id|content`,
+    #: so a sentence in an attached file that also exists verbatim in
+    #: `kg_signal` derives the SAME id as the stored row — and the two would
+    #: then be one key in every `claims_by_id` map downstream, with the
+    #: run-scoped claim silently standing in for a real graph signal (or being
+    #: overwritten by it). A separate namespace makes that impossible by
+    #: construction rather than by hoping the sentences differ.
+    id_namespace: uuid.UUID = _NS,
 ) -> list[Signal]:
     """Signal-schema `items` (+ their content embeddings) -> `Signal` objects.
 
@@ -660,7 +692,8 @@ def signals_from_items(
     for item, vec in zip(items, vectors):
         # Content-keyed (not doc-keyed): re-syncs + shifting ingest batches
         # cannot duplicate the same fact under a different doc name.
-        sig_id = str(uuid.uuid5(_NS, f"{enterprise_id}|{item['content']}"))
+        sig_id = str(uuid.uuid5(
+            id_namespace, f"{enterprise_id}|{item['content']}"))
         # Scenario-noise guardrail (shared _SYSTEM): the model may lower
         # `reality_confidence` for a fact it is unsure is real vs stated only
         # inside a simulated/hypothetical scenario. Kept-not-dropped by design —
