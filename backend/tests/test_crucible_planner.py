@@ -423,12 +423,50 @@ def test_the_plan_says_it_will_count_rather_than_weight_and_why():
     """THE GRACEFUL-DEGRADATION RULE, STATED OUT LOUD. The engine already
     counts rather than weighting by revenue, on every corpus, silently — and a
     reader has no way to tell a considered count from a weighting that quietly
-    failed."""
+    failed.
+
+    THE WORDING MOVED AND THE RULE DID NOT. This used to pin the literal
+    phrase "count accounts instead of weighting", which the step said on every
+    run that saw the attribution gap — including a weighted one, because the
+    gap does not decide the unit. The sentence is now read off the settled
+    unit, so this asserts the CLAIM at the unit this fixture actually runs at
+    rather than the string it happened to use, and the weighted branch is
+    covered by its own test below.
+    """
     _, steps = _prose_plan()
     step = next(s for s in steps
                 if s.params.get("field") == "properties.account")
-    assert "count accounts instead of weighting" in step.why
+    assert "counts accounts rather than weighting them" in step.why
+    assert "not what they are worth" in step.why
     assert "0.0%" in step.why or "0 of 200" in step.why
+
+
+def test_the_attribution_gap_step_does_not_claim_a_count_on_a_weighted_run():
+    """THE BRANCH THE OLD WORDING GOT WRONG.
+
+    `account_attribution_gap` measures signals naming any account;
+    `weighting_verdict` reads `priceable_coverage`, which is priced accounts
+    over accounts NAMED in the evidence. Different denominators, moving
+    independently — so a transcript-heavy tenant with a contracts export could
+    have most signals unattributed and every named account priceable, and got
+    a step promising a count directly above the step that weighs.
+    """
+    report = _prose_report()
+    steps = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=report,
+        source_types=("pm_manual", "customer_voice"),
+        weighting_unit="value",
+        weighting_because="themes are ranked by the revenue behind them.",
+    )
+    step = next(s for s in steps
+                if s.params.get("field") == "properties.account")
+    assert "counts accounts rather than weighting" not in step.why, (
+        f"the step still promises a count on a weighted run: {step.why}"
+    )
+    assert "revenue a theme is ranked by" in step.why
+    assert "0.0%" in step.why or "0 of 200" in step.why, (
+        "the measurement must survive the correction or this is vacuous"
+    )
 
 
 def test_the_plan_never_promises_the_echo_rule_a_prose_run_switches_off():
@@ -740,31 +778,265 @@ def test_the_counting_unit_step_says_the_value_does_not_move_the_sizing():
 
 def test_the_derived_note_does_not_claim_the_run_prices_accounts():
     """SITE TWO, AND THE ONE THAT HIDES. This note is carried onto the plan
-    as `account_value_derived_note` and SERIALISED — fixing the step alone
-    leaves the same claim in the stored JSON, where the report renders from."""
+    as `account_value_derived_note` and SERIALISED, so it outlives the screen
+    that produced it — fixing the step alone leaves the claim in the JSON.
+
+    THE DISCLAIMER IS NOW ASSERTED AS A CONDITIONAL, NOT AS A PHRASE. This
+    used to require "count of the accounts" unconditionally. That was true of
+    every run when it was written and became false when the weighting path
+    landed: `pipeline.build_findings` ranks a `value` run by revenue, so the
+    note was requiring the stored plan to contradict its own verdict. A test
+    that pins a stale sentence is protecting a phrase rather than behaviour,
+    so this pins the PROPERTY — the disclaimer belongs on a counted run and
+    must be gone from a weighted one — and fails on unfixed code in both
+    directions.
+    """
     from app.crucible.framework import derived_account_value
 
-    _value, note = derived_account_value(_report().observations)
-    assert note, "the fixture must derive a value or this test is vacuous"
+    for unit in ("", "count"):
+        _value, note = derived_account_value(
+            _report().observations, weighting_unit=unit)
+        assert note, "the fixture must derive a value or this test is vacuous"
+        for claim in _PRICING_CLAIMS:
+            assert claim not in note.lower(), (
+                f"weighting_unit={unit!r} still claims: {claim!r}")
+        assert "count of the accounts" in note.lower(), (
+            f"weighting_unit={unit!r} must state that size stays a count")
+
+    _value, weighted = derived_account_value(
+        _report().observations, weighting_unit="value")
+    assert weighted, "the weighted branch must still produce a note"
+    assert "count of the accounts" not in weighted.lower(), (
+        f"the note disclaims a count on a run ranked by revenue: {weighted}")
+    assert "median" in weighted.lower(), (
+        "the figure must still be reported on a weighted run, or the fix was "
+        "a deletion and this test is vacuous")
     for claim in _PRICING_CLAIMS:
-        assert claim not in note.lower(), f"the note still claims: {claim!r}"
-    assert "count of the accounts" in note.lower(), (
-        "the note must state that size stays a count of accounts")
+        assert claim not in weighted.lower(), (
+            f"the weighted note overclaims in the other direction: {claim!r}")
 
 
 def test_the_stored_plan_payload_carries_the_corrected_note():
     """The assertion above reads the function; this one reads the BLOB, which
-    is what a stored run and the rendered report actually see."""
+    is what a stored run actually carries. Both branches, because the defect
+    the conditional replaced was invisible in exactly this serialised copy."""
     from app.crucible.framework import derived_account_value
     from app.crucible.plan import RunPlan
 
-    value, note = derived_account_value(_report().observations)
-    blob = RunPlan(
-        goal_text="g", definition_text="d", currency="accounts",
-        account_value_derived=value, account_value_derived_note=note,
-    ).to_json()
-    stored = blob["account_value_derived_note"].lower()
-    assert stored, "the note must survive serialisation or this is vacuous"
+    def _stored(unit: str) -> str:
+        value, note = derived_account_value(
+            _report().observations, weighting_unit=unit)
+        blob = RunPlan(
+            goal_text="g", definition_text="d", currency="accounts",
+            account_value_derived=value, account_value_derived_note=note,
+        ).to_json()
+        text = blob["account_value_derived_note"].lower()
+        assert text, "the note must survive serialisation or this is vacuous"
+        return text
+
+    for unit in ("", "count"):
+        stored = _stored(unit)
+        for claim in _PRICING_CLAIMS:
+            assert claim not in stored, (
+                f"the stored plan at weighting_unit={unit!r} claims: {claim!r}")
+        assert "count of the accounts" in stored
+
+    stored = _stored("value")
+    assert "count of the accounts" not in stored, (
+        f"the stored plan disclaims a count on a weighted run: {stored}")
     for claim in _PRICING_CLAIMS:
-        assert claim not in stored, f"the stored plan still claims: {claim!r}"
-    assert "count of the accounts" in stored
+        assert claim not in stored, f"the stored plan claims: {claim!r}"
+
+
+# ─── The plan may promise only what the run performs ───────────────────────
+#
+# THE GOVERNING INVARIANT, AND THE ONE THAT KEEPS COMING BACK. A plan step is
+# read as a commitment — it is the screen a reader approves — so a step saying
+# the run will report something is a promise, and a promise the engine has no
+# code path to keep is the coverage-note apology moved to the front of the
+# document, where it does more damage. The failures have all had the same
+# shape: a reconnaissance-time measurement, described accurately, followed by
+# a clause handing it to a run that never receives it.
+#
+# So the pair below is written to catch the NEXT one rather than only the last.
+# The specific test pins the sentence; the sweep pins the property across every
+# declared kind, including a kind added after this was written.
+
+
+#: A sentence telling the reader that THE RUN, or the finished report, will
+#: carry out a reporting act.
+#:
+#: DELIBERATELY NARROW. It matches a claim about the run or the report DOING
+#: something with a finding. It does not match a claim about which unit the
+#: finished document states its sizes in — that rests on the pipeline's own
+#: arithmetic rather than on the observation the step was written from, so the
+#: consumer check below would be judging it against the wrong evidence and
+#: would fail an honest sentence.
+_RUN_REPORTS = re.compile(
+    r"\bthe run (?:reports|records|says|re-?derives|will\b)"
+    r"|\bthe (?:finished )?report (?:will\b|reports|records|says)",
+    re.I,
+)
+
+
+class _AnyFigure(dict):
+    """Every figure key a step might format, so ONE synthetic observation can
+    render any kind's step text without this test having to know which numbers
+    that kind measures — which is what lets the sweep below cover a kind added
+    to `recon.KINDS` tomorrow. `1.0` rather than `0.0` because a step is free
+    to divide by a figure it was handed."""
+
+    def __missing__(self, key: str) -> float:
+        return 1.0
+
+
+def _texts_for_kind(kind: str, *, weighting_unit: str) -> list[str]:
+    """The step text this kind ALONE adds to a plan, at a settled unit.
+
+    Diffed against the same call on an empty report, so the `_plain` steps
+    every plan carries drop out and what remains is attributable to `kind`.
+
+    BEHAVIOURAL, NOT A SOURCE SCAN, AND THAT IS THE POINT. A sentence the
+    planner emits on one branch of a settled unit is a promise on that branch
+    alone; reading the file would see both branches at once and could not tell
+    a gated clause from an ungated one. It is also why the unit is swept in
+    both of its values rather than left at its default.
+    """
+    o = recon.Observation(
+        id=f"fixture:{kind}", kind=kind, severity="high", source="fixture",
+        fields=("field_a", "field_b", "field_c"), what="fixture",
+        figures=_AnyFigure(),
+    )
+    kw = dict(goal_text="grow revenue this year", currency="accounts",
+              weighting_unit=weighting_unit,
+              weighting_because="because the fixture says so.")
+    base = {s.why for s in
+            planner.compose_deterministic(report=recon.ReconReport(), **kw)[0]}
+    return [s.why for s in planner.compose_deterministic(
+        report=recon.ReconReport(observations=(o,)), **kw)[0]
+        if s.why not in base]
+
+
+#: Where a run-side code path would have to live for a step to be entitled to
+#: say the run reports something.
+_RUN_SIDE_FILES = ("app/crucible/report.py", "app/crucible/pipeline.py",
+                   "app/routes/crucible.py")
+
+
+def _run_side_source() -> str:
+    """The run-side modules, READ AS SOURCE.
+
+    Not a tree-level scan and not an import-time attribute: a text search that
+    excludes a source file can be satisfied by that file's `.pyc`, and a scan
+    over a checkout cannot see the file it was pointed away from. Each path is
+    asserted to exist, because the failure mode of this helper is a guard that
+    passes because it read nothing.
+    """
+    from pathlib import Path
+
+    root = Path(planner.__file__).resolve().parents[2]
+    out = []
+    for rel in _RUN_SIDE_FILES:
+        p = root / rel
+        assert p.is_file(), f"{p} is missing; this guard would be vacuous"
+        text = p.read_text(encoding="utf-8")
+        assert text.strip(), f"{p} is empty; this guard would be vacuous"
+        out.append(text)
+    return "\n".join(out)
+
+
+def test_no_plan_step_says_the_run_reports_something_it_cannot_report():
+    """THE GENERAL FORM. A step may say the run reports a finding only if the
+    run has a code path that reads that kind of finding at all.
+
+    The consumer test is the kind's own name in the run-side source. That is a
+    proxy, and a deliberately loose one — it asks whether the run can SEE the
+    finding, not whether it renders it well. Loose in the safe direction: it
+    cannot manufacture a consumer that is not there, and a kind the run never
+    names is a kind whose plan step is writing a cheque nobody can cash.
+    """
+    src = _run_side_source()
+    offenders: list[tuple[str, str, str]] = []
+    rendered: set[str] = set()
+    for kind in recon.KINDS:
+        for unit in ("count", "value"):
+            for why in _texts_for_kind(kind, weighting_unit=unit):
+                rendered.add(kind)
+                m = _RUN_REPORTS.search(why)
+                if m and kind not in src:
+                    offenders.append((kind, unit, why))
+
+    assert len(rendered) >= 8, (
+        f"only {len(rendered)} of {len(recon.KINDS)} kinds rendered a step, "
+        f"so this sweep is mostly testing nothing: {sorted(rendered)}"
+    )
+    assert not offenders, (
+        "A plan step tells the reader the run will report a finding that no "
+        "run-side module reads:\n"
+        + "\n".join(f"  [{k}] at weighting_unit={u!r}: {w}"
+                    for k, u, w in offenders)
+    )
+
+
+def test_the_censoring_step_does_not_say_the_run_reports_the_mature_rate():
+    """THE SPECIFIC ONE, PINNED AT THE SENTENCE.
+
+    The measured failure: the step ended "so the run reports the second figure
+    and says which cohorts it counted". `_recon_report` is called on the plan
+    path alone, `report.py` contains no reference to an observation, and no
+    run-side module names `censored_periods` — so the corrected rate was
+    computed, shown once at the gate, and then dropped.
+
+    The figures are asserted too, because the fix must not be a deletion: the
+    correction is real, measured, and worth having before you approve.
+    """
+    step = next(s for s in _plan() if s.primitive == "check_period_censoring")
+    assert "46.7" in step.why and "93.3" in step.why, (
+        "the measured figures must survive the correction, or the fix was a "
+        "deletion and this test is vacuous"
+    )
+    m = _RUN_REPORTS.search(step.why)
+    assert m is None, (
+        f"the censoring step still promises a run-side act ({m.group(0)!r} "
+        f"in): {step.why}"
+    )
+    assert "censored_periods" not in _run_side_source(), (
+        "a run-side module now reads this kind, so the step is entitled to a "
+        "run-side promise again and this test needs rewriting rather than "
+        "keeping"
+    )
+
+
+def _amount_step(**kw):
+    """The monetary-coverage step off the prose fixture, at a settled unit."""
+    steps = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=_prose_report(),
+        source_types=("pm_manual", "customer_voice"), **kw)
+    return next(s for s in steps
+                if s.params.get("field") == "properties.amount")
+
+
+def test_the_monetary_gap_step_states_the_unit_it_is_actually_run_at():
+    """THE SAME DEFECT AS THE ATTRIBUTION GAP, ONE STEP OVER.
+
+    This observation measures whether SIGNALS carry a figure. The unit is
+    settled from a priced BOOK and the recorded business model — a different
+    question about different evidence — so a tenant whose transcripts carry no
+    amounts and whose contracts export prices every account is weighted while
+    this step told it every size in the document was stated in accounts
+    touched. Both branches are asserted, so the guard cannot be satisfied by
+    deleting the sentence.
+    """
+    counted = _amount_step()
+    assert "stated in accounts touched, never in money" in counted.why
+    assert "nothing connected here measures it" in counted.why
+
+    weighted = _amount_step(
+        weighting_unit="value",
+        weighting_because="themes are ranked by the revenue behind them.")
+    assert "stated in accounts touched, never in money" not in weighted.why, (
+        f"the step still claims a count on a weighted run: {weighted.why}")
+    assert "comes from your contracts" in weighted.why
+    for step in (counted, weighted):
+        assert "signals do." in step.why, (
+            "the measurement must survive the correction or this is vacuous")

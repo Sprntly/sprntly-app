@@ -786,26 +786,70 @@ def compose_deterministic(
     # would have taken, what it actually has, and which of the two it is
     # therefore doing.
     for o in _acting("account_attribution_gap"):
+        # THE CONSEQUENCE IS READ OFF THE SETTLED UNIT, NOT ASSUMED FROM THE
+        # GAP. This step used to end "I will count accounts instead of
+        # weighting them, and the report will say that is what happened" on
+        # every run that saw the gap — and the gap does not decide the unit.
+        # `weighting_verdict` decides it, from `priceable_coverage` (priced
+        # accounts over accounts NAMED in the evidence) and the recorded
+        # business model; this observation measures a different ratio over a
+        # different denominator (signals naming any account at all). The two
+        # move independently, so a corpus where most signals are unattributed
+        # while the attributed ones are all priceable — a transcript-heavy
+        # tenant with a contracts export, which is the common shape — got a
+        # plan promising a count immediately above the step that weighs.
+        #
+        # The measurement is unchanged and still worth stating: a reader
+        # should know how much of what was read can carry a value at all.
+        # Only the consequence is now conditioned on the fact that determines
+        # it, which is what makes the sentence unable to be wrong.
+        if weighting_unit == "value":
+            consequence = (
+                "The revenue a theme is ranked by is therefore summed over "
+                "the accounts that share does name; evidence naming none "
+                "still shapes what a theme is about, but adds nothing to "
+                "what it is worth."
+            )
+        else:
+            consequence = (
+                "This run counts accounts rather than weighting them, so a "
+                "theme's size below is how many accounts it touches and not "
+                "what they are worth."
+            )
         steps.append(_obs_step(
             "audit_signal_field_coverage", o,
             "Check how much of the evidence names an account",
             f"Only {o.figures['present']:,.0f} of "
             f"{o.figures['signals']:,.0f} signals name one, so weighting a "
             f"theme by the revenue behind it would rest on "
-            f"{o.figures['share'] * 100:.1f}% of what I read. I will count "
-            f"accounts instead of weighting them, and the report will say that "
-            f"is what happened rather than presenting the count as a "
-            f"valuation.",
+            f"{o.figures['share'] * 100:.1f}% of what I read. {consequence}",
             params={"field": (list(o.fields) or ["properties.account"])[0]},
         ))
     for o in _acting("monetary_coverage_gap"):
+        # GATED ON THE SETTLED UNIT, FOR THE SAME REASON THE ATTRIBUTION-GAP
+        # STEP ABOVE IS. This measures whether SIGNALS carry a figure; the
+        # unit is settled from a priced BOOK and the recorded business model,
+        # which is a different question about different evidence. A tenant
+        # whose transcripts carry no amounts and whose contracts export prices
+        # every account is weighted — and used to be told, unconditionally,
+        # that every size in its document was stated in accounts touched.
+        if weighting_unit == "value":
+            consequence = (
+                "No size here is read out of the evidence itself, then: what "
+                "a theme is worth comes from your contracts, and this says "
+                "only that the evidence could not have supplied it."
+            )
+        else:
+            consequence = (
+                "Every size in the finished document is therefore stated in "
+                "accounts touched, never in money — not because money is "
+                "unimportant, but because nothing connected here measures it."
+            )
         steps.append(_obs_step(
             "audit_signal_field_coverage", o,
             "Check whether anything here carries a figure",
             f"{o.figures['present']:,.0f} of {o.figures['signals']:,.0f} "
-            f"signals do. Every size in the finished document is therefore "
-            f"stated in accounts touched, never in money — not because money "
-            f"is unimportant, but because nothing connected here measures it.",
+            f"signals do. {consequence}",
             params={"field": (list(o.fields) or ["properties.amount"])[0]},
         ))
     for o in _acting("dating_unreliable"):
@@ -951,6 +995,20 @@ def compose_deterministic(
     # ── Understand why. ────────────────────────────────────────────────────
     for o in _acting("censored_periods"):
         key, size, last = (list(o.fields) + ["", "", ""])[:3]
+        # MEASURED AT THE GATE, AND THAT IS WHERE IT STAYS — THE STEP MUST SAY
+        # BOTH. This step used to end "so the run reports the second figure and
+        # says which cohorts it counted", which the run does not do and never
+        # has: the reconnaissance pass runs on the plan path alone, `report.py`
+        # reads no observation, and no run-side module names `censored_periods`
+        # at all. The correction was computed, shown once here, and dropped —
+        # so the one sentence a reader would have relied on afterwards was the
+        # single place this plan promised more than the run performs.
+        #
+        # It is not deleted, because the correction IS real and IS useful: it
+        # is measured off the reader's own cohorts and it is the difference
+        # between approving a run to chase a decline and knowing there is not
+        # one. A reader should have it before they approve — and should learn,
+        # in the same breath, that having it here is having it at all.
         steps.append(_obs_step(
             "check_period_censoring", o,
             "Count retention only over cohorts old enough to have one",
@@ -962,8 +1020,9 @@ def compose_deterministic(
             f"{o.figures['mature_cohorts']:.0f} that have a full window it is "
             f"{o.figures['mature_rate'] * 100:.1f}%. That is a "
             f"{o.figures['error_points']:.1f} point error in the direction "
-            f"that invents a crisis, so the run reports the second figure and "
-            f"says which cohorts it counted.",
+            f"that invents a crisis. I measured the corrected figure here, "
+            f"before you approve, so you have it at the gate: the run does "
+            f"not re-derive it and the finished report does not restate it.",
             params={"source": o.source, "period_field": key},
             part=PARTS[1],
         ))

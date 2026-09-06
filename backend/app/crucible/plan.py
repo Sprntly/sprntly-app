@@ -980,7 +980,6 @@ def build_plan(
         observations = tuple(getattr(recon_report, "observations", ()) or ())
         summary = getattr(recon_report, "summary", None)
         coverage = summary() if callable(summary) else {}
-        derived_value, derived_note = derived_account_value(observations)
 
         # ── WHAT THIS GOAL MAKES OF THE EVIDENCE, DECIDED BEFORE ANY MODEL
         # CALL. Deterministic, from facts already in hand: the kept inventory,
@@ -1007,6 +1006,13 @@ def build_plan(
         # the routing narrates it and must not restate the decision.
         verdict = weighting_verdict(
             observations, business_model_unit(business_type))
+        # READ AFTER THE VERDICT, BECAUSE THE NOTE DISCLAIMS AGAINST IT. This
+        # used to be taken a few lines above, before the unit existed, which
+        # is how a weighted run ended up storing a note saying its sizes stay
+        # a count of accounts. Nothing between here and there consumed the
+        # value, so moving the call is the whole change.
+        derived_value, derived_note = derived_account_value(
+            observations, weighting_unit=verdict.unit)
         goal_routing = routing_mod.resolve(
             goal_text=goal_text,
             definition_text=definition_text,

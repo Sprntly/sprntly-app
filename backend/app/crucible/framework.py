@@ -311,7 +311,14 @@ def _derived(observations: Sequence[object]) -> list[PlanQuestion]:
     return deduped
 
 
-def derived_account_value(observations: Sequence[object]) -> tuple[Optional[float], str]:
+def derived_account_value(
+    observations: Sequence[object],
+    #: THE RUN'S SETTLED UNIT (`plan.weighting_verdict`), because the note
+    #: below disclaims differently depending on it. Empty — every caller that
+    #: only wants the VALUE, and every caller written before the engine could
+    #: weight — keeps the counted wording, which is what those runs do.
+    weighting_unit: str = "",
+) -> tuple[Optional[float], str]:
     """What one account is worth, read off the evidence, and how.
 
     Returns `(None, "")` when nothing connected carries a per-account annual
@@ -337,14 +344,32 @@ def derived_account_value(observations: Sequence[object]) -> tuple[Optional[floa
         # carries `value_per_unit=None`, and `score_impact` returns a count of
         # accounts. Fixing the plan step alone left this copy of the claim
         # standing in the stored JSON.
+        # THE DISCLAIMER IS GATED ON THE SETTLED UNIT, and this note is the
+        # site where that matters most: it is carried onto the plan as
+        # `account_value_derived_note` and SERIALISED, so it outlives the
+        # screen that produced it. Unconditional, it told a weighted run that
+        # size "stays a count of the accounts a theme touches" while
+        # `pipeline.build_findings` ranked that run by revenue.
+        #
+        # The first half is true either way — the figure IS read from the
+        # reader's own contracts, and it IS why they are not asked for a
+        # number their data already answers. Only the consequence moves.
+        tail = (
+            " It is why you are not asked for this number; it does not change "
+            "how anything is sized here, which stays a count of the accounts "
+            "a theme touches."
+            if weighting_unit != "value" else
+            " It is why you are not asked for this number. It is not what "
+            "sizes a theme either: that is the contracted value of the "
+            "accounts the theme actually touches, summed, not this median "
+            "multiplied out."
+        )
         return float(median), (
             f"Taken from `{column}` in {getattr(o, 'source', 'your contracts')}, "
             f"which carries a value for each of {figures.get('accounts', 0):.0f} "
             f"accounts. The median is recorded rather than the mean because "
             f"a handful of very large accounts should not stand in for a "
-            f"typical one. It is why you are not asked for this number; it "
-            f"does not change how anything is sized here, which stays a count "
-            f"of the accounts a theme touches."
+            f"typical one.{tail}"
         )
     return None, ""
 
