@@ -1726,6 +1726,13 @@ def execute_run(
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock,
                                 value_map=value_map, weighted=weighted)
+        # READ BACK FROM THE CALL ABOVE, NEVER ASSERTED HERE — see
+        # `pipeline.build_findings`'s own comment on this stats key. This is
+        # what lets the report say "reach was never narrowed to your goal's
+        # population" as a fact about what just ran rather than a claim typed
+        # in a second place, free to drift from it.
+        goal_population_filter_applied = bool(
+            result.stats.get("goal_population_filter_applied"))
         logger.info("crucible_weighting unit=%s priced_book=%s findings=%s "
                     "priced_findings=%s", weighting_unit or "count",
                     len(value_map), len(result.findings),
@@ -1873,6 +1880,10 @@ def execute_run(
         # is coming, and it comes down in the same write that publishes the
         # results — so "pending" is never left true by a path that finished.
         meta = dict(_meta_of(run_id, company_id))
+        # NEXT TO `plan`, NOT INSIDE IT. This is a fact about what the run
+        # just DID, settled long after the plan was approved — see
+        # `report._reach_not_narrowed_note` for what reads it.
+        meta["goal_population_filter_applied"] = goal_population_filter_applied
         meta["enrichment_pending"] = True
         runs_db.update(run_id, company_id, prioritisation=meta)
 
