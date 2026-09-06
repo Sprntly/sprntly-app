@@ -31,6 +31,33 @@ def _fresh(**kw) -> ci.Freshness:
     )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_refresh_locks():
+    """Keep one test's abandoned refresh thread out of the next test's way.
+
+    `ensure_fresh` bounds an inline refresh by JOINING ITS WORKER WITH A
+    TIMEOUT, not by cancelling it — on timeout the thread is abandoned, still
+    holding `_refresh_lock(company_id)` until its sync finally returns. That
+    is correct in production, where the lock is exactly what stops a burst of
+    questions from firing a sync each.
+
+    In tests it leaks, because `_refresh_locks` is a module global that
+    outlives the test that populated it. A later test naming the same company
+    then blocks on a lock owned by a thread belonging to a test that already
+    finished: its own refresh never runs, and it fails reporting that the
+    feature is broken when the feature is fine. Under xdist the two tests need
+    not even be adjacent in the file to land back-to-back on one worker, so
+    the failure is order-dependent and rare — the worst shape a red build can
+    have.
+
+    Handing every test a fresh mapping leaves the abandoned thread holding the
+    old lock object, which nothing will ask for again.
+    """
+    ci._refresh_locks.clear()
+    yield
+    ci._refresh_locks.clear()
+
+
 # ── listing vs synthesis intent ──────────────────────────────────────────────
 
 def test_listing_requests_are_recognised():
@@ -1149,7 +1176,10 @@ def test_a_slow_source_times_out_instead_of_hanging_the_turn(monkeypatch):
     monkeypatch.setattr(ci, "sync_company", lambda *a, **k: time.sleep(5))
 
     started = time.monotonic()
-    fresh = ci.ensure_fresh("ent-A", timeout_s=0.2)
+    # Its own company: this refresh is STILL RUNNING when the test ends (that
+    # is the point of the test), and it holds that company's refresh lock the
+    # whole time.
+    fresh = ci.ensure_fresh("ent-slow-source", timeout_s=0.2)
     elapsed = time.monotonic() - started
 
     assert elapsed < 2.0
