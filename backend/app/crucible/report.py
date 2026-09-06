@@ -2246,6 +2246,24 @@ MAX_LEDGER_REASON_CHARS = 400
 MAX_GAPS = 40
 MAX_GAP_CHARS = 400
 
+#: THE RECONNAISSANCE FINDINGS, BOUNDED LIKE EVERY OTHER LIST ON THIS PAGE.
+#:
+#: `recon` emits one observation per (source, check, field) triple, so a
+#: tenant who uploads forty tables gets a list whose length is a property of
+#: their upload rather than of this document — the same shape as the ledger
+#: and the gaps, and the same bound.
+#:
+#: `MAX_OBSERVATION_CHARS` is deliberately larger than `MAX_GAP_CHARS`. An
+#: observation's `what` is one code-authored sentence carrying two or three
+#: measured figures, and the longest `recon` writes today runs to roughly 460
+#: characters; clipping one mid-figure would leave a reader a number with no
+#: denominator, which is worse than carrying the whole sentence. The bound is
+#: still real, because `what` INTERPOLATES TENANT TEXT — a column name, a
+#: value label, an uploaded file's own name — and an unbounded tenant string
+#: on this page is how the ledger blew up to 800,349 characters.
+MAX_OBSERVATIONS = 12
+MAX_OBSERVATION_CHARS = 700
+
 _BODY_LIMIT = 400_000  # mirrors custom_artifacts.MAX_BODY_CHARS
 
 #: WHY THERE IS NO IMPORT-TIME ASSERTION HERE ANY MORE.
@@ -3158,6 +3176,151 @@ def _further_findings_sentence(beyond: int) -> str:
     )
 
 
+def _observations_heading(bearing: int) -> str:
+    """A claim about THIS corpus, agreeing with itself in the singular.
+
+    A HEADING HERE SAYS SOMETHING, and the count is the thing it has to say:
+    "What the reconnaissance pass found" is a label, true of every run, and
+    tells a reader nothing they could disagree with. The number is computed
+    from this plan's own observations, so the heading is false if the section
+    under it is wrong — which is the property that makes it worth printing.
+
+    THE ZERO BRANCH IS A CLAIM TOO, and a different one. It is reached only
+    when every observation on the plan was set aside by this goal, so the
+    section still renders (the set-aside list is below it) and the heading
+    states the honest thing: nothing that bears on this question moved.
+    """
+    if bearing == 0:
+        return ("<h3>Nothing in the shape of your evidence changes what these "
+                "numbers mean</h3>")
+    if bearing == 1:
+        return ("<h3>One thing about your evidence changes what these numbers "
+                "mean</h3>")
+    return (f"<h3>{bearing} things about your evidence change what these "
+            f"numbers mean</h3>")
+
+
+def _observations_section(plan: dict) -> str:
+    """What the reconnaissance pass saw in the evidence, restated in the
+    finished document.
+
+    WHY THIS EXISTS. `recon` inspects the evidence structurally before a run
+    and writes an `Observation` per thing it finds; the observations are
+    carried onto the plan, serialised, and shown at the gate. Until this
+    section, `report.py` held no reference to them at all — so a censoring
+    correction measured off the reader's own cohorts ("dividing the last
+    period by every cohort gives one rate; over the cohorts old enough to
+    have a full window it is another, a large error in the direction that
+    invents a crisis") was computed, shown once before approval, and then
+    absent from the document the reader keeps. The plan and the report
+    disagreed about what the run knew.
+
+    `what` IS RENDERED VERBATIM, AND THAT IS THE WHOLE POINT. It is prose
+    written in this repository with figures computed in this repository —
+    not model output — and every number in it is also carried under a name in
+    the same observation's `figures`. Summarising it here would drop exactly
+    the figures that make it worth printing, and paraphrasing code-authored
+    prose is how a restatement becomes a second, unverified claim.
+
+    IT IS STILL ESCAPED AND STILL BOUNDED. `what` interpolates tenant strings
+    — a column name, a value label, the name of an uploaded file — so it is
+    untrusted by the time it arrives here for exactly the reason a finding
+    statement is.
+
+    NOT INSIDE THE FIGURE-TRACEABILITY GATE, AND CORRECTLY SO. `recommend
+    ._FIGURE` is a blanket "no `$` and no `%`" rule applied to MODEL text
+    before any citation check, and `shown_claim_ids` is a set of claim ids. A
+    deterministic section is outside that gate by construction: there is no
+    model turn to gate and no claim to cite. Extending the gate to admit an
+    "observation citation class" would have to loosen `_FIGURE` itself, which
+    would let model prose carry figures — the precise thing it exists to stop.
+
+    KINDS ARE ROUTED THROUGH `routing.bears_on`, SO THIS AGREES WITH THE PLAN.
+    `planner._acting` withholds the STEP for a kind this goal does not bear
+    on and records a set-aside instead, while deliberately leaving the
+    observation on the plan. This renders the same split: a kind that bears
+    on the goal is stated as a finding, and one that does not is stated as
+    recorded-and-not-acted-on. Printing everything indiscriminately would
+    tell a reader chasing new logos that a cohort-maturity correction changed
+    their answer, and dropping it would hide a real measurement.
+    """
+    from app.crucible.recon import observations_from_json
+    from app.crucible.routing import (
+        GOAL_CLASS_NOTE, UNCLASSIFIED, bears_on,
+    )
+
+    observations = observations_from_json(plan.get("observations"))
+    if not observations:
+        # NOTHING, RATHER THAN A SECTION SAYING NOTHING. Same convention as
+        # `coverage` and `routing`, which render as no section at all on a
+        # plan built before they existed: "we looked and found nothing" and
+        # "this run predates the pass" are different statements, and an empty
+        # list cannot tell them apart. The gaps list says its version out loud
+        # only because it lives inside a section that renders regardless.
+        return ""
+
+    # A PLAN WITH NO STORED ROUTING SETS NOTHING ASIDE, and the fallback has
+    # to say so in the vocabulary `bears_on` speaks. Passing `""` through
+    # would take the `_BEARS_ON` branch and quietly set aside every
+    # population-shaped kind on every run built before routing shipped —
+    # inventing a goal-based omission that no goal ever made.
+    goal_class = (
+        str(_as_dict(plan.get("routing")).get("goal_class") or "").strip()
+        or UNCLASSIFIED
+    )
+
+    # STORED ORDER, NOT SORTED. It is the order the reconnaissance pass
+    # produced and it is already deterministic; re-ordering by severity here
+    # would present a ranking `recon` does not compute, and the findings above
+    # are the only ranked thing in this document.
+    bearing = [o for o in observations if bears_on(o.kind, goal_class)]
+    set_aside = [o for o in observations if not bears_on(o.kind, goal_class)]
+
+    shown_bearing = bearing[:MAX_OBSERVATIONS]
+    remaining = MAX_OBSERVATIONS - len(shown_bearing)
+    shown_aside = set_aside[:remaining] if remaining > 0 else []
+    withheld = (len(bearing) - len(shown_bearing)) + (
+        len(set_aside) - len(shown_aside))
+
+    out = [_observations_heading(len(bearing))]
+    out.append(_p(
+        "Before reading any of it for content, we checked the shape of your "
+        "evidence — which columns disagree, which are empty, how the dates "
+        "behave, what can carry a value. Each of these was measured, and each "
+        "one is stated here in the same words you were shown before you "
+        "approved this run."
+    ))
+    for o in shown_bearing:
+        out.append(_p(
+            f"<strong>{_esc_clipped(o.source_label, MAX_SOURCE_NAME_CHARS)}"
+            f"</strong> {_esc_clipped(o.what, MAX_OBSERVATION_CHARS)}"
+        ))
+    if shown_aside:
+        out.append(_p(
+            f"<strong>Recorded, and not acted on for this goal.</strong> This "
+            f"run is about "
+            f"{_esc(GOAL_CLASS_NOTE.get(goal_class, 'this goal'))}, and the "
+            f"checks below are about a different part of your book — so "
+            f"nothing above rests on them. They are stated because a check "
+            f"that was set aside and a check that found nothing are different "
+            f"things, and only one of them is a reason to relax."
+        ))
+        for o in shown_aside:
+            out.append(_p(
+                f"<strong>{_esc_clipped(o.source_label, MAX_SOURCE_NAME_CHARS)}"
+                f"</strong> {_esc_clipped(o.what, MAX_OBSERVATION_CHARS)}"
+            ))
+    if withheld:
+        out.append(_p(
+            f"{withheld} further observation"
+            f"{'' if withheld == 1 else 's'} of this kind "
+            f"{'is' if withheld == 1 else 'are'} on the run and "
+            f"{'is' if withheld == 1 else 'are'} not listed here, because "
+            f"this document has a size limit."
+        ))
+    return "".join(out)
+
+
 def _provenance_section(
     run: dict,
     plan: dict,
@@ -3223,6 +3386,18 @@ def _provenance_section(
             "many accounts a theme touches and not which ones. Where a name "
             "appears in this document it is a source document."
         ),
+        # LAST IN THE APPENDIX, DELIBERATELY, AND THE REASON IS MECHANICAL.
+        # Four of the blocks above emit no heading of their own — the funnel
+        # chart, the funnel sentence, the relevance coverage and the
+        # recommendation basis all belong to the `<h3>` that precedes them,
+        # and `test_crucible_document_consistency._section` reads a section as
+        # "from this heading to the next one at its level or above". Inserting
+        # a new `<h3>` between "What was read" and the funnel would silently
+        # move the funnel's numbers out of the region that suite checks them
+        # in — a test that passes because it stopped looking. Appended here,
+        # the only heading that closes this section is the `<h2>` that already
+        # closed the appendix.
+        _observations_section(plan),
     ]
     return "".join(p for p in out if p)
 

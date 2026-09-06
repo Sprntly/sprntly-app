@@ -2307,3 +2307,272 @@ def test_a_run_smaller_than_the_cap_still_accounts_for_all_of_it():
     total, rows, beyond = _tail_arithmetic(html)
     assert beyond == 0
     assert MAX_WRITTEN_UP_FINDINGS + rows == 3
+
+
+# ── The report states what the reconnaissance pass found ────────────────────
+#
+# THE DEFECT THIS CLOSES. `recon` inspects the evidence structurally before a
+# run, writes an `Observation` per thing it finds, and those observations are
+# carried onto the plan and SERIALISED — the route reads them back, the
+# framework re-derives its questions from them, `weighting_verdict` settles the
+# run's unit off one of them. `report.py` held not one reference to them. So a
+# censoring correction measured off the reader's own cohorts was computed,
+# shown once before approval, and then absent from the document they keep.
+
+
+def _observation(**over) -> dict:
+    """One stored observation, in the shape `Observation.to_json` produces."""
+    o = {
+        "id": "product analytics:censored_periods:month_",
+        "kind": "censored_periods",
+        "severity": "high",
+        "source": "product analytics:cohort retention",
+        "source_label": "product analytics — cohort retention",
+        "fields": ["cohort", "accounts", "month_12"],
+        "what": "`month_12` is zero for 8 of 16 cohorts because those months "
+                "have not happened yet. Dividing the last period by every "
+                "cohort gives 46.7%; over the 8 cohorts old enough to have a "
+                "full window it is 93.3% — a 46.7 point error, pointing the "
+                "wrong way.",
+        "figures": {"cohorts": 16.0, "naive_rate": 0.467, "mature_rate": 0.933},
+    }
+    o.update(over)
+    return o
+
+
+def _obs_html(observations, *, goal_class: str = "retention", **plan_over):
+    plan = _plan(**plan_over)
+    if observations is not None:
+        plan["observations"] = observations
+    if goal_class is not None:
+        plan["routing"] = {"goal_class": goal_class}
+    return render_report_html(_run(prioritisation={"plan": plan}), [], [], plan)
+
+
+def test_the_report_restates_the_correction_the_plan_already_measured():
+    """THE ONE THE DEFECT WAS FOUND ON, END TO END.
+
+    Both rates and the error between them reach the finished document, in the
+    observation's own words. VERBATIM rather than summarised, because the
+    sentence is code-authored with code-computed figures and a paraphrase
+    would drop exactly the numbers that make it worth printing.
+    """
+    html = _obs_html([_observation()])
+    para = _para_containing(html, "46.7%")
+    assert para, "the censoring correction never reached the document"
+    for figure in ("46.7%", "93.3%", "8 of 16 cohorts", "46.7 point error"):
+        assert figure in para, f"{figure!r} was dropped from the restatement"
+    assert "product analytics — cohort retention" in _plain(html), (
+        "the observation is restated without saying which source it came from"
+    )
+
+
+def test_a_run_created_before_observations_existed_renders_no_section():
+    """THE ABSENT KEY, WHICH IS EVERY RUN OLDER THAN THE RECONNAISSANCE PASS.
+
+    Nothing, rather than a section saying nothing — the same convention
+    `coverage` and `routing` follow. An empty list cannot distinguish "we
+    looked and found nothing" from "this run predates the pass", so the
+    document declines to imply either.
+    """
+    plain = _plain(_obs_html(None))
+    assert "about your evidence" not in plain
+    assert "Nothing in the shape of your evidence" not in plain
+    # AND THE REST OF THE DOCUMENT IS UNHARMED, which is the failure mode a
+    # missing-key guard actually has: a renderer that raises on `.get` of a
+    # key that was never written takes the whole report with it.
+    assert "How this was produced" in plain
+
+
+def test_a_malformed_observations_blob_does_not_take_the_report_with_it():
+    """`observations_from_json` skips what it cannot read. A stored plan is a
+    JSONB blob with no version field, so a shape this cannot parse has to read
+    as 'none' and never as a broken run."""
+    plain = _plain(_obs_html(["not a mapping", 7, {"kind": "censored_periods"}]))
+    assert "How this was produced" in plain
+
+
+def test_a_kind_this_goal_sets_aside_is_stated_as_set_aside_not_dropped():
+    """ROUTED THROUGH `routing.bears_on`, EXACTLY AS THE PLAN IS.
+
+    `planner._acting` withholds the STEP for a kind that does not bear on the
+    goal and deliberately leaves the observation on the plan. The report makes
+    the same split rather than printing everything: a reader chasing new logos
+    must not be told a cohort-maturity correction changed their answer, and
+    must still be able to see that the check ran and what it found.
+    """
+    html = _obs_html([_observation()], goal_class="acquisition")
+    plain = _plain(html)
+    assert "Recorded, and not acted on for this goal" in plain, (
+        "a set-aside observation was printed as though it bore on the goal"
+    )
+    assert "winning accounts you do not have yet" in plain, (
+        "the set-aside is stated without saying what this goal is about"
+    )
+    assert "46.7%" in plain, "the finding itself was dropped rather than set aside"
+    assert "Nothing in the shape of your evidence changes" in plain, (
+        "every observation was set aside, and the heading claimed otherwise"
+    )
+
+
+def test_a_kind_this_goal_bears_on_is_not_set_aside():
+    """The other half of the split, on the same fixture and the same kind —
+    without this, deleting the `bears_on` call would satisfy the test above by
+    setting everything aside."""
+    plain = _plain(_obs_html([_observation()], goal_class="retention"))
+    assert "Recorded, and not acted on for this goal" not in plain
+    assert "One thing about your evidence changes what these numbers mean" in plain
+
+
+def test_a_plan_with_no_stored_routing_sets_nothing_aside():
+    """THE FALLBACK THAT HAD TO BE NAMED RATHER THAN LEFT TO DEFAULT.
+
+    `routing` is `{}` on every plan built before it existed, so `goal_class`
+    reads back as `""`. Passing that through to `bears_on` takes the
+    `_BEARS_ON` branch — `"" in {retention, expansion}` is False — and would
+    quietly set aside every population-shaped kind on every one of those runs,
+    inventing a goal-based omission that no goal ever made. `unclassified` is
+    the honest reading and sets nothing aside.
+    """
+    plain = _plain(_obs_html([_observation()], goal_class=None))
+    assert "Recorded, and not acted on for this goal" not in plain
+    assert "46.7%" in plain
+
+
+def test_the_heading_is_a_claim_carrying_this_corpus_own_count():
+    """A HEADING HERE SAYS SOMETHING. "What the reconnaissance pass found" is
+    true of every run and cannot be disagreed with; the count is computed from
+    this plan's own observations, so the heading is false if the section under
+    it is wrong. Asserted in all three branches, including the singular, which
+    is otherwise only reachable on a corpus with exactly one finding."""
+    one = _plain(_obs_html([_observation()]))
+    assert "One thing about your evidence changes what these numbers mean" in one
+
+    two = _plain(_obs_html([
+        _observation(),
+        _observation(id="kg:evidence_mix", kind="evidence_mix",
+                     source_label="knowledge graph",
+                     what="1,275 of 1,416 signals are classified."),
+    ]))
+    assert "2 things about your evidence change what these numbers mean" in two
+
+    none = _plain(_obs_html([_observation()], goal_class="acquisition"))
+    assert "Nothing in the shape of your evidence changes" in none
+
+
+def test_tenant_text_inside_an_observation_is_escaped():
+    """`what` is code-authored and INTERPOLATES TENANT STRINGS — a column
+    name, a value label, the name of an uploaded file. It is untrusted by the
+    time it reaches the renderer for exactly the reason a finding statement
+    is, and the sanitizer downstream is a second line rather than the only
+    one."""
+    html = _obs_html([_observation(
+        what="`<img src=x onerror=alert(1)>` is empty on 4 of 14 rows.",
+        source_label="<script>alert(2)</script>",
+    )])
+    assert "<img" not in html and "<script>" not in html
+    assert "&lt;img src=x onerror=alert(1)&gt;" in html
+
+
+def test_the_section_is_bounded_in_count_and_in_length():
+    """Uncapped in count and uncapped in its one free-text field is how the
+    ledger reached 800,349 characters. `recon` emits an observation per
+    (source, check, field) triple, so the length of this list is a property of
+    the tenant's upload rather than of this document."""
+    from app.crucible.report import MAX_OBSERVATIONS, MAX_OBSERVATION_CHARS
+
+    html = _obs_html([
+        _observation(id=f"kg:evidence_mix:{i}", kind="evidence_mix",
+                     what=f"row {i} " + "x" * 4_000)
+        for i in range(MAX_OBSERVATIONS + 7)
+    ])
+    plain = _plain(html)
+    assert plain.count("row ") == MAX_OBSERVATIONS, (
+        f"{plain.count('row ')} observations rendered past a cap of "
+        f"{MAX_OBSERVATIONS}"
+    )
+    assert "7 further observations of this kind are on the run" in plain, (
+        "observations were dropped past the cap without saying so"
+    )
+    assert "x" * (MAX_OBSERVATION_CHARS + 100) not in plain, (
+        "an observation rendered past its per-item bound"
+    )
+
+
+def test_the_overflow_line_agrees_with_itself_in_the_singular():
+    """The sibling of `_further_findings_sentence`'s bug, which reached a live
+    report as "None of the 1 met the citation bar" — a boundary too fragile to
+    hit by accident and therefore worth pinning directly."""
+    from app.crucible.report import MAX_OBSERVATIONS
+
+    plain = _plain(_obs_html([
+        _observation(id=f"kg:evidence_mix:{i}", kind="evidence_mix",
+                     what=f"row {i}.")
+        for i in range(MAX_OBSERVATIONS + 1)
+    ]))
+    assert "1 further observation of this kind is on the run" in plain
+
+
+def test_no_observation_forecasts_the_unit_the_run_has_not_settled():
+    """THE CONSTRAINT RENDERING `what` VERBATIM PUTS ON `recon`.
+
+    An observation's sentence now reaches the finished document unchanged, so
+    it cannot be conditioned on anything decided after the reconnaissance pass
+    — and the run's counting unit is decided after it, by
+    `plan.weighting_verdict`, from a different ratio and from a business-model
+    column `recon` never reads.
+
+    Three sentences forecast it and all three were wrong on a real corpus
+    shape: two claimed a count on a tenant that weights, and the third called
+    a cleared threshold a verdict when an unrecorded business model still
+    counts. Swept over every kind rather than pinned to those three, because
+    the next one will be a fourth sentence.
+    """
+    from tests import _tabular_recon_fixtures as fx
+
+    from app.crucible import recon
+
+    report = recon.observe(
+        fx.full_pack(), expected_sources=("revenue", "analytics",
+                                          "customer_voice"),
+        signals=fx.signals())
+    # AND A CORPUS THE CONTRACTS CAN PRICE, BECAUSE `full_pack` DOES NOT RAISE
+    # `priceable_coverage` AT ALL. Found by mutation: reverting that
+    # observation's headline to the verdict it used to assert left this sweep
+    # green, because the kind was not in its population. A sweep whose
+    # population misses a kind is a sweep that does not cover it, and the
+    # third of the three defects lived exactly there.
+    priced = recon.observe(
+        [fx.contracts()], expected_sources=("revenue",),
+        signals=[{"id": f"s{i}", "kind": "sentiment",
+                  "source_type": "customer_voice", "content": "an assertion",
+                  "valid_at": "2026-08-01T12:00:00+00:00",
+                  "properties": {"account": a}}
+                 for i, a in enumerate(("Account B", "Account C",
+                                        "Account D", "Someone Else"))])
+    observations = list(report.observations) + list(priced.observations)
+    kinds = {o.kind for o in observations}
+    assert len(observations) >= 8, (
+        f"only {len(observations)} observations; this sweep would be mostly "
+        f"testing nothing"
+    )
+    for required in ("account_attribution_gap", "monetary_coverage_gap",
+                     "priceable_coverage"):
+        assert required in kinds, (
+            f"{required!r} is not in this sweep's population, so the sentence "
+            f"it used to carry is not being checked: {sorted(kinds)}"
+        )
+    forecasts = (
+        "themes can only be counted",
+        "never weighted by the revenue",
+        "the report will say that is what happened",
+        "every size is stated in accounts touched",
+        "themes here are weighted by the revenue",
+    )
+    offenders = [(o.kind, f) for o in observations
+                 for f in forecasts if f in o.what]
+    assert not offenders, (
+        "an observation forecasts the run's counting unit, and the report now "
+        "restates it verbatim into a document that may contradict it:\n"
+        + "\n".join(f"  [{k}] {f!r}" for k, f in offenders)
+    )

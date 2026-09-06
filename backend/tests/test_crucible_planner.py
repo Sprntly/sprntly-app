@@ -872,9 +872,16 @@ def test_the_stored_plan_payload_carries_the_corrected_note():
 #: arithmetic rather than on the observation the step was written from, so the
 #: consumer check below would be judging it against the wrong evidence and
 #: would fail an honest sentence.
+#:
+#: `restates` IS IN THE REPORT ALTERNATION ON PURPOSE, and it is the verb the
+#: censoring step now uses. A detector that skipped it would let the one
+#: sentence this pair exists to police pass unexamined — the point is not to
+#: forbid the claim, it is to make every claim of this shape get checked
+#: against the document.
 _RUN_REPORTS = re.compile(
-    r"\bthe run (?:reports|records|says|re-?derives|will\b)"
-    r"|\bthe (?:finished )?report (?:will\b|reports|records|says)",
+    r"\bthe run (?:reports|records|says|re-?derives|restates|will\b)"
+    r"|\bthe (?:finished )?report "
+    r"(?:will\b|reports|records|says|restates)",
     re.I,
 )
 
@@ -918,7 +925,7 @@ def _texts_for_kind(kind: str, *, weighting_unit: str) -> list[str]:
 
 
 #: Where a run-side code path would have to live for a step to be entitled to
-#: say the run reports something.
+#: say the run RE-DERIVES something.
 _RUN_SIDE_FILES = ("app/crucible/report.py", "app/crucible/pipeline.py",
                    "app/routes/crucible.py")
 
@@ -931,6 +938,14 @@ def _run_side_source() -> str:
     over a checkout cannot see the file it was pointed away from. Each path is
     asserted to exist, because the failure mode of this helper is a guard that
     passes because it read nothing.
+
+    NARROWED TO ONE QUESTION. This used to stand in for "can the run see this
+    finding at all", which a source-text search answers badly now that
+    `report._observations_section` reads every kind generically and names
+    none. What a source search still answers well is the other half: whether
+    any run-side module SWITCHES ON a kind, which is what re-deriving a
+    measurement would require. Rendering a stored sentence verbatim needs no
+    such reference, and computing a second rate cannot avoid one.
     """
     from pathlib import Path
 
@@ -945,17 +960,62 @@ def _run_side_source() -> str:
     return "\n".join(out)
 
 
-def test_no_plan_step_says_the_run_reports_something_it_cannot_report():
-    """THE GENERAL FORM. A step may say the run reports a finding only if the
-    run has a code path that reads that kind of finding at all.
+def _report_restates(kind: str, *, stored: bool = True) -> bool:
+    """Does the FINISHED DOCUMENT restate a finding of this kind?
 
-    The consumer test is the kind's own name in the run-side source. That is a
-    proxy, and a deliberately loose one — it asks whether the run can SEE the
-    finding, not whether it renders it well. Loose in the safe direction: it
-    cannot manufacture a consumer that is not there, and a kind the run never
-    names is a kind whose plan step is writing a cheque nobody can cash.
+    BEHAVIOURAL, AND THAT IS THE WHOLE UPGRADE. The consumer test used to be
+    the kind's own name in the run-side source — a proxy, chosen when
+    `report.py` held no reference to an observation of any kind and the only
+    available question was whether the run could see the finding at all. It
+    was loose in the safe direction then and is simply wrong now:
+    `report._observations_section` reads the stored observations generically
+    and switches on no kind, so a source search would report every kind as
+    unread while the document restates all of them.
+
+    So this renders the document and looks for the observation's own sentence
+    in it. It asks whether the report DOES the thing rather than whether a
+    file mentions a word, which is narrower, stronger, and the only form that
+    can fail for the right reason if someone deletes the section.
+
+    `stored=False` builds the plan a run created before observations existed —
+    no `observations` key at all. It must render nothing, and asserting that
+    is what proves this helper is not a constant that returns True.
     """
-    src = _run_side_source()
+    from app.crucible.report import render_report_html
+    from app.crucible.routing import classify_goal
+
+    goal = "grow revenue this year"
+    sentence = f"THE STORED MEASUREMENT FOR {kind.upper()}"
+    o = recon.Observation(
+        id=f"fixture:{kind}", kind=kind, severity="high", source="fixture",
+        fields=("field_a",), what=sentence, figures=_AnyFigure(),
+    )
+    plan: dict = {"routing": {"goal_class": classify_goal(goal)}}
+    if stored:
+        plan["observations"] = [o.to_json()]
+    run = {"id": 1, "goal_text": goal, "prioritisation": {"plan": plan}}
+    return sentence in render_report_html(run, [], [], plan)
+
+
+def test_no_plan_step_says_the_run_reports_something_it_cannot_report():
+    """THE GENERAL FORM, AND ITS PREMISE MOVED.
+
+    A step may tell a reader the run or the report will do something with a
+    finding only if the finished document actually does it. That is the same
+    invariant this was written for; what changed is that it can now be checked
+    against the document instead of against a substring of a source file,
+    because there is finally a report-side reader of observations to check.
+
+    The assertion is therefore narrower than the one it replaces — "the report
+    restates this kind" rather than "some run-side module mentions this kind"
+    — and fails in the direction that matters: when a step claims something
+    the document does NOT do.
+    """
+    assert not _report_restates("censored_periods", stored=False), (
+        "a plan with no `observations` key still rendered the fixture "
+        "sentence, so the consumer check below is a constant and this sweep "
+        "proves nothing"
+    )
     offenders: list[tuple[str, str, str]] = []
     rendered: set[str] = set()
     for kind in recon.KINDS:
@@ -963,7 +1023,7 @@ def test_no_plan_step_says_the_run_reports_something_it_cannot_report():
             for why in _texts_for_kind(kind, weighting_unit=unit):
                 rendered.add(kind)
                 m = _RUN_REPORTS.search(why)
-                if m and kind not in src:
+                if m and not _report_restates(kind):
                     offenders.append((kind, unit, why))
 
     assert len(rendered) >= 8, (
@@ -971,39 +1031,59 @@ def test_no_plan_step_says_the_run_reports_something_it_cannot_report():
         f"so this sweep is mostly testing nothing: {sorted(rendered)}"
     )
     assert not offenders, (
-        "A plan step tells the reader the run will report a finding that no "
-        "run-side module reads:\n"
+        "A plan step tells the reader the run or the report will carry out an "
+        "act on a finding the finished document does not restate:\n"
         + "\n".join(f"  [{k}] at weighting_unit={u!r}: {w}"
                     for k, u, w in offenders)
     )
 
 
-def test_the_censoring_step_does_not_say_the_run_reports_the_mature_rate():
-    """THE SPECIFIC ONE, PINNED AT THE SENTENCE.
+def test_the_censoring_step_promises_exactly_what_the_document_does():
+    """THE SPECIFIC ONE, PINNED AT THE SENTENCE — TWICE WRONG, NOW CHECKED.
 
-    The measured failure: the step ended "so the run reports the second figure
-    and says which cohorts it counted". `_recon_report` is called on the plan
-    path alone, `report.py` contains no reference to an observation, and no
-    run-side module names `censored_periods` — so the corrected rate was
-    computed, shown once at the gate, and then dropped.
+    Wording one ended "so the run reports the second figure and says which
+    cohorts it counted", which no code path kept: the correction was computed
+    on the plan path, shown once, and dropped. Wording two replaced it with
+    "the run does not re-derive it and the finished report does not restate
+    it", which was true of that engine and false of this one the moment
+    `report._observations_section` landed.
 
-    The figures are asserted too, because the fix must not be a deletion: the
-    correction is real, measured, and worth having before you approve.
+    So the assertion is no longer the ABSENCE of a run-side promise. The step
+    makes a promise with two halves and each is checked against the thing that
+    would keep it: the report restates the measurement (verified by rendering
+    a document), and the run does not produce a second figure of its own
+    (verified by no run-side module switching on the kind).
+
+    The figures are asserted too, because no revision of this sentence may be
+    a deletion: the correction is real, measured off the reader's own cohorts,
+    and worth having before you approve.
     """
     step = next(s for s in _plan() if s.primitive == "check_period_censoring")
     assert "46.7" in step.why and "93.3" in step.why, (
         "the measured figures must survive the correction, or the fix was a "
         "deletion and this test is vacuous"
     )
-    m = _RUN_REPORTS.search(step.why)
-    assert m is None, (
-        f"the censoring step still promises a run-side act ({m.group(0)!r} "
-        f"in): {step.why}"
+    assert "the finished report restates this measurement" in step.why, (
+        f"the step no longer states what the document does with the figure: "
+        f"{step.why}"
     )
+    assert _RUN_REPORTS.search(step.why), (
+        "the sentence must be one the general sweep above examines, or this "
+        "step is making a claim nothing checks"
+    )
+    assert _report_restates("censored_periods"), (
+        "the step says the finished report restates this measurement and the "
+        "rendered document does not contain it"
+    )
+    # THE HALF THAT IS STILL A DENIAL. "does not re-derive it" is a claim
+    # about arithmetic, not about rendering: no run-side module may switch on
+    # this kind to compute a second rate. `_observations_section` renders a
+    # stored sentence verbatim and names no kind, so it does not trip this.
+    assert "does not re-derive it" in step.why
     assert "censored_periods" not in _run_side_source(), (
-        "a run-side module now reads this kind, so the step is entitled to a "
-        "run-side promise again and this test needs rewriting rather than "
-        "keeping"
+        "a run-side module now switches on this kind, so it may be computing "
+        "a rate of its own — the step's 'does not re-derive it' needs "
+        "re-checking rather than this guard needs deleting"
     )
 
 

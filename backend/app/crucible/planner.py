@@ -995,20 +995,33 @@ def compose_deterministic(
     # ── Understand why. ────────────────────────────────────────────────────
     for o in _acting("censored_periods"):
         key, size, last = (list(o.fields) + ["", "", ""])[:3]
-        # MEASURED AT THE GATE, AND THAT IS WHERE IT STAYS — THE STEP MUST SAY
-        # BOTH. This step used to end "so the run reports the second figure and
-        # says which cohorts it counted", which the run does not do and never
-        # has: the reconnaissance pass runs on the plan path alone, `report.py`
-        # reads no observation, and no run-side module names `censored_periods`
-        # at all. The correction was computed, shown once here, and dropped —
-        # so the one sentence a reader would have relied on afterwards was the
-        # single place this plan promised more than the run performs.
+        # MEASURED AT THE GATE, AND NOW RESTATED IN THE DOCUMENT — THE STEP
+        # MUST SAY EXACTLY WHICH OF THOSE TWO IT MEANS.
         #
-        # It is not deleted, because the correction IS real and IS useful: it
-        # is measured off the reader's own cohorts and it is the difference
-        # between approving a run to chase a decline and knowing there is not
-        # one. A reader should have it before they approve — and should learn,
-        # in the same breath, that having it here is having it at all.
+        # THREE WORDINGS, AND EACH WAS TRUE OF THE ENGINE THAT CARRIED IT.
+        # The first ended "so the run reports the second figure and says which
+        # cohorts it counted", which was false when it was written: the
+        # correction was computed here, shown once, and dropped, because
+        # `report.py` read no observation at all. The second replaced it with
+        # "the run does not re-derive it and the finished report does not
+        # restate it", which was true of that engine and is FALSE OF THIS ONE
+        # — `report._observations_section` now renders every stored
+        # observation's own sentence, this one included, in the finished
+        # document.
+        #
+        # WHAT IS STILL TRUE IS THE HALF ABOUT RE-DERIVATION, and it is worth
+        # keeping separate from the half about restatement. Nothing on the run
+        # path recomputes a cohort-maturity correction: no primitive reads a
+        # period grid, and `pipeline` never sees a `censored_periods`
+        # observation. The report restates the figure MEASURED HERE; it does
+        # not produce a second one of its own, and a reader who is told
+        # otherwise would reasonably believe the run had checked the
+        # arithmetic twice.
+        #
+        # It was not deleted at either revision, because the correction IS
+        # real and IS useful: it is measured off the reader's own cohorts and
+        # it is the difference between approving a run to chase a decline and
+        # knowing there is not one.
         steps.append(_obs_step(
             "check_period_censoring", o,
             "Count retention only over cohorts old enough to have one",
@@ -1022,7 +1035,8 @@ def compose_deterministic(
             f"{o.figures['error_points']:.1f} point error in the direction "
             f"that invents a crisis. I measured the corrected figure here, "
             f"before you approve, so you have it at the gate: the run does "
-            f"not re-derive it and the finished report does not restate it.",
+            f"not re-derive it, and the finished report restates this "
+            f"measurement rather than computing one of its own.",
             params={"source": o.source, "period_field": key},
             part=PARTS[1],
         ))
