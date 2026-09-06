@@ -539,12 +539,75 @@ def test_apply_chat_edit_flag_off_is_full_emit(isolated_settings, monkeypatch):
     assert seen["max_tokens"] == 32000
     assert seen["system"] is prd_edit._CHAT_EDIT_SYSTEM  # no targeted rewrite
 
+
 def test_apply_chat_edit_flag_on_targeted_splices(isolated_settings, monkeypatch):
     monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
+    calls = []
 
     def _fake(**kw):
+        calls.append(kw["prompt_version"])
         return _llm_result({
             "mode": "targeted", "summary": "tightened goal",
             "ops": [{"op": "replace", "section": "Goal",
                      "new_html": _delim("Goal", '<div class="goal"><p>p95&lt;200ms</p></div>')}],
         })
+
+    monkeypatch.setattr(prd_edit, "llm_call", _fake)
+    out = prd_edit.apply_chat_edit(DOC, "tighten the goal", enterprise_id="co")
+    assert "p95&lt;200ms" in out["html"]
+    assert "<p>Problem body that is long enough here.</p>" in out["html"]  # untouched
+    assert out["sections_changed"] == ["Goal"]
+    assert out["summary"] == "tightened goal"
+    # spliced on the FIRST call: the targeted lane only, no full-emit fallback
+    assert calls == [f"{prd_edit.CHAT_EDIT_PROMPT_VERSION}-targeted"]
+
+
+def test_apply_chat_edit_flag_on_bad_targeted_falls_back_to_full_emit(
+    isolated_settings, monkeypatch):
+    monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
+    calls = []
+
+    def _fake(**kw):
+        calls.append(kw["prompt_version"])
+        # First call = the targeted attempt with a BAD anchor (gate1 -> fallback).
+        if kw["json_schema"] is te.TARGETED_EDIT_SCHEMA:
+            return _llm_result({
+                "mode": "targeted", "summary": "x",
+                "ops": [{"op": "replace", "section": "DoesNotExist",
+                         "new_html": _delim("DoesNotExist", "<p>y</p>")}],
+            })
+        # Second call = the full-emit fallback (proven path).
+        return _llm_result({"html": "<html><body>FALLBACK</body></html>",
+                            "sections_changed": ["Goal"], "summary": "fell back"})
+
+    monkeypatch.setattr(prd_edit, "llm_call", _fake)
+    out = prd_edit.apply_chat_edit(DOC, "tighten the goal", enterprise_id="co")
+    assert "FALLBACK" in out["html"]
+    assert out["summary"] == "fell back"
+    # both lanes ran: the targeted attempt, then the full-emit fallback
+    assert calls == [f"{prd_edit.CHAT_EDIT_PROMPT_VERSION}-targeted",
+                     prd_edit.CHAT_EDIT_PROMPT_VERSION]
+
+
+def test_apply_chat_edit_flag_on_appendix_splices_no_fallback(
+    isolated_settings, monkeypatch):
+    # the appendix case — a chat edit against a real appendix-bearing PRD, model
+    # names the op section:"Appendix". Must splice on the FIRST call only (no
+    # full-emit fallback).
+    monkeypatch.setenv("TARGETED_EDIT_ENABLED", "1")
+    calls = []
+
+    def _fake(**kw):
+        calls.append(kw["prompt_version"])
+        return _llm_result({
+            "mode": "targeted", "summary": "resolved one open decision",
+            "ops": [{"op": "replace", "section": "Appendix",
+                     "new_html": _appendix("<li>Second open decision to resolve.</li>")}],
+        })
+
+    monkeypatch.setattr(prd_edit, "llm_call", _fake)
+    out = prd_edit.apply_chat_edit(
+        APPENDIX_DOC, "resolve the first open decision", enterprise_id="co")
+    assert out["html"].count("<li>") == 1  # one item removed, spliced
+    assert out["sections_changed"] == ["Appendix"]
+    assert calls == [f"{prd_edit.CHAT_EDIT_PROMPT_VERSION}-targeted"]  # ONE call, no fallback
