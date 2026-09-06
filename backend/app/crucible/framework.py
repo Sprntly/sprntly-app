@@ -264,29 +264,23 @@ def _derived(observations: Sequence[object]) -> list[PlanQuestion]:
                 ),
                 options=(total, base),
             ))
-        elif kind == "concentration_divergence" and len(fields) >= 2:
-            out.append(PlanQuestion(
-                id="weighting_choice",
-                prompt="Rank by how many accounts a theme touches, or by the "
-                       "revenue those accounts carry?",
-                why="These two orderings disagree on your data, so this is a "
-                    "choice rather than a detail — and it decides which "
-                    "themes reach the top of the document.",
-                what_i_saw=(
-                    f"The top {figures.get('top_n', 0):.0f} of "
-                    f"{figures.get('groups', 0):.0f} accounts generate "
-                    f"{figures.get('volume_share', 0) * 100:.1f}% of the "
-                    f"activity and hold "
-                    f"{figures.get('value_share', 0) * 100:.1f}% of the money."
-                ),
-                affects="the order of the findings, and which one is recommended",
-                default_if_skipped=(
-                    "themes are ranked by how many accounts they touch, which "
-                    "is what this engine measures today, and the divergence is "
-                    "disclosed beside the ranking"
-                ),
-                options=("Accounts touched", "Revenue carried"),
-            ))
+        # `concentration_divergence` DELIBERATELY RAISES NO QUESTION. It used
+        # to ask "rank by accounts touched, or by the revenue those accounts
+        # carry?" — offering an answer nothing in the engine read. The string
+        # `weighting_choice` appeared exactly once in the whole backend, at its
+        # own definition, so a reader who chose "Revenue carried" had that
+        # answer collected and silently discarded while the question told them
+        # it decided "the order of the findings, and which one is recommended".
+        #
+        # That is the same overclaim as a plan step promising work the run does
+        # not do, in the one place a reader is actively asked to participate,
+        # and it is worse than a wrong default: a default is a decision the
+        # engine owns, while this made the reader believe they owned it.
+        #
+        # The divergence itself is real and STAYS: the observation is still
+        # emitted and `compare_measures_across_groups` still puts it on the
+        # plan as evidence. It also now motivates the question that IS wired —
+        # see `_weighting_available_note`, which folds these figures in.
         elif kind == "coding_gap" and len(fields) >= 2:
             coded, text = fields[0], fields[1]
             out.append(PlanQuestion(
@@ -384,6 +378,29 @@ def _weighting_is_available(observations: Sequence[object]) -> bool:
     return False
 
 
+def _divergence_clause(observations: Sequence[object]) -> str:
+    """The strongest motivation for the unit question, in the reader's own
+    numbers: their loudest accounts are not their most valuable ones.
+
+    Carried here rather than raised as its own question. `concentration_
+    divergence` used to ask the reader to choose a weighting directly and then
+    read nothing back; the honest use of the same finding is to explain why the
+    question that IS wired matters.
+    """
+    for o in observations:
+        if getattr(o, "kind", "") != "concentration_divergence":
+            continue
+        f = dict(getattr(o, "figures", {}) or {})
+        return (
+            f" It matters here: the top {f.get('top_n', 0):.0f} of "
+            f"{f.get('groups', 0):.0f} accounts generate "
+            f"{f.get('volume_share', 0) * 100:.1f}% of the activity and hold "
+            f"{f.get('value_share', 0) * 100:.1f}% of the money, so counting "
+            f"and weighting do not put the same themes on top."
+        )
+    return ""
+
+
 def _weighting_available_note(observations: Sequence[object]) -> str:
     for o in observations:
         if getattr(o, "kind", "") != "priceable_coverage":
@@ -391,11 +408,12 @@ def _weighting_available_note(observations: Sequence[object]) -> str:
         figures = dict(getattr(o, "figures", {}) or {})
         return (
             f"Your contracts price "
-            f"{figures.get('book_accounts', 0):,.0f} accounts and reach "
-            f"{figures.get('priceable_share', 0) * 100:.1f}% of what I read, "
-            f"so weighting is available here — but your business model is not "
-            f"recorded, so nothing has decided whether to use it."
-        )
+            f"{figures.get('book_accounts', 0):,.0f} accounts and cover "
+            f"{figures.get('priceable_share', 0) * 100:.1f}% of the accounts "
+            f"named in your evidence, so weighting is available here — but "
+            f"your business model is not recorded, so nothing has decided "
+            f"whether to use it."
+        ) + _divergence_clause(observations)
     return ""
 
 

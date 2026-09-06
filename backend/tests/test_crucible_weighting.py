@@ -397,7 +397,7 @@ def test_size_does_not_move_with_how_many_claims_said_it():
 
 # ── THE VERDICT: decided once, stored, and never re-derived ────────────────
 
-from app.crucible import recon  # noqa: E402
+from app.crucible import planner, recon  # noqa: E402
 from app.crucible.plan import (  # noqa: E402
     WEIGHTING_UNIT_COUNT,
     WEIGHTING_UNIT_VALUE,
@@ -583,3 +583,80 @@ def test_the_bucket_and_conflict_clauses_are_identical_on_both_paths():
     assert shared.strip() in _ordering_note(
         [_row(priced_value=1.0, claim_types=("preference",)),
          _row(claim_types=("constraint",))])
+
+
+# ── A QUESTION MAY ONLY BE ASKED IF ITS ANSWER IS READ ─────────────────────
+
+
+def _divergence_obs():
+    return recon.Observation(
+        id="08_sales_data:contracts:concentration_divergence:account",
+        kind="concentration_divergence", severity="high",
+        source="02_support_tickets:tickets", fields=("account", "total_acv_usd"),
+        what="…",
+        figures={"top_n": 5.0, "groups": 40.0, "volume_share": 0.62,
+                 "value_share": 0.18, "even_share": 0.125, "ratio": 3.4},
+    )
+
+
+def test_no_question_offers_an_answer_the_engine_never_reads():
+    """THE INVARIANT, APPLIED TO THE ONE PLACE THE READER IS ASKED TO ACT.
+
+    A plan step may only promise work the run performs. A gate QUESTION is the
+    same promise with the reader's own effort attached, and breaking it is
+    worse: a wrong default is a decision the engine owns and discloses, while
+    an unread answer makes the reader believe they owned it.
+
+    Asserted by searching the backend for each question id rather than by
+    listing the ones known to be wired, so a question added later is caught by
+    the same rule."""
+    import pathlib
+    import subprocess
+
+    from app.crucible.framework import questions_for
+
+    root = pathlib.Path(recon.__file__).resolve().parents[1]
+    asked = {q.id for q in questions_for(
+        "RICE", [_coverage_obs(0.9), _divergence_obs()])}
+    assert asked, "fixture must produce questions or this is vacuous"
+
+    unread = []
+    for qid in sorted(asked):
+        hits = subprocess.run(
+            ["grep", "-rl", qid, str(root)],
+            capture_output=True, text=True).stdout.split()
+        # Its own definition in `framework.py` does not count as a reader.
+        readers = [h for h in hits if not h.endswith("crucible/framework.py")]
+        if not readers:
+            unread.append(qid)
+    assert not unread, (
+        f"these questions collect an answer nothing in the engine reads: "
+        f"{unread}")
+
+
+def test_the_divergence_is_kept_as_evidence_rather_than_as_a_question():
+    """Retiring the question must not lose the finding. The divergence is a
+    real, checkable fact about the reader's own book and it belongs on the
+    plan — it is the strongest motivation for the question that IS wired."""
+    from app.crucible.framework import questions_for
+
+    obs = [_coverage_obs(0.9), _divergence_obs()]
+    ids = {q.id for q in questions_for("RICE", obs)}
+    assert "weighting_choice" not in ids
+
+    q = next(q for q in questions_for("RICE", obs) if q.id == "business_model")
+    assert "top 5 of 40 accounts" in q.what_i_saw
+    assert "62.0% of the activity" in q.what_i_saw
+    assert "18.0% of the money" in q.what_i_saw
+
+
+def test_the_divergence_step_still_reaches_the_plan():
+    """The observation and its step are untouched — only the question went."""
+    import tests._tabular_recon_fixtures as tfx
+
+    report = recon.observe([tfx.contracts(), tfx.tickets()])
+    assert "concentration_divergence" in {o.kind for o in report.observations}
+    steps = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=report,
+        source_types=("revenue",))
+    assert "compare_measures_across_groups" in {s.primitive for s in steps}
