@@ -870,14 +870,65 @@ def theme_map_for(
     # 2. Attach each surviving prose topic to a GRAPH theme naming the same
     #    subject, if there is one.
     graph_labels: dict[str, str] = {}
+    #: HOW MANY SIGNALS THE GRAPH ITSELF BOUND TO EACH THEME, derived from the
+    #: map rather than fetched: `load_theme_map` returns one entry per signal,
+    #: so counting entity ids over its values reproduces EXACTLY the `counts`
+    #: it builds internally to feed `canonicalize_themes`. No second query, no
+    #: second column, and — the part that matters — no second definition of
+    #: "how much the graph leaned on this topic" that could drift from the one
+    #: the fold already uses. The map arrives post-fold, so the count is the
+    #: representative's total across its shards, which is the right quantity.
+    graph_counts: dict[str, int] = {}
     for entry in graph_theme_map.values():
         if len(entry) >= 2 and entry[0] and entry[1]:
             graph_labels[str(entry[0])] = str(entry[1])
+            graph_counts[str(entry[0])] = graph_counts.get(str(entry[0]), 0) + 1
     attach: dict[str, tuple[str, str]] = {}
     if graph_labels:
-        candidates = sorted(graph_labels.items(), key=lambda kv: (kv[1], kv[0]))
+        # MOST-CITED FIRST, TIES ON THE ENTITY ID — `canonicalize_themes`'
+        # `rank()`, verbatim, and adopted for its reasons rather than by
+        # analogy. Most-cited is the shard the graph actually leaned on; the
+        # tie-break is what makes the choice a function of the input rather
+        # than of dict order or of which page a batch landed on.
+        #
+        # IT REPLACES ALPHABETICAL ORDER, WHICH HAD A SYSTEMATIC BIAS AND WAS
+        # MEASURED. On a real tenant's 2,129 theme labels, an extractor's
+        # "pricing" had 52 qualifying candidates and "tabletop exercise
+        # scheduling" had 27 — so the choice was doing real work on nearly
+        # every attachment rather than breaking the occasional tie — and
+        # alphabetical order skews hard toward `A`. On a graph carrying
+        # meeting-assistant themes, a pricing discussion in an attached
+        # document attached to ANOTHER PRODUCT'S pricing theme. That is not a
+        # near-miss; it is the document joining the wrong conversation, and it
+        # is invisible in the output because the claim still lands in a cluster
+        # and still gets cited.
+        #
+        # ── WHAT THIS IS STILL NOT ────────────────────────────────────────
+        # BETTER, NOT CORRECT, and a reader of this code should know which.
+        # "pricing" still has 52 qualifying candidates and this picks one of
+        # them by popularity. That is a heuristic attaching a document to a
+        # conversation: when it attaches wrongly the claim is not dropped and
+        # not flagged — it is counted, cited, and filed under the wrong theme.
+        #
+        # What would settle it is the join the graph uses on its own ingest
+        # path: embed the label and take the nearest theme entity
+        # (`facade.find_candidates`). That is unavailable here by construction,
+        # not by omission — it is a pgvector similarity search issued as an
+        # `rpc`, and `rpc` is one of the verbs the run-scoped no-write guard
+        # forbids. Lifting that would mean letting this path issue graph
+        # queries, which is a bigger decision than a tie-break and belongs to
+        # whoever owns the guard.
+        def _rank(item: tuple[str, str]) -> tuple[int, str]:
+            return (-graph_counts.get(item[0], 0), item[0])
+
+        candidates = sorted(graph_labels.items(), key=_rank)
         by_norm = {}
         for eid, lab in candidates:
+            # `setdefault` over a most-cited-first list, so the exact-match
+            # tier picks the same way the overlap tier below does. Two entities
+            # whose labels normalise identically is the ordinary case the fold
+            # exists for, and picking the thin one there is the same defect one
+            # tier up.
             by_norm.setdefault(normalize_label(lab), (eid, lab))
         for prose_eid in sorted(set(prose_ids.values())):
             label = prose_labels.get(prose_eid) or ""

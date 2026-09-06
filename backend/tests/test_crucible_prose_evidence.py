@@ -669,6 +669,106 @@ def test_prose_claims_join_the_graph_theme_that_names_the_same_subject():
     assert {v[1] for v in mapped.values()} == {"Bulk export speed"}
 
 
+def _graph(*themes) -> dict:
+    """`load_theme_map`-shaped map: signal id -> (entity id, label, verb).
+
+    ONE ENTRY PER SIGNAL, which is the shape the real function returns and the
+    reason a theme's citation count is derivable from it at all. A theme
+    carrying 51 signals is 51 entries pointing at one entity id.
+    """
+    out = {}
+    for entity_id, label, n in themes:
+        for i in range(n):
+            out[f"{entity_id}-sig{i}"] = (entity_id, label, None)
+    return out
+
+
+def test_a_prose_label_joins_the_theme_the_graph_leaned_on_not_the_first_one():
+    """MEASURED BIAS, NOT A TIE-BREAK.
+
+    On a real tenant's 2,129 theme labels an extractor's "pricing" had 52
+    candidates qualifying under `same_topic`, and "tabletop exercise
+    scheduling" had 27 — so which candidate wins is doing real work on nearly
+    every attachment rather than settling the occasional draw. Sorting
+    alphabetically skews hard toward `A`, and on a graph that also carries
+    meeting-assistant themes an attached pricing discussion attached to
+    ANOTHER PRODUCT'S pricing theme.
+
+    That failure is invisible in the output: the claim is not dropped and not
+    flagged, it is counted and cited under the wrong theme. So the rule is
+    `canonicalize_themes`' own — most-cited, ties on the entity id.
+
+    BOTH CANDIDATES HERE QUALIFY, and they disagree: the thin one sorts first
+    alphabetically, the heavy one is the topic's real home. A fixture with one
+    candidate passes under either rule and proves nothing.
+    """
+    from app.crucible.kg_themes import content_tokens, same_topic
+
+    graph = _graph(("e-ai-platform", "AI tabletop exercise platform", 5),
+                   ("e-tabletop", "Tabletop exercise programme", 51))
+    probe = content_tokens("tabletop exercise scheduling")
+    # THE PRECONDITION, ASSERTED. If only one of these qualified the test would
+    # be pinning the overlap rule, not the ordering.
+    assert same_topic(probe, content_tokens("AI tabletop exercise platform"))
+    assert same_topic(probe, content_tokens("Tabletop exercise programme"))
+    # ...and they really do disagree, so the assertion below has something to
+    # decide. Alphabetically the thin `AI ...` label comes first.
+    assert sorted(["AI tabletop exercise platform",
+                   "Tabletop exercise programme"])[0].startswith("AI")
+
+    mapped = prose.theme_map_for(
+        {"s1": {"theme": "tabletop exercise scheduling",
+                "relationship": "REQUESTS"}}, graph)
+    assert mapped["s1"][0] == "e-tabletop"
+    assert mapped["s1"][1] == "Tabletop exercise programme"
+
+
+def test_the_exact_match_tier_picks_by_citations_too():
+    """THE SAME DEFECT ONE TIER UP, which a fix to the overlap loop alone
+    would leave in place.
+
+    Two entities whose labels normalise identically is the ordinary case the
+    theme fold exists for — 'Pricing' and 'pricing' are separate rows in the
+    graph today purely because of capitalisation. The exact-match tier picks
+    among them with `setdefault` over the candidate list, so it inherits
+    whatever ordering that list has; under alphabetical it took the thin one.
+    """
+    graph = _graph(("e-thin", "PRICING", 3), ("e-home", "pricing", 40))
+    assert sorted(["PRICING", "pricing"])[0] == "PRICING"  # the thin one
+
+    mapped = prose.theme_map_for(
+        {"s1": {"theme": "Pricing", "relationship": "AFFECTS"}}, graph)
+    assert mapped["s1"][0] == "e-home"
+
+
+def test_the_attachment_is_the_same_on_two_identical_runs():
+    """THE TIE-BREAK'S OWN JOB. Most-cited alone leaves equal-count candidates
+    decided by dict order, so the same corpus would attach differently
+    depending on which page a batch landed on — and the same evidence would
+    yield different findings on different days. Ties go to the entity id,
+    exactly as `canonicalize_themes` does it."""
+    from app.crucible.kg_themes import content_tokens, same_topic
+
+    graph = _graph(("e-zzz", "Billing invoicing platform", 9),
+                   ("e-aaa", "Invoicing billing workflow", 9))
+    items = {"s1": {"theme": "billing and invoicing errors",
+                    "relationship": "AFFECTS"}}
+    # THE PRECONDITION. Both must QUALIFY and their counts must be EQUAL, or
+    # the tie-break is never consulted and this passes without it — which is
+    # exactly what the first version of this test did.
+    probe = content_tokens("billing and invoicing errors")
+    assert same_topic(probe, content_tokens("Billing invoicing platform"))
+    assert same_topic(probe, content_tokens("Invoicing billing workflow"))
+
+    first = prose.theme_map_for(items, graph)
+    assert first["s1"][0] == "e-aaa"  # the lower id, not the first-inserted
+    # SAME MAP, OPPOSITE ITERATION ORDER — which is what a different page of a
+    # paged read hands you.
+    reversed_graph = dict(reversed(list(graph.items())))
+    for _ in range(5):
+        assert prose.theme_map_for(items, reversed_graph) == first
+
+
 def test_a_topic_the_graph_has_never_seen_gets_its_own_group_not_none():
     rows, items_by_id = _rows(per_conversation=True)
     mapped = prose.theme_map_for(items_by_id, {})
