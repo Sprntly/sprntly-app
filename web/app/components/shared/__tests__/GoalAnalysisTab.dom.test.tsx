@@ -529,3 +529,28 @@ describe("a visible generating state for the recommendations", () => {
     }
   })
 })
+
+describe("reopening a cut option", () => {
+  // This panel owns the state machine, not what a selection does — see
+  // `GoalAnalysisReport`'s own tests for what happens with the label once it
+  // is handed over. All this file has to prove is that the wire is connected.
+  const CONSIDERED = [
+    { id: 1, label: "self-serve onboarding", reason: "an anecdote, not a finding", stopped_at_stage: "clustering", claim_ids: ["c1"] },
+  ]
+
+  it("passes the caller's handler through to the report untouched", async () => {
+    get.mockResolvedValue({ ...RUN, considered: CONSIDERED })
+    const onSelectOption = vi.fn()
+    render(<GoalAnalysisTab runId={7} onSelectOption={onSelectOption} />)
+    const option = await screen.findByTestId("goal-considered-option")
+    fireEvent.click(option)
+    expect(onSelectOption).toHaveBeenCalledWith("self-serve onboarding")
+  })
+
+  it("renders no cut-option list when the caller passes nothing", async () => {
+    get.mockResolvedValue({ ...RUN, considered: CONSIDERED })
+    render(<GoalAnalysisTab runId={7} />)
+    await screen.findByTestId("goal-ready")
+    expect(screen.queryByTestId("goal-considered")).toBeNull()
+  })
+})

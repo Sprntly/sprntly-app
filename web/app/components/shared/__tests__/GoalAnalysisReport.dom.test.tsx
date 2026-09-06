@@ -191,3 +191,54 @@ describe("the document actions", () => {
     ).toBe(true)
   })
 })
+
+describe("a cut option is reopenable, not just readable", () => {
+  const CONSIDERED = [
+    { id: 1, label: "self-serve onboarding", reason: "only 2 supporting claims — an anecdote, not a finding", stopped_at_stage: "clustering", claim_ids: ["c1", "c2"] },
+    { id: 2, label: "pricing page redesign", reason: "every supporting claim comes from a single account", stopped_at_stage: "verification", claim_ids: ["c3"] },
+  ]
+  const withConsidered = { ...RUN, considered: CONSIDERED } as unknown as GoalRunDetail
+
+  it("offers nothing when the caller has nowhere to send a selection", () => {
+    // Undefined `onSelectOption` — the caller has no composer to hand the
+    // label to. The prose in the document above is still the complete
+    // account of what was cut; this layer just isn't reachable.
+    render(<GoalAnalysisReport run={withConsidered} />)
+    expect(screen.queryByTestId("goal-considered")).toBeNull()
+  })
+
+  it("offers nothing when nothing was cut", () => {
+    render(<GoalAnalysisReport run={RUN} onSelectOption={vi.fn()} />)
+    expect(screen.queryByTestId("goal-considered")).toBeNull()
+  })
+
+  it("lists every cut option as its own clickable object, closed by default", () => {
+    render(<GoalAnalysisReport run={withConsidered} onSelectOption={vi.fn()} />)
+    const details = screen.getByTestId("goal-considered") as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    const options = screen.getAllByTestId("goal-considered-option")
+    expect(options).toHaveLength(2)
+    expect(options[0].textContent).toContain("self-serve onboarding")
+    expect(options[1].textContent).toContain("pricing page redesign")
+  })
+
+  it("hands the exact label of the clicked option to the caller", () => {
+    const onSelectOption = vi.fn()
+    render(<GoalAnalysisReport run={withConsidered} onSelectOption={onSelectOption} />)
+    const options = screen.getAllByTestId("goal-considered-option")
+    fireEvent.click(options[1])
+    expect(onSelectOption).toHaveBeenCalledTimes(1)
+    expect(onSelectOption).toHaveBeenCalledWith("pricing page redesign")
+  })
+
+  it("does not restate the reason each was cut — that sentence lives once, in the document", () => {
+    // The additive layer names the option, not the ruling on it: the reason
+    // already appears, once, inside the sandboxed report `srcdoc`. Printing it
+    // a second time here is the exact class of drift this component's own
+    // header describes killing off.
+    render(<GoalAnalysisReport run={withConsidered} onSelectOption={vi.fn()} />)
+    const details = screen.getByTestId("goal-considered")
+    expect(details.textContent).not.toContain("only 2 supporting claims")
+    expect(details.textContent).not.toContain("single account")
+  })
+})

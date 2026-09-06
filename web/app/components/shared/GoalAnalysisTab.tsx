@@ -154,7 +154,13 @@ function _detailOf(e: unknown): string {
   return msg.trim()
 }
 
-export function GoalAnalysisTab({ runId }: { runId: number }) {
+export function GoalAnalysisTab({ runId, onSelectOption }: {
+  runId: number
+  /** Reopen a cut option as a chat question. Threaded straight through to
+   *  `GoalAnalysisReport` — this file owns the state machine, not what a
+   *  selection does; see that component for what the callback is for. */
+  onSelectOption?: (label: string) => void
+}) {
   const [run, setRun] = useState<GoalRunDetail | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Re-arms the poll: `load` is keyed on `runId`, which has not changed, so
@@ -575,6 +581,7 @@ export function GoalAnalysisTab({ runId }: { runId: number }) {
         onEdit={openDocument}
         onSaveCopy={saveCopy}
         busy={docBusy}
+        onSelectOption={onSelectOption}
       />
       {howItNarrowed}
     </div>

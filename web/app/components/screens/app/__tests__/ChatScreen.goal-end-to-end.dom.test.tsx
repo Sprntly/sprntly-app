@@ -633,6 +633,32 @@ describe("a goal typed in chat, answered in the thread, read in the panel", () =
       expect(screen.queryByRole("button", { name: /approve and run/i }))
         .toBeNull()
     }, 30_000)
+
+  it("reopens a cut option as a chat question, through the real navigation bridge",
+    async () => {
+      // The seam this test exists for: `GoalAnalysisReport`'s button is
+      // wired through `GoalAnalysisTab` and `ContentPanel` to the SAME
+      // hand-off the home starter chips and the skills grid already use
+      // (`pendingOndemandDraft`) — asserted here against the real
+      // `NavigationProvider`, not a mock of it, because a mock of
+      // `useNavigation` is exactly what would hide a broken wire between
+      // ContentPanel and whichever composer is mounted.
+      await walkTheFlow()
+      const body = panelBody() as HTMLElement
+      const option = within(body).getByTestId("goal-considered-option")
+      expect(option.textContent).toContain("Globex asked for SSO")
+      await act(async () => { fireEvent.click(option) })
+      // An active tab already exists (the one `walkTheFlow` typed into), so
+      // the hand-off opens a FRESH tab seeded with the question rather than
+      // overwriting the thread mid-run — same branch the skills grid exercises
+      // when a skill is invoked from an active conversation.
+      await waitFor(() => {
+        const boxes = screen.getAllByPlaceholderText(
+          /Ask Sprntly anything/) as HTMLTextAreaElement[]
+        const seeded = boxes.find((b) => b.value.includes("Globex asked for SSO"))
+        expect(seeded).toBeTruthy()
+      })
+    }, 30_000)
 })
 
 

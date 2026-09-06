@@ -347,7 +347,7 @@ export type ContentPanelProps = {
 export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
   const {
     contentPanelTab, openContentPanel, closeContentPanel, showToast,
-    setPendingDocumentQuote,
+    setPendingDocumentQuote, setPendingOndemandDraft,
   } = useNavigation()
   const guestSession = useGuestSession()
   const { content } = useContent()
@@ -782,7 +782,19 @@ export function ContentPanel({ prdPanelOverrides }: ContentPanelProps = {}) {
                   a second run in one thread swaps this prop, and the poll
                   timer, the confirm state and the user's half-typed definition
                   all belong to the run they were mounted for. */}
-              <GoalAnalysisTab key={content.goalRunId} runId={content.goalRunId} />
+              <GoalAnalysisTab
+                key={content.goalRunId}
+                runId={content.goalRunId}
+                // A cut option, reopened as a question. SAME HAND-OFF the home
+                // starter chips and the skills grid already use
+                // (`pendingOndemandDraft`, consumed once by whichever chat
+                // composer is mounted): fills the composer so the reader can
+                // edit or send, rather than asking a second time as a new
+                // Goal Analysis run — which `goal.resolve` cannot answer, since
+                // a theme label names no metric.
+                onSelectOption={(label) =>
+                  setPendingOndemandDraft(`What's the evidence for "${label}"?`)}
+              />
             </Suspense>
           )}
           {activeTab === "document" && content.documentId != null && (
