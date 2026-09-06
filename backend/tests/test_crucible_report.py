@@ -2698,3 +2698,89 @@ def test_nothing_cut_says_nothing_when_the_kept_list_overflowed():
         _run_with_progress(_ZERO_DROPPED), findings, [])
     assert "Nothing here was cut" not in html
     assert "we did not choose" in html
+
+
+# ─── Reach not narrowed to the goal's population ─────────────────────────────
+#
+# `_reach_not_narrowed_note` is a METHOD fact, read back from what
+# `pipeline.build_findings` actually did (`goal_population_filter_applied`),
+# not a claim about the evidence. See `app.crucible.routing.
+# POPULATION_SPECIFIC_CLASSES` for which goal classes this applies to and why.
+
+def _deep_finding(**over) -> dict:
+    """A finding that qualifies for a numbered option in `_answer_section` —
+    `option_numbers` requires a `deep_recommendation`, which the default
+    `_finding()` fixture does not carry."""
+    f = _finding(deep_recommendation={
+        "action": "Fix the export path", "because": "three accounts named it",
+        "changes": [], "open_questions": [], "what_would_falsify": "",
+        "comparison": "",
+    })
+    f.update(over)
+    return f
+
+
+def test_reach_not_narrowed_note_renders_on_a_retention_goal_left_unfiltered():
+    run = _run(prioritisation={
+        "plan": _plan(routing={"goal_class": "retention"}),
+    })
+    html = render_report_html(run, [_deep_finding()])
+    text = _plain(html)
+    assert "not narrowed to keeping the accounts you already have" in text
+    # RENDERED ON THE FIRST SCREEN — "What we recommend" — not only in an
+    # appendix three sections down.
+    assert text.index("not narrowed to") < text.index("Each one, in full")
+
+
+def test_reach_not_narrowed_note_is_silent_once_the_filter_is_applied():
+    """SELF-CORRECTING: the same plan, but this run's own pipeline call
+    reports it DID narrow reach to the goal's population — the day a real
+    caller passes `goal_accounts`, this sentence must stop on its own."""
+    run = _run(prioritisation={
+        "plan": _plan(routing={"goal_class": "retention"}),
+        "goal_population_filter_applied": True,
+    })
+    html = render_report_html(run, [_deep_finding()])
+    assert "not narrowed to" not in _plain(html)
+
+
+def test_reach_not_narrowed_note_is_silent_for_a_book_wide_goal():
+    """BOOK_WIDE sets nothing aside — there is no population to have failed
+    to narrow to, so this must render exactly as it did before this existed."""
+    run = _run(prioritisation={
+        "plan": _plan(routing={"goal_class": "book_wide"}),
+    })
+    html = render_report_html(run, [_deep_finding()])
+    assert "not narrowed to" not in _plain(html)
+
+
+def test_reach_not_narrowed_note_is_silent_with_no_routing_at_all():
+    """A plan built before `routing` existed, or one with no reconnaissance
+    pass — `plan.get("routing")` is absent, which must render exactly as it
+    did before this feature existed."""
+    html = render_report_html(_run(), [_deep_finding()])
+    assert "not narrowed to" not in _plain(html)
+
+
+def test_reach_not_narrowed_note_does_not_characterise_the_evidence():
+    """THE CLAIM THIS SENTENCE MUST NOT MAKE. It may say what the ranking did
+    (counted every account); it may never say the corpus cannot tell which
+    side of a sale an account is on — that is a claim about the DATA this
+    disclosure is not entitled to make.
+
+    Scoped to the SENTENCE ITSELF, via `_para_containing` — the document has
+    an unrelated "what this cannot tell you" section elsewhere, and a
+    whole-document scan would fail on that phrase for a reason that has
+    nothing to do with this disclosure."""
+    run = _run(prioritisation={
+        "plan": _plan(routing={"goal_class": "retention"}),
+    })
+    html = render_report_html(run, [_deep_finding()])
+    para = _para_containing(html, "not narrowed to").lower()
+    assert para, "the disclosure itself was not found"
+    for overclaim in ("cannot tell", "cannot confirm", "ambiguous",
+                      "prospect"):
+        assert overclaim not in para, (
+            f"{overclaim!r} found in the disclosure sentence — it must speak "
+            f"about the method, not about the evidence: {para!r}"
+        )

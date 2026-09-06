@@ -606,3 +606,34 @@ def test_a_counted_run_keeps_the_disclaimer_and_must():
         assert any(_CLAIMS_COUNT_SIZING.search(n) for n in out.notes), (
             f"weighting_unit={unit!r} lost the disclaimer: {out.notes}"
         )
+
+
+# ─── Population-specific classes ─────────────────────────────────────────────
+#
+# `POPULATION_SPECIFIC_CLASSES` is a closed, hand-argued set, not a derived
+# one — see its own comment for why each class is in or out. Pinned here so a
+# future entry added to `GOAL_CLASSES` does not silently join or miss this set
+# without anyone deciding it should.
+
+def test_population_specific_classes_are_exactly_retention_expansion_acquisition():
+    """RETENTION/EXPANSION are the customer side, ACQUISITION is the other —
+    the two directions `pipeline._REACH_SEGMENT`'s own comment names as the
+    reason `build_findings`'s `goal_accounts` argument exists."""
+    assert routing.POPULATION_SPECIFIC_CLASSES == frozenset({
+        routing.RETENTION, routing.EXPANSION, routing.ACQUISITION,
+    })
+
+
+def test_activation_and_efficiency_and_book_wide_are_excluded():
+    """ACTIVATION names a slice of the customer side ("a new account"), not
+    the customer/prospect split itself; EFFICIENCY names no account
+    population at all; BOOK_WIDE and UNCLASSIFIED must behave exactly as
+    before this set existed."""
+    excluded = {
+        routing.ACTIVATION, routing.EFFICIENCY,
+        routing.BOOK_WIDE, routing.UNCLASSIFIED,
+    }
+    assert excluded.isdisjoint(routing.POPULATION_SPECIFIC_CLASSES)
+    # And every excluded class is a real, still-reachable reading — this is a
+    # scoping decision, not a typo that happens to exclude them.
+    assert excluded <= set(routing.GOAL_CLASSES)

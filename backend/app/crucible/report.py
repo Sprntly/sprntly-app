@@ -2797,8 +2797,48 @@ def _rank_reason(first: dict, second: dict) -> str:
     )
 
 
+def _reach_not_narrowed_note(goal_class: str) -> str:
+    """"This ranking was never narrowed to the population your goal names" —
+    or empty, when that sentence would not be TRUE or not be RELEVANT.
+
+    A METHOD FACT, READ BACK FROM THE PIPELINE'S OWN ARGUMENT, NEVER ASSERTED
+    HERE. `pipeline.build_findings`'s `goal_accounts` parameter is the one
+    thing that could narrow a theme's reach to one side of a sale, and no
+    production caller passes it (`pipeline._REACH_SEGMENT`'s own comment says
+    so). `render_report_html` reads that back as
+    `goal_population_filter_applied` and only calls this when it is False, so
+    the sentence stops rendering itself the day a caller starts passing it —
+    no second place to remember to turn this off.
+
+    NAMES WHAT THE METHOD DID, NOT WHAT THE EVIDENCE IS. It says reach is
+    "counted across your whole book" — true of the arithmetic regardless of
+    what the corpus contains — and never says the corpus cannot tell one
+    side from the other, which is a claim about the DATA this sentence is not
+    entitled to make.
+
+    `goal_class` NOT IN `routing.POPULATION_SPECIFIC_CLASSES` RETURNS EMPTY.
+    A book-wide or unclassified goal has no population to narrow to, and
+    activation/efficiency name no population this evidence model can express
+    a narrower reach for either — see `POPULATION_SPECIFIC_CLASSES`'s own
+    comment for why each is excluded.
+    """
+    from app.crucible.routing import GOAL_CLASS_NOTE, POPULATION_SPECIFIC_CLASSES
+
+    if goal_class not in POPULATION_SPECIFIC_CLASSES:
+        return ""
+    note = GOAL_CLASS_NOTE.get(goal_class, "")
+    if not note:
+        return ""
+    return (
+        f"Reach here is counted across your whole book, not narrowed to "
+        f"{note}. A finding's count below may include accounts outside that "
+        f"population."
+    )
+
+
 def _answer_section(
     kept: list[dict], full_cap: int, one_topic: bool,
+    population_note: str = "",
 ) -> str:
     """The screen that answers the question, above everything else.
 
@@ -2824,6 +2864,13 @@ def _answer_section(
     produced, in the run's own frozen rank order (I10); the numbering is
     `data_gaps.option_numbers`, the same function the write-ups below use, so
     the screen and the cards cannot disagree about which is first.
+
+    `population_note` IS A METHOD FACT, NOT AN EVIDENCE JUDGEMENT — see
+    `render_report_html`'s own comment on where it comes from. Rendered here,
+    on the first screen, because it qualifies the very recommendation this
+    screen states rather than a footnote three sections down; empty on every
+    goal this does not apply to, which renders exactly as it did before this
+    parameter existed.
     """
     out = ["<h2>What we recommend</h2>"]
 
@@ -2860,6 +2907,9 @@ def _answer_section(
             f'<p class="deck">We think {_count_word(n, capital=False)} things '
             f'here are worth building, and one of them first.</p>'
         )
+
+    if population_note:
+        out.append(_p(_esc(population_note)))
 
     rows = "".join(
         "<tr>"
@@ -3591,6 +3641,18 @@ def render_report_html(
     relevance_gate_ran = bool(prioritisation.get("relevance_gate_ran"))
     relevance_judged_info = _as_dict(prioritisation.get("relevance_judged"))
 
+    # WHETHER REACH WAS EVER NARROWED TO THE GOAL'S OWN POPULATION. Read back
+    # from what `pipeline.build_findings` actually did on this run
+    # (`goal_population_filter_applied`, on `prioritisation` beside `plan`,
+    # never inside it — this is an EXECUTION fact, settled after the plan was
+    # already approved), never assumed. See `_reach_not_narrowed_note`.
+    population_note = (
+        "" if prioritisation.get("goal_population_filter_applied")
+        else _reach_not_narrowed_note(
+            str(_as_dict(plan.get("routing")).get("goal_class") or "")
+        )
+    )
+
     # THE ARGUMENT BEHIND THE ANSWER. Read straight off the run's own JSON —
     # computed once, upstream, by `recommend.build_synthesized_recommendation`
     # — and rendered by `_assemble` below immediately UNDER the screen that
@@ -3632,7 +3694,7 @@ def render_report_html(
         one_topic = options_are_one_topic(written)
         parts = [
             f"<h1>{_esc_clipped(goal, MAX_STATEMENT_CHARS) or 'Goal analysis'}</h1>",
-            _answer_section(kept, full_cap, one_topic),
+            _answer_section(kept, full_cap, one_topic, population_note),
             _why_this_section(synthesized_recommendation, written),
             _decision_section(plan, kept),
             _stat_strip(plan, findings, kept),

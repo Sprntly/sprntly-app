@@ -153,6 +153,19 @@ def test_the_goal_population_filter_excludes_accounts_outside_it():
     assert out.impacts[0].affected_population == 1.0
 
 
+def test_goal_population_filter_applied_is_read_off_the_argument():
+    """A REPORT-FACING DISCLOSURE READS THIS BACK
+    (`report._reach_not_narrowed_note`) rather than asserting it itself, so it
+    must be derived from what THIS CALL actually did — never a constant a
+    report author has to remember to flip the day someone starts passing
+    `goal_accounts` in production."""
+    claims = [claim("c1", days_ago=5, accounts=("Northwind",))]
+    assert run(claims).stats["goal_population_filter_applied"] is False
+    assert run(
+        claims, goal_accounts=frozenset({"Northwind"})
+    ).stats["goal_population_filter_applied"] is True
+
+
 def test_a_sized_finding_discloses_the_missing_value_per_account():
     """I8. Accounts-as-currency is a reach measure standing in for a value
     measure, and rendering it without that disclosure reads as a price."""

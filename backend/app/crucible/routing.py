@@ -86,6 +86,36 @@ GOAL_CLASS_NOTE: Mapping[str, str] = {
     UNCLASSIFIED: "something I could not place against one part of your book",
 }
 
+#: Goal classes whose population is one side of a sale — the ONE binary this
+#: engine's evidence model can even express (`claims._population`'s
+#: `customer_side` segment; see `pipeline._REACH_SEGMENT`). Read by the report
+#: to decide whether "reach was counted across your whole book, not narrowed
+#: to the population you asked about" is a true and relevant thing to say.
+#:
+#: RETENTION AND EXPANSION ARE THE CUSTOMER SIDE; ACQUISITION IS THE OTHER
+#: ONE. `pipeline._REACH_SEGMENT`'s own comment names exactly these two
+#: directions — "Dropping prospects is right for a retention question and
+#: wrong for an acquisition one" — as the two cases `build_findings`'
+#: `goal_accounts` argument exists to serve.
+#:
+#: ACTIVATION AND EFFICIENCY ARE DELIBERATELY ABSENT, and for a reason
+#: specific to each rather than a shared one. Activation's population is "a
+#: new account", i.e. a recent arrival on the CUSTOMER side — a slice of
+#: `customer_side`, not the customer/prospect split itself, and this engine
+#: has no "how new" segment to narrow reach to even in principle. Efficiency
+#: names no account population at all ("less effort or cost"). Saying "not
+#: narrowed to the population you asked about" about either would name a
+#: narrowing this evidence model cannot perform for that class, which is a
+#: stronger and false claim, not a weaker true one.
+#:
+#: BOOK_WIDE AND UNCLASSIFIED ARE ABSENT BECAUSE THEY MUST BEHAVE EXACTLY AS
+#: TODAY: a goal that sets nothing aside (`_SETS_NOTHING_ASIDE`, above) has no
+#: population to narrow reach to in the first place, so there is nothing here
+#: for it to disclose.
+POPULATION_SPECIFIC_CLASSES: frozenset[str] = frozenset({
+    RETENTION, EXPANSION, ACQUISITION,
+})
+
 #: The words that place a goal. Matched on WORD BOUNDARIES against the
 #: definition first and the goal text second — see `classify_goal`.
 #:
