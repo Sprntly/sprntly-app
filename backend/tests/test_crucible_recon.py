@@ -625,3 +625,176 @@ def test_no_company_name_leaves_every_count_exactly_as_it_was():
     empty = recon.signal_field_presence(
         signals, path=("properties", "account"), self_names=frozenset())
     assert plain.present == empty.present == 7711
+
+
+# ─── The per-account value map, and whether the run may weight by it ────────
+#
+# The map is a copy of the reader's contract rows and is never persisted; what
+# the plan carries is the VERDICT it produces. Both halves are tested here:
+# that the join is keyed the way the graph names accounts, and that the gate
+# says no on a corpus the book cannot reach.
+
+
+def _priced_signal(account: str, sid: str) -> dict:
+    return {"id": sid, "kind": "sentiment", "source_type": "customer_voice",
+            "content": "an assertion", "valid_at": "2026-08-01T12:00:00+00:00",
+            "properties": {"account": account}}
+
+
+def test_the_value_map_is_keyed_the_way_the_graph_names_accounts():
+    """The contracts sheet writes `Account B` and the graph writes whatever a
+    speaker said. Joining on the raw strings matches neither; one
+    normalisation used on both sides is the entire value of the join."""
+    from app.crucible.claims import account_key
+
+    book = recon.account_value_map([fx.contracts()])
+    assert book is not None
+    assert book.source == "08_sales_data:contracts"
+    assert book.field == "total_acv_usd"
+    assert book.key_field == "account"
+    assert book.values[account_key("account b")] == 546844
+    assert book.values[account_key("Account B Inc.")] == 546844
+    assert book.accounts == 8
+
+
+def test_two_spellings_in_the_contracts_file_are_added_together_and_named():
+    """Summing two rows into one account is the one operation here that can
+    silently overstate a customer, so the raw spellings are carried."""
+    rows = [{"account": a, "total_acv_usd": v} for a, v in (
+        ("Northwind", 100.0), ("Northwind Inc.", 25.0),
+        ("Contoso", 50.0), ("AdventureWorks", 75.0), ("Fabrikam", 10.0))]
+    book = recon.account_value_map(
+        [recon.make_table("08_sales_data:contracts", rows,
+                          columns=("account", "total_acv_usd"))])
+    from app.crucible.claims import account_key
+
+    assert book.values[account_key("Northwind")] == 125.0
+    assert book.merged == ("Northwind", "Northwind Inc.")
+
+
+def test_nothing_carrying_a_per_account_value_yields_no_map():
+    """The negative twin, and the normal case: no contracts, no map, and the
+    run stays counted."""
+    assert recon.account_value_map([fx.tickets()]) is None
+    assert recon.account_value_map([]) is None
+
+
+def test_a_corpus_the_book_can_price_clears_the_gate():
+    """Three of four named accounts are in the book. Deliberately not two of
+    four — a fixture sitting exactly on the bar is satisfied by a `>` rule and
+    a `>=` rule alike, and proves neither."""
+    signals = [_priced_signal(a, f"s{i}") for i, a in enumerate(
+        ("Account B", "Account C", "Account D", "Someone Else"))]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == 0.75
+    assert o.figures["threshold"] == recon.WEIGHTING_MIN_PRICEABLE_SHARE
+    assert o.figures["priced_accounts"] == 3
+    assert o.figures["named_accounts"] == 4
+    assert o.figures["book_accounts"] == 8
+    assert o.severity == "medium"
+    assert "weighted by the revenue behind them" in o.what
+
+
+def test_a_corpus_the_book_cannot_reach_is_counted_and_says_so():
+    """THE HONEST HALF, AND THE ONE THAT SHIPS FIRST. Measured on a real
+    tenant the join reaches a small fraction of the accounts named; the plan
+    has to say so rather than degrade to a count in silence."""
+    signals = [_priced_signal("Account B", "s0")]
+    signals += [_priced_signal(f"Stranger {i}", f"s{i + 1}") for i in range(24)]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == 0.04
+    assert o.severity == "high"
+    assert "counted, not weighted" in o.what
+    assert "4.0% of the accounts named in your evidence could be priced" in o.what
+
+
+def test_the_gate_divides_by_accounts_and_not_by_how_loud_they_are():
+    """THE DENOMINATOR, PINNED — and pinned on the case where the two answers
+    DISAGREE, because on any fixture where they agree this asserts nothing.
+
+    One priced account that talks twenty times, five unpriced accounts that
+    speak once each. By signal share the book covers 80% and the run would
+    WEIGH; by account share it covers 17% and the run COUNTS.
+
+    Signal share is loudness-weighted, and loudness is the exact variable this
+    feature exists to stop trusting — asking "may I stop ranking by mention
+    count?" and answering in mention counts is circular. It also fails in the
+    unsafe direction: contracted customers talk more than prospects, so the
+    signal view reads systematically higher and errs toward weighting a run
+    that should have counted. A false count is honest and disclosed; a false
+    weight is the invariant violation."""
+    signals = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    signals += [_priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    cov = recon.priceable_coverage(
+        signals, recon.account_value_map([fx.contracts()]).values)
+
+    assert cov.signal_share == 0.8, "the fixture must actually diverge"
+    assert round(cov.share, 4) == round(1 / 6, 4)
+    assert cov.share < recon.WEIGHTING_MIN_PRICEABLE_SHARE < cov.signal_share
+
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_share"] == cov.share
+    assert o.figures["priceable_signal_share"] == 0.8
+    assert "counted, not weighted" in o.what, (
+        "the loud priced account weighted a run that should have counted")
+
+
+def test_the_signal_counts_are_still_reported_just_not_divided_by():
+    """They are a true fact about the corpus and a reader wants them. Dropping
+    them would trade one silence for another."""
+    signals = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    signals += [_priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    o = _only([fx.contracts()], "priceable_coverage", signals=signals)
+    assert o.figures["priceable_signals"] == 20
+    assert o.figures["attributed_signals"] == 25
+    assert "20 of 25 attributed signals" in o.what
+    assert "not what the decision above divides by" in o.what
+
+
+def test_no_minimum_signal_floor_trims_the_long_tail():
+    """A floor would reintroduce loudness through the back door: dropping
+    one-signal accounts from the denominator quietly RAISES the share and
+    walks the gate back toward the measure it just stopped using."""
+    loud_only = [_priced_signal("Account B", f"s{i}") for i in range(20)]
+    with_tail = loud_only + [
+        _priced_signal(f"Stranger {i}", f"q{i}") for i in range(5)]
+    book = recon.account_value_map([fx.contracts()]).values
+    assert recon.priceable_coverage(loud_only, book).share == 1.0
+    assert recon.priceable_coverage(with_tail, book).share < 0.2, (
+        "a quiet unpriced account must count exactly as much as a loud one")
+
+
+def test_the_priceable_share_ignores_signals_that_name_nobody():
+    """The denominator is what NAMES an account, not the whole corpus — a
+    share taken over every row would be a statement about attribution, which
+    the attribution gate already makes."""
+    signals = [_priced_signal("Account B", "s0"),
+               {"id": "s1", "kind": "sentiment", "source_type": "customer_voice",
+                "content": "x", "valid_at": "2026-08-01T12:00:00+00:00",
+                "properties": {}}]
+    cov = recon.priceable_coverage(
+        signals, recon.account_value_map([fx.contracts()]).values)
+    assert cov.attributed_signals == 1
+    assert cov.share == 1.0
+
+
+def test_the_vendors_own_name_cannot_satisfy_the_priceable_gate():
+    """Same defect as the attribution gate, one join over: a contracts file
+    that lists the vendor would otherwise price the vendor's own rows."""
+    rows = [{"account": a, "total_acv_usd": v} for a, v in (
+        ("AdventureWorks", 900.0), ("Contoso", 50.0),
+        ("Fabrikam", 10.0), ("Northwind", 20.0))]
+    book = recon.account_value_map(
+        [recon.make_table("08_sales_data:contracts", rows,
+                          columns=("account", "total_acv_usd"))])
+    signals = [_priced_signal("AdventureWorks", f"s{i}") for i in range(9)]
+    signals.append(_priced_signal("Contoso", "s9"))
+    cov = recon.priceable_coverage(
+        signals, book.values, recon_self_keys("AdventureWorks"))
+    assert cov.attributed_signals == 1
+    assert cov.priced_names == ("contoso",)
+
+
+def test_the_gate_says_nothing_at_all_when_there_is_no_book():
+    assert "priceable_coverage" not in _kinds(
+        [fx.tickets()], signals=[_priced_signal("Account B", "s0")])

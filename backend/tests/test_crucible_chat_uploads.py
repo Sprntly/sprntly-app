@@ -592,3 +592,270 @@ def test_a_plan_built_before_this_existed_reads_back_as_nothing_unread():
     assert plan_mod.RunPlan(
         goal_text="g", definition_text="d", currency="accounts",
     ).to_json()["unread_uploads"] == []
+
+
+# ─── 6. The book survives the gate, and the run weighs by it ───────────────
+#
+# THE PLUMBING FAILURE THIS SECTION EXISTS TO CATCH. `/approve` is a second
+# request carrying a run id and nothing else, so a run that measured its unit
+# against an attached contracts file had no way to read that file again — the
+# plan would say "weighted" and the pipeline would receive an empty book. The
+# references are stored with the plan and RE-AUTHORISED here, because a key on
+# a row is a reference and a reference is not permission.
+
+
+def _account_signal(company_id: str, i: int, account: str) -> None:
+    from app.db.client import require_client
+
+    require_client().table("kg_signal").insert({
+        "id": f"sig-w{i:04d}", "enterprise_id": company_id, "kind": "finding",
+        "source_type": "customer_voice",
+        "content": f"{account} raised export latency again",
+        "properties": {"customer": account},
+        "provenance": {"doc": f"call-{i}"},
+        "valid_at": f"2026-0{1 + i % 6}-1{i % 9}T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+        "embedding": str([0.11, 0.22, 0.33, 0.44]),
+    }).execute()
+
+
+@pytest.fixture
+def weighted_ctx(monkeypatch, contracts_xlsx):
+    """A run whose evidence names only accounts the attached book prices."""
+    from tests import _tabular_recon_fixtures as fx
+    from tests.test_routes_crucible import _enable, _start
+    from tests._company_helpers import company_client
+
+    _, data, _rows = contracts_xlsx
+    ctx = company_client(monkeypatch)
+    _enable(ctx.company_id)
+    for i, (account, *_rest) in enumerate(fx.CONTRACT_ROWS[:6]):
+        _account_signal(ctx.company_id, i, account)
+
+    checked: list[str] = []
+
+    def _owns(*, workspace_id, key):
+        checked.append(key)
+        return True
+
+    monkeypatch.setattr(attachments_storage, "owns_key", _owns)
+    monkeypatch.setattr(
+        attachments_storage, "read_attachment",
+        lambda *, workspace_id, key: data)
+    ctx.checked = checked
+    ctx.start = lambda: _start(ctx, attachments=[
+        {"key": "chat-attachments/ws/contracts.xlsx",
+         "name": "08_sales_data.xlsx"}])
+    return ctx
+
+
+@pytest.fixture
+def crucible_db(isolated_settings):
+    from tests import _fake_supabase
+    from tests.test_routes_crucible import _DDL
+
+    _fake_supabase.get_fake_db().executescript(_DDL)
+    yield
+
+
+def _plan_of(ctx, run_id: int) -> dict:
+    return ctx.client.get(
+        f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+
+
+def test_the_gate_reports_the_unit_it_measured(crucible_db, weighted_ctx):
+    """Every account named in the evidence is in the book, so weighting is
+    available — and the plan still COUNTS, because nobody has said how this
+    business sells. Inferring B2B from the presence of a contracts file is the
+    guess this refuses to make."""
+    run_id = weighted_ctx.start().json()["id"]
+    plan = _plan_of(weighted_ctx, run_id)
+    assert plan["weighting_priceable_share"] == 1.0
+    assert plan["weighting_unit"] == "count"
+    assert "business model is not recorded" in plan["weighting_because"]
+    assert "business_model" in {q["id"] for q in plan["questions"]}
+
+
+def test_answering_the_question_at_the_gate_weighs_the_run(
+    crucible_db, weighted_ctx,
+):
+    """THE WHOLE PATH, END TO END: the file is read at plan time, its
+    references are stored, `/approve` re-authorises and re-reads them, the
+    verdict is settled from the STORED share plus the reader's answer, and the
+    findings come back carrying the contracted value of the accounts they
+    touch."""
+    from app.crucible.pipeline import ACCOUNT_VALUE_UNIT
+
+    run_id = weighted_ctx.start().json()["id"]
+    weighted_ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"answers": {"business_model":
+                          "Sales-assisted or enterprise (B2B)"}},
+    )
+    plan = _plan_of(weighted_ctx, run_id)
+    assert plan["weighting_unit"] == "value"
+    assert "ranked by the revenue behind them" in plan["weighting_because"]
+    # The key was checked AGAIN at approve, not trusted off the row.
+    assert weighted_ctx.checked.count(
+        "chat-attachments/ws/contracts.xlsx") >= 2
+
+    findings = weighted_ctx.client.get(
+        f"/v1/crucible/{run_id}").json()["findings"]
+    assert findings, "the fixture must produce a finding or this is vacuous"
+    money = [f["impact"]["native_units"].get(ACCOUNT_VALUE_UNIT)
+             for f in findings]
+    assert any(m for m in money), (
+        f"no finding carried the accounts' contracted value: {findings}")
+    assert all(f["impact"]["priced"] for f in findings if
+               f["impact"]["native_units"].get(ACCOUNT_VALUE_UNIT))
+
+
+def test_a_book_that_cannot_be_read_back_downgrades_to_counting_and_says_so(
+    crucible_db, weighted_ctx, monkeypatch,
+):
+    """A plan promising a weighting the run did not perform is the one defect
+    this whole path exists to prevent, so a file swept from storage between the
+    gate and the run must change the STORED plan the report renders from — not
+    just the arithmetic."""
+    run_id = weighted_ctx.start().json()["id"]
+    monkeypatch.setattr(
+        attachments_storage, "read_attachment",
+        lambda *, workspace_id, key: (_ for _ in ()).throw(
+            RuntimeError("object missing")))
+    weighted_ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"answers": {"business_model":
+                          "Sales-assisted or enterprise (B2B)"}},
+    )
+    plan = _plan_of(weighted_ctx, run_id)
+    assert plan["weighting_unit"] == "count"
+    assert "could not be read back" in plan["weighting_because"]
+
+
+def test_a_stored_key_from_another_workspace_is_not_read_back(crucible_db):
+    """The re-check is the whole reason the references may be stored at all."""
+    import app.routes.crucible as routes
+
+    row = {"prioritisation": {"uploads": [
+        ["chat-attachments/ws-1/mine.xlsx", "mine.xlsx"],
+        ["chat-attachments/ws-2/theirs.xlsx", "theirs.xlsx"],
+        ["chat-attachments/ws-1/../ws-2/sneaky.xlsx", "sneaky.xlsx"],
+        "not-a-pair",
+    ]}}
+    assert routes._stored_uploads(row, "ws-1") == (
+        ("chat-attachments/ws-1/mine.xlsx", "mine.xlsx"),)
+
+
+def test_the_stored_method_states_the_unit_the_run_actually_used(
+    crucible_db, weighted_ctx,
+):
+    """THE OVERCLAIM POINTING THE OTHER WAY, and the one that would have
+    shipped. The plan is composed BEFORE the reader answers how they sell, so
+    it says "count in accounts"; the answer then flips the run to weighted and
+    the method section still denies it. The arithmetic would be right and the
+    audit trail wrong, which is the harder version of the same defect."""
+    run_id = weighted_ctx.start().json()["id"]
+    before = _plan_of(weighted_ctx, run_id)
+    assert "weight_by_account_value" not in {s["primitive"]
+                                             for s in before["steps"]}
+
+    weighted_ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"answers": {"business_model":
+                          "Sales-assisted or enterprise (B2B)"}},
+    )
+    after = _plan_of(weighted_ctx, run_id)
+    named = [s["primitive"] for s in after["steps"]]
+    assert "weight_by_account_value" in named
+    assert "set_counting_unit" not in named, (
+        "the plan now says two different things about one unit")
+    # Replaced IN PLACE, so the composed ordering the reader read survives.
+    assert len(after["steps"]) == len(before["steps"])
+    assert [s["primitive"] for s in before["steps"]].index("set_counting_unit") \
+        == named.index("weight_by_account_value")
+
+
+def test_an_unchanged_verdict_rewrites_no_step_at_all(crucible_db,
+                                                      weighted_ctx):
+    """A model call is a draw, not a lookup, and the reader said yes to one
+    sample. Skipping the question leaves the unit where it was, so the method
+    they approved must come back byte-identical."""
+    run_id = weighted_ctx.start().json()["id"]
+    before = _plan_of(weighted_ctx, run_id)
+    weighted_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = _plan_of(weighted_ctx, run_id)
+    assert after["steps"] == before["steps"]
+    assert after["weighting_unit"] == before["weighting_unit"] == "count"
+
+
+def _record_business_type(company_id: str, value: str) -> None:
+    from app.db.client import require_client
+
+    require_client().table("companies").update(
+        {"business_type": value}).eq("id", company_id).execute()
+
+
+def test_approving_does_not_insert_a_question_the_reader_never_saw(
+    crucible_db, weighted_ctx,
+):
+    """THE GATE'S QUESTION SET, REPRODUCED — not a fresh one derived with
+    different inputs.
+
+    `questions_for` suppresses the business-model question when the model is
+    already recorded. The approve path re-derives the set from the stored
+    observations, and re-deriving it WITHOUT the stored business model puts
+    that question back: one the reader was never shown, whose "if you skip
+    this, themes are counted, not weighted" then sits in the stored plan
+    beside `weighting_unit = "value"`. The report renders from that plan, so
+    the document would contradict itself about the single field this whole
+    feature exists to get right."""
+    _record_business_type(weighted_ctx.company_id, "B2B SaaS")
+    run_id = weighted_ctx.start().json()["id"]
+
+    before = _plan_of(weighted_ctx, run_id)
+    assert before["weighting_unit"] == "value", (
+        "fixture must reach a weighted verdict or this proves nothing")
+    assert "business_model" not in {q["id"] for q in before["questions"]}, (
+        "the gate must not ask when the model is recorded")
+
+    weighted_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = _plan_of(weighted_ctx, run_id)
+    assert "business_model" not in {q["id"] for q in after["questions"]}, (
+        "approve inserted a question the reader never saw")
+    assert after["weighting_unit"] == "value"
+
+
+def test_a_question_that_was_asked_and_answered_survives_approve(
+    crucible_db, weighted_ctx,
+):
+    """The other direction. Reproducing the gate's set means KEEPING the
+    question when it was genuinely asked — dropping it would lose the record
+    of what the reader was shown and answered."""
+    run_id = weighted_ctx.start().json()["id"]
+    before = _plan_of(weighted_ctx, run_id)
+    assert "business_model" in {q["id"] for q in before["questions"]}
+
+    weighted_ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"answers": {"business_model":
+                          "Sales-assisted or enterprise (B2B)"}},
+    )
+    after = _plan_of(weighted_ctx, run_id)
+    assert "business_model" in {q["id"] for q in after["questions"]}
+    assert after["weighting_unit"] == "value"
+
+
+def test_the_approved_question_set_is_the_one_the_gate_showed(
+    crucible_db, weighted_ctx,
+):
+    """The general form, so this cannot regress through a different route:
+    approve re-derives, and what it re-derives must equal what was on screen.
+    Ranked truncation means an inserted question does not merely add a row —
+    it can push a derived one off the end."""
+    _record_business_type(weighted_ctx.company_id, "B2B SaaS")
+    run_id = weighted_ctx.start().json()["id"]
+    before = [q["id"] for q in _plan_of(weighted_ctx, run_id)["questions"]]
+    weighted_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    after = [q["id"] for q in _plan_of(weighted_ctx, run_id)["questions"]]
+    assert after == before, f"gate showed {before}, approve stored {after}"

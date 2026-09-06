@@ -366,13 +366,22 @@ _PRIMITIVES: tuple[Primitive, ...] = (
         description="Weight a theme by the revenue of the accounts it touches, "
                     "instead of counting how many raised it.",
         params=(),
-        # DECLARED, AND THIS ONE IS THE POINT OF THE STATUS FIELD. It is what a
-        # reader assumes is happening when a plan says a theme is "big", and
-        # nothing performs it: `score_impact` counts accounts. On a corpus
-        # where almost nothing names an account it could not run even if it
-        # existed, which is what `account_attribution_gap` says out loud —
-        # instead of the run degrading to a count in silence.
-        status="declared",
+        # IMPLEMENTED, AND CONDITIONAL — WHICH IS A DIFFERENT THING FROM
+        # IMPLEMENTED. `pipeline.build_findings` performs this, and only on a
+        # run whose stored verdict says `value`. `status` alone cannot carry
+        # that: the moment it flipped, this entered the catalogue the model
+        # composes from on EVERY run, and a counted run's plan would claim it
+        # weights while it counts — the exact overclaim the status field
+        # exists to make impossible, one release later.
+        #
+        # So the condition is enforced rather than described. `catalogue` and
+        # `validate_steps` both take `weighting_enabled`, and both default it
+        # to False, so a caller that has not thought about the verdict gets
+        # the safe answer. `requires_sources` is NOT the mechanism: it is
+        # declared on this class and read nowhere in the backend, so relying
+        # on it would be a second field that describes and does not perform.
+        status="implemented",
+        implemented_by="app.crucible.pipeline.build_findings",
     ),
     Primitive(
         id="weight_by_speaker_authority",
@@ -591,7 +600,12 @@ def by_group(group: str, *, implemented_only: bool = True) -> tuple[Primitive, .
     )
 
 
-def catalogue(*, implemented_only: bool = True) -> str:
+def catalogue(*, implemented_only: bool = True,
+              #: Whether this run's stored verdict is `value`. DEFAULT FALSE:
+              #: a caller that has not read the verdict must not be handed an
+              #: operation the run will not perform, and a model shown an
+              #: operation writes a step for it.
+              weighting_enabled: bool = False) -> str:
     """The vocabulary, as the text the planner shows a model.
 
     GENERATED, NEVER HAND-MAINTAINED. A prompt listing the primitives by hand
@@ -601,7 +615,10 @@ def catalogue(*, implemented_only: bool = True) -> str:
     """
     lines: list[str] = []
     for group in GROUPS:
-        entries = by_group(group, implemented_only=implemented_only)
+        entries = [
+            p for p in by_group(group, implemented_only=implemented_only)
+            if weighting_enabled or p.id not in WEIGHTING_GATED
+        ]
         if not entries:
             continue
         lines.append(f"[{group}]")
@@ -616,6 +633,15 @@ def catalogue(*, implemented_only: bool = True) -> str:
 
 
 # ── VALIDATION ──────────────────────────────────────────────────────────────
+
+
+#: Primitives a plan may name only when the run's verdict permits them.
+#:
+#: ONE ENTRY, AND IT IS NOT A GENERAL MECHANISM ON PURPOSE. A second gated
+#: primitive would need its own condition, and a registry of conditions is a
+#: place for a condition to be declared and never checked — which is precisely
+#: what `requires_sources` already is.
+WEIGHTING_GATED: frozenset[str] = frozenset({"weight_by_account_value"})
 
 
 @dataclass(frozen=True)
@@ -636,6 +662,9 @@ def validate_steps(
     *,
     available_sources: Iterable[str] = (),
     implemented_only: bool = True,
+    #: Whether this run's stored verdict is `value`. DEFAULT FALSE, for the
+    #: same reason `catalogue`'s is — see `WEIGHTING_GATED`.
+    weighting_enabled: bool = False,
 ) -> tuple[StepProblem, ...]:
     """Can every one of these steps actually be run against THIS run?
 
@@ -671,6 +700,20 @@ def validate_steps(
             problems.append(StepProblem(
                 i, pid,
                 "is declared but not implemented, so a plan must not name it",
+            ))
+            continue
+        if pid in WEIGHTING_GATED and not weighting_enabled:
+            # THE FOURTH QUESTION, AND THE ONE THE OTHER THREE CANNOT ASK. A
+            # step can name a real operation, with valid parameters, over
+            # sources that are genuinely present, and still be a lie — because
+            # THIS run is counting. A plan that says it weighs while the engine
+            # counts is the defect the status field was introduced to remove,
+            # and flipping a primitive to `implemented` without this check
+            # reintroduces it on every counted run at once.
+            problems.append(StepProblem(
+                i, pid,
+                "weighs by account value, and this run's approved unit is a "
+                "count of accounts, so a plan must not name it",
             ))
             continue
 

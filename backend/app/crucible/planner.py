@@ -365,6 +365,13 @@ def verify(
     #: later — describing work it said it would not do, which is the mirror
     #: image of the failure this whole stage exists to remove.
     set_aside_observations: Sequence[str] = (),
+    #: THE RUN'S UNIT, as `plan.weighting_verdict` settled it — `value` or
+    #: `count`, empty on a caller built before the verdict existed. NARRATED
+    #: HERE, NEVER DECIDED HERE: a second place that decides whether a run
+    #: weights is a second place that can disagree with the plan the reader
+    #: approved.
+    weighting_unit: str = "",
+    weighting_because: str = "",
 ) -> tuple[list[PlanStep], list[str]]:
     """Keep the steps that survive both gates; say why the others did not.
 
@@ -382,6 +389,7 @@ def verify(
 
     problems = prim.validate_steps(
         [s.to_json() for s in steps], available_sources=available_sources,
+        weighting_enabled=(weighting_unit == "value"),
     )
     bad_indexes = {p.index for p in problems}
     for p in problems:
@@ -579,6 +587,95 @@ def _plain(primitive: str, what: str, why: str,
     )
 
 
+#: The two primitives that can STATE THE RUN'S UNIT. A stored plan carrying
+#: either of them from a reconnaissance observation is describing a decision
+#: that may still change at the gate, so `settle_unit_step` replaces it rather
+#: than leaving two sentences about one fact.
+UNIT_PRIMITIVES: frozenset[str] = frozenset(
+    {"set_counting_unit", "weight_by_account_value"})
+
+
+def unit_step(
+    *, observations: Sequence[Observation], currency: str,
+    weighting_unit: str, weighting_because: str = "",
+) -> Optional[PlanStep]:
+    """The one step that says what a size in this document MEANS.
+
+    DETERMINISTIC PATH ONLY, AND THAT IS THE ENFORCEMENT. The model never
+    writes this: it is emitted here from the run's stored verdict, so the
+    sentence a reader approves and the unit `pipeline.build_findings` is handed
+    are the same fact rather than two descriptions that can drift.
+    `weight_by_account_value` is withheld from the catalogue and rejected by
+    `validate_steps` on a counted run, so the model cannot write it either.
+
+    `None` when the reconnaissance pass never reached the question — no book,
+    no join to measure — which is when the older `unit_value_derivable` step
+    still speaks.
+    """
+    if not observations:
+        return None
+    o = observations[0]
+    priced = o.figures.get("priced_accounts", 0.0)
+    named = o.figures.get("named_accounts", 0.0)
+    if weighting_unit == "value":
+        return _obs_step(
+            "weight_by_account_value", o,
+            "Weigh each theme by the revenue behind the accounts it touches",
+            (weighting_because or "") + (
+                f" A theme's size here is the contracted value of the accounts "
+                f"it touches, ranked against the other themes' — not how many "
+                f"accounts raised it. {priced:,.0f} of the {named:,.0f} "
+                f"accounts named in your evidence carry a contract value; a "
+                f"theme reaching only unpriced accounts is listed separately "
+                f"and ranked by accounts touched, because a size we could not "
+                f"measure is not a size of zero."
+            ),
+            params={},
+        )
+    return _obs_step(
+        "set_counting_unit", o,
+        "Count in accounts, and say why this is not weighted by revenue",
+        (weighting_because or "") + (
+            f" {priced:,.0f} of the {named:,.0f} accounts named in your "
+            f"evidence carry a contract value. A theme's size below is the "
+            f"number of accounts it touches, never money."
+        ),
+        params={"unit": currency},
+    )
+
+
+def settle_unit_step(
+    steps: Sequence[Mapping[str, Any]], replacement: Optional[PlanStep],
+) -> list[dict]:
+    """Put the SETTLED unit sentence into an already-stored method.
+
+    THE PLAN IS WRITTEN BEFORE THE READER ANSWERS, AND THE ANSWER CAN CHANGE
+    THE UNIT. The gate asks how a business sells when nothing recorded it, so a
+    plan composed while the answer was unknown says "count in accounts" — and
+    if the reader then says "sales-assisted", the run weighs while its own
+    method section denies it. That is the same overclaim as promising a
+    weighting that never happens, pointing the other way, and it is worse for
+    being invisible: the arithmetic is right and the audit trail is wrong.
+
+    Replaces IN PLACE, keeping the step's position and number, so the composed
+    ordering the reader read is preserved. Appended only if the stored method
+    never named a unit at all.
+    """
+    out = [dict(s) for s in steps if isinstance(s, Mapping)]
+    if replacement is None:
+        return out
+    new = replacement.to_json()
+    for i, step in enumerate(out):
+        if str(step.get("primitive") or "") in UNIT_PRIMITIVES:
+            new["n"] = step.get("n", 0)
+            new["part"] = step.get("part") or new["part"]
+            out[i] = new
+            return out
+    new["n"] = max((int(s.get("n") or 0) for s in out), default=0) + 1
+    out.append(new)
+    return out
+
+
 def minimal_plan(
     *,
     goal_text: str,
@@ -586,12 +683,20 @@ def minimal_plan(
     report: Optional[ReconReport] = None,
     source_types: Sequence[str] = (),
     goal_class: str = "",
+    #: THE RUN'S UNIT, as `plan.weighting_verdict` settled it — `value` or
+    #: `count`, empty on a caller built before the verdict existed. NARRATED
+    #: HERE, NEVER DECIDED HERE: a second place that decides whether a run
+    #: weights is a second place that can disagree with the plan the reader
+    #: approved.
+    weighting_unit: str = "",
+    weighting_because: str = "",
 ) -> list[PlanStep]:
     """`compose_deterministic`, steps only. Kept for callers that do not
     render what was set aside."""
     return compose_deterministic(
         goal_text=goal_text, currency=currency, report=report,
         source_types=source_types, goal_class=goal_class,
+        weighting_unit=weighting_unit, weighting_because=weighting_because,
     )[0]
 
 
@@ -609,6 +714,13 @@ def compose_deterministic(
     #: run that quietly stopped looking, so the absence of a reading must
     #: never narrow anything.
     goal_class: str = "",
+    #: THE RUN'S UNIT, as `plan.weighting_verdict` settled it — `value` or
+    #: `count`, empty on a caller built before the verdict existed. NARRATED
+    #: HERE, NEVER DECIDED HERE: a second place that decides whether a run
+    #: weights is a second place that can disagree with the plan the reader
+    #: approved.
+    weighting_unit: str = "",
+    weighting_because: str = "",
 ) -> tuple[list[PlanStep], tuple[Any, ...]]:
     """The plan the engine can write without a model at all, PLUS the steps it
     deliberately did not write for this goal.
@@ -743,8 +855,16 @@ def compose_deterministic(
             f"is what it is before you act on it.",
             params={},
         ))
+    priceable = report.of_kind("priceable_coverage")
+    unit = unit_step(
+        observations=priceable, currency=currency,
+        weighting_unit=weighting_unit, weighting_because=weighting_because,
+    )
+    if unit is not None:
+        steps.append(unit)
+
     unit_obs = report.of_kind("unit_value_derivable")
-    if unit_obs:
+    if unit_obs and not priceable:
         o = unit_obs[0]
         # READ AND REPORTED, NOT APPLIED — AND THE STEP MUST SAY BOTH.
         # This step used to be titled "price an account from your own
@@ -777,7 +897,7 @@ def compose_deterministic(
             f"it touches, never money.",
             params={"unit": currency},
         ))
-    else:
+    elif not priceable:
         steps.append(_plain(
             "set_counting_unit",
             "Fix the unit every size is stated in",
@@ -1148,6 +1268,10 @@ def _prompt(
     #: `_SYSTEM` that forbids changing either.
     routing: Any = None,
     set_aside: Sequence[Any] = (),
+    #: The run's unit. Decides which operations the catalogue below offers —
+    #: a model handed an operation writes a step for it, so withholding it is
+    #: a stronger instruction than telling the model not to use it.
+    weighting_unit: str = "",
 ) -> str:
     """The material the model composes from.
 
@@ -1210,7 +1334,8 @@ def _prompt(
         lines += ["", routed]
     lines += [
         "", "PARTS, in order: " + " | ".join(PARTS),
-        "", "OPERATIONS YOU MAY NAME:", prim.catalogue(),
+        "", "OPERATIONS YOU MAY NAME:",
+        prim.catalogue(weighting_enabled=(weighting_unit == "value")),
         "",
         "Return one step per operation you choose. Put the observation ids "
         "you drew a number from in that step's `observations`. Steps whose "
@@ -1321,6 +1446,10 @@ def build_steps(
     #: defaults that reproduce the pre-routing plan exactly.
     routing: Any = None,
     set_aside: Sequence[Any] = (),
+    #: THE RUN'S UNIT — see `compose_deterministic`. Threaded so both the
+    #: fallback plan and the validation gate read the same verdict.
+    weighting_unit: str = "",
+    weighting_because: str = "",
 ) -> tuple[PlanStep, ...]:
     """The plan for this run: drawn once, validated, and never re-sampled.
 
@@ -1339,6 +1468,7 @@ def build_steps(
     fallback = tuple(minimal_plan(
         goal_text=goal_text, currency=currency, report=report,
         source_types=source_types, goal_class=goal_class,
+        weighting_unit=weighting_unit, weighting_because=weighting_because,
     ))
     if _offline():
         return fallback
@@ -1362,6 +1492,7 @@ def build_steps(
         goal_text=goal_text, definition_text=definition_text,
         currency=currency, report=report, source_types=source_types,
         sources=sources, routing=routing, set_aside=set_aside,
+        weighting_unit=weighting_unit,
     )
     for attempt in range(MAX_REGENERATIONS + 1):
         try:
@@ -1394,6 +1525,7 @@ def build_steps(
             inventory=report.inventory_figures(),
             set_aside_observations=[
                 getattr(sa, "observation", "") for sa in set_aside],
+            weighting_unit=weighting_unit,
         )
         if dropped:
             logger.warning("crucible_plan_steps_dropped attempt=%s dropped=%s",

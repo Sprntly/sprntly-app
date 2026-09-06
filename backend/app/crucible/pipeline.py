@@ -25,7 +25,7 @@ from bisect import bisect_right
 from collections import defaultdict
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
-from typing import Iterable, NamedTuple, Optional, Sequence
+from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
 
 from app.crucible.figure_class import RANGE_CLASS, SUMMABLE_CLASS
 from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
@@ -133,6 +133,32 @@ LIST_PRICE_MIN_UNIT = "commercial_list_price_min"
 LIST_PRICE_MAX_UNIT = "commercial_list_price_max"
 LIST_PRICE_DISTINCT_UNIT = "commercial_list_price_distinct"
 LIST_PRICE_ACCOUNTS_UNIT = "commercial_list_price_accounts"
+
+#: THE THIRD RANKED POPULATION: contracted revenue behind the accounts a theme
+#: touches. Written only on a run whose unit is value, and read as its own
+#: `_rank_fractions` population exactly as `COMMITTED_USD_UNIT` is.
+#:
+#: NOT `affected_population`, AND NOT `value_per_unit`. Folding it into
+#: `affected_population` would put dollars into `_size_ranks`' reach population
+#: beside account counts and destroy the currency separation the ordinal design
+#: exists for. `value_per_unit` is worse: `score_impact` computes
+#: `affected_population * movable_gap * value_per_unit`, `_rank_fractions`
+#: sorts on rank position WITHIN a population, and a rank is invariant under
+#: any strictly monotonic transform — multiplying every finding by one price
+#: provably cannot move a single position. A uniform scalar is a no-op with a
+#: currency symbol on it.
+ACCOUNT_VALUE_UNIT = "weighted_account_value_usd"
+#: How many of a finding's accounts that sum actually covers, and how many it
+#: does not. BOTH, because the sum alone is not interpretable: "$2.9m across 18
+#: accounts" and "$2.9m across 2 of 18" are different claims and only one of
+#: them supports the ranking it produces.
+PRICED_ACCOUNTS_UNIT = "priced_accounts"
+UNPRICED_ACCOUNTS_UNIT = "unpriced_accounts"
+
+#: How many unpriced account names the disclosure spells out before it counts
+#: the rest. Every one of them is NAMED somewhere, but a basis line carrying
+#: forty names is not read by anyone.
+MAX_NAMED_UNPRICED = 6
 
 #: How many DISTINCT accounts must be quoted the identical figure before it
 #: is treated as a rate card rather than a coincidence.
@@ -509,6 +535,7 @@ def _rank_fractions(values: Sequence[float]) -> dict[float, float]:
 
 def _size_ranks(
     findings: Sequence[Finding], provisional: Sequence[Impact],
+    *, weighted: bool = False,
 ) -> list[Optional[float]]:
     """The one cross-finding comparison in this pipeline, and the reason it
     lives HERE rather than inside `score_impact`.
@@ -544,32 +571,59 @@ def _size_ranks(
     inputs are compared, the answer is written into `ImpactInputs`, and only
     then is anything scored. Ordering afterwards reads the frozen `Impact` and
     mutates nothing, exactly as before.
+
+    ── ON A WEIGHTED RUN, VALUE REPLACES REACH. IT DOES NOT JOIN IT. ─────────
+
+    `max(candidates)` is right for two populations that measure different
+    KINDS of evidence: carrying a quoted figure as well as a reach should be
+    able to lift a finding and never demote one. It is exactly wrong for value
+    against reach, because those two measure the SAME accounts in two units.
+    Left in the candidate list, a forty-account theme worth less money still
+    wins on its reach rank and the whole change becomes a no-op wearing a
+    third hat — "three mentions from large accounts beat forty from small
+    ones" is precisely the ordering `max` refuses to produce.
+
+    So on a weighted run a PRICED finding's candidates are its committed-usd
+    rank and its value rank, and its reach rank is excluded. An UNPRICED
+    finding keeps the counted-run rule untouched — committed usd against reach
+    — because it is not competing with the priced ones at all: it is in the
+    second list, which is ranked by accounts touched and labelled as such.
+    Its rank is computed here rather than left `None` so that list has a real
+    order instead of every member sitting at the sentinel.
     """
     dollar_values: list[float] = []
     reach_values: list[float] = []
-    per_finding: list[tuple[Optional[float], Optional[float]]] = []
+    value_values: list[float] = []
+    per_finding: list[tuple[Optional[float], Optional[float], Optional[float]]] = []
     for finding, impact in zip(findings, provisional):
-        usd = finding.impact_inputs.native_units.get(COMMITTED_USD_UNIT)
+        units = finding.impact_inputs.native_units
+        usd = units.get(COMMITTED_USD_UNIT)
         usd = float(usd) if isinstance(usd, (int, float)) else None
+        money = units.get(ACCOUNT_VALUE_UNIT) if weighted else None
+        money = float(money) if isinstance(money, (int, float)) else None
         reach = impact.value
         if usd is not None:
             dollar_values.append(usd)
         if reach is not None:
             reach_values.append(reach)
-        per_finding.append((usd, reach))
+        if money is not None:
+            value_values.append(money)
+        per_finding.append((usd, reach, money))
 
     dollar_ranks = _rank_fractions(dollar_values)
     reach_ranks = _rank_fractions(reach_values)
+    value_ranks = _rank_fractions(value_values)
 
     ranks: list[Optional[float]] = []
-    for usd, reach in per_finding:
-        candidates = [
-            rank for rank in (
-                dollar_ranks.get(usd) if usd is not None else None,
-                reach_ranks.get(reach) if reach is not None else None,
-            )
-            if rank is not None
-        ]
+    for usd, reach, money in per_finding:
+        if money is not None:
+            # PRICED, ON A WEIGHTED RUN. Reach is deliberately absent.
+            against = (dollar_ranks.get(usd) if usd is not None else None,
+                       value_ranks.get(money))
+        else:
+            against = (dollar_ranks.get(usd) if usd is not None else None,
+                       reach_ranks.get(reach) if reach is not None else None)
+        candidates = [rank for rank in against if rank is not None]
         ranks.append(max(candidates) if candidates else None)
     return ranks
 
@@ -639,6 +693,19 @@ class PipelineResult:
     #: prevent — but a reader given 168 equally-weighted options has been handed
     #: the corpus back, not a decision aid.
     deep_count: int = 0
+    #: WHICH LIST EACH FINDING IS IN, aligned with `findings`.
+    #:
+    #: A weighted run produces two labelled lists — "ranked by the revenue
+    #: behind them" and "could not be priced; ranked by accounts touched" —
+    #: and `findings` carries both, list one first. Without this flag the
+    #: second list is invisible: `_rank` sorts an unranked finding behind
+    #: every ranked one, so partial coverage would silently sink every
+    #: unpriced finding to the bottom of ONE list with no label on it, which
+    #: is the unlabelled-column failure this engine exists to refuse.
+    #:
+    #: All-True on a counted run, which is what every caller written before
+    #: this existed reads back as: one list, ranked the way it always was.
+    priced: tuple[bool, ...] = ()
 
 
 def _cluster(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
@@ -897,6 +964,19 @@ def _refute(
     return None
 
 
+def _named_unpriced(names: Sequence[str]) -> str:
+    """The accounts a sum could not reach, spelled out.
+
+    NAMED RATHER THAN COUNTED. "18 of 42 accounts priced" tells a reader the
+    number is partial and nothing about whether the gap matters; the names tell
+    them whether their three largest customers are the ones missing, which is
+    the only version of this disclosure they can act on.
+    """
+    head = list(names[:MAX_NAMED_UNPRICED])
+    rest = len(names) - len(head)
+    return ", ".join(head) + (f" and {rest} more" if rest > 0 else "")
+
+
 def build_findings(
     claims: Iterable[Claim],
     *,
@@ -906,6 +986,15 @@ def build_findings(
     solution_evidence_absent: bool = True,
     dates_are_ingest_clock: bool = False,
     deep_cap: int = DEFAULT_DEEP_CAP,
+    #: `account_key -> annual value`, from the reader's own contracts. See
+    #: `recon.account_value_map`. Run-scoped and never persisted.
+    value_map: Optional[Mapping[str, float]] = None,
+    #: THE RUN'S UNIT, DECIDED AT PLAN TIME AND PASSED IN. Never derived here
+    #: from whether `value_map` happens to be non-empty: the verdict is what
+    #: the reader approved at the gate, and a run that re-decided it from
+    #: whatever the corpus looks like at execute could weight a run the reader
+    #: approved as counted.
+    weighted: bool = False,
 ) -> PipelineResult:
     """The whole deterministic middle of the engine.
 
@@ -914,6 +1003,12 @@ def build_findings(
     combined confidence formula would band every finding `low` regardless of
     its evidence (see `MAX_SCORE_WITHOUT_LEVER_EVIDENCE`). Defaulting the other
     way would render a number that carries no information.
+
+    `weighted=False` IS A HARD OFF SWITCH, AND IT IS TESTED AS ONE.
+    `build_findings(claims, value_map=M, weighted=False)` returns exactly what
+    `build_findings(claims)` returns — a pure-function equality that cannot
+    flake, and the only proof that the gate actually gates. Every use of
+    `value_map` below is behind `weighted`.
     """
     claims = list(claims)
     # CORPUS-WIDE, BEFORE CLUSTERING. A rate card quoted to sixteen accounts
@@ -1014,12 +1109,69 @@ def build_findings(
                      "evidence does not support", "rendering", ids))
             continue
 
+        # ── WHAT THE ACCOUNTS THIS THEME TOUCHES ARE ACTUALLY WORTH. ───
+        #
+        # Scoped to `accounts`, the goal-intersected set, so the population
+        # filter reaches the money exactly as it reaches the count.
+        #
+        # A PARTIAL IS DISCLOSED, NOT WITHHELD. The alternative rule — value
+        # is `None` unless most of a finding's accounts are priced — is
+        # NON-MONOTONE IN THE EVIDENCE: one new claim from an unpriced
+        # account would REMOVE a finding's value, so more evidence about the
+        # same theme makes the engine say less about it. `_refute` fought
+        # exactly that shape and lost the count-based gates over it. So the
+        # sum is taken over the priced accounts and the unpriced ones are
+        # NAMED beside it; monotonicity plus disclosure beats silence.
+        #
+        # ZERO PRICED ACCOUNTS IS STILL `None`, and that is not a partial of
+        # zero — it is the second list. "We could not price this" and "this
+        # is worth nothing" lead to opposite decisions (I3).
+        value_sum: Optional[float] = None
+        priced_names: tuple[str, ...] = ()
+        unpriced_names: tuple[str, ...] = ()
+        if weighted and value_map and accounts:
+            from app.crucible.claims import account_key
+
+            priced_names = tuple(a for a in accounts if account_key(a) in value_map)
+            unpriced_names = tuple(
+                a for a in accounts if account_key(a) not in value_map)
+            if priced_names:
+                value_sum = float(sum(
+                    value_map[account_key(a)] for a in priced_names))
+
+        native_units = dict(_grounded_commercial_native_units(
+            group, list_price_amounts,
+        ))
+        if value_sum is not None:
+            # A PLAIN DICT, BUILT BEFORE THE FROZEN OBJECT EXISTS. Never
+            # `impact.native_units |= {...}` — `FrozenDict` inherits
+            # `dict.__ior__` unless it refuses it, and an in-place update
+            # through a local alias writes straight into a frozen score.
+            native_units[ACCOUNT_VALUE_UNIT] = value_sum
+            native_units[PRICED_ACCOUNTS_UNIT] = float(len(priced_names))
+            native_units[UNPRICED_ACCOUNTS_UNIT] = float(len(unpriced_names))
+
         assumed: tuple[AssumedParam, ...] = ()
-        if accounts:
+        if accounts and value_sum is not None:
             assumed = (AssumedParam(
                 name="value_per_account",
                 value=None,
-                basis="no revenue data connected; accounts weighted equally",
+                basis=(
+                    f"weighted by {value_sum:,.0f} of contracted value across "
+                    f"{len(priced_names)} of {len(accounts)} accounts"
+                    + (f"; not priced: {_named_unpriced(unpriced_names)}"
+                       if unpriced_names else "; every account was priced")
+                ),
+                plausible_range=(0.0, 1.0),
+            ),)
+        elif accounts:
+            assumed = (AssumedParam(
+                name="value_per_account",
+                value=None,
+                basis=("no revenue data connected; accounts weighted equally"
+                       if not weighted else
+                       "none of the accounts this touches is in your "
+                       "contracts, so it is ranked by accounts touched"),
                 plausible_range=(0.0, 1.0),
             ),)
 
@@ -1036,9 +1188,7 @@ def build_findings(
                 movable_gap=1.0 if accounts else None,
                 value_per_unit=None,
                 assumed_params=assumed,
-                native_units=_grounded_commercial_native_units(
-                    group, list_price_amounts,
-                ),
+                native_units=native_units,
                 # The identities behind that sum, so anything summing ACROSS
                 # findings can deduplicate the same money one more time.
                 grounded_figures=deduped_grounded_figures(
@@ -1085,7 +1235,7 @@ def build_findings(
     #
     # The provisional impacts are discarded here and never reach a caller.
     provisional = [score_impact(f) for f in findings]
-    ranks = _size_ranks(findings, provisional)
+    ranks = _size_ranks(findings, provisional, weighted=weighted)
     _log_size_bands(findings, ranks)
     findings = [
         f if rank is None else replace(
@@ -1123,15 +1273,50 @@ def build_findings(
             f"were read but could not be grouped",
             UNGROUPED_STAGE, tuple(ungroupable)))
 
-    order = _rank(findings, impacts, confidences, deep_cap=deep_cap)
+    # ── TWO LISTS ON A WEIGHTED RUN, AND THE PARTITION IS THE OUTER KEY. ───
+    #
+    # `_rank` is applied to each list SEPARATELY and the results concatenated,
+    # rather than adding a partition term to its sort key. That is deliberate:
+    # `_rank`'s first term is the authoritative conflict, which outranks
+    # everything — correctly, within a list. Across the two lists it would let
+    # a finding the engine could not price lead a document whose whole claim is
+    # that it ranked by revenue. The lists are labelled sections, so they do
+    # not interleave, and every rule `_rank` applies is untouched inside each.
+    priced_flags = [
+        f.impact_inputs.native_units.get(ACCOUNT_VALUE_UNIT) is not None
+        for f in findings
+    ] if weighted else [True] * len(findings)
+    if weighted and not all(priced_flags):
+        first = [i for i, ok in enumerate(priced_flags) if ok]
+        second = [i for i, ok in enumerate(priced_flags) if not ok]
+        order = [
+            *(first[j] for j in _rank(
+                [findings[i] for i in first], [impacts[i] for i in first],
+                [confidences[i] for i in first], deep_cap=deep_cap)),
+            *(second[j] for j in _rank(
+                [findings[i] for i in second], [impacts[i] for i in second],
+                [confidences[i] for i in second], deep_cap=deep_cap)),
+        ]
+    else:
+        order = _rank(findings, impacts, confidences, deep_cap=deep_cap)
     findings = [findings[i] for i in order]
     impacts = [impacts[i] for i in order]
     confidences = [confidences[i] for i in order]
+    priced_flags = [priced_flags[i] for i in order]
+
+    # THE DEEP SLICE STAYS INSIDE LIST ONE. `findings[:deep_count]` is what
+    # gets written up in full, and spilling that into "could not be priced"
+    # would present an unpriced finding as one of the run's headline
+    # revenue-ranked answers.
+    ranked_count = sum(1 for ok in priced_flags if ok)
+    deep_count = min(deep_cap, ranked_count if (weighted and ranked_count)
+                     else len(findings))
 
     return PipelineResult(
         findings=tuple(findings), impacts=tuple(impacts),
         confidences=tuple(confidences), rejected=tuple(rejected),
-        deep_count=min(deep_cap, len(findings)),
+        priced=tuple(priced_flags),
+        deep_count=deep_count,
         stats={
             "claims": len(claims), "clusters": len(clusters),
             "findings": len(findings), "rejected": len(rejected),

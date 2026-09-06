@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import logging
 import re
+from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -305,8 +306,60 @@ def self_account_keys(display_name: Optional[str]) -> frozenset[str]:
     return frozenset({key}) if key else frozenset()
 
 
+def canonical_account_names(
+    signals: Iterable[Mapping[str, Any]],
+    self_names: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    """One display spelling per account, decided over the WHOLE corpus.
+
+    `account_key` already knows that `Northwind Labs` and `NorthwindLabs` are
+    one customer. Nothing acted on it: `normalise_account` returned the raw
+    display string, so the two spellings travelled through the engine as two
+    accounts — inflating the account count of any theme that touched both,
+    splitting a real customer's evidence across two names in the reach, and
+    handing a value join two keys where the contracts carry one.
+
+    MEASURED ON A REAL TENANT: 14 keys collapse 30 raw spellings; outside the
+    vendor's own four spellings that is 559 signals, about 7% of everything
+    attributed — `Northwind Labs`/`NorthwindLabs` (127) and
+    `FabrikamPay`/`Fabrikam Pay` (102) are the two largest.
+
+    THE BLIND SPOTS ARE REAL AND ARE NOT HIDDEN. This collapses spellings of
+    the same tokens, and nothing else. On that same tenant the graph holds
+    `Contoso Federal` (46), `Contoso Federal Credit Union` (8) and
+    `Contoso Fed` (2) — three token sets, so three keys, and they do NOT merge
+    here. A looser
+    token-SUBSET rule would reach all three, and is deliberately not used: the
+    same rule would have to refuse `Contoso Air` (13 signals, a different
+    organisation entirely) on nothing but a token count, and a false merge
+    combines two customers' revenue into one number with no way for a reader
+    to see it happened. Under-merging costs reach on one theme; over-merging
+    corrupts the money. The conservative rule is the one that ships.
+
+    THE CHOSEN SPELLING IS THE MOST FREQUENT ONE, ties broken lexicographically
+    so two runs over the same corpus can never disagree. Most frequent rather
+    than longest or first-seen because it is the spelling the reader's own
+    people actually use, and this string is rendered.
+    """
+    counts: dict[str, Counter] = defaultdict(Counter)
+    for signal in signals:
+        props = signal.get("properties")
+        if not isinstance(props, Mapping):
+            continue
+        for key in (*CUSTOMER_KEYS, *PROSPECT_KEYS):
+            name = normalise_account(props.get(key), self_names)
+            if name:
+                counts[account_key(name)][name] += 1
+    return {
+        key: min(spellings.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+        for key, spellings in counts.items()
+        if key
+    }
+
+
 def normalise_account(
     value: Any, self_names: frozenset[str] = frozenset(),
+    canonical: Optional[Mapping[str, str]] = None,
 ) -> Optional[str]:
     """An account name, or None if the value is a placeholder rather than one.
 
@@ -316,21 +369,30 @@ def normalise_account(
     `infer_account_sides` are the only two callers, and reach, the graph
     relations, the deduped grounded figures, the commercial native units and
     the repeated amounts all read what they produce), so excluding a name
-    here excludes it everywhere at once.
+    here excludes it everywhere at once — and, now, collapsing two spellings
+    here collapses them everywhere at once.
+
+    `canonical` is `canonical_account_names`' output, keyed on `account_key`.
+    EMPTY OR ABSENT MEANS "COLLAPSE NOTHING", which is exactly the behaviour
+    every caller had before this parameter existed: the raw display string is
+    returned unchanged. A corpus-wide map cannot be built from one row, so the
+    default has to be the identity rather than a guess.
     """
     if not isinstance(value, str):
         return None
     name = " ".join(value.strip().split())
     if name.lower() in _NOT_A_NAME or not 3 <= len(name) <= 80:
         return None
-    if self_names and account_key(name) in self_names:
+    key = account_key(name)
+    if self_names and key in self_names:
         return None
-    return name
+    return canonical.get(key, name) if canonical else name
 
 
 def infer_account_sides(
     signals: Iterable[Mapping[str, Any]],
     self_names: frozenset[str] = frozenset(),
+    canonical: Optional[Mapping[str, str]] = None,
 ) -> dict[str, str]:
     """Decide customer-vs-prospect per ACCOUNT, over the whole corpus.
 
@@ -349,11 +411,11 @@ def infer_account_sides(
         if not isinstance(props, dict):
             continue
         for key in ("customer", "poc_customer"):
-            name = normalise_account(props.get(key), self_names)
+            name = normalise_account(props.get(key), self_names, canonical)
             if name:
                 customers.add(name)
         for key in PROSPECT_KEYS:
-            name = normalise_account(props.get(key), self_names)
+            name = normalise_account(props.get(key), self_names, canonical)
             if name:
                 prospects.add(name)
     return {
@@ -365,10 +427,11 @@ def infer_account_sides(
 def _population(
     props: Mapping[str, Any], sides: Mapping[str, str],
     self_names: frozenset[str] = frozenset(),
+    canonical: Optional[Mapping[str, str]] = None,
 ) -> PopulationFilter:
     named: list[str] = []
     for key in (*CUSTOMER_KEYS, *PROSPECT_KEYS):
-        name = normalise_account(props.get(key), self_names)
+        name = normalise_account(props.get(key), self_names, canonical)
         if name and name not in named:
             named.append(name)
     if not named:
@@ -440,6 +503,7 @@ def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
     self_names: frozenset[str] = frozenset(),
+    canonical: Optional[Mapping[str, str]] = None,
 ) -> Optional[Claim]:
     """One `kg_signal` row → one `Claim`, or None if it cannot be a claim.
 
@@ -488,7 +552,7 @@ def project_signal(
         strength=strength,
         observed_at=observed_at,
         authoritative=authoritative,
-        population=_population(props, sides, self_names),
+        population=_population(props, sides, self_names, canonical),
         # Sizing across a POPULATION still comes from the substrate, not
         # from a single signal — left unmeasured here rather than guessed
         # (I3). `magnitude` is different: it is this ONE claim's own
@@ -516,13 +580,24 @@ def project_signals(
 ) -> tuple[tuple[Claim, ...], dict[str, int]]:
     """Project a corpus. Returns the claims and a count of what was dropped.
 
+    THE CORPUS IS READ TWICE AND THAT IS THE POINT. `canonical_account_names`
+    and `infer_account_sides` are both corpus-wide facts that no single row
+    can answer — which spelling of a customer is the one to render, and which
+    side of the funnel that customer is on — so both are settled over the
+    whole list before any row is projected.
+
     The counts are not diagnostics — they are the input to a `CoverageNote`. A
     run that silently discarded a third of its evidence looks exactly like one
     that read everything, and that is the degradation the spec calls worse than
     an outright failure.
     """
     rows = list(signals)
-    sides = infer_account_sides(rows, self_names)
+    # CORPUS-WIDE, AND BEFORE THE SIDES ARE INFERRED. `infer_account_sides`
+    # keys on the display name, so building it from raw spellings would decide
+    # customer-vs-prospect separately for `Northwind Labs` and `NorthwindLabs`
+    # and then hand the two answers to one collapsed account.
+    canonical = canonical_account_names(rows, self_names)
+    sides = infer_account_sides(rows, self_names, canonical)
 
     claims: list[Claim] = []
     stats = {"seen": len(rows), "projected": 0, "no_timestamp": 0, "retired": 0}
@@ -536,7 +611,7 @@ def project_signals(
         if signal_is_retired(props if isinstance(props, dict) else None):
             stats["retired"] += 1
             continue
-        claim = project_signal(row, sides, self_names)
+        claim = project_signal(row, sides, self_names, canonical)
         if claim is None:
             stats["no_timestamp"] += 1
             continue

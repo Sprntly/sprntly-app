@@ -262,7 +262,12 @@ def test_the_run_says_what_unit_it_can_size_in():
 _CLAIMS_MONEY_SIZING = re.compile(
     r"sizes?\b[^.]{0,40}\b(?:are|is)\s+stated\s+in\s+money"
     r"|weight(?:s|ed|ing)?\s+(?:a\s+theme\s+)?by\s+(?:the\s+)?revenue"
-    r"|sized\s+in\s+money",
+    r"|sized\s+in\s+money"
+    # ADDED WITH THE WEIGHTING PATH. The engine can now genuinely rank by
+    # revenue, and the sentence it uses to say so is "ranked by the revenue
+    # behind them" — which the three patterns above do not match. A guard that
+    # cannot see the wording the feature actually ships is not a guard.
+    r"|rank(?:s|ed|ing)?\s+by\s+(?:the\s+)?revenue",
     re.IGNORECASE)
 
 
@@ -283,33 +288,50 @@ def test_a_routing_note_never_promises_a_capability_the_registry_calls_declared(
     `weight_by_account_value` was `declared`, nothing built an `ImpactInputs`
     with a `value_per_unit`, and `score_impact` returned a count of accounts.
 
-    THIS TEST READS THE REGISTRY RATHER THAN HARDCODING THE ANSWER. If
-    `weight_by_account_value` is ever implemented, the claim becomes true and
-    this stops demanding the disclaimer — which is what keeps it a statement
-    about honesty rather than a lock on today's wording.
+    THIS TEST READS THE RUN'S VERDICT RATHER THAN HARDCODING THE ANSWER.
+    `weight_by_account_value` is now implemented, so reading the registry's
+    STATUS would make the assertion vacuously true on every run — the capability
+    existing is not the same fact as this run using it. The condition is
+    `weighting_unit`, which is what `pipeline.build_findings` is actually
+    handed, so the note and the arithmetic cannot disagree.
     """
-    from app.crucible import primitives
+    offenders: list[tuple[str, bool, str]] = []
+    for unit in ("", "count"):
+        for available in (True, False):
+            out = routing.resolve(
+                goal_text="reduce churn",
+                definition_text="accounts lost in the period",
+                unit_value_available=available,
+                weighting_unit=unit,
+            )
+            for note in out.notes:
+                if _CLAIMS_MONEY_SIZING.search(note):
+                    offenders.append((unit, available, note))
 
-    performs = primitives.REGISTRY["weight_by_account_value"].status == "implemented"
-
-    offenders: list[tuple[bool, str]] = []
-    for available in (True, False):
-        out = routing.resolve(
-            goal_text="reduce churn",
-            definition_text="accounts lost in the period",
-            unit_value_available=available,
-        )
-        for note in out.notes:
-            if _CLAIMS_MONEY_SIZING.search(note):
-                offenders.append((available, note))
-
-    assert not (offenders and not performs), (
-        "A routing note claims the run sizes in money, but "
-        "`weight_by_account_value` is "
-        f"{primitives.REGISTRY['weight_by_account_value'].status} and "
-        "`score_impact` returns a count of accounts:\n"
-        + "\n".join(f"  unit_value_available={a}: {n}" for a, n in offenders)
+    assert not offenders, (
+        "A routing note claims the run sizes by money on a run whose approved "
+        "unit is a count of accounts:\n"
+        + "\n".join(f"  weighting_unit={u!r} unit_value_available={a}: {n}"
+                    for u, a, n in offenders)
     )
+
+
+def test_a_weighted_run_is_allowed_to_say_it_weighs_and_must():
+    """The other direction, and it matters as much. A guard that only ever
+    demands a disclaimer would keep the disclaimer standing after the engine
+    started weighting — a run stating the wrong unit is the same defect
+    whichever way it points."""
+    out = routing.resolve(
+        goal_text="reduce churn",
+        definition_text="accounts lost in the period",
+        unit_value_available=True,
+        weighting_unit="value",
+        weighting_because=("62.0% of what I read names an account your "
+                           "contracts can price, so themes are ranked by the "
+                           "revenue behind them rather than by how many "
+                           "accounts raised them."),
+    )
+    assert any(_CLAIMS_MONEY_SIZING.search(n) for n in out.notes)
 
 
 def test_score_impact_sizes_in_accounts_so_the_note_above_is_the_truthful_one():

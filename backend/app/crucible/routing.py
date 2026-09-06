@@ -405,6 +405,11 @@ def resolve(
     unit_value_available: bool = False,
     coverage: Optional[Mapping[str, Any]] = None,
     dating_unreliable: bool = False,
+    #: The run's unit, already decided (`plan.weighting_verdict`) — narrated
+    #: here, never re-decided here. Empty means a caller built before the
+    #: verdict existed, which renders exactly as it did then.
+    weighting_unit: str = "",
+    weighting_because: str = "",
 ) -> GoalRouting:
     """The whole decision, in one deterministic call.
 
@@ -463,6 +468,22 @@ def resolve(
             "Nothing read here carries a per-account value, so every size is "
             "stated in accounts touched and never in money. That is a "
             "statement about the evidence, not about how big anything is.")
+
+    # ── THE UNIT THE RUN ACTUALLY SETTLED ON, IN ITS OWN WORDS.
+    #
+    # NARRATED, NOT DECIDED. The verdict is `plan.weighting_verdict`'s, made
+    # from the reconnaissance pass and the recorded business model before this
+    # is called; restating the rule here would be a second implementation of
+    # the most consequential decision on the gate, free to disagree with the
+    # one the run actually carries out.
+    #
+    # It says so even when the answer is "counted", and especially then: B100
+    # requires a deviation from the default weighting to be stated with its
+    # reason, and a self-serve business whose contracts COULD have priced its
+    # themes is exactly the case where silence would read as the engine having
+    # simply failed to try.
+    if weighting_because:
+        notes.append(weighting_because)
 
     # ── THE BUSINESS MODEL, READ RATHER THAN ASSUMED.
     if business_type:

@@ -264,29 +264,23 @@ def _derived(observations: Sequence[object]) -> list[PlanQuestion]:
                 ),
                 options=(total, base),
             ))
-        elif kind == "concentration_divergence" and len(fields) >= 2:
-            out.append(PlanQuestion(
-                id="weighting_choice",
-                prompt="Rank by how many accounts a theme touches, or by the "
-                       "revenue those accounts carry?",
-                why="These two orderings disagree on your data, so this is a "
-                    "choice rather than a detail — and it decides which "
-                    "themes reach the top of the document.",
-                what_i_saw=(
-                    f"The top {figures.get('top_n', 0):.0f} of "
-                    f"{figures.get('groups', 0):.0f} accounts generate "
-                    f"{figures.get('volume_share', 0) * 100:.1f}% of the "
-                    f"activity and hold "
-                    f"{figures.get('value_share', 0) * 100:.1f}% of the money."
-                ),
-                affects="the order of the findings, and which one is recommended",
-                default_if_skipped=(
-                    "themes are ranked by how many accounts they touch, which "
-                    "is what this engine measures today, and the divergence is "
-                    "disclosed beside the ranking"
-                ),
-                options=("Accounts touched", "Revenue carried"),
-            ))
+        # `concentration_divergence` DELIBERATELY RAISES NO QUESTION. It used
+        # to ask "rank by accounts touched, or by the revenue those accounts
+        # carry?" — offering an answer nothing in the engine read. The string
+        # `weighting_choice` appeared exactly once in the whole backend, at its
+        # own definition, so a reader who chose "Revenue carried" had that
+        # answer collected and silently discarded while the question told them
+        # it decided "the order of the findings, and which one is recommended".
+        #
+        # That is the same overclaim as a plan step promising work the run does
+        # not do, in the one place a reader is actively asked to participate,
+        # and it is worse than a wrong default: a default is a decision the
+        # engine owns, while this made the reader believe they owned it.
+        #
+        # The divergence itself is real and STAYS: the observation is still
+        # emitted and `compare_measures_across_groups` still puts it on the
+        # plan as evidence. It also now motivates the question that IS wired —
+        # see `_weighting_available_note`, which folds these figures in.
         elif kind == "coding_gap" and len(fields) >= 2:
             coded, text = fields[0], fields[1]
             out.append(PlanQuestion(
@@ -355,8 +349,79 @@ def derived_account_value(observations: Sequence[object]) -> tuple[Optional[floa
     return None, ""
 
 
+#: The two answers to the business-model question, in the order they are
+#: offered. Declared once so the prompt the reader sees and the mapping that
+#: reads their answer back cannot drift apart — a mismatch there would record
+#: an answer nobody gave.
+BUSINESS_MODEL_OPTIONS: tuple[str, ...] = (
+    "Sales-assisted or enterprise (B2B)",
+    "Self-serve or consumer",
+)
+
+
+def _weighting_is_available(observations: Sequence[object]) -> bool:
+    """Could this run weight by revenue if it were told to?
+
+    Reads the reconnaissance pass's own verdict figures rather than re-deriving
+    them: `recon._observe_priceable_coverage` measured the share and the
+    threshold together, and a second comparison here would be a second place
+    the bar could be set.
+    """
+    for o in observations:
+        if getattr(o, "kind", "") != "priceable_coverage":
+            continue
+        figures = dict(getattr(o, "figures", {}) or {})
+        share = figures.get("priceable_share")
+        threshold = figures.get("threshold")
+        if isinstance(share, (int, float)) and isinstance(threshold, (int, float)):
+            return share >= threshold
+    return False
+
+
+def _divergence_clause(observations: Sequence[object]) -> str:
+    """The strongest motivation for the unit question, in the reader's own
+    numbers: their loudest accounts are not their most valuable ones.
+
+    Carried here rather than raised as its own question. `concentration_
+    divergence` used to ask the reader to choose a weighting directly and then
+    read nothing back; the honest use of the same finding is to explain why the
+    question that IS wired matters.
+    """
+    for o in observations:
+        if getattr(o, "kind", "") != "concentration_divergence":
+            continue
+        f = dict(getattr(o, "figures", {}) or {})
+        return (
+            f" It matters here: the top {f.get('top_n', 0):.0f} of "
+            f"{f.get('groups', 0):.0f} accounts generate "
+            f"{f.get('volume_share', 0) * 100:.1f}% of the activity and hold "
+            f"{f.get('value_share', 0) * 100:.1f}% of the money, so counting "
+            f"and weighting do not put the same themes on top."
+        )
+    return ""
+
+
+def _weighting_available_note(observations: Sequence[object]) -> str:
+    for o in observations:
+        if getattr(o, "kind", "") != "priceable_coverage":
+            continue
+        figures = dict(getattr(o, "figures", {}) or {})
+        return (
+            f"Your contracts price "
+            f"{figures.get('book_accounts', 0):,.0f} accounts and cover "
+            f"{figures.get('priceable_share', 0) * 100:.1f}% of the accounts "
+            f"named in your evidence, so weighting is available here — but "
+            f"your business model is not recorded, so nothing has decided "
+            f"whether to use it."
+        ) + _divergence_clause(observations)
+    return ""
+
+
 def questions_for(
     framework: str, observations: Sequence[object] = (),
+    #: `value`, `count` or `""` — `plan.business_model_unit`'s output. Empty
+    #: means nobody has said, which is the one case worth asking about.
+    business_model: str = "",
 ) -> tuple[PlanQuestion, ...]:
     """What THIS run genuinely needs and cannot derive — batched, asked once,
     never invented if skipped (the gap is carried into the output instead; see
@@ -381,6 +446,37 @@ def questions_for(
     """
     derived_value, _ = derived_account_value(observations)
     questions: list[PlanQuestion] = []
+
+    # ── THE UNIT, WHEN THE EVIDENCE COULD SUPPORT EITHER ANSWER. ───────────
+    #
+    # ASKED, NEVER INFERRED, and asked FIRST because it decides what every
+    # other number in the document is denominated in. Reading "B2B" off the
+    # presence of a contracts spreadsheet is a guess dressed as a fact — a
+    # self-serve business with an enterprise tier has exactly the same file —
+    # and this is the most consequential thing on the gate to get wrong.
+    #
+    # ONLY WHEN THE ANSWER WOULD CHANGE SOMETHING. If the book cannot price
+    # enough of the corpus to weight anyway, or the business model is already
+    # recorded, this is a form field rather than a question, and a gate that
+    # asks questions whose answers change nothing stops being answered.
+    if not business_model and _weighting_is_available(observations):
+        questions.append(PlanQuestion(
+            id="business_model",
+            prompt="How do you sell — sales-assisted, or self-serve?",
+            why="It decides the unit every size in this document is stated "
+                "in: the revenue behind a theme, or the number of accounts "
+                "that raised it. Those two orderings disagree, and I would "
+                "rather ask than assume from the fact that you have a "
+                "contracts file.",
+            what_i_saw=_weighting_available_note(observations),
+            affects="whether themes are ranked by revenue or by accounts "
+                    "touched",
+            default_if_skipped=(
+                "themes are counted, not weighted, and the document says that "
+                "is what happened and why"
+            ),
+            options=BUSINESS_MODEL_OPTIONS,
+        ))
 
     # FIRST, NOT LAST, WHEN IT IS ASKED AT ALL. It was appended after the
     # derived questions and a book with three derived questions truncated it
