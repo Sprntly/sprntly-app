@@ -434,9 +434,30 @@ def resolve(
     # ── THE UNIT. The single most consequential thing a reader can learn
     # before approving, and the one the engine used to degrade to silently.
     if unit_value_available:
+        # READ AND REPORTED, NOT APPLIED — AND THE NOTE MUST SAY BOTH.
+        # This branch used to read "sizes here are stated in money rather than
+        # in a count of accounts", which the engine does not do and has never
+        # done: `weight_by_account_value` is `declared` in the primitive
+        # registry, nothing constructs an `ImpactInputs` with a non-None
+        # `value_per_unit`, and `score_impact` therefore returns
+        # `affected_population * movable_gap` — a COUNT OF ACCOUNTS. Every
+        # other statement of the unit in this engine already said so
+        # (`planner`'s monetary-coverage step, `framework`'s reason lines, the
+        # plan header), so that sentence was the single place the document
+        # promised more than the run performs, on the one screen that sells
+        # the run as reproducible.
+        #
+        # It is not deleted, because the derived value IS used: it is measured
+        # off the customer's own contracts and reported with its median, and
+        # it is why the plan does not ask them for a number their data already
+        # answers. A reader who connected contract data should still learn it
+        # was recognised — and should learn, in the same breath, that it does
+        # not move the sizing.
         notes.append(
-            "Your own evidence carries what an account is worth, so sizes here "
-            "are stated in money rather than in a count of accounts.")
+            "Your own evidence carries what an account is worth, so that "
+            "figure is read from your own data rather than asked of you. It "
+            "does not change how anything is sized here: a theme's size is "
+            "still a count of the accounts it touches, never money.")
     else:
         notes.append(
             "Nothing read here carries a per-account value, so every size is "
