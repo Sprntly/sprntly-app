@@ -396,7 +396,7 @@ def test_prompt_v2_names_vendor_side_scope_and_owner_timing():
     vocabulary carries the new kinds, and the properties description shows the
     owner/due/status shape. PROMPT_VERSION is bumped so re-extraction cache-busts.
     """
-    assert ex.PROMPT_VERSION == "extract-doc-v4"
+    assert ex.PROMPT_VERSION == "extract-doc-v5"
 
     system = ex._SYSTEM.lower()
     for term in ("pricing", "commercial", "capabilit", "logistic",
@@ -669,6 +669,150 @@ def test_checklist_and_open_pass_validators_agree_on_the_same_raw_input():
     }
 
 
+# ── account_side: which side of the sale a named account is on ─────────────
+#
+# `claims.infer_account_sides` has always tried to split named accounts into
+# customer/prospect, but nothing in the extraction schema ever asked the
+# model to say which one — every named account fell through that reader's
+# own conservative "customer" default. `account_side` closes that gap at
+# extraction time, on the SAME shared validator both passes reuse for
+# `account` itself.
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("customer", "customer"),
+    ("prospect", "prospect"),
+    ("partner", "partner"),
+    ("unknown", "unknown"),
+    (" Customer ", "customer"),          # case/whitespace are spelling, not identity
+    ("PROSPECT", "prospect"),
+])
+def test_grounded_account_side_accepts_the_closed_vocabulary(value, expected):
+    assert ex._grounded_account_side({"account_side": value}) == expected
+
+
+@pytest.mark.parametrize("value", [
+    "", "maybe", "buyer", "vendor", "n/a", None, 1, True, ["customer"],
+])
+def test_grounded_account_side_rejects_anything_outside_the_vocabulary(value):
+    """Absence-over-guess (I3): an unrecognised or missing value is dropped,
+    NEVER coerced to any member of the vocabulary — least of all "customer",
+    which is the exact silent default this property exists to stop
+    reproducing under a new name."""
+    assert ex._grounded_account_side({"account_side": value}) is None
+
+
+def test_grounded_account_side_is_none_when_the_key_is_absent():
+    assert ex._grounded_account_side({}) is None
+    assert ex._grounded_account_side({"account": "Acme Corp"}) is None
+
+
+def test_account_side_survives_open_extraction_alongside_a_named_account(facade):
+    """The write path: `account_side` reaches the stored signal's properties
+    exactly like `account` does, when both are present and valid — through
+    the SAME validator (case/whitespace normalised), not a raw pass-through
+    of whatever the model wrote."""
+    items = [_kind_item(
+        "Acme wants a bulk export", "feature_request",
+        source_type="customer_voice",
+        properties={"account": "Acme Corp", "account_side": "  Prospect  "},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "Acme wants a bulk export")
+    assert sig is not None
+    assert sig.properties["account"] == "Acme Corp"
+    assert sig.properties["account_side"] == "prospect"
+
+
+def test_account_side_is_dropped_without_a_named_account(facade):
+    """Gated on `account` surviving its own validator — a side with nothing
+    to attach it to is noise, not an attribution, so it is never written on
+    its own even when the model volunteers one."""
+    items = [_kind_item(
+        "an unattributed side value", "feature_request",
+        source_type="customer_voice",
+        properties={"account_side": "customer"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "an unattributed side value")
+    assert sig is not None
+    assert "account" not in sig.properties
+    assert "account_side" not in sig.properties
+
+
+def test_account_side_outside_the_vocabulary_is_dropped_not_defaulted(facade):
+    """An account IS named, but the side value the model wrote is not in the
+    closed vocabulary — `account` still survives, `account_side` does not,
+    and nothing invents a replacement value."""
+    items = [_kind_item(
+        "a named account with a junk side", "feature_request",
+        source_type="customer_voice",
+        properties={"account": "Acme Corp", "account_side": "buyer"},
+    )]
+    _extract(facade, items)
+    sig = _sig(facade, "a named account with a junk side")
+    assert sig is not None
+    assert sig.properties["account"] == "Acme Corp"
+    assert "account_side" not in sig.properties
+
+
+def test_account_side_survives_the_checklist_whitelist():
+    """The closed-whitelist problem `account` itself had before v3: a new
+    property is invisible on every call-provider signal unless
+    `_sanitize_checklist_properties` is taught to keep it. Proven on a
+    category with NO other documented shape (`pain_point`), so the only way
+    `account_side` could appear is if it is allowed generically."""
+    raw = {"account": "Acme Corp", "account_side": "customer",
+           "unrelated_key": "dropped"}
+    cleaned = ex._sanitize_checklist_properties("pain_point", raw, "any text")
+    assert cleaned == {"account": "Acme Corp", "account_side": "customer"}
+
+
+def test_account_side_is_dropped_by_the_checklist_whitelist_without_account():
+    raw = {"account_side": "prospect"}
+    cleaned = ex._sanitize_checklist_properties("pain_point", raw, "any text")
+    assert cleaned == {}
+
+
+def test_checklist_and_open_pass_account_side_validators_agree():
+    """Same parity guarantee as the amount validators: one shared function,
+    fed the same raw dict from both call sites, produces the same result."""
+    raw = {"account": "Acme Corp", "account_side": "Partner"}
+    from_checklist = ex._sanitize_checklist_properties("timeline", raw, "any text")
+    assert from_checklist.get("account_side") == ex._grounded_account_side(raw)
+    assert from_checklist["account_side"] == "partner"
+
+
+def test_extract_schema_teaches_account_side_as_an_explicit_three_state_choice():
+    """Content-property test on the LLM-facing schema strings — an
+    LLM-facing description with no length/content assertion is a
+    description nobody has checked the model can actually act on. The
+    property description must (a) name the key, (b) offer unknown as an
+    explicit, non-guessed state, and (c) say not to guess."""
+    signal_props = (
+        ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"])
+    desc = signal_props["properties"]["description"]
+    assert "account_side" in desc
+    assert "unknown" in desc
+    assert "guess" in desc.lower()
+    assert len(desc) > 200, "description too thin to carry the new contract"
+
+
+def test_checklist_schema_teaches_account_side_as_an_explicit_three_state_choice():
+    checklist_props = (
+        ex._CHECKLIST_SCHEMA["properties"]["checklist"]["items"]["properties"])
+    desc = checklist_props["properties"]["description"]
+    assert "account_side" in desc
+    assert "unknown" in desc
+    assert "guess" in desc.lower()
+
+
+def test_system_prompt_teaches_account_side_explicitly():
+    system = ex._SYSTEM.lower()
+    assert "account_side" in system
+    assert "unknown" in system
+
+
 # A REAL-LLM eval: it exercises the actual broadened prompt + schema against
 # Anthropic and asserts the vendor-side + owner-attributed signals are minted.
 # Skipped by default because it spends a real API call; run it with a live key:
@@ -794,6 +938,55 @@ def test_a_stated_figure_in_a_non_call_document_is_captured_real_llm():
     assert float(props["amount"]) == 80000.0
     assert props.get("basis") in ex._COMMERCIAL_BASIS_VALUES
     assert props.get("certainty") in ex._COMMERCIAL_CERTAINTY_VALUES
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_account_side_is_returned_by_the_open_pass_real_llm():
+    """`_offline()` returns `"pytest" in sys.modules`, so no other pytest run
+    ever exercises the real extraction prompt end to end. This is the one
+    real model draw proving the model actually returns `account_side` on the
+    OPEN pass (not just the checklist pass) for a clearly-stated prospect,
+    and that the value survives `_grounded_account_side` unchanged."""
+    slack_thread = (
+        "#new-deals-globex\n"
+        "alex (account exec): had a great first call with Globex today — "
+        "they are a brand new prospect, not a customer yet, still deciding "
+        "between us and a competitor. They asked for a bulk CSV export "
+        "before they'll sign anything.\n"
+        "priya (sales eng): noted, I'll follow up on the export ask.\n"
+    )
+    result = ex.llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='slack-sync-batch-0'>\n{slack_thread}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    named = [
+        s for s in signals
+        if isinstance(s.get("properties"), dict) and s["properties"].get("account")
+    ]
+    print(f"REAL MODEL DRAW (open pass) — raw signals naming an account: "
+          f"{[s['properties'] for s in named]}")
+    assert named, f"expected at least one signal to name an account, got {signals}"
+
+    with_side = [s for s in named if s["properties"].get("account_side")]
+    assert with_side, (
+        f"model named an account but never returned account_side at all; "
+        f"got {named}")
+
+    for sig_item in with_side:
+        raw_side = str(sig_item["properties"]["account_side"]).strip().lower()
+        grounded = ex._grounded_account_side(sig_item["properties"])
+        if raw_side in ("customer", "prospect", "partner", "unknown"):
+            assert grounded == raw_side
+        else:
+            assert grounded is None
 
 
 # ── source_call_id / per-call traceability (source_ref) ──────────────────────

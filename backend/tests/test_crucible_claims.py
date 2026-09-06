@@ -318,6 +318,83 @@ def test_an_account_side_is_decided_across_the_CORPUS_not_per_row():
     assert sides["Contoso"] == "prospect"
 
 
+# ── infer_account_sides reads the extractor's explicit `account_side` ───────
+#
+# Before this, nothing an extraction pass wrote ever placed an account on a
+# side — every named account fell through the caller's own "customer"
+# default. `account_side` is the extractor's explicit answer to the
+# question; these tests pin how the reader half of that contract behaves,
+# separately from the legacy per-row-key mechanism above.
+
+
+def test_infer_account_sides_reads_the_explicit_account_side_property():
+    rows = [
+        sig(id="a", properties={"account": "Globex", "account_side": "prospect"}),
+        sig(id="b", properties={"account": "Initech", "account_side": "customer"}),
+    ]
+    sides = infer_account_sides(rows)
+    assert sides["Globex"] == "prospect"
+    assert sides["Initech"] == "customer"
+
+
+def test_an_explicit_customer_side_wins_over_an_explicit_prospect_side():
+    """A customer relationship does not un-happen — the same "any customer
+    sighting wins" rule the legacy per-row-key mechanism already applies,
+    now proven across the NEW property too."""
+    rows = [
+        sig(id="a", properties={"account": "Globex", "account_side": "prospect"}),
+        sig(id="b", properties={"account": "Globex", "account_side": "customer"}),
+    ]
+    assert infer_account_sides(rows)["Globex"] == "customer"
+
+
+def test_an_explicit_unknown_side_is_recorded_as_unknown_not_customer():
+    """THE DEFECT THIS PROPERTY EXISTS TO STOP REPRODUCING. An account
+    explicitly marked "we don't know" must never read as `customer` — that
+    would be the exact silent default under a new name."""
+    rows = [sig(properties={"account": "Globex", "account_side": "unknown"})]
+    assert infer_account_sides(rows)["Globex"] == "unknown"
+
+
+def test_an_explicit_partner_side_is_recorded_as_partner():
+    rows = [sig(properties={"account": "Globex", "account_side": "partner"})]
+    assert infer_account_sides(rows)["Globex"] == "partner"
+
+
+def test_an_unknown_side_never_overrides_a_customer_or_prospect_sighting():
+    rows = [
+        sig(id="a", properties={"account": "Globex", "account_side": "unknown"}),
+        sig(id="b", properties={"account": "Globex", "account_side": "customer"}),
+    ]
+    assert infer_account_sides(rows)["Globex"] == "customer"
+
+
+def test_an_invalid_account_side_value_is_ignored_not_defaulted():
+    """A value outside the closed vocabulary (an older shape, a typo, a
+    future addition this reader has not caught up to) is treated exactly
+    like the key being absent — never coerced into a side."""
+    rows = [sig(properties={"account": "Globex", "account_side": "lead"})]
+    assert infer_account_sides(rows) == {}
+
+
+def test_account_side_with_no_named_account_contributes_nothing():
+    """The property qualifies a name; with no name to qualify it is inert —
+    mirrors the write-side gate in `graph.extractor`."""
+    rows = [sig(properties={"account_side": "customer"})]
+    assert infer_account_sides(rows) == {}
+
+
+def test_a_bare_account_with_no_side_at_all_is_absent_from_the_returned_dict():
+    """PROSPECTIVE-ONLY, PROVEN. A signal with no side evidence from EITHER
+    source (the shape every signal ingested before this property existed
+    has, and will keep having — no backfill runs) produces the exact same
+    empty result as before this property existed: absent from the dict,
+    leaving the caller's own conservative default (I8) as the only opinion,
+    unchanged."""
+    rows = [sig(properties={"account": "Globex"})]
+    assert infer_account_sides(rows) == {}
+
+
 def test_a_signal_with_no_named_account_is_unsized_not_zero():
     """I3. "We did not record who this is about" is not "this affects nobody",
     and a finding built from these must render unsizeable rather than
