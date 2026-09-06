@@ -29,6 +29,8 @@ plan and these assertions are about code rather than about a draw.
 """
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from app.crucible import recon, routing
@@ -228,11 +230,119 @@ def test_the_routing_is_derived_from_the_role_the_engine_already_assigns():
 
 def test_the_run_says_what_unit_it_can_size_in():
     """The single most consequential thing a reader learns before approving,
-    and the one the engine used to degrade to silently."""
+    and the one the engine used to degrade to silently.
+
+    WHAT THIS ASSERTION USED TO BE, AND WHY IT HAD TO CHANGE. It read
+    `any("in money" in n for n in with_value.notes)` — which pinned the
+    with-value branch to the claim that sizes ARE stated in money. Nothing in
+    the engine performs that (see the test below), so the test was holding a
+    false sentence in place. Both branches must now say the size is a count of
+    accounts; what differs between them is whether the per-account value was
+    found and read at all, which is a statement about the EVIDENCE and is the
+    only thing the flag actually changes.
+    """
     with_value = routing.resolve(goal_text="reduce churn", unit_value_available=True)
     without = routing.resolve(goal_text="reduce churn", unit_value_available=False)
-    assert any("in money" in n for n in with_value.notes)
-    assert any("never in money" in n for n in without.notes)
+
+    # The flag changes what the run says it FOUND ...
+    assert any("read from your own data rather than asked of you" in n
+               for n in with_value.notes)
+    assert any("Nothing read here carries a per-account value" in n
+               for n in without.notes)
+    # ... and never what the run says it COUNTS.
+    assert any("count of the accounts it touches" in n for n in with_value.notes)
+    assert any("stated in accounts touched" in n for n in without.notes)
+
+
+#: Prose that asserts the run SIZES something in money — the capability
+#: `weight_by_account_value` describes and does not perform. Deliberately
+#: narrow: it must not fire on the disclaimers, which are the honest form of
+#: the same subject ("never in money", "stated in accounts touched and never in
+#: money"), so it matches only a positive claim that a size IS money.
+_CLAIMS_MONEY_SIZING = re.compile(
+    r"sizes?\b[^.]{0,40}\b(?:are|is)\s+stated\s+in\s+money"
+    r"|weight(?:s|ed|ing)?\s+(?:a\s+theme\s+)?by\s+(?:the\s+)?revenue"
+    r"|sized\s+in\s+money",
+    re.IGNORECASE)
+
+
+def test_a_routing_note_never_promises_a_capability_the_registry_calls_declared():
+    """THE CLASS OF DEFECT, NOT THE ONE SENTENCE.
+
+    A plan may only promise what the engine performs — that is the whole claim
+    the audit trail makes, and `primitives.REGISTRY` is where the engine
+    records which half of the vocabulary is real. `validate_steps` already
+    enforces it for STEPS. The routing notes are free prose that never passed
+    through that gate, and `prompt_block` hands them to the composition model
+    as SETTLED FACT to restate in the reader's language — so a false note is
+    not merely rendered, it is laundered through the model into the reader's
+    own vocabulary.
+
+    The measured failure: the `unit_value_available` branch stated "sizes here
+    are stated in money rather than in a count of accounts" while
+    `weight_by_account_value` was `declared`, nothing built an `ImpactInputs`
+    with a `value_per_unit`, and `score_impact` returned a count of accounts.
+
+    THIS TEST READS THE REGISTRY RATHER THAN HARDCODING THE ANSWER. If
+    `weight_by_account_value` is ever implemented, the claim becomes true and
+    this stops demanding the disclaimer — which is what keeps it a statement
+    about honesty rather than a lock on today's wording.
+    """
+    from app.crucible import primitives
+
+    performs = primitives.REGISTRY["weight_by_account_value"].status == "implemented"
+
+    offenders: list[tuple[bool, str]] = []
+    for available in (True, False):
+        out = routing.resolve(
+            goal_text="reduce churn",
+            definition_text="accounts lost in the period",
+            unit_value_available=available,
+        )
+        for note in out.notes:
+            if _CLAIMS_MONEY_SIZING.search(note):
+                offenders.append((available, note))
+
+    assert not (offenders and not performs), (
+        "A routing note claims the run sizes in money, but "
+        "`weight_by_account_value` is "
+        f"{primitives.REGISTRY['weight_by_account_value'].status} and "
+        "`score_impact` returns a count of accounts:\n"
+        + "\n".join(f"  unit_value_available={a}: {n}" for a, n in offenders)
+    )
+
+
+def test_score_impact_sizes_in_accounts_so_the_note_above_is_the_truthful_one():
+    """The other half of the pair. The test above pins what the plan SAYS;
+    this pins what the engine DOES, so the two cannot drift apart silently and
+    a future reader can see why the note is worded as it is."""
+    from app.crucible.scoring import score_impact
+    from app.crucible.types import ConfidenceInputs, Finding, ImpactInputs
+
+    finding = Finding(
+        id="f-1",
+        statement="renewals slip when onboarding stalls",
+        claim_ids=("c-1",),
+        confidence_inputs=ConfidenceInputs(
+            strengths=("reported",), claim_types=("preference",),
+            observed_ats=(), authoritative_count=1, claim_count=1,
+            independent_authoritative_source_types=1,
+        ),
+        impact_inputs=ImpactInputs(
+            currency="accounts",
+            affected_population=7.0,
+            movable_gap=1.0,
+            # WHAT EVERY CONSTRUCTION SITE IN `app/` PASSES. Both of them —
+            # `pipeline._findings` and the read path in `routes/crucible` —
+            # hardcode None, which is why the money branch of `score_impact`
+            # is unreachable in production and the plan may not promise it.
+            value_per_unit=None,
+        ),
+    )
+
+    impact = score_impact(finding)
+    assert impact.value == 7.0, "the size is the count of accounts touched"
+    assert impact.value_per_unit is None
 
 
 def test_an_unrecorded_business_type_is_stated_rather_than_assumed_away():
