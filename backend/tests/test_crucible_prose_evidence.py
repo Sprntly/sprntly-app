@@ -1420,6 +1420,52 @@ def test_approving_turns_the_document_into_claims_the_run_actually_reads(
     assert {r["id"] for r in stored} <= cited
 
 
+def test_an_attached_document_does_not_disturb_the_goal_relevance_wiring(
+    prose_ctx, monkeypatch,
+):
+    """CROSS-CUT WITH THE GOAL-POPULATION-AWARE RELEVANCE GATE.
+
+    `_run_enrichment` reads `goal_class` off the run's stored PLAN
+    (`plan["routing"]["goal_class"]`) — a fact settled when the plan was
+    built, before any attachment is read. Prose only ever joins `claims` and
+    `findings`, further downstream, on the same call `execute_run` was
+    already making. So an attached document must change neither WHAT
+    `goal_class` `judge_relevance` is handed, nor WHERE it is handed one —
+    `_run_enrichment` stays the only call site on both the direct run and the
+    stalled-enrichment sweep.
+    """
+    run_id = prose_ctx.start().json()["id"]
+    plan = prose_ctx.client.get(
+        f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    goal_class = plan["routing"]["goal_class"]
+
+    seen = {}
+    import app.crucible.relevance as relevance_mod
+    real = relevance_mod.judge_relevance
+
+    def spy(**kw):
+        seen.update(kw)
+        return real(**kw)
+
+    monkeypatch.setattr(relevance_mod, "judge_relevance", spy)
+    approved = prose_ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    # THE SAME READING THE PLAN ALREADY MADE, not re-derived and not
+    # defaulted away because an attachment was in play.
+    assert seen.get("goal_class") == goal_class, seen
+    # AND THE PROSE-BACKED FINDINGS ACTUALLY REACHED THIS CALL — proving
+    # nothing on the prose path short-circuits around `judge_relevance`.
+    assert seen.get("findings"), "the gate never received any findings at all"
+    prose_claim_ids = {r["id"] for r in prose_ctx.client.get(
+        f"/v1/crucible/{run_id}").json()["prioritisation"].get(
+        prose.META_KEY, [])}
+    assert prose_claim_ids, "the run stored no prose claim rows to check against"
+    reached_ids = {cid for f in seen["findings"] for cid in f.claim_ids}
+    assert prose_claim_ids & reached_ids, (
+        "no prose-backed claim reached the relevance gate's findings"
+    )
+
+
 def test_the_same_bytes_are_extracted_once_while_the_worker_lives(prose_ctx):
     """WHAT THE CACHE ACTUALLY DELIVERS, AND WHAT IT DOES NOT.
 

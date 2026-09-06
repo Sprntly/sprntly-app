@@ -52,6 +52,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
+from app.crucible.routing import GOAL_CLASS_NOTE, UNCLASSIFIED
 from app.crucible.types import Finding
 
 logger = logging.getLogger(__name__)
@@ -157,6 +158,13 @@ is the vendor talking about themselves, not a problem to solve.
 - routine pipeline mechanics with no problem in them — a contact agreeing to \
 meet, a demo being scheduled, a follow-up date.
 - internal administration unrelated to the metric.
+- the theme is about the WRONG POPULATION for this goal, when you are told \
+which population the goal is about. A theme about winning NEW business does \
+not bear on a goal about keeping the customers already won, and a theme about \
+an existing customer's ongoing experience does not bear on a goal about \
+winning new ones — even when the theme describes a real, addressable problem. \
+The problem being real is not the question; whether it sits in the part of \
+the business this goal is about is.
 A `false` verdict ALWAYS needs a `reason`, specific to that theme — the reader \
 sees it printed beside the theme in an appendix, so it must say why THIS one \
 does not bear on the goal, not a generic phrase.
@@ -189,14 +197,31 @@ def _offline() -> bool:
     return "pytest" in sys.modules
 
 
-def _input(goal_text: str, definition_text: str, findings: Sequence[Finding]) -> str:
+def _input(
+    goal_text: str, definition_text: str, findings: Sequence[Finding],
+    goal_class: str = UNCLASSIFIED,
+) -> str:
     """Numbered 1..N — the number IS `idx`, the only handle the model gets back
     to a theme. Sending the real finding id here (and asking for it back in
     every verdict) is the input half of the same waste `idx` removes from the
-    output; the id never has to leave this function."""
+    output; the id never has to leave this function.
+
+    `goal_class` NAMES THE POPULATION, WHEN ONE IS KNOWN. `classify_goal`
+    already computed this once, deterministically, at plan time (`routing.py`)
+    — this reads that answer back rather than re-deriving it. An
+    `UNCLASSIFIED` (or otherwise unrecognised) class adds no line at all, which
+    is the same prompt this function produced before goal-population-awareness
+    existed: a goal this engine could not place against one part of the book
+    must not start filtering by population it does not actually know.
+    """
     lines = [
         f"GOAL: {goal_text}",
         f"THE READER'S OWN DEFINITION OF THE METRIC: {definition_text}",
+    ]
+    note = GOAL_CLASS_NOTE.get(goal_class) if goal_class != UNCLASSIFIED else None
+    if note:
+        lines.append(f"THE POPULATION THIS GOAL IS ABOUT: {note}")
+    lines += [
         "",
         "THEMES:",
     ]
@@ -210,7 +235,7 @@ def _input(goal_text: str, definition_text: str, findings: Sequence[Finding]) ->
 
 def _judge_chunk(
     *, enterprise_id: str, goal_text: str, definition_text: str,
-    findings: Sequence[Finding],
+    findings: Sequence[Finding], goal_class: str = UNCLASSIFIED,
 ) -> dict[str, Verdict]:
     from app.graph.gateway import llm_call
     from app.llm import FAST_MODEL
@@ -219,13 +244,17 @@ def _judge_chunk(
         enterprise_id=enterprise_id,
         agent="crucible",
         purpose="judge_goal_relevance",
-        prompt_version="crucible-relevance-v2",
+        # BUMPED FROM v2: `_SYSTEM` now names a wrong-population `false` case
+        # and `_input` may carry `THE POPULATION THIS GOAL IS ABOUT` — a
+        # different prompt should not share a version with the one that let
+        # a pre-purchase theme outrank retention findings on a churn goal.
+        prompt_version="crucible-relevance-v3",
         # HIGH-VOLUME, closed-set, short-output — exactly the shape
         # `FAST_MODEL`'s own charter names (`app/llm.py`). Ranking eight
         # letters is not the reasoning-depth job `DEFAULT_MODEL` is for.
         model=FAST_MODEL,
         system=_SYSTEM,
-        input=_input(goal_text, definition_text, findings),
+        input=_input(goal_text, definition_text, findings, goal_class),
         json_schema=RELEVANCE_SCHEMA,
         max_tokens=8000,
     )
@@ -262,8 +291,20 @@ def judge_relevance(
     definition_text: str,
     findings: Sequence[Finding],
     run_meta: Optional[dict] = None,
+    goal_class: str = UNCLASSIFIED,
 ) -> dict[str, Verdict]:
     """Which findings bear on the goal. Absent id == judged relevant.
+
+    `goal_class` IS READ, NEVER RECOMPUTED. `classify_goal` already ran once,
+    deterministically, when the plan was built (`routing.py`), and the answer
+    is on the run's own stored plan — the caller reads it back the same way
+    `report.py` does (`plan["routing"]["goal_class"]`) and hands it straight
+    through. An `UNCLASSIFIED` goal (the default here, and the answer for any
+    plan built before this existed) adds no population statement to the
+    prompt at all — see `_input` — which is the identical prompt this gate
+    asked before goal-population-awareness existed. Being unable to place a
+    goal must cost nothing; a WRONG population statement would cost the
+    reader a finding.
 
     JUDGE ONCE. TAKE THE FIRST SAMPLE AND KEEP IT.
     ----------------------------------------------
@@ -349,7 +390,7 @@ def judge_relevance(
                 ex.submit(
                     _judge_chunk, enterprise_id=enterprise_id,
                     goal_text=goal_text, definition_text=definition_text,
-                    findings=c,
+                    findings=c, goal_class=goal_class,
                 )
                 for c in wave
             ]
