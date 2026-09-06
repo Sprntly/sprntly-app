@@ -1353,6 +1353,32 @@ def execute_run(
                     for g in gaps
                 ]
                 plan_json["will_produce"] = list(produce)
+
+                # AND THE ROUTING, NARROWED THE SAME WAY. The routing block
+                # says what each source is being USED for; a source the reader
+                # has just dropped is being used for nothing, and leaving its
+                # original disposition there would have the approved plan
+                # describe a use of evidence the run will not make. Marked
+                # rather than deleted, for the reason the tick list keeps a
+                # struck-through row: "which source did I drop" is exactly
+                # what a reader comes back to this card to check.
+                from app.crucible.routing import IGNORE
+
+                routed = plan_json.get("routing")
+                if isinstance(routed, dict) and isinstance(
+                        routed.get("sources"), list):
+                    kept_types = {
+                        src.get("source_type") for src in kept}
+                    for entry in routed["sources"]:
+                        if not isinstance(entry, dict):
+                            continue
+                        if entry.get("source_type") in kept_types:
+                            continue
+                        entry["disposition"] = IGNORE
+                        entry["why"] = ("You dropped it at this gate, so "
+                                        "nothing below rests on it.")
+                    plan_json["routing"] = routed
+
                 meta["plan"] = plan_json
                 runs_db.update(run_id, company_id, prioritisation=meta)
 

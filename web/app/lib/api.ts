@@ -828,6 +828,55 @@ export type GoalPlanUnreadUpload = {
   reason: string
 }
 
+/** One source, and what THIS goal does with it. */
+export type GoalPlanRoutedSource = {
+  source_type: string
+  label: string
+  /** "use" | "weight" | "discount" | "ignore". Rendered as a word, not mapped
+   *  to a colour: the difference between counting a source and merely showing
+   *  it is a sentence, and a legend the reader has to learn is not one. */
+  disposition: string
+  why: string
+}
+
+/** WHAT THIS PARTICULAR GOAL MAKES OF THE EVIDENCE.
+ *
+ *  Decided server-side in code (`backend/app/crucible/routing.py`) before any
+ *  model call, and frozen: the composition may narrate these decisions and may
+ *  not change them. Rendered here because it is a decision the reader is being
+ *  asked to APPROVE — a routing that existed only inside a prompt would be a
+ *  set of choices made about their evidence that they could neither see nor
+ *  argue with, which is the opposite of what this gate is for.
+ *
+ *  Absent on every plan stored before this existed and on runs with no
+ *  reconnaissance pass, both of which render as no routing section. */
+export type GoalPlanRouting = {
+  /** Which part of the book this goal was read as being about — one of a
+   *  closed set, `unclassified` when it could not be placed. */
+  goal_class: string
+  goal_class_note: string
+  /** The business model as the company recorded it at onboarding, verbatim.
+   *  Empty when unset, which the notes state out loud. */
+  business_type: string
+  sources: GoalPlanRoutedSource[]
+  notes: string[]
+}
+
+/** A step the plan deliberately did NOT write, with the reason.
+ *
+ *  Not a deletion. Hiding an irrelevant step makes a shorter plan and a less
+ *  checkable one: the reader cannot tell a considered omission from a check
+ *  that silently failed, and they are the only person who can say "no, that
+ *  one does matter here". */
+export type GoalPlanSetAside = {
+  what: string
+  why: string
+  /** The observation it would have rested on. The finding itself stays on the
+   *  plan — only the step is withheld. */
+  observation: string
+  source?: string
+}
+
 export type GoalPlanSource = {
   source_type: string
   signal_count: number
@@ -960,6 +1009,10 @@ export type GoalRunPlan = {
    *  reader only when both are true, and this field is how the first becomes
    *  a statement rather than an inference from silence. */
   unread_uploads?: GoalPlanUnreadUpload[]
+  /** How this goal routes the evidence, decided in code before composition. */
+  routing?: GoalPlanRouting
+  /** What this goal chose not to do, and why. */
+  set_aside?: GoalPlanSetAside[]
   cannot_answer: GoalPlanGap[]
   will_produce: string[]
   /** Source types the user dropped at the plan step. */

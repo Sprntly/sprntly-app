@@ -588,6 +588,12 @@ function PlanBody({
   //  would let a reader who scans the list of ticks leave with the impression
   //  that the list is complete.
   const unreadUploads = plan.unread_uploads ?? []
+  //: HOW THIS GOAL ROUTES THE EVIDENCE, and what it therefore chose not to
+  //  do. Both decided in code server-side and frozen before composition —
+  //  rendered here because they are decisions the reader is being asked to
+  //  approve, and a decision they cannot see is one they cannot argue with.
+  const routing = plan.routing
+  const setAside = plan.set_aside ?? []
 
   // THE VERDICT, IN A SENTENCE, BEFORE ANY NUMBER. A reader arriving at a plan
   // asks whether this can be answered at all; the strip below answers "off how
@@ -1009,6 +1015,83 @@ function PlanBody({
           </div>
         ) : null}
       </section>
+
+      {/* ── HOW THIS GOAL READS THE EVIDENCE ────────────────────────────
+          AFTER THE SOURCES AND BEFORE THE LIMITS, because that is the order
+          the questions arrive in: what have you got, what are you doing with
+          it, what can you therefore not answer. The old plan answered the
+          first and third and left the middle to be inferred from a list of
+          steps — which is how two different goals over the same evidence
+          produced the same twenty-five steps and nothing on screen to show
+          that the engine had not looked at the question. */}
+      {routing ? (
+        <section className="ga-plan-section" data-testid="goal-plan-routing">
+          <h2 className={s.sectionLabel}>How I am reading this</h2>
+          <p className="ga-doc-note" data-testid="goal-plan-goal-class">
+            I am treating this as a question about {routing.goal_class_note}.
+          </p>
+          {routing.sources.length ? (
+            <ul className={s.tickList}>
+              {routing.sources.map((r) => (
+                <li
+                  key={r.source_type}
+                  className={s.tickRow}
+                  data-testid="goal-plan-routed-source"
+                >
+                  <span
+                    className={r.disposition === "use" ? s.tick : s.tickOff}
+                    aria-hidden
+                  >
+                    {r.disposition === "use" ? "\u2713" : "\u2013"}
+                  </span>
+                  <span>
+                    <b
+                      className={
+                        r.disposition === "ignore" ? s.tickLabelOff : undefined
+                      }
+                    >
+                      {r.label}
+                    </b>{" "}
+                    <span className={s.rolePill}>{r.disposition}</span>
+                  </span>
+                  <span className={s.tickWitness}>{r.why}</span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          {routing.notes.map((n) => (
+            <p key={n} className="ga-doc-note" data-testid="goal-plan-routing-note">
+              {n}
+            </p>
+          ))}
+        </section>
+      ) : null}
+
+      {/* ── WHAT I AM NOT DOING, AND WHY ────────────────────────────────
+          THE SAME DISCIPLINE THE CUT LIST APPLIES TO A FINDING, APPLIED TO A
+          STEP. An omission the reader cannot see is indistinguishable from a
+          check that quietly failed — and the reader is the only person who
+          can say "no, that one does matter here", which is the whole reason
+          this is a gate and not a progress bar. */}
+      {setAside.length ? (
+        <section className="ga-plan-section" data-testid="goal-plan-set-aside">
+          <h2 className={s.sectionLabel}>What I am setting aside</h2>
+          <ul className="ga-doc-gaps">
+            {setAside.map((sa) => (
+              <li key={sa.observation} data-testid="goal-plan-set-aside-item">
+                <p className="ga-doc-gap-q">{sa.what}</p>
+                <p className="ga-doc-gap-why">{sa.why}</p>
+                {sa.source ? (
+                  <p className="ga-doc-gap-fix">
+                    <span className="ga-sources-label">Found in</span>{" "}
+                    {sa.source}
+                  </p>
+                ) : null}
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
 
       {/* WHAT THE PLAN STILL NEEDS — a forward reference, not the questions
           themselves. They come after the approval, because they are about the
