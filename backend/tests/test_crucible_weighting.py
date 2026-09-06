@@ -611,7 +611,6 @@ def test_no_question_offers_an_answer_the_engine_never_reads():
     listing the ones known to be wired, so a question added later is caught by
     the same rule."""
     import pathlib
-    import subprocess
 
     from app.crucible.framework import questions_for
 
@@ -620,13 +619,22 @@ def test_no_question_offers_an_answer_the_engine_never_reads():
         "RICE", [_coverage_obs(0.9), _divergence_obs()])}
     assert asked, "fixture must produce questions or this is vacuous"
 
+    # SOURCE ONLY, AND `__pycache__` IS THE WHOLE REASON THIS IS SPELLED OUT.
+    # The first version shelled out to `grep -r` and discounted the question's
+    # own definition in `framework.py` — and was then satisfied by
+    # `__pycache__/framework.cpython-311.pyc`, which is the compiled form of
+    # the file it had just excluded. The guard passed on a question with no
+    # reader at all, which is precisely the state it exists to detect. Reading
+    # the `.py` files directly has no such shadow.
+    sources = [f for f in root.rglob("*.py") if "__pycache__" not in f.parts]
+    assert len(sources) > 100, "the source sweep found almost nothing"
+
     unread = []
     for qid in sorted(asked):
-        hits = subprocess.run(
-            ["grep", "-rl", qid, str(root)],
-            capture_output=True, text=True).stdout.split()
-        # Its own definition in `framework.py` does not count as a reader.
-        readers = [h for h in hits if not h.endswith("crucible/framework.py")]
+        readers = [
+            f for f in sources
+            if f.name != "framework.py" and qid in f.read_text(errors="ignore")
+        ]
         if not readers:
             unread.append(qid)
     assert not unread, (
