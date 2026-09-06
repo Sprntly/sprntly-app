@@ -218,6 +218,213 @@ def _transcript(n: int, *, stated: int | None = None, dated: bool = True,
     return "".join(out)
 
 
+#: THE REAL DOCUMENT'S OPENING, STRUCTURE FOR STRUCTURE.
+#:
+#: EVERY CHARACTER OF THIS SHAPE IS LOAD-BEARING and none of it is decoration:
+#: the `## Page 1` header (so there is a bare number in the text), the BLANK
+#: line after it (so `\s` can span it), a heading whose first word begins with
+#: a letter (so `\d+\s+word` completes a match), and the TAB before "calls"
+#: on a later line (so a `[ ]`-only fix would still fail here).
+#:
+#: A synthetic transcript without a page header passes either way and proves
+#: nothing — which is exactly what the first version of this suite did, and it
+#: is why the defect below reached a real document before anything caught it.
+#: The tenant name is the repo's synthetic convention; the name is not what
+#: causes the bug, the line structure is.
+_REAL_HEADER = (
+    "## Page 1\n"
+    "\n"
+    "Call Transcripts \u2014 Rolling 90 Days\n"
+    "Northwind \u00b7 Gong export \u00b7 10\tcalls \u00b7 "
+    "2026-06-30 to 2026-09-04\n"
+)
+
+
+def _real_shape_document(n: int = 10) -> str:
+    """`_REAL_HEADER` plus `n` tab-separated per-call headers across pages.
+
+    Titles REPEAT, because they do: "Call with Northwind — renewal" recurring
+    across a quarter is the normal case for a rolling export, and a document
+    where every title happened to be unique would hide the id collision this
+    also pins.
+    """
+    accounts = ["Northwind", "Contoso", "Fabrikam", "AdventureWorks"]
+    out = [_REAL_HEADER, "\n"]
+    for i in range(n):
+        if i and i % 4 == 0:
+            out.append(f"## Page {i // 4 + 1}\n\n")
+        out.append(f"Call with {accounts[i % 4]} \u2014 renewal\n")
+        out.append(f"Date:\t2026-0{7 + i // 5}-{10 + i:02d}\n")
+        out.append("Type:\tdiscovery\n\n")
+        out.append("They said the bulk export is slow. " * 10 + "\n\n")
+    return "".join(out)
+
+
+def test_a_page_number_is_not_the_documents_count_of_its_conversations():
+    """THE DEFECT A SYNTHETIC FIXTURE MISSED, AND IT COST THE WHOLE FEATURE.
+
+    `_STATED_COUNT` used `\\s+`, and `\\s` matches a NEWLINE. On the real
+    document `1\\n\\nCall` matched — the page number, the blank line, and the
+    first word of the heading — and `search()` returns the FIRST match, so the
+    document's own count parsed as 1 when it says 10.
+
+    Nothing errored. The split found all ten headers correctly, "disagreed"
+    with a number the document never stated, and fell back to one whole-file
+    segment dated to the run clock: 3 findings where there should have been 7.
+    The guard was right, the disclosure was accurate, and the answer was wrong.
+    """
+    assert prose._STATED_COUNT.search(_REAL_HEADER).group(1) == "10"
+    # AND ONLY ONE THING IN THAT HEADER LOOKS LIKE A COUNT. Asserting the
+    # parsed value alone would still pass a pattern that matched twice and
+    # happened to order them favourably.
+    assert len(prose._STATED_COUNT.findall(_REAL_HEADER)) == 1
+
+
+def test_no_pattern_here_may_match_across_a_line_boundary():
+    """THE DEFECT CLASS, NOT THE INSTANCE.
+
+    Everything this module parses is positional — a count in a header line, a
+    date on its label line, a title on the line above. A pattern permitted to
+    span a newline reaches into the next line and takes whatever is there, and
+    it does it silently. Swept over every compiled pattern in the module so a
+    fourth one added later is covered by construction rather than by memory.
+    """
+    probe = ("## Page 1\n\nCall Transcripts\nDate:\n2026-08-20\n"
+             "Northwind \u00b7 10\tcalls \u00b7\n")
+    for name in ("_DATE_LABEL", "_ISO_DATE", "_STATED_COUNT"):
+        pattern = getattr(prose, name)
+        spanning = [m.group(0) for m in pattern.finditer(probe)
+                    if "\n" in m.group(0)]
+        assert not spanning, f"{name} matched across a line: {spanning!r}"
+
+
+def test_the_real_document_shape_splits_into_ten_dated_conversations():
+    """THE WHOLE THING, over the shape that actually broke it.
+
+    Ten headers, the document's own count agreeing, ten distinct dates read
+    from ten different header lines, and ten distinct artifact ids.
+    """
+    doc = _real_shape_document(10)
+    segments, per_conversation, markers, stated, fallback = prose.segment(
+        doc, name="calls.pdf", now=NOW)
+
+    assert (len(segments), markers, stated, per_conversation, fallback) == (
+        10, 10, 10, True, "")
+    assert len({s.observed_at for s in segments}) == 10
+
+    d = prose.ProseDocument(
+        name="calls.pdf", sha256="x", chars=len(doc), segments=segments,
+        per_conversation=per_conversation, markers_found=markers,
+        stated_count=stated)
+    ids = [d.artifact_id_for(s) for s in segments]
+    assert len(set(ids)) == 10, ids
+    assert all(ids)
+    assert d.how_it_was_read.startswith("read as 10 separate conversations")
+    assert "the document says it holds 10, and it does" in d.how_it_was_read
+
+
+def test_two_conversations_sharing_a_title_are_two_artifacts():
+    """A TITLE-KEYED ID MERGES THEM, AND THE MERGE IS THE FAILURE.
+
+    Two calls with the same account in one rolling export carry the same
+    title. Collapsing them to one artifact hands the echo rule a cluster built
+    from two separate conversations and tells it they came from one document —
+    which is the exact collapse per-conversation identity exists to prevent,
+    arriving through the back door. Disambiguated on collision only, the way
+    `recon.read_uploads` already disambiguates two attachments sharing a
+    filename, so the first occurrence keeps a name a citation can print.
+    """
+    doc = _real_shape_document(10)
+    segments, per_conversation, markers, stated, _f = prose.segment(
+        doc, name="calls.pdf", now=NOW)
+    d = prose.ProseDocument(
+        name="calls.pdf", sha256="x", chars=len(doc), segments=segments,
+        per_conversation=per_conversation, markers_found=markers,
+        stated_count=stated)
+    ids = [d.artifact_id_for(s) for s in segments]
+    assert ids[0] == "calls.pdf#Call with Northwind \u2014 renewal"
+    assert ids[4] == "calls.pdf#Call with Northwind \u2014 renewal (2)"
+    assert ids[8] == "calls.pdf#Call with Northwind \u2014 renewal (3)"
+
+
+def test_a_date_is_read_from_the_field_and_not_from_the_neighbourhood():
+    """SAME CLASS AS THE COUNT BUG, ONE FIELD OVER — AND THE FIRST VERSION OF
+    THIS TEST DID NOT PROVE IT.
+
+    The wrap fallback exists for one reason: a PDF text layer sometimes puts
+    `Date:` and its value on separate lines. It was written as a 3-line window
+    scanned for the first date-shaped thing, which is wider than that reason —
+    it takes a date out of ANY nearby line and stamps the conversation with it.
+
+    THE HONEST HISTORY, because it is the point. A first attempt at this
+    "preferred the label's own value", which changed nothing at all:
+    `_plausible_date` scans forward and the label line was already first in the
+    window, so the preference preferred something that had already won. The
+    mutation that should have caught it did not, and the comment above it
+    claimed a fix that had not been made. What follows tests the narrowing that
+    actually changes behaviour.
+    """
+    body = "They said the export is slow. " * 10
+
+    # A. The ordinary case: the value is on the label line.
+    segments, per_conversation, *_rest = prose.segment(
+        f"Call one\nDate:\t2026-08-20\n\n{body}\n\n"
+        f"Call two\nDate:\t2026-08-25\n\n{body}\n", name="c.pdf", now=NOW)
+    assert per_conversation is True
+    assert [s.observed_at.date().isoformat() for s in segments] == [
+        "2026-08-20", "2026-08-25"]
+
+    # B. The case the fallback is FOR: the value wrapped onto the next line.
+    segments, per_conversation, *_rest = prose.segment(
+        f"Call one\nDate:\n2026-08-20\n\n{body}\n\n"
+        f"Call two\nDate:\n2026-08-25\n\n{body}\n", name="c.pdf", now=NOW)
+    assert per_conversation is True
+    assert [s.observed_at.date().isoformat() for s in segments] == [
+        "2026-08-20", "2026-08-25"]
+
+    # C. THE ONE THAT MATTERS: a bare label, and a date on the NEXT FIELD.
+    # Taking it would date this call from a sentence about something else and
+    # leave nothing in the output to show for it. Refusing it leaves the
+    # segment undated, and `segment` then declines to split the document at
+    # all — visible, disclosed, and correct.
+    segments, per_conversation, _m, _st, fallback = prose.segment(
+        f"Call one\nDate:\nType:\tdiscovery \u2014 agreed 2026-09-01\n{body}\n\n"
+        f"Call two\nDate:\t2026-08-25\n\n{body}\n", name="c.pdf", now=NOW)
+    assert per_conversation is False
+    assert "carry no date" in fallback
+
+    # D. AND THE SEARCH STOPS AT THE FIRST NON-EMPTY LINE, which is what makes
+    # this a read of one field rather than a scan of the neighbourhood. A
+    # wrapped value is always the line immediately after its label; a line two
+    # down that merely STARTS with a date is a sentence, not the value.
+    segments, per_conversation, _m, _st, fallback = prose.segment(
+        f"Call one\nDate:\nType:\tdiscovery\n2026-09-01 was the follow-up\n"
+        f"{body}\n\nCall two\nDate:\t2026-08-25\n\n{body}\n",
+        name="c.pdf", now=NOW)
+    assert per_conversation is False
+    assert "carry no date" in fallback
+
+
+def test_a_split_that_is_not_corroborated_says_so():
+    """THE THIRD CASE, WHICH USED TO BE SILENT.
+
+    A document with per-call headers and no count of its own IS split — an
+    absent count is not a disagreement — but nothing corroborates that split,
+    and the sentence has to say which of the two it is. Otherwise a checked
+    claim and an unchecked one wear identical words.
+    """
+    doc = _real_shape_document(3).replace("10\tcalls", "calls")
+    segments, per_conversation, markers, stated, _f = prose.segment(
+        doc, name="calls.pdf", now=NOW)
+    assert (per_conversation, stated) == (True, None)
+    d = prose.ProseDocument(
+        name="calls.pdf", sha256="x", chars=len(doc), segments=segments,
+        per_conversation=per_conversation, markers_found=markers,
+        stated_count=stated)
+    assert "states no count of its own" in d.how_it_was_read
+    assert "nothing corroborates that split" in d.how_it_was_read
+
+
 def test_a_split_that_matches_the_documents_own_count_is_used():
     segments, per_conversation, markers, stated, fallback = prose.segment(
         _transcript(3, stated=3), name="calls.pdf", now=NOW)
@@ -260,7 +467,7 @@ def test_the_fallback_reason_reaches_the_sentence_the_reader_sees():
         per_conversation=True, markers_found=3, stated_count=3,
     )
     assert "3 separate conversations" in verified.how_it_was_read
-    assert "the number it states itself" in verified.how_it_was_read
+    assert "the document says it holds 3, and it does" in verified.how_it_was_read
     assert "split at the per-call headers" in verified.how_it_was_read
 
 

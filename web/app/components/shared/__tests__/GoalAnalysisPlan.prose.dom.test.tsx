@@ -36,8 +36,13 @@ const PROSE = [
   {
     name: "customer_calls",
     conversations: 10,
-    how: "read as 10 separate conversations, which is the number it states "
-      + "itself, split at the per-call headers, each dated from its own header",
+    // Copied from what the server actually composes
+    // (`prose.ProseDocument.how_it_was_read`) rather than invented here. A
+    // fixture that drifts from the real sentence is a test asserting a string
+    // no user will ever be shown.
+    how: "read as 10 separate conversations — the document says it holds 10, "
+      + "and it does, split at the per-call headers, each dated from its own "
+      + "header",
   },
 ]
 

@@ -176,8 +176,28 @@ _ISO_DATE = re.compile(r"(\d{4})-(\d{2})-(\d{2})")
 
 #: The document's own statement of how many conversations it holds — "10
 #: calls", "· 6 interviews ·". Used to CHECK the split, never to produce it.
+#:
+#: `[ \t]+` AND NOT `\s+`, AND THIS IS NOT A STYLE CHOICE. `\s` matches a
+#: NEWLINE, so on the real document the pattern matched across a blank line:
+#:
+#:     ## Page 1
+#:                      <- `1\n\nCall` matched here, and `search` returns the
+#:     Call Transcripts    FIRST match, so the count parsed as 1
+#:     ... · 10\tcalls · ...
+#:
+#: A page NUMBER and the first word of a heading were read as the document's
+#: own count of its conversations. The split then "disagreed" with a number
+#: the document never stated (10 headers found, 1 claimed), so a correctly
+#: segmented ten-call pack fell all the way back to one whole-file segment
+#: dated to the run clock — worth 3 findings instead of 7 on the measured
+#: corpus. The guard behaved perfectly and disclosed exactly what it did; the
+#: thing it was guarding was wrong.
+#:
+#: THE TAB IS LOAD-BEARING IN THE CHARACTER CLASS. The separator in that PDF's
+#: text layer is `\t`, not a space, so a bare `[ ]+` reintroduces the failure
+#: on the exact file that exposed it.
 _STATED_COUNT = re.compile(
-    r"\b(\d{1,3})\s+(calls?|conversations?|interviews?|meetings?|transcripts?)\b",
+    r"\b(\d{1,3})[ \t]+(calls?|conversations?|interviews?|meetings?|transcripts?)\b",
     re.IGNORECASE,
 )
 
@@ -242,10 +262,29 @@ class ProseDocument:
         claim switches the rule off for its whole cluster and every finding in
         it passes that check vacuously. A segment we cannot name takes the
         FILE's id, which is less precise than we wanted and still true.
+
+        AND NEVER SHARED BETWEEN TWO CONVERSATIONS. Two calls in one pack can
+        carry the SAME title — "Call with Northwind — renewal" recurring across
+        a quarter is the normal case, not a corner one — and a title-keyed id
+        would silently merge them into one artifact. That is precisely the
+        collapse this whole scheme exists to prevent, arriving through the back
+        door: the echo rule would then see one document behind a cluster built
+        from two separate conversations and refute it, and the run would report
+        having read ten calls while counting four.
+
+        Disambiguated ON COLLISION ONLY, so the common case keeps a readable
+        name and a citation still says which call it came from. This is the
+        same shape `recon.read_uploads` already applies to two attachments
+        sharing a filename, deliberately rather than by coincidence — one
+        convention for "these two things are distinct and were named the same".
+        Keyed on position in document order, so it is stable across runs.
         """
         if not self.per_conversation or not segment.title:
             return self.name
-        return f"{self.name}#{segment.title}"
+        seen = sum(1 for s in self.segments
+                   if s.index < segment.index and s.title == segment.title)
+        suffix = f" ({seen + 1})" if seen else ""
+        return f"{self.name}#{segment.title}{suffix}"
 
     @property
     def how_it_was_read(self) -> str:
@@ -257,10 +296,28 @@ class ProseDocument:
         """
         if self.per_conversation:
             n = len(self.segments)
-            checked = (
-                f", which is the number it states itself"
-                if self.stated_count == n else ""
-            )
+            # WHAT THE SPLIT WAS CHECKED AGAINST, NAMED — and the unverified
+            # case named too, which it was not before.
+            #
+            # This sentence is why a mis-parse of the document's own count took
+            # minutes to diagnose instead of an afternoon: it said, in the
+            # reader's words, exactly which two numbers disagreed. The verified
+            # path has to keep that quality rather than trailing off into "read
+            # as 10 conversations", which is a number nobody can check.
+            #
+            # AND THE THIRD CASE IS NO LONGER SILENT. A document that carries
+            # per-call headers but states no count of its own is split on
+            # evidence that was never corroborated — the split is used (an
+            # absent count is not a disagreement), and saying so is the
+            # difference between a checked claim and an unchecked one wearing
+            # the same words.
+            if self.stated_count == n:
+                checked = f" — the document says it holds {n}, and it does"
+            elif self.stated_count is None:
+                checked = (" — the document states no count of its own, so "
+                           "nothing corroborates that split")
+            else:  # pragma: no cover — `segment` falls back before this
+                checked = ""
             return (
                 f"read as {n} separate conversations{checked}, split at the "
                 f"per-call headers, each dated from its own header"
@@ -336,10 +393,36 @@ def segment(text: str, *, name: str, now: datetime) -> tuple[
         title = " ".join(lines[j].split()) if j >= 0 else ""
 
         # THE DATE COMES OFF THE SAME HEADER BLOCK THAT GAVE THE BOUNDARY.
-        # Three lines rather than one because a PDF text layer sometimes wraps
-        # `Date:` and its value apart.
-        observed_at = _plausible_date(
-            "\n".join(lines[i:min(i + 3, len(lines))]), now=now)
+        #
+        # THE LABEL'S OWN VALUE FIRST, AND THEN A NARROW WRAP FALLBACK.
+        #
+        # The fallback exists for ONE reason: a PDF text layer sometimes puts
+        # `Date:` and its value on separate lines. It was written as a 3-line
+        # window scanned for the first date-shaped thing, which is wider than
+        # that reason — it will take a date out of ANY nearby line, including
+        # `Type:  discovery — agreed 2026-09-01`, and stamp the conversation
+        # with it. Same defect class as `_STATED_COUNT` above, one field over:
+        # a search allowed past the line that owns the value silently picks up
+        # whatever is on the other side.
+        #
+        # So the fallback now accepts only what a WRAPPED VALUE looks like: the
+        # first non-empty line after the label, and only if it BEGINS with the
+        # date. Anything else stops the search and leaves the segment undated —
+        # which is the honest answer, and `segment` already refuses to split a
+        # document with an undated conversation rather than guessing one.
+        own = _DATE_LABEL.match(lines[i])
+        observed_at = _plausible_date(own.group(1) if own else "", now=now)
+        if observed_at is None:
+            for k in range(i + 1, min(i + 3, len(lines))):
+                candidate = lines[k].strip()
+                if not candidate:
+                    continue
+                if _ISO_DATE.match(candidate):
+                    observed_at = _plausible_date(candidate, now=now)
+                # THE FIRST NON-EMPTY LINE DECIDES IT, either way. Continuing
+                # past a line that is not the value is what made this a search
+                # of the neighbourhood instead of a read of one field.
+                break
 
         end = len(lines)
         if n + 1 < len(starts):
