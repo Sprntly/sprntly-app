@@ -1714,3 +1714,38 @@ def test_the_finding_carries_its_theme_and_its_example_separately():
     # The example, when there is one, is the words a source actually used.
     if f.example:
         assert f.example in f.statement
+
+
+def test_reach_is_taken_over_every_named_account_not_the_customer_side():
+    """A NO-OP TODAY, WHICH IS THE ENTIRE POINT.
+
+    `_accounts` used to read `customer_side` — every named account minus
+    anything `claims.infer_account_sides` placed on the prospect side. Nothing
+    in `app/` writes a prospect key, so the two segments are the same set and
+    the read was invisible; the day a connector lands one, reading the narrow
+    segment would shrink every reach count in the product with no code change,
+    no failing test, and nothing for a reader to see. It would also falsify
+    the plan's own disclosure that every named account is counted as a
+    customer.
+
+    Asserted on a claim whose two segments DISAGREE, because on any fixture
+    where they agree — which is every other fixture in this file — this test
+    asserts nothing at all.
+    """
+    import dataclasses
+
+    from app.crucible.pipeline import _accounts
+    from app.crucible.types import PopulationFilter
+
+    split = dataclasses.replace(
+        claim("c1", accounts=("Alpha Works", "Beta Systems")),
+        population=PopulationFilter(
+            segments={"accounts": ("Alpha Works", "Beta Systems"),
+                      "customer_side": ("Alpha Works",)},
+            estimated_size=2,
+        ),
+    )
+    assert _accounts([split]) == ("Alpha Works", "Beta Systems"), (
+        "reach dropped an account the evidence names, on the strength of a "
+        "customer/prospect split nothing records"
+    )

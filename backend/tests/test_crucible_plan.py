@@ -110,3 +110,101 @@ def test_a_derived_account_value_never_lands_in_the_field_the_report_calls_an_es
     assert blob["account_value"] is None
     assert blob["account_value_derived"] == 283526.0
     assert blob["account_value_derived_note"]
+
+
+# ─── The assumption every run makes about which side of the sale an account
+#     is on ─────────────────────────────────────────────────────────────────
+
+
+def _sides_gap(gaps):
+    return next((g for g in gaps if "prospects" in g.question), None)
+
+
+def test_the_customer_side_assumption_is_disclosed_rather_than_silent():
+    """`claims.infer_account_sides` resolves an account it cannot place to
+    `customer` and says in its own docstring that this "is disclosed as an
+    assumed parameter (I8) by the caller rather than hidden here". No caller
+    disclosed it: before this, `plan`, `planner` and `report` between them
+    contained not one occurrence of the word."""
+    gaps, _ = derive_gaps_and_promises([_src("customer_voice")])
+    gap = _sides_gap(gaps)
+    assert gap is not None, "the assumption is made on every run and stated on none"
+    assert "which side of the sale an account is on" in gap.because
+    assert "every named account is counted as a customer" in gap.because
+    assert gap.remedy, "a gap without a remedy is an apology"
+
+
+def test_the_assumption_is_stated_whatever_is_connected():
+    """UNCONDITIONAL, BECAUSE THE ABSENCE IS. `claims.PROSPECT_KEYS` is read
+    in four places and written in none, so no source this engine can ingest
+    carries the distinction. A gap that came and went with the kept inventory
+    would imply that connecting something closes it."""
+    for kept in ([], [_src("analytics")], [_src("revenue"), _src("customer_voice")]):
+        assert _sides_gap(derive_gaps_and_promises(kept)[0]) is not None, (
+            f"the assumption went unstated for kept={[s.source_type for s in kept]}"
+        )
+
+
+def test_the_disclosure_does_not_claim_a_goal_filter_production_never_runs():
+    """THE SENTENCE THIS GAP MUST NOT GROW. The obvious follow-on — that a
+    prospect scores zero against a retention goal — describes
+    `build_findings(goal_accounts=...)`, and every production caller leaves
+    that argument `None`. Saying it would be a fresh instance of the defect
+    this work exists to remove."""
+    gap = _sides_gap(derive_gaps_and_promises([_src("customer_voice")])[0])
+    said = f"{gap.question} {gap.because} {gap.remedy}".lower()
+    for claim in ("score", "scores zero", "retention goal", "filtered out",
+                  "excluded from", "ranked lower", "does not count towards"):
+        assert claim not in said, (
+            f"the disclosure claims a goal filter production does not run: "
+            f"{claim!r}"
+        )
+
+
+def test_no_prospect_writer_exists_or_this_disclosure_is_stale():
+    """THE PREMISE, PINNED. The gap says the distinction is not recorded. It
+    is true because nothing in `app/` ever writes a prospect key — the day
+    something does, this sentence becomes a lie in the reader's own document
+    and the failure has to land here rather than in production.
+
+    Read as SOURCE over the tree, with each file asserted non-empty: a text
+    search that excludes a source file can be satisfied by that file's
+    `.pyc`, and the failure mode of a guard like this is passing because it
+    read nothing.
+
+    `prospect` ONLY, THOUGH `PROSPECT_KEYS` HAS TWO. `candidate` is an
+    ordinary English word this codebase already uses for unrelated things —
+    a goal resolution status, a column-rename suggestion — so scanning for it
+    as a dict key would fire on noise, and a guard that cries wolf is one
+    somebody deletes. The realistic way this premise dies is a connector
+    landing a `prospect` field, which this does catch. It is deliberately
+    loose in the safe direction: it cannot manufacture a writer that is not
+    there.
+    """
+    from pathlib import Path
+
+    from app.crucible import claims
+
+    assert "prospect" in claims.PROSPECT_KEYS, (
+        "the key this scans for is no longer one the engine reads")
+
+    root = Path(claims.__file__).resolve().parents[2] / "app"
+    files = sorted(root.rglob("*.py"))
+    assert len(files) > 50, f"only {len(files)} sources scanned; guard is vacuous"
+
+    writers = []
+    for p in files:
+        text = p.read_text(encoding="utf-8", errors="replace")
+        assert text.strip() or p.name == "__init__.py", f"{p} read as empty"
+        # An ASSIGNMENT into a mapping under the key. Reading one
+        # (`props.get("prospect")`) is what the engine does today and is not
+        # a writer; `claims.py` itself is the reader and is exempt.
+        if p.name == "claims.py":
+            continue
+        if '"prospect":' in text or "'prospect':" in text:
+            writers.append(str(p.relative_to(root)))
+    assert not writers, (
+        "something now records which side of the sale an account is on, so "
+        "the plan's disclosure that nothing does is false:\n  "
+        + "\n  ".join(writers)
+    )
