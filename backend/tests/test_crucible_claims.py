@@ -29,8 +29,10 @@ from app.crucible.claims import (
     AUTHORITATIVE_FOR,
     DEFAULT_CLAIM_TYPE,
     KIND_TO_CLAIM_TYPE,
+    account_key,
     infer_account_sides,
     normalise_account,
+    self_account_keys,
     project_signal,
     project_signals,
 )
@@ -568,3 +570,81 @@ def test_reporting_a_constraint_does_not_let_a_call_size_anything():
     assert claim is not None
     assert claim.type == "magnitude"
     assert claim.authoritative is False
+
+
+# ── The vendor is not one of its own customers ───────────────────────────────
+#
+# On a real tenant the company's own name was the single largest "account" in
+# the corpus — 2,357 of 7,711 attributed signals, 30.6%, spread across four
+# spellings. Two things go wrong when it is counted. The attribution gate
+# (`recon.ATTRIBUTABLE_MIN_SHARE`) passes on a corpus that should fail it,
+# because the guard that stops the engine weighting an unattributable corpus
+# is being satisfied by the vendor's own name. And the `single_account`
+# refutation is defeated: a cluster of one real customer plus the vendor has
+# two accounts and survives a rule it should fail.
+#
+# THE MATCH IS ON A NORMALISED KEY, NOT THE RAW STRING. A raw-string exclusion
+# drops `AdventureWorks` and keeps `Adventure Works`, which is the same bug wearing a
+# fix.
+
+_SPELLINGS = ["AdventureWorks", "Adventure Works", "Adventureworks", "adventureworks",
+              "AdventureWorks Inc", "AdventureWorks, Inc."]
+
+
+@pytest.mark.parametrize("spelling", _SPELLINGS)
+def test_every_spelling_of_the_company_name_collapses_to_one_key(spelling):
+    """Case, spacing and a trailing legal suffix are spelling, not identity."""
+    assert account_key(spelling) == account_key("AdventureWorks")
+
+
+def test_a_legal_suffix_is_only_stripped_when_it_is_its_own_word():
+    """`Cisco` must not become `cis`. The suffix is dropped as a TOKEN, never
+    as a trailing substring, or the exclusion starts eating real names."""
+    assert account_key("Cisco") == "cisco"
+    assert account_key("Acme Co.") == account_key("Acme")
+    assert account_key("Incident.io") != account_key("ident.io")
+
+
+@pytest.mark.parametrize("spelling", _SPELLINGS)
+def test_the_company_is_not_an_account_in_its_own_corpus(spelling):
+    """SITE ONE: `_population`, via `normalise_account`. Everything that reads
+    an account name downstream — reach, the graph relations, the deduped
+    figures, the repeated amounts — reads it through here."""
+    selves = self_account_keys("AdventureWorks")
+    assert normalise_account(spelling, self_names=selves) is None
+    # ...and a real customer is untouched.
+    assert normalise_account("Northwind", self_names=selves) == "Northwind"
+
+
+def test_a_signal_naming_only_the_vendor_contributes_no_account():
+    selves = self_account_keys("AdventureWorks Inc")
+    rows = [sig(id="a", properties={"account": "Adventure Works"}),
+            sig(id="b", properties={"customer": "Northwind"})]
+    claims, _ = project_signals(rows, self_names=selves)
+    by_id = {c.id: c for c in claims}
+    assert by_id["a"].population.segments == {}, (
+        "the vendor's own name sized a population")
+    assert by_id["a"].population.estimated_size is None
+    assert by_id["b"].population.segments["accounts"] == ("Northwind",)
+
+
+def test_the_vendor_does_not_pad_a_single_account_cluster_to_two():
+    """The `single_account` refutation drops a finding whose every claim comes
+    from one account. One real customer plus the vendor reads as two, which is
+    how a one-account finding survives the rule that exists to kill it."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"customer": "Northwind"}),
+            sig(id="b", properties={"customer": "AdventureWorks"})]
+    claims, _ = project_signals(rows, self_names=selves)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == {"Northwind"}, f"expected one real account, got {named}"
+
+
+def test_without_a_company_name_nothing_is_excluded():
+    """The default must reproduce the previous behaviour exactly — a tenant
+    whose display name will not load must not silently lose its accounts."""
+    assert self_account_keys(None) == frozenset()
+    assert self_account_keys("") == frozenset()
+    assert normalise_account("AdventureWorks") == "AdventureWorks"
+    claims, _ = project_signals([sig(id="a", properties={"account": "AdventureWorks"})])
+    assert claims[0].population.segments["accounts"] == ("AdventureWorks",)

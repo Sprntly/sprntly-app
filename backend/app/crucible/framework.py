@@ -332,11 +332,25 @@ def derived_account_value(observations: Sequence[object]) -> tuple[Optional[floa
             continue
         fields = list(getattr(o, "fields", ()) or ["", ""])
         column = fields[1] if len(fields) > 1 else ""
+        # THE NOTE MUST DISCLAIM AS WELL AS EXPLAIN, BECAUSE IT IS STORED.
+        # It is carried onto the plan as `account_value_derived_note` and
+        # SERIALISED (`plan.build_plan` -> `RunPlan.to_json`), so it outlives
+        # the screen that produced it and is what a stored run and the
+        # rendered report read back. It used to end "so a handful of very
+        # large accounts do not set the price of a typical one" — a sentence
+        # about how the figure is USED, in an engine that does not use it:
+        # `weight_by_account_value` is `declared`, every `ImpactInputs`
+        # carries `value_per_unit=None`, and `score_impact` returns a count of
+        # accounts. Fixing the plan step alone left this copy of the claim
+        # standing in the stored JSON.
         return float(median), (
             f"Taken from `{column}` in {getattr(o, 'source', 'your contracts')}, "
             f"which carries a value for each of {figures.get('accounts', 0):.0f} "
-            f"accounts. The median is used rather than the mean so a handful of "
-            f"very large accounts do not set the price of a typical one."
+            f"accounts. The median is recorded rather than the mean because "
+            f"a handful of very large accounts should not stand in for a "
+            f"typical one. It is why you are not asked for this number; it "
+            f"does not change how anything is sized here, which stays a count "
+            f"of the accounts a theme touches."
         )
     return None, ""
 

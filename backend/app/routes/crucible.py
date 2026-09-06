@@ -1398,7 +1398,8 @@ def execute_run(
                        if r.get("source_type") not in excluded_sources]
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
-        claims, stats = project_signals(signals)
+        claims, stats = project_signals(
+            signals, self_names=_self_account_keys(company_id))
         # SOURCES OF THE CLAIMS, not of the rows. Counting `signals` says "read
         # from 4 sources" on a tenant whose entire `docs` corpus was retired —
         # so a PM defending the ranking believes their documents are in it when
@@ -2201,7 +2202,8 @@ def _reenrich_stalled_run(run_id: int, company_id: str, row: dict) -> None:
             signals = _load_signals_by_id(company_id, all_claim_ids)
             from app.crucible.claims import project_signals
 
-            claims, _stats = project_signals(signals)
+            claims, _stats = project_signals(
+                signals, self_names=_self_account_keys(company_id))
 
             enrichment_meta = _run_enrichment(
                 run_id=run_id, company_id=company_id, goal_text=goal_text,
@@ -2625,6 +2627,33 @@ def _read_uploads(uploads: tuple[tuple[str, str], ...], workspace_id: str):
     return tables, tuple(unread) + skipped
 
 
+def _self_account_keys(company_id: str) -> frozenset[str]:
+    """The tenant's own company name, as account keys, or nothing.
+
+    THE VENDOR IS NOT ONE OF ITS OWN CUSTOMERS. The extractor writes the
+    company's own name into `properties.account` on every row that mentions
+    it, and on a real tenant that made the vendor the single largest
+    "account" in its own analysis — 2,357 of 7,711 attributed signals, 30.6%,
+    across four spellings. That inflates the reach of every theme it touches,
+    rescues one-account findings from the `single_account` refutation by
+    padding them to two, and satisfies the attribution gate on a corpus that
+    should fail it.
+
+    TOTAL, AND EMPTY ON ANY FAILURE. Losing the exclusion costs the old
+    behaviour; raising here would cost the run.
+    """
+    try:
+        from app.crucible.claims import self_account_keys
+        from app.db.companies import display_name_for_company_id
+
+        return self_account_keys(display_name_for_company_id(company_id))
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.warning("crucible: could not resolve the company name for %s; "
+                       "its own name will be counted as an account",
+                       company_id, exc_info=True)
+        return frozenset()
+
+
 def _recon_report(company_id: str, *,
                   uploads: tuple[tuple[str, str], ...] = (),
                   workspace_id: str = ""):
@@ -2682,7 +2711,9 @@ def _recon_report(company_id: str, *,
         tables, displaced = reserve_for_uploads(
             uploaded, tables_from_signals(rows))
         return replace(
-            observe(tables, signals=rows), unread=unread + displaced)
+            observe(tables, signals=rows,
+                    self_names=_self_account_keys(company_id)),
+            unread=unread + displaced)
     except Exception:  # noqa: BLE001 — see the constant above
         logger.warning("crucible: reconnaissance pass failed for %s; the plan "
                        "will be built without a method section", company_id,

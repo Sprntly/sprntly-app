@@ -29,6 +29,7 @@ reaches the substrate over-strengthened is indistinguishable from a real one.
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping, Optional
 
@@ -259,17 +260,78 @@ _NOT_A_NAME = frozenset({
 })
 
 
-def normalise_account(value: Any) -> Optional[str]:
-    """An account name, or None if the value is a placeholder rather than one."""
+#: Trailing words that are a legal form rather than part of the name. Dropped
+#: as a whole TOKEN, never as a trailing substring — stripping "co" off the end
+#: of the letters would turn `Cisco` into `cis` and start merging real
+#: customers into each other.
+_LEGAL_SUFFIXES = frozenset({
+    "inc", "llc", "ltd", "limited", "corp", "corporation", "co", "plc",
+    "gmbh", "sa", "ag", "bv", "nv", "pty", "group", "holdings",
+})
+
+
+def account_key(value: str) -> str:
+    """Collapse the spellings of one account name to a single key.
+
+    Case, spacing and punctuation are spelling, not identity: one tenant
+    carried its own name four different ways across its rows — squashed,
+    spaced, title-cased and lowercase — and any exclusion matching the RAW
+    STRING would have dropped one spelling and kept the other three, which is
+    the same bug wearing a fix.
+    """
+    tokens = [t for t in re.split(r"[^a-z0-9]+", str(value).lower()) if t]
+    # NEVER THE ONLY TOKEN. "Inc" on its own is not a legal suffix attached to
+    # a name, and returning "" here would make every such row match every
+    # other one.
+    if len(tokens) > 1 and tokens[-1] in _LEGAL_SUFFIXES:
+        tokens = tokens[:-1]
+    return "".join(tokens)
+
+
+def self_account_keys(display_name: Optional[str]) -> frozenset[str]:
+    """The keys that mean "this is the tenant, not one of its customers".
+
+    A tenant's own company name is written into `properties.account` by the
+    extractor on every row that mentions it, and on a real corpus that made
+    the vendor the single largest account in its own analysis — 30.6% of all
+    attributed signals. Counting it inflates every reach it touches, and it
+    silently rescues one-account findings from the `single_account`
+    refutation by padding them to two.
+
+    EMPTY IS THE SAFE DEFAULT AND MEANS "EXCLUDE NOTHING". A tenant whose
+    display name will not load must lose the exclusion, never its accounts.
+    """
+    key = account_key(display_name or "")
+    return frozenset({key}) if key else frozenset()
+
+
+def normalise_account(
+    value: Any, self_names: frozenset[str] = frozenset(),
+) -> Optional[str]:
+    """An account name, or None if the value is a placeholder rather than one.
+
+    `self_names` are `account_key` outputs, not raw names — see
+    `self_account_keys`. THE SINGLE CHOKE-POINT: every reader of an account
+    name in this engine resolves it here (`_population` and
+    `infer_account_sides` are the only two callers, and reach, the graph
+    relations, the deduped grounded figures, the commercial native units and
+    the repeated amounts all read what they produce), so excluding a name
+    here excludes it everywhere at once.
+    """
     if not isinstance(value, str):
         return None
     name = " ".join(value.strip().split())
     if name.lower() in _NOT_A_NAME or not 3 <= len(name) <= 80:
         return None
+    if self_names and account_key(name) in self_names:
+        return None
     return name
 
 
-def infer_account_sides(signals: Iterable[Mapping[str, Any]]) -> dict[str, str]:
+def infer_account_sides(
+    signals: Iterable[Mapping[str, Any]],
+    self_names: frozenset[str] = frozenset(),
+) -> dict[str, str]:
     """Decide customer-vs-prospect per ACCOUNT, over the whole corpus.
 
     The population intersection is only real if it can tell them apart, and no
@@ -287,11 +349,11 @@ def infer_account_sides(signals: Iterable[Mapping[str, Any]]) -> dict[str, str]:
         if not isinstance(props, dict):
             continue
         for key in ("customer", "poc_customer"):
-            name = normalise_account(props.get(key))
+            name = normalise_account(props.get(key), self_names)
             if name:
                 customers.add(name)
         for key in PROSPECT_KEYS:
-            name = normalise_account(props.get(key))
+            name = normalise_account(props.get(key), self_names)
             if name:
                 prospects.add(name)
     return {
@@ -300,10 +362,13 @@ def infer_account_sides(signals: Iterable[Mapping[str, Any]]) -> dict[str, str]:
     }
 
 
-def _population(props: Mapping[str, Any], sides: Mapping[str, str]) -> PopulationFilter:
+def _population(
+    props: Mapping[str, Any], sides: Mapping[str, str],
+    self_names: frozenset[str] = frozenset(),
+) -> PopulationFilter:
     named: list[str] = []
     for key in (*CUSTOMER_KEYS, *PROSPECT_KEYS):
-        name = normalise_account(props.get(key))
+        name = normalise_account(props.get(key), self_names)
         if name and name not in named:
             named.append(name)
     if not named:
@@ -374,6 +439,7 @@ def _stored_figure_class(props: Mapping[str, Any]) -> Optional[str]:
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
+    self_names: frozenset[str] = frozenset(),
 ) -> Optional[Claim]:
     """One `kg_signal` row → one `Claim`, or None if it cannot be a claim.
 
@@ -422,7 +488,7 @@ def project_signal(
         strength=strength,
         observed_at=observed_at,
         authoritative=authoritative,
-        population=_population(props, sides),
+        population=_population(props, sides, self_names),
         # Sizing across a POPULATION still comes from the substrate, not
         # from a single signal — left unmeasured here rather than guessed
         # (I3). `magnitude` is different: it is this ONE claim's own
@@ -443,6 +509,10 @@ def project_signal(
 
 def project_signals(
     signals: Iterable[Mapping[str, Any]],
+    #: The tenant's own name, as `account_key` keys — see `self_account_keys`.
+    #: Default empty excludes nothing, which is exactly what every caller
+    #: without a resolved company display name should get.
+    self_names: frozenset[str] = frozenset(),
 ) -> tuple[tuple[Claim, ...], dict[str, int]]:
     """Project a corpus. Returns the claims and a count of what was dropped.
 
@@ -452,7 +522,7 @@ def project_signals(
     an outright failure.
     """
     rows = list(signals)
-    sides = infer_account_sides(rows)
+    sides = infer_account_sides(rows, self_names)
 
     claims: list[Claim] = []
     stats = {"seen": len(rows), "projected": 0, "no_timestamp": 0, "retired": 0}
@@ -466,7 +536,7 @@ def project_signals(
         if signal_is_retired(props if isinstance(props, dict) else None):
             stats["retired"] += 1
             continue
-        claim = project_signal(row, sides)
+        claim = project_signal(row, sides, self_names)
         if claim is None:
             stats["no_timestamp"] += 1
             continue

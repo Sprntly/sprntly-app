@@ -1320,6 +1320,11 @@ class FieldPresence:
 
 def signal_field_presence(
     signals: Sequence[Mapping[str, Any]], *, path: Sequence[str],
+    #: Account keys that name the TENANT rather than one of its customers —
+    #: `claims.self_account_keys` output. Only the account path passes these;
+    #: a company name is not a figure, so the monetary gap is measured with
+    #: this empty and is unaffected.
+    self_names: frozenset[str] = frozenset(),
 ) -> FieldPresence:
     """Count the signals carrying `path`, e.g. `("properties", "account")`.
 
@@ -1327,6 +1332,13 @@ def signal_field_presence(
     "how much of this names an account" and "how much of this carries a
     figure" are the same question asked of two keys — and the next one will be
     a third key, not a third function.
+
+    A ROW WHOSE ONLY ACCOUNT IS THE TENANT ITSELF HAS NOT ATTRIBUTED ANYTHING,
+    and counting it is how the attribution gate came to pass on a corpus that
+    should fail it: on a real tenant 67.6% of signals carried an account, but
+    30.6% of those named the vendor, leaving a true 47.0% — under
+    `ATTRIBUTABLE_MIN_SHARE`. The guard that stops the engine weighting an
+    unattributable corpus was being satisfied by the vendor's own name.
     """
     present = 0
     total = 0
@@ -1339,8 +1351,13 @@ def signal_field_presence(
             cursor = cursor.get(key) if isinstance(cursor, Mapping) else None
             if cursor is None:
                 break
-        if cursor is not None and not (isinstance(cursor, str) and not cursor.strip()):
-            present += 1
+        if cursor is None or (isinstance(cursor, str) and not cursor.strip()):
+            continue
+        if self_names and isinstance(cursor, str):
+            from app.crucible.claims import account_key
+            if account_key(cursor) in self_names:
+                continue
+        present += 1
     return FieldPresence(field_path=".".join(path), signals=total, present=present)
 
 
@@ -1559,7 +1576,10 @@ def _observe_dating(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
     )]
 
 
-def _observe_attribution(signals: Sequence[Mapping[str, Any]]) -> list[Observation]:
+def _observe_attribution(
+    signals: Sequence[Mapping[str, Any]],
+    self_names: frozenset[str] = frozenset(),
+) -> list[Observation]:
     """How much of the evidence names an account, and how much carries money.
 
     THE HONEST VERSION OF GRACEFUL DEGRADATION. A run that cannot attribute
@@ -1572,15 +1592,21 @@ def _observe_attribution(signals: Sequence[Mapping[str, Any]]) -> list[Observati
     the report will say so."
     """
     out: list[Observation] = []
-    for path, kind, noun, consequence in (
+    # `exclude_self` IS SET ON THE ACCOUNT PATH ONLY. The tenant's own name
+    # disqualifies a row from having attributed anything; it says nothing
+    # about whether that row carries a figure, so the monetary gap is counted
+    # exactly as it always was.
+    for path, kind, noun, consequence, exclude_self in (
         (("properties", "account"), "account_attribution_gap", "name an account",
          "themes can only be counted, never weighted by the revenue behind "
-         "them — and the report will say that is what happened"),
+         "them — and the report will say that is what happened", True),
         (("properties", "amount"), "monetary_coverage_gap", "carry a figure",
          "nothing can be sized in money; every size is stated in accounts "
-         "touched"),
+         "touched", False),
     ):
-        p = signal_field_presence(signals, path=path)
+        p = signal_field_presence(
+            signals, path=path,
+            self_names=self_names if exclude_self else frozenset())
         if not p.signals or p.share >= ATTRIBUTABLE_MIN_SHARE:
             continue
         out.append(Observation(
@@ -2393,6 +2419,12 @@ def observe(
     #: rather than a table. Optional: a caller with only spreadsheets passes
     #: none and simply gets no evidence-mix observation.
     signals: Sequence[Mapping[str, Any]] = (),
+    #: The tenant's own company name as `account_key` keys — see
+    #: `claims.self_account_keys`. RESOLVED BY THE CALLER, NOT HERE: this pass
+    #: is documented as deterministic and total, and a DB read for the display
+    #: name inside it would make it neither. Empty excludes nothing, which is
+    #: what every caller that cannot resolve a name gets.
+    self_names: frozenset[str] = frozenset(),
 ) -> ReconReport:
     """Read the structure of the evidence and say what is there.
 
@@ -2477,14 +2509,26 @@ def observe(
             logger.warning("crucible recon: %s failed", cross.__name__,
                            exc_info=True)
 
-    for kg_check in (_observe_dating, _observe_attribution,
-                     _observe_source_concentration, _observe_claim_mix):
+    # `_observe_attribution` IS THE ONE CHECK THAT NEEDS MORE THAN THE ROWS.
+    # It is bound with the tenant's own account keys here rather than given a
+    # uniform signature across all four, so the other three keep reading
+    # exactly what they always read.
+    # NAME AND CALLABLE, because one of the four now carries a bound argument
+    # and a bare lambda would log itself as "<lambda> failed" — the warning is
+    # the only thing that says WHICH check a tenant lost.
+    for check_name, kg_check in (
+        ("_observe_dating", _observe_dating),
+        ("_observe_attribution",
+         lambda rows: _observe_attribution(rows, self_names)),
+        ("_observe_source_concentration", _observe_source_concentration),
+        ("_observe_claim_mix", _observe_claim_mix),
+    ):
         if not signals:
             break
         try:
             observations.extend(kg_check(signals))
         except Exception:  # noqa: BLE001 — one check is never the run
-            logger.warning("crucible recon: %s failed", kg_check.__name__,
+            logger.warning("crucible recon: %s failed", check_name,
                            exc_info=True)
     if signals:
         try:
