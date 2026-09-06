@@ -1098,3 +1098,65 @@ def test_a_run_with_no_attachment_reads_exactly_what_it_read_before(prose_ctx):
     assert row["prioritisation"]["progress"]["signals_read"] == 1
     assert prose_ctx.llm_calls == []
     assert row["coverage_notes"] is not None
+
+
+# ─── 12. The one write-back in the run, over a claim that is not in the graph ─
+
+
+def test_persisting_a_figure_class_cannot_create_a_row_for_a_prose_claim():
+    """THE ONLY PER-CLAIM WRITE-BACK IN A RUN, aimed at an id `kg_signal` does
+    not hold.
+
+    `figure_class.persist_classes` stores the class beside its own signal so
+    the next run reads a fact rather than taking a second sample — and a
+    prose-backed claim carrying a stated figure goes into `classify_figures`
+    with every other claim, because the run projects ONE corpus and that is the
+    containment this feature rests on.
+
+    It is safe today for a reason worth pinning rather than rediscovering: the
+    function SELECTS before it updates and skips an id it does not find. The
+    obvious "simplification" — an upsert, or a blind write — would silently
+    mint `kg_signal` rows for evidence that must never reach the graph, and no
+    other test in this repo would notice. Asserted with every mutating verb on
+    every `kg_*` table raising, which is the shape that catches all of them.
+    """
+    from app.crucible.figure_class import persist_classes
+
+    touched: list[str] = []
+
+    class _KgForbidden:
+        def __init__(self, name):
+            self._name = name
+
+        def __getattr__(self, verb):
+            if verb in ("insert", "upsert", "update", "delete", "rpc"):
+                if self._name.startswith("kg_"):
+                    raise AssertionError(
+                        f"persist_classes wrote to {self._name!r} via "
+                        f".{verb}() for a claim that is not in the graph")
+                touched.append(self._name)
+            return lambda *a, **k: self
+
+        def execute(self):
+            class _R:
+                data: list = []
+                count = 0
+            return _R()
+
+    class _Client:
+        def table(self, name):
+            return _KgForbidden(name)
+
+    import app.db.client as db_client
+
+    original = db_client.require_client
+    try:
+        db_client.require_client = lambda *a, **k: _Client()
+        rows, _items = _rows(per_conversation=True)
+        written = persist_classes(
+            {r["id"]: "deal_value" for r in rows}, company_id=CO)
+    finally:
+        db_client.require_client = original
+
+    assert written == 0
+    assert touched == []
