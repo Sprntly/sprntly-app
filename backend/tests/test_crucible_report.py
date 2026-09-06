@@ -2629,3 +2629,72 @@ def test_the_account_naming_sentence_survives_a_run_with_no_pricing_at_all():
     assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
 
 
+# ─── A recommendation set says when nothing was cut ────────────────────────
+
+#: Every `NARRATED_DROPS` reason at zero — the shape `_progress` writes when
+#: the pipeline ran clustering and rejected nothing.
+_ZERO_DROPPED = {
+    "ungroupable": 0, "anecdote": 0, "echo": 0,
+    "single_account": 0, "no_authority": 0, "uncausal": 0,
+}
+
+
+def _run_with_progress(dropped, *, set_aside_by_rank=None) -> dict:
+    prioritisation = {"plan": _plan()}
+    if dropped is not None:
+        prioritisation["progress"] = {"dropped": dropped}
+    if set_aside_by_rank is not None:
+        prioritisation["set_aside_by_rank"] = set_aside_by_rank
+    return _run(prioritisation=prioritisation)
+
+
+def test_nothing_cut_is_said_out_loud_when_the_run_can_defend_it():
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED), [_finding()], [])
+    assert "Nothing here was cut" in html
+    assert "no candidate theme was ruled out after grouping" in html
+    # NOT "at verification" — five of the six NARRATED_DROPS reasons are not
+    # verification-stage, so naming that one stage would be false for them.
+    assert "at verification" not in html
+
+
+def test_nothing_cut_says_nothing_when_progress_was_never_written():
+    """ABSENT IS NOT ZERO. A run predating `_progress`, or one whose progress
+    write failed, has no `dropped` key at all — and printing "nothing was
+    cut" on a run that cannot defend the claim is the overclaim this note
+    exists to remove."""
+    html = render_report_html(_run_with_progress(None), [_finding()], [])
+    assert "Nothing here was cut" not in html
+
+
+def test_nothing_cut_says_nothing_when_something_actually_was():
+    dropped = dict(_ZERO_DROPPED, anecdote=3)
+    html = render_report_html(_run_with_progress(dropped), [_finding()], [])
+    assert "Nothing here was cut" not in html
+
+
+def test_nothing_cut_says_nothing_when_a_finding_was_set_aside():
+    """Even with zero rejections at grouping, a finding set aside for this
+    goal is itself a cut — and a populated set-aside table right below
+    "nothing was cut" would contradict it on the same page."""
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED,
+                          set_aside_by_rank=["not about this goal"]),
+        [_finding()], [],
+    )
+    assert "Nothing here was cut" not in html
+    assert "Considered and set aside for this goal" in html
+
+
+def test_nothing_cut_says_nothing_when_the_kept_list_overflowed():
+    """The third trap: `_other_considered_section` renders its own populated
+    cut table once the kept list exceeds the write-up cap, and this note
+    must not co-render beside it."""
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
+
+    findings = [_finding(claim_ids=[f"c{i}"])
+                for i in range(MAX_WRITTEN_UP_FINDINGS + 3)]
+    html = render_report_html(
+        _run_with_progress(_ZERO_DROPPED), findings, [])
+    assert "Nothing here was cut" not in html
+    assert "we did not choose" in html

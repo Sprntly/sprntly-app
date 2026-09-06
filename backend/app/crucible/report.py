@@ -3014,6 +3014,60 @@ def _other_considered_section(
     return "".join(out)
 
 
+def _nothing_cut_note(
+    run: dict,
+    ledger: list[dict],
+    set_aside: list,
+    kept: list[dict],
+    written: list[dict],
+) -> str:
+    """The absence of a cut list, said out loud rather than left silent.
+
+    A run with few findings and nothing rejected renders `_set_aside_section`,
+    `_other_considered_section` and `_ledger_section` all empty, and none of
+    the three says so — the reader sees a recommendation with no cut list and
+    cannot tell "there was nothing to cut" from "the cut list did not
+    render". This says which one it was, and only when it can defend it.
+
+    ABSENT IS NOT ZERO. `progress.dropped` is written once, at the end of
+    grouping (`routes.crucible._progress`), with every `NARRATED_DROPS` key
+    present even at zero — but a run whose progress write failed, or one from
+    before `_progress` existed, has no such key at all, and this document has
+    never read `progress` before this note. An absent key says NOTHING,
+    because guessing zero is the exact overclaim this note exists to remove.
+
+    "AFTER GROUPING", NOT "AT VERIFICATION". `NARRATED_DROPS` spans grouping
+    (`ungroupable`), clustering (`anecdote`, `echo`, `single_account`) and
+    rendering (`uncausal`) as well as verification (`no_authority`) — so the
+    only stage-neutral phrase that covers every reason this counts is "ruled
+    out after grouping"; naming verification specifically would be false for
+    five of the six reasons.
+
+    AND THE OTHER TWO CUT LISTS MUST ALSO BE EMPTY, OR THIS CONTRADICTS THE
+    TABLE NEXT TO IT. `set_aside` is this run's goal-relevance cut; `written`
+    shorter than `kept` is `_other_considered_section`'s own truncation
+    signal; a non-empty `ledger` is the same candidates `_ledger_section`
+    would otherwise name. Any one of the three populates a cut table
+    elsewhere on this page, and "nothing was cut" beside a populated table
+    is not a caveat, it is a contradiction.
+    """
+    dropped = _as_dict(_as_dict(
+        _as_dict(run.get("prioritisation")).get("progress")
+    ).get("dropped"))
+    if not dropped:
+        return ""
+    if any((v or 0) for v in dropped.values()):
+        return ""
+    if ledger or set_aside:
+        return ""
+    if len(written) < len(kept):
+        return ""
+    return _p(
+        "Nothing here was cut: no candidate theme was ruled out after "
+        "grouping."
+    )
+
+
 def _hypotheses_section(plan: dict) -> str:
     hypotheses = [h for h in _as_list(plan.get("hypotheses")) if h]
     if not hypotheses:
@@ -3586,6 +3640,7 @@ def render_report_html(
             _before_you_spend_section(written),
             _framework_section(kept, plan),
             _other_considered_section(kept, full_cap, overflow_cap),
+            _nothing_cut_note(run, ledger, set_aside, kept, written),
             _hypotheses_section(plan),
             _provenance_section(
                 run, plan, findings, kept, set_aside,
