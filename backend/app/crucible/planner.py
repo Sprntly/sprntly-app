@@ -746,15 +746,35 @@ def compose_deterministic(
     unit_obs = report.of_kind("unit_value_derivable")
     if unit_obs:
         o = unit_obs[0]
+        # READ AND REPORTED, NOT APPLIED — AND THE STEP MUST SAY BOTH.
+        # This step used to be titled "price an account from your own
+        # contracts" and to explain that sizing against the median stops large
+        # accounts inflating a theme. The engine does not do that and never
+        # has: every `ImpactInputs` is constructed with `value_per_unit=None`,
+        # so `score_impact` returns `affected_population * movable_gap` — a
+        # COUNT OF ACCOUNTS — and `weight_by_account_value` is `declared` in
+        # the primitive registry for exactly this reason. The step named the
+        # honest primitive (`set_counting_unit` IS implemented) while
+        # promising a second one that is not, which is the one failure the
+        # registry's status field exists to make impossible.
+        #
+        # It is not deleted, because the derived figure IS used: it is
+        # measured off the reader's own contracts and it is why the plan does
+        # not ask them for a number their data already answers. A reader who
+        # connected contract data should still learn it was found — and learn,
+        # in the same breath, that it does not move the sizing.
         steps.append(_obs_step(
             "set_counting_unit", o,
-            "Count in accounts, and price an account from your own contracts",
-            f"Your contracts already say what each account is worth, so this "
-            f"does not have to be guessed at: the median account is "
-            f"{o.figures['median']:,.0f} and the mean is "
-            f"{o.figures['mean']:,.0f}. Sizing against the median rather than "
-            f"the mean stops a handful of very large accounts from making "
-            f"every theme look bigger than it is.",
+            "Count in accounts, and record what your contracts say an "
+            "account is worth",
+            f"Your contracts already say what each account is worth, so that "
+            f"figure is read from your own data rather than asked of you: the "
+            f"median account is {o.figures['median']:,.0f} and the mean is "
+            f"{o.figures['mean']:,.0f}. The median is recorded rather than "
+            f"the mean because a handful of very large accounts should not "
+            f"stand in for a typical one. It does not change how anything is "
+            f"sized here: a theme's size is still a count of the accounts "
+            f"it touches, never money.",
             params={"unit": currency},
         ))
     else:

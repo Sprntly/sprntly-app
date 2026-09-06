@@ -640,3 +640,86 @@ def test_a_completed_plan_is_read_back_and_never_re_drawn():
                           "steps_pending": False}}
     steps = planner.load_steps(completed)
     assert steps is not None and [s.what for s in steps] == ["stored"]
+
+
+# ─── The plan may not promise the run prices anything ──────────────────────
+#
+# `score_impact` computes `affected_population * movable_gap` on every path
+# this engine has: every `ImpactInputs` construction passes
+# `value_per_unit=None`, and `weight_by_account_value` is `declared` in the
+# registry precisely because nothing performs it. A theme's size is a COUNT
+# OF ACCOUNTS. Two places used to tell the reader otherwise — the plan step
+# and the derived-value note carried into the stored plan — and a fix to
+# either one alone leaves the claim standing in the other.
+
+#: Phrasings that assert the run sizes, prices or weights by account value.
+#: Matched case-insensitively against both surfaces.
+_PRICING_CLAIMS = (
+    "price an account",
+    "price of a typical",
+    "sizing against the median",
+    "stops a handful of very large accounts from making every theme",
+)
+
+
+def _unit_step():
+    for step in _plan():
+        if step.primitive == "set_counting_unit":
+            return step
+    raise AssertionError("the plan has no set_counting_unit step")
+
+
+def test_the_counting_unit_step_does_not_claim_the_run_prices_accounts():
+    """SITE ONE. The step fires only when the contracts carry a per-account
+    value, which is exactly when a reader is most likely to believe the
+    figure moved the sizing."""
+    step = _unit_step()
+    text = f"{step.what} {step.why}".lower()
+    for claim in _PRICING_CLAIMS:
+        assert claim not in text, f"the plan step still claims: {claim!r}"
+    assert "count" in text, "the step must still say what the unit IS"
+
+
+def test_the_counting_unit_step_says_the_value_does_not_move_the_sizing():
+    """Not deleted, DISCLAIMED. The median is genuinely derived and it does
+    genuine work — it is why the reader is not asked for a number their own
+    contracts answer — so a reader whose contracts were read should still
+    learn the figure was found, and learn in the same breath what it did
+    not do."""
+    step = _unit_step()
+    text = f"{step.what} {step.why}".lower()
+    assert "median" in text, "the derived figure must still be reported"
+    assert "count of the accounts" in text, (
+        "the step must state that size stays a count of accounts")
+
+
+def test_the_derived_note_does_not_claim_the_run_prices_accounts():
+    """SITE TWO, AND THE ONE THAT HIDES. This note is carried onto the plan
+    as `account_value_derived_note` and SERIALISED — fixing the step alone
+    leaves the same claim in the stored JSON, where the report renders from."""
+    from app.crucible.framework import derived_account_value
+
+    _value, note = derived_account_value(_report().observations)
+    assert note, "the fixture must derive a value or this test is vacuous"
+    for claim in _PRICING_CLAIMS:
+        assert claim not in note.lower(), f"the note still claims: {claim!r}"
+    assert "count of the accounts" in note.lower(), (
+        "the note must state that size stays a count of accounts")
+
+
+def test_the_stored_plan_payload_carries_the_corrected_note():
+    """The assertion above reads the function; this one reads the BLOB, which
+    is what a stored run and the rendered report actually see."""
+    from app.crucible.framework import derived_account_value
+    from app.crucible.plan import RunPlan
+
+    value, note = derived_account_value(_report().observations)
+    blob = RunPlan(
+        goal_text="g", definition_text="d", currency="accounts",
+        account_value_derived=value, account_value_derived_note=note,
+    ).to_json()
+    stored = blob["account_value_derived_note"].lower()
+    assert stored, "the note must survive serialisation or this is vacuous"
+    for claim in _PRICING_CLAIMS:
+        assert claim not in stored, f"the stored plan still claims: {claim!r}"
+    assert "count of the accounts" in stored
