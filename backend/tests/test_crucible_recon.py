@@ -15,6 +15,7 @@ from __future__ import annotations
 from tests import _tabular_recon_fixtures as fx
 
 from app.crucible import recon
+from app.crucible.claims import self_account_keys as recon_self_keys
 
 
 def _kinds(tables, signals=()) -> set[str]:
@@ -531,3 +532,96 @@ def test_the_payload_reads_the_way_the_card_writes_numbers():
     with_commas = _only([], "account_attribution_gap",
                         signals=fx.kg_signals(n=1275))
     assert "of 1,275 signals" in with_commas.what
+
+
+# ─── The attribution gate is not satisfied by the vendor's own name ─────────
+#
+# THE SECOND TOUCH POINT, AND IT DOES NOT GO THROUGH `_population`.
+# `_observe_attribution` reads `properties.account` directly, so the exclusion
+# that fixes reach does not reach this gate — and this gate is the guard that
+# stops the engine weighting a corpus it cannot attribute.
+#
+# Measured on a real tenant: 7,711 of 11,402 signals carried an account, which
+# is 67.6% and passes `ATTRIBUTABLE_MIN_SHARE`. 2,357 of those named the
+# TENANT ITSELF, across four spellings. Excluding them the true figure is
+# 5,354/11,402 = 47.0%, which fails. The proportions below are that corpus,
+# scaled down.
+
+def _attribution_corpus(n_self: int, n_real: int, n_bare: int):
+    """`n_self` rows naming the tenant (in four spellings), `n_real` naming a
+    real customer, `n_bare` naming nobody."""
+    spellings = ("AdventureWorks", "Adventure Works", "Adventureworks", "adventureworks")
+    rows = []
+    for i in range(n_self):
+        rows.append({"id": f"self-{i}", "kind": "finding",
+                     "source_type": "communication", "content": "x",
+                     "valid_at": "2026-08-01T12:00:00+00:00",
+                     "properties": {"account": spellings[i % len(spellings)]}})
+    for i in range(n_real):
+        rows.append({"id": f"real-{i}", "kind": "finding",
+                     "source_type": "communication", "content": "x",
+                     "valid_at": "2026-08-01T12:00:00+00:00",
+                     "properties": {"account": f"Customer {i % 40}"}})
+    for i in range(n_bare):
+        rows.append({"id": f"bare-{i}", "kind": "finding",
+                     "source_type": "communication", "content": "x",
+                     "valid_at": "2026-08-01T12:00:00+00:00",
+                     "properties": {}})
+    return rows
+
+
+def test_the_vendors_own_name_does_not_count_as_attribution():
+    """The presence count is what the gate reads. A row whose only account is
+    the tenant's own name has not attributed anything."""
+    signals = _attribution_corpus(n_self=2357, n_real=5354, n_bare=3691)
+    assert len(signals) == 11402
+
+    counted = recon.signal_field_presence(signals, path=("properties", "account"))
+    assert counted.present == 7711 and round(counted.share, 3) == 0.676
+
+    excluded = recon.signal_field_presence(
+        signals, path=("properties", "account"),
+        self_names=recon_self_keys("AdventureWorks Inc"))
+    assert excluded.present == 5354, "a spelling variant survived the exclusion"
+    assert round(excluded.share, 3) == 0.470
+
+
+def test_the_attribution_gate_fails_once_the_vendor_is_excluded():
+    """THE WHOLE POINT. The guard that stops the engine weighting an
+    unattributable corpus was being satisfied by the vendor counting itself."""
+    signals = _attribution_corpus(n_self=2357, n_real=5354, n_bare=3691)
+
+    passing = recon.observe([], signals=signals).observations
+    assert "account_attribution_gap" not in {o.kind for o in passing}, (
+        "the fixture must PASS the gate before exclusion or this is vacuous")
+
+    failing = recon.observe(
+        [], signals=signals, self_names=recon_self_keys("AdventureWorks Inc"),
+    ).observations
+    gap = [o for o in failing if o.kind == "account_attribution_gap"]
+    assert gap, "the gate must fail once the vendor is not counted"
+    assert gap[0].figures["present"] == 5354
+    assert gap[0].severity == "high"
+
+
+def test_the_exclusion_does_not_touch_the_monetary_gap():
+    """`signal_field_presence` is parameterised over the path and BOTH gaps
+    use it. A company name is not a figure, and the money question must be
+    measured exactly as it was."""
+    signals = fx.kg_signals(monetary=True)
+    before = recon.signal_field_presence(signals, path=("properties", "amount"))
+    after = recon.observe(
+        [], signals=signals, self_names=recon_self_keys("AdventureWorks")
+    ).observations
+    assert before.present > 0
+    assert "monetary_coverage_gap" not in {o.kind for o in after}
+
+
+def test_no_company_name_leaves_every_count_exactly_as_it_was():
+    """The default path — and every caller that cannot resolve a display
+    name — must be byte-identical to the previous behaviour."""
+    signals = _attribution_corpus(n_self=2357, n_real=5354, n_bare=3691)
+    plain = recon.signal_field_presence(signals, path=("properties", "account"))
+    empty = recon.signal_field_presence(
+        signals, path=("properties", "account"), self_names=frozenset())
+    assert plain.present == empty.present == 7711
