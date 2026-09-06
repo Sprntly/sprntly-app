@@ -2471,6 +2471,30 @@ def _weighted_counts(findings: list[dict]) -> tuple[int, int]:
     return (priced, len(findings) - priced) if priced else (0, 0)
 
 
+def _confidence_score_clause(findings: list[dict]) -> str:
+    """The tie-break every ordering sentence owes, not only the one corpus
+    shape where it used to be visible.
+
+    `_rank`'s key is (conflict, claim-type bucket, reach, confidence), and
+    the confidence term is a raw SCORE that is never rendered anywhere in
+    this document — `Confidence.score` is annotated "internal only, NEVER
+    rendered" at its definition, and the reader sees only the band. Whenever
+    the terms ahead of it tie between two findings — which does not require
+    every band on the page to match, only the two NEIGHBOURS in question to
+    tie on conflict, bucket, and reach — that unprinted score is what put one
+    ahead of the other. That can happen on a priced run, a reach-ranked run,
+    or an all-unsized run alike, so the disclosure travels with all three
+    rather than the single "nothing sized, one band" shape it used to be
+    conditioned on.
+    """
+    if len(findings) <= 1:
+        return ""
+    return (
+        " Within a kind, findings are ordered by a confidence score this "
+        "report does not print."
+    )
+
+
 def _ordering_note(findings: list[dict]) -> str:
     """What the order actually is. METHOD, so it reads with the method.
 
@@ -2488,6 +2512,7 @@ def _ordering_note(findings: list[dict]) -> str:
     """
     if not findings:
         return ""
+    score_clause = _confidence_score_clause(findings)
     priced, unpriced = _weighted_counts(findings)
     if priced:
         return _p(
@@ -2500,6 +2525,7 @@ def _ordering_note(findings: list[dict]) -> str:
                f"we could not measure is not a size of zero."
                if unpriced else "")
             + _bucket_and_conflict_clauses(findings)
+            + score_clause
         )
     anything_sized = any(f.get("impact_value") is not None for f in findings)
     bucket_clause, conflict_clause = _bucket_and_conflict_parts(findings)
@@ -2507,12 +2533,14 @@ def _ordering_note(findings: list[dict]) -> str:
         return _p(
             "Ranked by reach — how many accounts each theme touches."
             + bucket_clause + conflict_clause
+            + score_clause
         )
     # Nothing could be sized, so the reach term is constant and the BUCKET is
-    # what orders the list. `_rank`'s last term is a confidence SCORE, which
-    # is real and never rendered — the reader sees bands — so when every band
-    # is the same, the gap between neighbours in one group rests on something
-    # this document does not print, and that is owed a sentence.
+    # what orders the list. Every band matching is the ONE case worth a
+    # stronger sentence than the generic score clause above: when there is
+    # only one band on the page, the score is the WHOLE of what separates any
+    # two neighbours, not merely a tie-break among several, so the reader is
+    # also told to read that gap as narrow.
     bands = {(f.get("confidence_band") or "").strip() for f in findings}
     one_band = len(bands) == 1 and len(findings) > 1
     return _p(
@@ -2523,7 +2551,7 @@ def _ordering_note(findings: list[dict]) -> str:
             "report does not print, and every finding here carries the same "
             "band — so read the gap between two neighbours in one group as "
             "narrow."
-            if one_band else ""
+            if one_band else score_clause
         )
     )
 
