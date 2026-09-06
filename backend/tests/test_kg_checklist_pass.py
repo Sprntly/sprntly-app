@@ -1115,3 +1115,61 @@ def test_checklist_guardrail_filters_simulated_incident_keeps_real_fact_real_llm
     legal = by_cat.get("legal") or {}
     assert legal.get("discussed") is True and "nda" in (legal.get("content") or "").lower(), (
         f"the plainly-real NDA gap must still be reported discussed; got {legal}")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_account_side_is_returned_by_the_checklist_pass_real_llm():
+    """`_offline()` returns `"pytest" in sys.modules`, so no other pytest run
+    ever exercises the real extraction prompt end to end. This is the one
+    real model draw proving the model actually returns `account_side` for a
+    named account, and that the value survives the checklist pass's closed
+    whitelist (`_sanitize_checklist_properties`) unchanged."""
+    transcript = (
+        "Rep: Thanks for hopping on, Priya — this is your third year with us "
+        "as a customer, right?\n"
+        "Priya (Acme, existing customer): Yes, we renewed in January. One "
+        "thing though — we still don't have an NDA in place with Acme, and "
+        "legal keeps asking.\n"
+        "Rep: Got it, I'll get that moving. Separately, how's the eval going "
+        "over at Globex? I know they were just kicking the tires last "
+        "quarter.\n"
+        "Priya: Globex is a totally separate account from mine — they're "
+        "still evaluating, haven't signed anything yet, still a prospect."
+    )
+    result = ex.llm_call(
+        enterprise_id="ent-eval", agent="test:checklist-eval",
+        purpose="extract_checklist", prompt_version=ex.CHECKLIST_PROMPT_VERSION,
+        system=ex._CHECKLIST_SYSTEM,
+        input=f"<document name='call.md'>\n{transcript}\n</document>",
+        json_schema=ex._CHECKLIST_SCHEMA,
+    )
+    checklist = result.output.get("checklist", [])
+    named = [
+        c for c in checklist
+        if isinstance(c.get("properties"), dict) and c["properties"].get("account")
+    ]
+    print(f"REAL MODEL DRAW (checklist pass) — raw entries naming an account: "
+          f"{[(c['category'], c['properties']) for c in named]}")
+    assert named, f"expected at least one category to name an account, got {checklist}"
+
+    with_side = [c for c in named if c["properties"].get("account_side")]
+    assert with_side, (
+        f"model named an account but never returned account_side at all; "
+        f"got {named}")
+
+    for entry in with_side:
+        cleaned = ex._sanitize_checklist_properties(
+            entry["category"], entry["properties"], transcript)
+        raw_side = str(entry["properties"]["account_side"]).strip().lower()
+        if raw_side in ("customer", "prospect", "partner", "unknown"):
+            assert cleaned.get("account_side") == raw_side, (
+                f"a closed-vocabulary value must survive the whitelist "
+                f"unchanged; raw={raw_side!r} cleaned={cleaned}")
+        else:
+            assert "account_side" not in cleaned, (
+                f"a value outside the closed vocabulary must be dropped, "
+                f"never coerced; raw={raw_side!r} cleaned={cleaned}")

@@ -254,6 +254,29 @@ FALLBACK_STRENGTH: EvidenceStrength = "reported"
 CUSTOMER_KEYS = ("customer", "poc_customer", "account", "organization", "company")
 PROSPECT_KEYS = ("prospect", "candidate")
 
+#: The property key the extractor writes an EXPLICIT side onto, alongside a
+#: named `account` — see `app.graph.extractor.ACCOUNT_SIDE_PROPERTY_KEY` for
+#: the write side and the closed vocabulary. Held here as its own copy
+#: rather than imported: `graph.extractor` is an ingest-time module with its
+#: own heavy dependencies (the LLM gateway, embeddings), and this read-time
+#: module has no reason to carry that import weight for one string constant.
+#: MUST STAY IN SYNC WITH THE WRITE SIDE — there is no shared source of truth
+#: for this literal.
+ACCOUNT_SIDE_KEY = "account_side"
+
+#: Values `ACCOUNT_SIDE_KEY` is trusted to carry. Anything else — an older
+#: value, a typo, a future addition the reader has not caught up to — is
+#: ignored by `infer_account_sides` exactly like the key being absent,
+#: never coerced into one of these.
+_CUSTOMER_SIDE_VALUES = frozenset({"customer"})
+_PROSPECT_SIDE_VALUES = frozenset({"prospect"})
+#: `partner` and `unknown` are both real, disclosed answers to "which side
+#: is this on" — neither is a customer or a prospect, so neither may vote
+#: `customer_side` in either direction. Tracked so an account that is
+#: EXPLICITLY known to be ambiguous is never silently indistinguishable from
+#: one nothing was ever said about.
+_NEITHER_SIDE_VALUES = frozenset({"partner", "unknown"})
+
 #: Strings that appear in those fields and are not an account name.
 _NOT_A_NAME = frozenset({
     "", "n/a", "na", "none", "null", "unknown", "tbd", "customer", "customers",
@@ -566,16 +589,46 @@ def infer_account_sides(
 ) -> dict[str, str]:
     """Decide customer-vs-prospect per ACCOUNT, over the whole corpus.
 
-    The population intersection is only real if it can tell them apart, and no
-    single row can: the same account shows up under `customer` on one signal and
-    `prospect` on another as a deal progresses. So any appearance under a
-    customer-only key wins, a name seen only under prospect keys is prospect-
-    side, and ambiguity resolves to customer — which is the conservative choice
-    for a retention goal, and is disclosed as an assumed parameter (I8) by the
-    caller rather than hidden here.
+    TWO SOURCES, READ TOGETHER, NEVER DRIFTING FROM EACH OTHER'S DEFAULT.
+
+    The legacy source is per-row NAME fields — `customer`/`poc_customer`
+    naming a customer directly, `PROSPECT_KEYS` naming a prospect — and stays
+    exactly as it always has. `poc_customer` is kept in that check though
+    nothing has ever written it (measured on a real corpus: zero times
+    across every tenant) — a dead key costs nothing to keep reading, and
+    removing it buys nothing either, so it is left rather than pulled to
+    avoid touching a check this module does not need to change to add the
+    source below.
+
+    The SECOND, LIVE source is the extractor's own explicit `ACCOUNT_SIDE_KEY`
+    property, recorded against a signal's named `account`
+    (`app.graph.extractor.ACCOUNT_SIDE_PROPERTY_KEY` is the write side).
+    Every signal extracted before that property existed carries neither key,
+    so for a corpus with none of them this function's output is BYTE-
+    IDENTICAL to before this property existed: an account with no evidence
+    from EITHER source is simply absent from the returned dict, and the
+    caller's own "ambiguity resolves to customer" default (I8, disclosed at
+    the call site) is exactly what a reader still sees for it. This function
+    never manufactures that default itself — see `_grounded_account_side`'s
+    sibling in `graph.extractor` for why an unrecognised or missing value is
+    dropped rather than coerced to any side, here or there.
+
+    Once a corpus DOES carry `account_side`, an EXPLICIT "partner" or
+    "unknown" answer is recorded as `partner`/`unknown` — neither `customer`
+    nor `prospect` — because an explicit "we don't know which side" is a
+    different, stronger claim than "nothing was said" and must not silently
+    read as `customer` either. Any appearance under a customer-key or an
+    explicit `account_side="customer"` wins over every other signal for the
+    same account (a customer relationship does not un-happen), a name seen
+    only under prospect evidence is prospect-side, and the remaining
+    ambiguity (customer XOR prospect never resolved either way, only
+    partner/unknown) still resolves to customer at the CALLER — this
+    function's own contract is unchanged.
     """
     customers: set[str] = set()
     prospects: set[str] = set()
+    partners: set[str] = set()
+    unknowns: set[str] = set()
     for signal in signals:
         props = signal.get("properties")
         if not isinstance(props, dict):
@@ -588,10 +641,31 @@ def infer_account_sides(
             name = normalise_account(props.get(key), self_names, canonical)
             if name:
                 prospects.add(name)
-    return {
-        name: ("customer" if name in customers else "prospect")
-        for name in customers | prospects
-    }
+        side = props.get(ACCOUNT_SIDE_KEY)
+        if isinstance(side, str):
+            side = side.strip().lower()
+            if side in _CUSTOMER_SIDE_VALUES | _PROSPECT_SIDE_VALUES | _NEITHER_SIDE_VALUES:
+                name = normalise_account(props.get("account"), self_names, canonical)
+                if name:
+                    if side in _CUSTOMER_SIDE_VALUES:
+                        customers.add(name)
+                    elif side in _PROSPECT_SIDE_VALUES:
+                        prospects.add(name)
+                    elif side == "partner":
+                        partners.add(name)
+                    else:
+                        unknowns.add(name)
+    # Priority, strongest evidence first: customer beats everything (it
+    # cannot un-happen), prospect beats an explicit non-answer, and an
+    # explicit "partner"/"unknown" only shows up for a name nothing
+    # stronger ever named.
+    partners -= customers | prospects
+    unknowns -= customers | prospects | partners
+    sides: dict[str, str] = {name: "prospect" for name in prospects}
+    sides.update({name: "customer" for name in customers})
+    sides.update({name: "partner" for name in partners})
+    sides.update({name: "unknown" for name in unknowns})
+    return sides
 
 
 def _population(
