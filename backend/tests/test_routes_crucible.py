@@ -3237,3 +3237,80 @@ def test_a_caller_that_did_not_resolve_a_name_says_nothing_about_it():
     notes = _coverage_notes(
         {"seen": 49, "projected": 44, "retired": 0, "no_timestamp": 5}, {})
     assert [n["reason"] for n in notes] == ["undated evidence"]
+
+
+def test_the_stored_note_refreshes_when_the_reader_flips_the_unit_at_approve(
+        ctx, monkeypatch):
+    """THE HOLE IN THE GATE, AND THE ONLY ONE THAT NEEDS A READER TO OPEN IT.
+
+    `account_value_derived_note` disclaims against the run's unit and is
+    SERIALISED onto the plan, so it outlives the screen that composed it. It
+    is written at plan time — before the reader answers the business-model
+    question, which is the one input that can turn a counted run into a
+    weighted one. A run that flipped therefore carried a stored note saying
+    its sizes stay a count of accounts inside the same stored plan whose own
+    verdict said it ranked by revenue.
+
+    Invisible to every other test here: the plan-time composer is correct, the
+    approve handler is correct about the unit itself, and nothing between the
+    two consumed the note. It only appears once a reader answers.
+
+    THE BOOK IS THE ONLY THING STUBBED. The approve path rebuilds the account
+    value map from the uploaded bytes, and this fixture's corpus reaches the
+    gate through signals rather than an attachment — so without a readable
+    book the run correctly downgrades back to counting and the flip under test
+    never happens. Everything that matters here is real: the reader's answer,
+    `business_model_unit`, `weighting_verdict`, the branch that compares the
+    settled unit against the stored one, and the plan JSON that is written
+    back.
+    """
+    from app.crucible.framework import BUSINESS_MODEL_OPTIONS
+    from app.crucible.recon import AccountValues
+
+    _contract_signals(ctx.company_id)
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+
+    before = _prioritisation(run_id)["plan"]
+    assert before["weighting_unit"] == "count", (
+        "the gate must compose this run as counted, or the flip below is not "
+        "a flip and this test is vacuous"
+    )
+    assert "count of the accounts" in before["account_value_derived_note"], (
+        "the counted note must be stored first, or there is nothing to refresh"
+    )
+    assert any(q["id"] == "business_model" for q in before["questions"]), (
+        "the reader must actually be asked the question that flips the unit"
+    )
+
+    monkeypatch.setattr(
+        "app.crucible.recon.account_value_map",
+        lambda _tables: AccountValues(
+            source="revenue:contract", field="total_acv_usd",
+            key_field="account",
+            values={a.lower().replace(" ", ""): float(total)
+                    for a, _b, _e, total in _CONTRACT_BOOK},
+        ),
+    )
+    ctx.client.post(f"/v1/crucible/{run_id}/approve", json={
+        "answers": {"business_model": BUSINESS_MODEL_OPTIONS[0]},
+    })
+
+    after = _prioritisation(run_id)["plan"]
+    assert after["weighting_unit"] == "value", (
+        "the answer must actually have flipped the unit, or this asserts "
+        "nothing about a refresh"
+    )
+    note = after["account_value_derived_note"]
+    assert note, "the note must survive the flip rather than being dropped"
+    assert "count of the accounts" not in note, (
+        f"the stored note still disclaims a count on a run its own stored "
+        f"verdict says is ranked by revenue: {note}"
+    )
+    assert "contracted value of the accounts" in note, (
+        f"the refreshed note must say what DOES size a theme: {note}"
+    )
+    assert "median" in note, (
+        "the derived figure must still be reported, or the refresh was a "
+        "deletion"
+    )
