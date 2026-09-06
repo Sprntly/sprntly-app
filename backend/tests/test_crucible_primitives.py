@@ -139,12 +139,43 @@ def test_the_catalogue_never_offers_an_operation_a_plan_may_not_name():
     """The prompt is GENERATED from the registry for this reason. A
     hand-written list is a second registry, and it drifts in one direction:
     it keeps offering the operation that was downgraded to `declared`, and the
-    model keeps emitting it."""
-    text = prim.catalogue()
+    model keeps emitting it.
+
+    A GATED PRIMITIVE IS `implemented` AND STILL MAY NOT BE NAMED on a run
+    whose verdict does not permit it — "the engine can do this" and "this run
+    is doing this" are different facts, and only the second one may reach the
+    model."""
+    text = prim.catalogue(weighting_enabled=True)
     for p in prim.declared_only():
         assert p.id not in text
     for p in prim.implemented():
         assert p.id in text
+
+
+def test_the_catalogue_withholds_a_gated_operation_by_default():
+    """DEFAULT FALSE, AND IT IS THE DEFAULT THAT MATTERS. A caller that has
+    not read the run's verdict must not be handed an operation the run will
+    not perform — a model shown an operation writes a step for it, and the
+    plan then promises weighting on a run that counts."""
+    text = prim.catalogue()
+    for gated in prim.WEIGHTING_GATED:
+        assert gated not in text
+    # ...and nothing else went missing with it.
+    for p in prim.implemented():
+        if p.id not in prim.WEIGHTING_GATED:
+            assert p.id in text
+
+
+def test_a_gated_step_is_rejected_on_a_counted_run_and_accepted_on_a_weighted_one():
+    """`requires_sources` is declared on `Primitive` and read NOWHERE in the
+    backend, so a condition expressed there would be a condition that
+    describes and does not perform. This is the enforced version."""
+    step = [{"primitive": "weight_by_account_value", "params": {}}]
+    problems = prim.validate_steps(step)
+    assert [p.problem for p in problems] == [
+        "weighs by account value, and this run's approved unit is a count of "
+        "accounts, so a plan must not name it"]
+    assert prim.validate_steps(step, weighting_enabled=True) == ()
 
 
 @pytest.mark.parametrize("bad, expected", [

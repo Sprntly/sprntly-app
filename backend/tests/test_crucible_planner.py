@@ -449,13 +449,58 @@ def test_it_still_promises_the_echo_rule_where_the_dates_are_real():
     assert "refute_echo" in named
 
 
-def test_weighting_by_revenue_is_registered_and_never_emitted():
+def test_weighting_by_revenue_is_never_emitted_on_a_counted_run():
     """It is what a reader assumes is happening when a plan calls a theme
-    "big", and nothing performs it — `score_impact` counts accounts. Declared
-    so the gap has a name; never emitted, so the plan cannot promise it."""
-    assert not prim.REGISTRY["weight_by_account_value"].is_implemented
+    "big", and it is now something the engine CAN do — which makes the
+    condition, not the capability, the thing that has to be enforced.
+
+    `pipeline.build_findings` performs it only when the run's stored verdict
+    says `value`. A plan built without that verdict must not name it, and the
+    check is not "the model was told not to": the operation is withheld from
+    the catalogue AND rejected by `validate_steps`, because a model handed an
+    operation writes a step for it."""
+    assert prim.REGISTRY["weight_by_account_value"].is_implemented
     _, steps = _prose_plan(attributed=True)
     assert "weight_by_account_value" not in {s.primitive for s in steps}
+    assert prim.validate_steps(
+        [{"primitive": "weight_by_account_value", "params": {}}]) != ()
+
+
+def test_the_unit_step_states_whichever_unit_the_run_actually_settled_on():
+    """SITE ONE OF THE OVERCLAIM, GENERALISED. The plan may only promise what
+    the engine performs, and the engine now performs two different things —
+    so the step is emitted from the stored verdict on the deterministic path,
+    never composed by the model, and there is exactly one sentence for each
+    outcome."""
+    import tests._tabular_recon_fixtures as tfx
+
+    signals = [
+        {"id": f"s{i}", "kind": "sentiment", "source_type": "customer_voice",
+         "content": "an assertion", "valid_at": "2026-08-01T12:00:00+00:00",
+         "properties": {"account": "Account B"}}
+        for i in range(10)
+    ]
+    report = recon.observe([tfx.contracts()], signals=signals)
+    assert report.of_kind("priceable_coverage"), "fixture must reach the gate"
+
+    counted = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=report,
+        source_types=("customer_voice",), weighting_unit="count",
+        weighting_because="Counted because you have not said how you sell.")
+    named = {s.primitive for s in counted}
+    assert "weight_by_account_value" not in named
+    unit = next(s for s in counted if s.primitive == "set_counting_unit")
+    assert "never money" in unit.why
+
+    weighted = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=report,
+        source_types=("customer_voice",), weighting_unit="value",
+        weighting_because="100.0% of what I read names a priced account.")
+    step = next(s for s in weighted
+                if s.primitive == "weight_by_account_value")
+    assert "contracted value of the accounts" in step.why
+    assert "listed separately" in step.why, (
+        "a weighted plan must say what happens to the themes it cannot price")
 
 
 def test_every_figure_in_a_prose_plan_traces_to_an_observation():

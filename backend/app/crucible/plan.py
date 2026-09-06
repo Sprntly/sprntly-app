@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Sequence
 
 from app.crucible.claims import AUTHORITATIVE_FOR
 from app.graph.types import source_type_label
@@ -265,6 +265,159 @@ class PlanQuestion:
     options: tuple[str, ...] = ()
 
 
+#: The two units a run can state a size in. Named rather than passed around as
+#: booleans, because "weighted" is a claim the finished document makes about
+#: itself and a boolean cannot be read back out of a stored plan and understood.
+WEIGHTING_UNIT_VALUE = "value"
+WEIGHTING_UNIT_COUNT = "count"
+
+#: `companies.business_type` is free text written by onboarding — "B2B SaaS",
+#: "self-serve", "marketplace" — and its own reader documents that an
+#: unrecognised value must be treated exactly as an absent one. These are the
+#: fragments this engine recognises; anything else is UNKNOWN and is ASKED,
+#: never guessed.
+_SELF_SERVE_MARKERS: tuple[str, ...] = (
+    "b2c", "business-to-consumer", "business to consumer", "consumer",
+    "self-serve", "self serve", "selfserve", "plg", "product-led",
+    "product led", "freemium",
+)
+_SALES_ASSISTED_MARKERS: tuple[str, ...] = (
+    "b2b", "business-to-business", "business to business", "enterprise",
+)
+
+
+def business_model_unit(business_type: str, answer: str = "") -> str:
+    """`value`, `count`, or `""` meaning "nobody has said, so ask".
+
+    THE MOST CONSEQUENTIAL THING THE READER APPROVES, AND IT IS NOT INFERRED.
+    Reading "this must be B2B, they attached a contracts spreadsheet" is a
+    guess dressed as a fact — plenty of self-serve businesses have an
+    enterprise tier and a contracts export — and getting it wrong changes the
+    unit every size in the finished document is stated in. So an unrecognised
+    business type produces a QUESTION, and until it is answered the run counts.
+
+    THE CONSUMER MARKERS ARE CHECKED FIRST. A string carrying both ("B2B
+    self-serve") is genuinely ambiguous, and counting is the conservative
+    reading: it is the behaviour the engine already has, and the deviation is
+    one the plan has to state out loud either way.
+
+    A PERSON'S ANSWER OUTRANKS THE RECORDED FIELD, and is read on its own
+    rather than concatenated with it. Onboarding wrote `business_type`; the
+    reader typed the answer at the gate having been shown the question and
+    what it changes. Reading the two together would let a stale onboarding
+    string carrying "self-serve" quietly overrule someone who has just
+    said "sales-assisted", which is the answer being collected and discarded.
+    """
+    for text in ((answer or "").lower(), (business_type or "").lower()):
+        if not text.strip():
+            continue
+        if any(m in text for m in _SELF_SERVE_MARKERS):
+            return WEIGHTING_UNIT_COUNT
+        if any(m in text for m in _SALES_ASSISTED_MARKERS):
+            return WEIGHTING_UNIT_VALUE
+    return ""
+
+
+@dataclass(frozen=True)
+class WeightingVerdict:
+    """Whether this run states sizes in money or in accounts, and why.
+
+    DECIDED ONCE, AT PLAN TIME, AND STORED. `execute_run` re-reads the corpus
+    fresh and a connector syncs every twenty minutes, so a share recomputed at
+    execute can land on the other side of the threshold from the one the reader
+    approved — they would agree to a counted run and receive a weighted one, or
+    the reverse, with the plan on screen saying the opposite. The value MAP may
+    be re-derived at execute because the uploaded bytes are immutable and the
+    derivation is deterministic; the VERDICT never is.
+
+    This is the same discipline the approve path already applies to the
+    framework, which is re-derived from the STORED observations and never from
+    a fresh reconnaissance pass.
+    """
+    unit: str
+    because: str
+    priceable_share: Optional[float] = None
+    threshold: Optional[float] = None
+    denominator: str = ""
+    #: `value`, `count` or `""` — see `business_model_unit`. Stored so the
+    #: approve path can settle the verdict from the reader's answer without
+    #: reading the company row or the corpus again.
+    business_model: str = ""
+
+    @property
+    def weighted(self) -> bool:
+        return self.unit == WEIGHTING_UNIT_VALUE
+
+
+def weighting_verdict(
+    observations: Sequence[object] = (), business_model: str = "",
+) -> WeightingVerdict:
+    """The run's unit, from the reconnaissance pass and the business model.
+
+    Three ways to end up counting, and each says which one it was, because
+    "counted" with no reason attached reads as a limitation of the engine when
+    it is usually a fact about the evidence.
+    """
+    from app.crucible.recon import WEIGHTING_MIN_PRICEABLE_SHARE
+
+    priceable = [o for o in observations
+                 if getattr(o, "kind", "") == "priceable_coverage"]
+    if not priceable:
+        return WeightingVerdict(
+            unit=WEIGHTING_UNIT_COUNT,
+            because=("Nothing read here prices an account, so a theme's size "
+                     "is the number of accounts it touches and never money."),
+            threshold=WEIGHTING_MIN_PRICEABLE_SHARE,
+            business_model=business_model,
+        )
+    figures = dict(getattr(priceable[0], "figures", {}) or {})
+    share = float(figures.get("priceable_share") or 0.0)
+    threshold = float(figures.get("threshold") or WEIGHTING_MIN_PRICEABLE_SHARE)
+    denominator = ("signals naming at least one account other than your own")
+    if share < threshold:
+        return WeightingVerdict(
+            unit=WEIGHTING_UNIT_COUNT,
+            because=(f"Only {share * 100:.1f}% of what I read could be priced, "
+                     f"so this is counted, not weighted."),
+            priceable_share=share, threshold=threshold,
+            denominator=denominator, business_model=business_model,
+        )
+    if business_model == WEIGHTING_UNIT_COUNT:
+        # B100: A DEVIATION FROM THE DEFAULT HAS TO BE STATED WITH ITS REASON.
+        # The benchmark asks a self-serve business for two lists — self-serve
+        # counted, sales-assisted revenue-weighted — and this engine does not
+        # split them yet. Deferring that is defensible; leaving it unsaid is
+        # not, so the reason goes in the plan rather than only in the spec.
+        return WeightingVerdict(
+            unit=WEIGHTING_UNIT_COUNT,
+            because=("You record this as a self-serve or consumer business, "
+                     "so themes are counted rather than weighted by revenue. "
+                     "Your contracts could price them; splitting a self-serve "
+                     "book from a sales-assisted one is not something this can "
+                     "do yet, and weighting the whole book as though it were "
+                     "sales-assisted would be the wrong answer confidently."),
+            priceable_share=share, threshold=threshold,
+            denominator=denominator, business_model=business_model,
+        )
+    if not business_model:
+        return WeightingVerdict(
+            unit=WEIGHTING_UNIT_COUNT,
+            because=(f"Your contracts could price {share * 100:.1f}% of what I "
+                     f"read, but your business model is not recorded — so this "
+                     f"counts accounts rather than assuming how you sell."),
+            priceable_share=share, threshold=threshold,
+            denominator=denominator, business_model=business_model,
+        )
+    return WeightingVerdict(
+        unit=WEIGHTING_UNIT_VALUE,
+        because=(f"{share * 100:.1f}% of what I read names an account your "
+                 f"contracts can price, so themes are ranked by the revenue "
+                 f"behind them rather than by how many accounts raised them."),
+        priceable_share=share, threshold=threshold,
+        denominator=denominator, business_model=business_model,
+    )
+
+
 @dataclass(frozen=True)
 class RunPlan:
     goal_text: str
@@ -449,6 +602,23 @@ class RunPlan:
     #: say "no, that one does matter here". Empty is the common case and the
     #: default.
     set_aside: tuple = ()
+    #: ── THE UNIT THIS RUN STATES ITS SIZES IN, AND WHY. ─────────────────
+    #:
+    #: Written at plan time and READ at execute, never recomputed — see
+    #: `WeightingVerdict`. Empty on every plan built before this existed, which
+    #: reads back as a counted run, which is exactly what those runs were.
+    weighting_unit: str = ""
+    weighting_because: str = ""
+    weighting_priceable_share: Optional[float] = None
+    weighting_threshold: Optional[float] = None
+    #: What the share is a share OF, in words. Two defensible denominators
+    #: differ by more than twofold on real data, so the one used is named
+    #: rather than left for a reader to assume.
+    weighting_denominator: str = ""
+    #: `value`, `count` or `""` — see `business_model_unit`. Carried so the
+    #: approve path can settle the verdict from the reader's answer without a
+    #: second read of the company row or of the corpus.
+    weighting_business_model: str = ""
 
     def to_json(self) -> dict:
         return {
@@ -486,6 +656,12 @@ class RunPlan:
             "routing": (self.routing.to_json()
                         if hasattr(self.routing, "to_json") else {}),
             "set_aside": [asdict(sa) for sa in self.set_aside],
+            "weighting_unit": self.weighting_unit,
+            "weighting_because": self.weighting_because,
+            "weighting_priceable_share": self.weighting_priceable_share,
+            "weighting_threshold": self.weighting_threshold,
+            "weighting_denominator": self.weighting_denominator,
+            "weighting_business_model": self.weighting_business_model,
         }
 
 
@@ -788,6 +964,7 @@ def build_plan(
     derived_note = ""
     goal_routing: Optional[object] = None
     set_aside: tuple = ()
+    verdict = weighting_verdict()
     if recon_report is not None:
         from app.crucible import routing as routing_mod
         from app.crucible.framework import derived_account_value
@@ -821,6 +998,10 @@ def build_plan(
         except Exception:  # noqa: BLE001 — see above
             logger.warning(
                 "crucible plan: could not read business type for %s", company_id)
+        # ── THE UNIT, DECIDED HERE AND CARRIED. Before the routing, because
+        # the routing narrates it and must not restate the decision.
+        verdict = weighting_verdict(
+            observations, business_model_unit(business_type))
         goal_routing = routing_mod.resolve(
             goal_text=goal_text,
             definition_text=definition_text,
@@ -830,6 +1011,8 @@ def build_plan(
             coverage=coverage,
             dating_unreliable=bool(
                 [o for o in observations if o.kind == "dating_unreliable"]),
+            weighting_unit=verdict.unit,
+            weighting_because=verdict.because,
         )
         # DERIVED FROM THE REPORT AND THE READING, NEVER FROM THE DRAW. A
         # set-aside is a deterministic consequence of what was observed and
@@ -842,6 +1025,8 @@ def build_plan(
         )
         if compose:
             steps = build_steps(
+                weighting_unit=verdict.unit,
+                weighting_because=verdict.because,
                 enterprise_id=enterprise_id or company_id,
                 goal_text=goal_text,
                 definition_text=definition_text,
@@ -861,6 +1046,8 @@ def build_plan(
                 goal_text=goal_text, currency=currency, report=recon_report,
                 source_types=tuple(sv.source_type for sv in kept),
                 goal_class=goal_routing.goal_class,
+                weighting_unit=verdict.unit,
+                weighting_because=verdict.because,
             )
             steps = tuple(steps)
 
@@ -882,7 +1069,8 @@ def build_plan(
         definition_adopted=definition_adopted,
         framework=choice.framework,
         framework_reason=choice.reason,
-        questions=questions_for(choice.framework, observations),
+        questions=questions_for(choice.framework, observations,
+                                business_model=verdict.business_model),
         account_value=account_value,
         decision_owner=decision_owner,
         needed_by=needed_by,
@@ -894,4 +1082,10 @@ def build_plan(
         account_value_derived_note=derived_note,
         routing=goal_routing,
         set_aside=set_aside,
+        weighting_unit=verdict.unit,
+        weighting_because=verdict.because,
+        weighting_priceable_share=verdict.priceable_share,
+        weighting_threshold=verdict.threshold,
+        weighting_denominator=verdict.denominator,
+        weighting_business_model=verdict.business_model,
     )
