@@ -1003,6 +1003,24 @@ class ReconReport:
     #: the file and is entitled to assume it was read. Empty on every report
     #: built before this field existed and on every pass that read everything.
     unread: tuple[UnreadFile, ...] = ()
+    #: ATTACHED DOCUMENTS READ AS PROSE — `crucible.prose.ProseDocument`s.
+    #:
+    #: Carried on this report rather than returned beside it because the plan
+    #: builds from ONE object and a second channel is a second thing for a
+    #: caller to forget: `unread` is already here for the files this pass could
+    #: not read, and a document read as ten conversations belongs in the same
+    #: place as the document that could not be opened at all.
+    #:
+    #: NOT OBSERVED, and that distinction is the point. `observe()` runs
+    #: structural checks over rectangles; prose has no columns to reconcile and
+    #: contributes no `Observation`, so it cannot change which prioritisation
+    #: framework the run picks or close a data gap the company genuinely has.
+    #: It contributes CLAIMS, after approval, and nothing before then.
+    #:
+    #: Typed loosely to keep this module free of a `crucible.prose` import —
+    #: that module reads `UnreadFile` from here, and the pair must not become a
+    #: cycle.
+    prose: tuple[Any, ...] = ()
 
     def summary(self) -> dict:
         """The coverage facts a reader needs in one line, aggregated.

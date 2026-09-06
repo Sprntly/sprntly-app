@@ -121,6 +121,9 @@ _JSONB_COLUMNS: dict[str, set[str]] = {
     "design_agent_map_cache": {"payload"},
     "design_agent_jobs":      {"payload"},  # Tier 2 worker queue
     "pipeline_runs":          {"stages"},   # per-stage results JSONB
+    # The model's own extraction output for one attached conversation, cached
+    # by (bytes, prompt version) so the same document ranks the same way twice.
+    "crucible_prose_extractions": {"output"},
 }
 
 # Postgres bool columns surface as bool in supabase-py; SQLite stores 0/1.
