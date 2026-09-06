@@ -30,6 +30,7 @@ from app.crucible.claims import (
     DEFAULT_CLAIM_TYPE,
     KIND_TO_CLAIM_TYPE,
     account_key,
+    canonical_account_names,
     infer_account_sides,
     normalise_account,
     self_account_keys,
@@ -648,3 +649,109 @@ def test_without_a_company_name_nothing_is_excluded():
     assert normalise_account("AdventureWorks") == "AdventureWorks"
     claims, _ = project_signals([sig(id="a", properties={"account": "AdventureWorks"})])
     assert claims[0].population.segments["accounts"] == ("AdventureWorks",)
+
+
+# ── Two spellings of one customer are one customer ───────────────────────────
+#
+# `account_key` has known this since the self-name exclusion shipped; nothing
+# acted on it, because `normalise_account` returned the raw display string.
+# Two spellings therefore travelled as two accounts: a theme touching both
+# counted two, a real customer's evidence split across two names, and a value
+# join keyed on the contracts' single spelling could only ever match one of
+# them.
+
+def test_two_spellings_of_one_customer_count_as_one_account():
+    """The measured case: `Northwind Labs` and `NorthwindLabs` are one customer
+    on the tenant this was measured against, and were counted as two."""
+    rows = [sig(id="a", properties={"customer": "Northwind Labs"}),
+            sig(id="b", properties={"customer": "NorthwindLabs"})]
+    claims, _ = project_signals(rows)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == {"Northwind Labs"}, (
+        f"one customer spelled two ways became {sorted(named)}")
+
+
+def test_one_signal_naming_both_spellings_is_one_account_not_two():
+    """The reach consequence, on a single row: `estimated_size` is what
+    `affected_population` is built from, so a duplicate here inflates a size."""
+    rows = [sig(id="a", properties={"customer": "Fabrikam Pay",
+                                    "account": "FabrikamPay"})]
+    claims, _ = project_signals(rows)
+    assert claims[0].population.segments["accounts"] == ("Fabrikam Pay",)
+    assert claims[0].population.estimated_size == 1
+
+
+def test_a_legal_suffix_variant_collapses_into_the_plain_name():
+    rows = [sig(id="a", properties={"customer": "Northwind"}),
+            sig(id="b", properties={"customer": "Northwind Inc."}),
+            sig(id="c", properties={"customer": "northwind"})]
+    claims, _ = project_signals(rows)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == {"Northwind"}
+
+
+def test_two_different_organisations_that_share_a_word_never_merge():
+    """THE BLIND SPOT, ASSERTED RATHER THAN HOPED FOR. The measured tenant
+    carries `Contoso Federal` and `Contoso Air`, which are not the same customer.
+    A token-SUBSET rule would reach further and would decide this case on a
+    token count; this rule refuses it, and under-merging is the direction that
+    cannot corrupt a revenue figure."""
+    rows = [sig(id="a", properties={"customer": "Contoso Federal"}),
+            sig(id="b", properties={"customer": "Contoso Air"}),
+            sig(id="c", properties={"customer": "Contoso Federal Credit Union"})]
+    claims, _ = project_signals(rows)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == {"Contoso Federal", "Contoso Air", "Contoso Federal Credit Union"}, (
+        "distinct organisations were merged into one account")
+
+
+def test_the_chosen_spelling_is_the_most_common_one():
+    rows = ([sig(id=f"a{i}", properties={"customer": "NorthwindLabs"})
+             for i in range(3)]
+            + [sig(id="b", properties={"customer": "Northwind Labs"})])
+    claims, _ = project_signals(rows)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == {"NorthwindLabs"}
+
+
+def test_the_chosen_spelling_does_not_depend_on_the_order_the_rows_arrive():
+    """REPRODUCIBILITY IS THE PRODUCT CLAIM. A first-seen rule would make the
+    rendered account name a function of however the corpus paged out of the
+    database, so the same evidence would render two different customer names
+    on two runs. Frequency, then lexicographic, cannot do that."""
+    rows = [sig(id="a", properties={"customer": "Fabrikam Pay"}),
+            sig(id="b", properties={"customer": "FabrikamPay"})]
+    forward = canonical_account_names(rows)
+    backward = canonical_account_names(list(reversed(rows)))
+    assert forward == backward == {account_key("FabrikamPay"): "Fabrikam Pay"}
+
+
+def test_collapsing_never_resurrects_the_vendors_own_name():
+    """The two rules compose in the right order: an excluded name contributes
+    no spelling to the map, so it cannot become anyone's canonical form."""
+    selves = self_account_keys("AdventureWorks")
+    rows = [sig(id="a", properties={"customer": "Adventure Works"}),
+            sig(id="b", properties={"customer": "adventureworks inc"})]
+    assert canonical_account_names(rows, selves) == {}
+    claims, _ = project_signals(rows, self_names=selves)
+    named = {n for c in claims for n in c.population.segments.get("accounts", ())}
+    assert named == set()
+
+
+def test_no_canonical_map_means_no_collapsing_at_all():
+    """The default has to reproduce the old behaviour exactly — a single row
+    cannot see the corpus, so it must not guess."""
+    assert normalise_account("NorthwindLabs") == "NorthwindLabs"
+    assert normalise_account("Northwind Labs") == "Northwind Labs"
+
+
+def test_customer_side_is_decided_once_per_collapsed_account():
+    """`infer_account_sides` keys on the display name, so building it from raw
+    spellings would answer customer-vs-prospect twice for one account and then
+    hand one of the two answers to the collapsed name."""
+    rows = [sig(id="a", properties={"prospect": "NorthwindLabs"}),
+            sig(id="b", properties={"customer": "Northwind Labs"})]
+    claims, _ = project_signals(rows)
+    by_id = {c.id: c for c in claims}
+    assert by_id["a"].population.segments["accounts"] == ("Northwind Labs",)
+    assert by_id["a"].population.segments["customer_side"] == ("Northwind Labs",)
