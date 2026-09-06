@@ -52,6 +52,17 @@
  * what they qualify, and the closing section built from the run plan's own
  * gaps are all still true of what is shown here, because what is shown here
  * is what that file produced.
+ *
+ * ONE THING THE DOCUMENT CANNOT DO: ACT. `HtmlReportView` renders it with no
+ * `allow-scripts`, so a cut option printed inside it is prose forever, however
+ * clearly `report.py` states the reason it was cut. This component adds the
+ * one thing the sandbox rules out — a way to REOPEN a cut option — as plain
+ * React, outside the frame: a button per `run.considered` entry that hands the
+ * label to the chat composer as a question, so "was this actually weighed?"
+ * is answerable on the spot, against the same corpus, at near-zero cost. It
+ * does not restate the reason each was cut — that sentence already exists,
+ * once, in the document above — only the label, which is what identifies the
+ * option to ask about.
  */
 import { HtmlReportView } from "./HtmlReportView"
 import type { GoalRunDetail } from "../../lib/api"
@@ -62,6 +73,7 @@ export function GoalAnalysisReport({
   onEdit,
   onSaveCopy,
   busy = false,
+  onSelectOption,
 }: {
   run: GoalRunDetail
   /** Show the document actions. DEFAULT FALSE, so every existing caller
@@ -77,6 +89,12 @@ export function GoalAnalysisReport({
    *  to the same run, and letting the second fire while the first is still
    *  going is how you get a copy of a report that is mid-creation. */
   busy?: boolean
+  /** Reopen a cut option: hands its label to the caller, which hands it to the
+   *  chat composer as a question. Undefined renders no list at all — a caller
+   *  with nowhere to send the label (there is none today; every caller sits
+   *  beside a composer) gets the exact prose-only panel this file replaced
+   *  nothing else about. */
+  onSelectOption?: (label: string) => void
 }) {
   const html = (run.report_html || "").trim()
 
@@ -129,6 +147,37 @@ export function GoalAnalysisReport({
           the run finishes.
         </p>
       )}
+
+      {/* THE REOPENABLE LIST. `run.considered` is already on the wire — see
+          the type's own doc in `lib/api.ts` — and until now nothing rendered
+          it here at all, since it is fully covered by the document above.
+          This is additive to that coverage, not a replacement for it: closed
+          by default (a reader who does not want to litigate cut options never
+          sees this open), and silent when there is nowhere to send a
+          selection or nothing was cut. */}
+      {onSelectOption && run.considered.length > 0 ? (
+        <details className="ga-considered" data-testid="goal-considered">
+          <summary>
+            {run.considered.length === 1
+              ? "1 option considered and cut"
+              : `${run.considered.length} options considered and cut`}
+          </summary>
+          <ul>
+            {run.considered.map((option) => (
+              <li key={option.id}>
+                <button
+                  type="button"
+                  className="ga-doc-action"
+                  data-testid="goal-considered-option"
+                  onClick={() => onSelectOption(option.label)}
+                >
+                  Ask about &ldquo;{option.label}&rdquo;
+                </button>
+              </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
     </article>
   )
 }
