@@ -588,6 +588,11 @@ function PlanBody({
   //  would let a reader who scans the list of ticks leave with the impression
   //  that the list is complete.
   const unreadUploads = plan.unread_uploads ?? []
+  //: And the ones read as PROSE rather than as rectangles. In the same block
+  //  as both, for the same reason they are in one block: the reader performed
+  //  ONE act — attaching files — and three lists in three places would make
+  //  them reconstruct what happened to their attachment from three screens.
+  const proseUploads = plan.prose_uploads ?? []
   //: HOW THIS GOAL ROUTES THE EVIDENCE, and what it therefore chose not to
   //  do. Both decided in code server-side and frozen before composition —
   //  rendered here because they are decisions the reader is being asked to
@@ -604,7 +609,7 @@ function PlanBody({
   // and telling that reader "nothing is connected for this to read" over a
   // plan that goes on to list the twelve files it read would be the screen
   // contradicting itself in its own first sentence.
-  const verdict = !plan.sources.length && !uploads.length
+  const verdict = !plan.sources.length && !uploads.length && !proseUploads.length
     ? "Nothing is connected for this to read."
     : gaps.length
       ? `I can answer this from what you have connected, with ${gaps.length} ` +
@@ -922,14 +927,21 @@ function PlanBody({
               </button>
             )}
           </>
-        ) : uploads.length ? null : (
+        ) : uploads.length || proseUploads.length ? null : (
           // AN UNREAD ATTACHMENT DOES NOT SUPPRESS THIS LINE, and a read one
           // does. "Nothing is connected for this to read" is false over a
           // spreadsheet that was read and TRUE over a workspace with no
-          // connectors whose only attachment was a PDF — that reader has
-          // nothing to analyse, and the block below tells them which file and
-          // why. Suppressing it there would leave a plan that answers a
-          // question from evidence it does not have.
+          // connectors whose only attachment could not be opened at all —
+          // that reader has nothing to analyse, and the block below tells
+          // them which file and why. Suppressing it there would leave a plan
+          // that answers a question from evidence it does not have.
+          //
+          // A DOCUMENT READ AS PROSE IS A READ ONE. The example this comment
+          // used to give was "a PDF", from when a PDF produced no rectangle
+          // and therefore nothing at all; it now produces conversations that
+          // the findings rest on, and a plan that opened by saying nothing
+          // was connected to read would be contradicting the list of
+          // conversations directly beneath it.
           <p className="ga-empty" data-testid="goal-plan-no-sources">
             Nothing is connected for this to read.
           </p>
@@ -950,12 +962,12 @@ function PlanBody({
             the plan; "dropping" an upload means detaching it from the message,
             which is a different act in a different place — a control here
             would imply this screen could undo it. */}
-        {uploads.length || unreadUploads.length ? (
+        {uploads.length || unreadUploads.length || proseUploads.length ? (
           <div className={s.uploads} data-testid="goal-plan-uploads">
             <div className={s.roleHead}>
               <span className={s.rolePill}>Attached to this message</span>
               <span className={s.roleNote}>
-                {uploads.length
+                {uploads.length || proseUploads.length
                   ? "Read for this analysis only — not added to your knowledge graph"
                   : "Nothing here could be read — see the reason on each file"}
               </span>
@@ -975,6 +987,35 @@ function PlanBody({
                   <span className={s.tickWitness}>
                     {u.tables === 1 ? "1 table" : `${u.tables} tables`}
                   </span>
+                </li>
+              ))}
+              {/* ── WHAT WAS READ AS CONVERSATIONS RATHER THAN AS TABLES.
+                  A tick, like a spreadsheet, because it WAS read — the
+                  difference is what came out of it, and that belongs in the
+                  same right-hand column that says "3 tables" for a workbook.
+                  `how` is rendered verbatim: it is the one line a reader can
+                  disagree with ("that pack holds eleven calls, not ten"), and
+                  a client that summarised it would be deciding for them which
+                  part of the engine's own account of itself they get to
+                  check. */}
+              {proseUploads.map((u) => (
+                <li
+                  key={`prose-${u.name}`}
+                  className={s.tickRow}
+                  data-testid="goal-plan-upload-prose"
+                >
+                  <span className={s.tick} aria-hidden>
+                    {"\u2713"}
+                  </span>
+                  <span>
+                    <b>{u.name}</b>{" "}
+                    <span className="ga-doc-source-count">
+                      {u.conversations === 1
+                        ? "1 conversation"
+                        : `${u.conversations.toLocaleString()} conversations`}
+                    </span>
+                  </span>
+                  <span className={s.tickWitness}>{u.how}</span>
                 </li>
               ))}
               {/* ── WHAT WAS ATTACHED AND NOT READ. ────────────────────────
