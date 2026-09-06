@@ -778,34 +778,74 @@ def test_the_counting_unit_step_says_the_value_does_not_move_the_sizing():
 
 def test_the_derived_note_does_not_claim_the_run_prices_accounts():
     """SITE TWO, AND THE ONE THAT HIDES. This note is carried onto the plan
-    as `account_value_derived_note` and SERIALISED — fixing the step alone
-    leaves the same claim in the stored JSON, where the report renders from."""
+    as `account_value_derived_note` and SERIALISED, so it outlives the screen
+    that produced it — fixing the step alone leaves the claim in the JSON.
+
+    THE DISCLAIMER IS NOW ASSERTED AS A CONDITIONAL, NOT AS A PHRASE. This
+    used to require "count of the accounts" unconditionally. That was true of
+    every run when it was written and became false when the weighting path
+    landed: `pipeline.build_findings` ranks a `value` run by revenue, so the
+    note was requiring the stored plan to contradict its own verdict. A test
+    that pins a stale sentence is protecting a phrase rather than behaviour,
+    so this pins the PROPERTY — the disclaimer belongs on a counted run and
+    must be gone from a weighted one — and fails on unfixed code in both
+    directions.
+    """
     from app.crucible.framework import derived_account_value
 
-    _value, note = derived_account_value(_report().observations)
-    assert note, "the fixture must derive a value or this test is vacuous"
+    for unit in ("", "count"):
+        _value, note = derived_account_value(
+            _report().observations, weighting_unit=unit)
+        assert note, "the fixture must derive a value or this test is vacuous"
+        for claim in _PRICING_CLAIMS:
+            assert claim not in note.lower(), (
+                f"weighting_unit={unit!r} still claims: {claim!r}")
+        assert "count of the accounts" in note.lower(), (
+            f"weighting_unit={unit!r} must state that size stays a count")
+
+    _value, weighted = derived_account_value(
+        _report().observations, weighting_unit="value")
+    assert weighted, "the weighted branch must still produce a note"
+    assert "count of the accounts" not in weighted.lower(), (
+        f"the note disclaims a count on a run ranked by revenue: {weighted}")
+    assert "median" in weighted.lower(), (
+        "the figure must still be reported on a weighted run, or the fix was "
+        "a deletion and this test is vacuous")
     for claim in _PRICING_CLAIMS:
-        assert claim not in note.lower(), f"the note still claims: {claim!r}"
-    assert "count of the accounts" in note.lower(), (
-        "the note must state that size stays a count of accounts")
+        assert claim not in weighted.lower(), (
+            f"the weighted note overclaims in the other direction: {claim!r}")
 
 
 def test_the_stored_plan_payload_carries_the_corrected_note():
     """The assertion above reads the function; this one reads the BLOB, which
-    is what a stored run and the rendered report actually see."""
+    is what a stored run actually carries. Both branches, because the defect
+    the conditional replaced was invisible in exactly this serialised copy."""
     from app.crucible.framework import derived_account_value
     from app.crucible.plan import RunPlan
 
-    value, note = derived_account_value(_report().observations)
-    blob = RunPlan(
-        goal_text="g", definition_text="d", currency="accounts",
-        account_value_derived=value, account_value_derived_note=note,
-    ).to_json()
-    stored = blob["account_value_derived_note"].lower()
-    assert stored, "the note must survive serialisation or this is vacuous"
+    def _stored(unit: str) -> str:
+        value, note = derived_account_value(
+            _report().observations, weighting_unit=unit)
+        blob = RunPlan(
+            goal_text="g", definition_text="d", currency="accounts",
+            account_value_derived=value, account_value_derived_note=note,
+        ).to_json()
+        text = blob["account_value_derived_note"].lower()
+        assert text, "the note must survive serialisation or this is vacuous"
+        return text
+
+    for unit in ("", "count"):
+        stored = _stored(unit)
+        for claim in _PRICING_CLAIMS:
+            assert claim not in stored, (
+                f"the stored plan at weighting_unit={unit!r} claims: {claim!r}")
+        assert "count of the accounts" in stored
+
+    stored = _stored("value")
+    assert "count of the accounts" not in stored, (
+        f"the stored plan disclaims a count on a weighted run: {stored}")
     for claim in _PRICING_CLAIMS:
-        assert claim not in stored, f"the stored plan still claims: {claim!r}"
-    assert "count of the accounts" in stored
+        assert claim not in stored, f"the stored plan claims: {claim!r}"
 
 
 # ─── The plan may promise only what the run performs ───────────────────────
@@ -965,3 +1005,38 @@ def test_the_censoring_step_does_not_say_the_run_reports_the_mature_rate():
         "run-side promise again and this test needs rewriting rather than "
         "keeping"
     )
+
+
+def _amount_step(**kw):
+    """The monetary-coverage step off the prose fixture, at a settled unit."""
+    steps = planner.minimal_plan(
+        goal_text="grow revenue", currency="accounts", report=_prose_report(),
+        source_types=("pm_manual", "customer_voice"), **kw)
+    return next(s for s in steps
+                if s.params.get("field") == "properties.amount")
+
+
+def test_the_monetary_gap_step_states_the_unit_it_is_actually_run_at():
+    """THE SAME DEFECT AS THE ATTRIBUTION GAP, ONE STEP OVER.
+
+    This observation measures whether SIGNALS carry a figure. The unit is
+    settled from a priced BOOK and the recorded business model — a different
+    question about different evidence — so a tenant whose transcripts carry no
+    amounts and whose contracts export prices every account is weighted while
+    this step told it every size in the document was stated in accounts
+    touched. Both branches are asserted, so the guard cannot be satisfied by
+    deleting the sentence.
+    """
+    counted = _amount_step()
+    assert "stated in accounts touched, never in money" in counted.why
+    assert "nothing connected here measures it" in counted.why
+
+    weighted = _amount_step(
+        weighting_unit="value",
+        weighting_because="themes are ranked by the revenue behind them.")
+    assert "stated in accounts touched, never in money" not in weighted.why, (
+        f"the step still claims a count on a weighted run: {weighted.why}")
+    assert "comes from your contracts" in weighted.why
+    for step in (counted, weighted):
+        assert "signals do." in step.why, (
+            "the measurement must survive the correction or this is vacuous")

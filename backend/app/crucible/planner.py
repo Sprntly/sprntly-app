@@ -826,13 +826,30 @@ def compose_deterministic(
             params={"field": (list(o.fields) or ["properties.account"])[0]},
         ))
     for o in _acting("monetary_coverage_gap"):
+        # GATED ON THE SETTLED UNIT, FOR THE SAME REASON THE ATTRIBUTION-GAP
+        # STEP ABOVE IS. This measures whether SIGNALS carry a figure; the
+        # unit is settled from a priced BOOK and the recorded business model,
+        # which is a different question about different evidence. A tenant
+        # whose transcripts carry no amounts and whose contracts export prices
+        # every account is weighted — and used to be told, unconditionally,
+        # that every size in its document was stated in accounts touched.
+        if weighting_unit == "value":
+            consequence = (
+                "No size here is read out of the evidence itself, then: what "
+                "a theme is worth comes from your contracts, and this says "
+                "only that the evidence could not have supplied it."
+            )
+        else:
+            consequence = (
+                "Every size in the finished document is therefore stated in "
+                "accounts touched, never in money — not because money is "
+                "unimportant, but because nothing connected here measures it."
+            )
         steps.append(_obs_step(
             "audit_signal_field_coverage", o,
             "Check whether anything here carries a figure",
             f"{o.figures['present']:,.0f} of {o.figures['signals']:,.0f} "
-            f"signals do. Every size in the finished document is therefore "
-            f"stated in accounts touched, never in money — not because money "
-            f"is unimportant, but because nothing connected here measures it.",
+            f"signals do. {consequence}",
             params={"field": (list(o.fields) or ["properties.amount"])[0]},
         ))
     for o in _acting("dating_unreliable"):

@@ -1469,6 +1469,20 @@ def execute_run(
                 # approved_with` exists to catch. An unchanged verdict rewrites
                 # nothing at all.
                 if verdict.unit != str(plan_json.get("weighting_unit") or ""):
+                    # AND THE DERIVED-VALUE NOTE, WHICH DISCLAIMS AGAINST THE
+                    # UNIT AND IS STORED. It was written at plan time, before
+                    # the reader answered the question that can flip a run
+                    # from counted to weighted — so a run that flipped kept a
+                    # note saying its sizes stay a count of accounts, in the
+                    # same stored plan whose own verdict said otherwise.
+                    # Re-derived through the pure function the gate used,
+                    # from the stored observations, so the two cannot drift.
+                    from app.crucible.framework import derived_account_value
+
+                    _, derived_note = derived_account_value(
+                        stored_obs, weighting_unit=verdict.unit)
+                    plan_json["account_value_derived_note"] = derived_note
+
                     from app.crucible.planner import settle_unit_step, unit_step
 
                     plan_json["steps"] = settle_unit_step(
