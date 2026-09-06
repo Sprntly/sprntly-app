@@ -742,10 +742,36 @@ def _adjudicate(claims: Sequence[Claim]) -> Adjudication:
     return "corroborated"
 
 
+#: WHICH SEGMENT A REACH COUNT IS TAKEN OVER, AND WHY IT IS THE UNFILTERED
+#: ONE.
+#:
+#: `accounts` is every account a claim names; `customer_side` is that list
+#: with anything `claims.infer_account_sides` placed on the prospect side
+#: removed. TODAY THEY ARE THE SAME SET — `PROSPECT_KEYS` is read in four
+#: places and written in none, so nothing this engine can ingest records which
+#: side of the sale an account is on and every name resolves to `customer`.
+#: The plan says so out loud, in `derive_gaps_and_promises`.
+#:
+#: So this is a no-op change of segment, made for what it does on the day it
+#: stops being one. Reading `customer_side` here would mean the first
+#: connector to land a prospect field silently shrinks every reach count in
+#: the product and silently falsifies that disclosure — with no code change,
+#: no test failure and nothing for a reader to notice. Reading `accounts`
+#: makes that day a no-op instead.
+#:
+#: IT IS ALSO NOT THE FILTER IT LOOKS LIKE. Dropping prospects is right for a
+#: retention question and wrong for an acquisition one, and this site has no
+#: goal to condition on: it filtered unconditionally, on every run, whatever
+#: was asked. The goal-shaped version of that decision already has a home —
+#: `build_findings`' `goal_accounts` argument — and until something passes it,
+#: an unconditional half-filter is a worse answer than none.
+_REACH_SEGMENT = "accounts"
+
+
 def _accounts(claims: Sequence[Claim]) -> tuple[str, ...]:
     seen: list[str] = []
     for c in claims:
-        for name in c.population.segments.get("customer_side", ()):
+        for name in c.population.segments.get(_REACH_SEGMENT, ()):
             if name not in seen:
                 seen.append(name)
     return tuple(seen)
@@ -811,7 +837,12 @@ def _graph_relations(
     for relation, members in by_relation.items():
         named: list[str] = []
         for c in members:
-            for name in c.population.segments.get("customer_side", ()):
+            # THE SAME SEGMENT `_accounts` READS, and it has to be. `scope` is
+            # built from that function's output, so a second site reading the
+            # narrower list would filter twice — and on the day the two
+            # segments diverge it would name fewer accounts than the reach
+            # count directly above it, in the same finding.
+            for name in c.population.segments.get(_REACH_SEGMENT, ()):
                 if name in scope and name not in named:
                     named.append(name)
         rows.append(GraphRelation(relation, len(members), tuple(named)))

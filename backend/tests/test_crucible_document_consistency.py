@@ -178,12 +178,43 @@ def _plan(excluded: tuple[str, ...] = (), hypotheses: tuple[str, ...] = ()) -> d
         lambda company_id: (list(_INVENTORY),
                             sum(s.signal_count for s in _INVENTORY)),
     ):
-        return build_plan(
+        blob = build_plan(
             company_id="co-1", goal_text="increase revenue by 5%",
             definition_text="recognised revenue from paying accounts, net of "
                             "refunds, as finance books it",
             excluded_sources=excluded, hypotheses=hypotheses,
         ).to_json()
+    # AND ONE STORED OBSERVATION, SO THE SECTION THAT RESTATES THEM IS SWEPT
+    # BY EVERY ASSERTION IN THIS FILE RATHER THAN ONLY BY ITS OWN TESTS.
+    #
+    # `build_plan` is called here without a reconnaissance pass, so it returns
+    # an empty observation list and `report._observations_section` renders
+    # nothing — which would have left a whole section of the document outside
+    # a suite whose entire job is reading the finished document back. Several
+    # of the assertions here quantify over the WHOLE html ("0 account" never
+    # appears; every use of "small" is immediately denied), and a section they
+    # never see is a section those rules do not cover.
+    #
+    # ONE, AND THE ONE THIS SECTION WAS BUILT FOR. A representative
+    # observation is enough to put the section in every document this file
+    # renders; enumerating all thirteen kinds here would make this fixture a
+    # second copy of `recon`'s own tests.
+    blob["observations"] = [{
+        "id": "product analytics:censored_periods:month_",
+        "kind": "censored_periods",
+        "severity": "high",
+        "source": "product analytics:cohort retention",
+        "source_label": "product analytics — cohort retention",
+        "fields": ["cohort", "accounts", "month_12"],
+        "what": "`month_12` is zero for 8 of 16 cohorts because those months "
+                "have not happened yet. Dividing the last period by every "
+                "cohort gives 46.7%; over the 8 cohorts old enough to have a "
+                "full window it is 93.3% — a 46.7 point error, pointing the "
+                "wrong way.",
+        "figures": {"cohorts": 16.0, "naive_rate": 0.467,
+                    "mature_rate": 0.933},
+    }]
+    return blob
 
 
 class Doc(NamedTuple):
@@ -287,6 +318,49 @@ def _tail_text(html: str) -> str:
     the ranking table above it is also a table of numbered-looking rows."""
     m = _TAIL_TOTAL.search(html)
     return _from(html, m.start()) if m else ""
+
+
+#: The reconnaissance section's heading, in all three of its branches.
+_OBSERVATIONS_H3 = re.compile(
+    r"<h3>(?:Nothing in the shape of your evidence|One thing about your "
+    r"evidence|[\d,]+ things about your evidence)[^<]*</h3>")
+
+
+def _without_observations(html: str) -> str:
+    """The document with the reconnaissance section removed.
+
+    TWO OF THE RULES BELOW MATCH ON STRINGS WHOSE MEANING DEPENDS ON WHICH
+    POPULATION THEY DESCRIBE, and this section describes the other one.
+    `report._observations_section` restates `recon`'s own sentences about
+    COLUMNS, ROWS, COHORTS AND FILES; every rule in this file was written
+    about FINDINGS. Two of them collide, and both collisions were reproduced
+    against real `recon` prose rather than reasoned about:
+
+      * `"0 account" not in html` is I3 — an UNSIZED finding must never render
+        as a measured zero. `priceable_coverage` writes "`arr` prices 0
+        accounts", which is a measured zero about a contracts file and is the
+        honest number.
+      * every `small*` must be immediately denied — an unmeasured theme must
+        not be called a minor one. `value_columns_disagree` writes "Reading
+        the smaller column understates the book by …", about a column.
+
+    So these two are scoped to the part of the document they are rules about,
+    exactly as `_findings_text` and `_tail_text` are scoped for the same
+    reason ("the pattern is generic enough to match elsewhere"). NOTHING ELSE
+    IS SCOPED: every other assertion here still quantifies over the whole
+    document, including this section.
+
+    THE HELPER ASSERTS IT FOUND THE SECTION when one is present, because the
+    failure mode of a subtraction like this is returning the whole document
+    and quietly re-covering nothing.
+    """
+    m = _OBSERVATIONS_H3.search(html)
+    if not m:
+        return html
+    section = _from(html, m.start(), 3)
+    assert len(section) > len(m.group(0)), (
+        "the reconnaissance heading rendered with no body under it")
+    return html[:m.start()] + html[m.start() + len(section):]
 
 
 # ── The consistency assertions ───────────────────────────────────────────────
@@ -529,7 +603,10 @@ def _assert_null_is_never_zero_or_small(doc: Doc) -> None:
     unsized_ranks = {i + 1 for i, r in enumerate(rows)
                      if r["impact_value"] is None}
 
-    assert "0 account" not in html
+    # SCOPED TO THE FINDINGS, NOT THE RECONNAISSANCE. See
+    # `_without_observations`: a measured "0 accounts" about a contracts file
+    # is the honest number, and this rule is about an unsized FINDING.
+    assert "0 account" not in _without_observations(html)
     listed = _findings_text(html)
     blocks = _BLOCK.findall(listed)
     # Only the rows that got a full block can say anything about their size, so
@@ -558,13 +635,21 @@ def _assert_null_is_never_zero_or_small(doc: Doc) -> None:
     # AND NOT "SMALL" ANYWHERE EITHER. The only sanctioned uses of the word are
     # the two that deny it — an unmeasured theme described as a minor one is
     # the same defect as rendering it 0, one register softer.
-    for m in re.finditer(r"\bsmall\w*\b", html):
-        window = html[max(0, m.start() - 30):m.start()]
+    # SCOPED FOR THE SAME REASON AS THE LINE ABOVE: "reading the smaller
+    # column" is `recon` describing a column, not this document describing a
+    # theme. See `_without_observations`.
+    outside = _without_observations(html)
+    for m in re.finditer(r"\bsmall\w*\b", outside):
+        window = outside[max(0, m.start() - 30):m.start()]
         # IMMEDIATELY DENIED, not merely denied somewhere nearby. The three
         # forms the document uses: "not a small one", "not small", and
         # "without being small".
+        # THE EXCERPT COMES OUT OF `outside` TOO. Slicing the full `html` at
+        # an offset taken from the subtracted string points the reader at the
+        # wrong sentence — which is how a scoped assertion becomes one nobody
+        # can act on.
         assert re.search(r"(?:not a |not |without being )$", window), (
-            f"...{html[max(0, m.start() - 60):m.start() + 40]}..."
+            f"...{outside[max(0, m.start() - 60):m.start() + 40]}..."
         )
 
 
@@ -1131,3 +1216,59 @@ def test_a_call_only_tenant_is_told_it_cannot_be_given_a_number():
     assert "nothing connected here carries numbers" in becauses
     assert any("Amplitude" in g.remedy for g in gaps)
     assert not any("connected and will be read" in p for p in produce)
+
+
+def test_recon_prose_about_columns_does_not_trip_rules_about_findings():
+    """THE SCOPING DECISION, PINNED ON THE TWO CASES THAT FORCED IT.
+
+    `report._observations_section` restates `recon`'s own sentences in the
+    finished document. Those sentences are about columns, rows, cohorts and
+    files; every rule in this file is about findings. Two rules match on
+    strings whose meaning depends on which of those two populations is being
+    described, and both were reproduced against real `recon` output rather
+    than reasoned about:
+
+      * `priceable_coverage` writes "prices 0 accounts" — a measured zero
+        about a contracts file, where I3's "0 account" ban is about an
+        UNSIZED finding rendering as a measured zero;
+      * `value_columns_disagree` writes "Reading the smaller column
+        understates the book by …", where the `small*` ban is about an
+        unmeasured theme being called a minor one.
+
+    Both halves are asserted. The document must tolerate these sentences
+    inside the reconnaissance section AND must still refuse them outside it,
+    or the scoping is a hole rather than a boundary.
+    """
+    import copy
+
+    for what in (
+        "Only 0.0% of the accounts named in your evidence could be priced, "
+        "so this is counted, not weighted. `arr` prices 0 accounts.",
+        "`base_acv_usd` and `total_acv_usd` both read as the account's value "
+        "and disagree on 2 of 8 rows. Reading the smaller column understates "
+        "the book by 273,378, or 11.9%.",
+    ):
+        plan = copy.deepcopy(_plan())
+        plan["observations"] = [{
+            "id": "x", "kind": "value_columns_disagree", "severity": "high",
+            "source": "sales data:contracts",
+            "source_label": "sales data — contracts",
+            "fields": ["a"], "what": what, "figures": {},
+        }]
+        doc = _document(_mixed_corpus(), plan=plan)
+        assert_internally_consistent(doc)
+
+    # AND THE BOUNDARY HOLDS THE OTHER WAY. The same strings outside the
+    # section are still refused, so this is a scoped rule and not a deleted
+    # one. Injected through the goal, which renders in the `<h1>` far above
+    # the appendix.
+    for banned in ("we found 0 accounts", "a smaller theme"):
+        doc = _document(_mixed_corpus(), goal=banned)
+        try:
+            assert_internally_consistent(doc)
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"{banned!r} passed outside the reconnaissance section, so the "
+            f"scoping removed the rule rather than bounding it"
+        )

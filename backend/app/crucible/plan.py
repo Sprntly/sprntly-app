@@ -919,6 +919,39 @@ def derive_gaps_and_promises(
             remedy=_REMEDY["customer_voice"],
         ))
 
+    # AN ASSUMPTION THAT DOCUMENTED ITS OWN DISCLOSURE AND NEVER GOT ONE.
+    #
+    # `claims.infer_account_sides` resolves an account it cannot place to
+    # `customer`, and says so in its docstring: "which is the conservative
+    # choice for a retention goal, and is disclosed as an assumed parameter
+    # (I8) by the CALLER rather than hidden here." No caller disclosed it.
+    # Nothing in `plan`, `planner` or `report` said the word — the assumption
+    # was made on every run, correctly documented at the site that makes it,
+    # and invisible to the only person it affects.
+    #
+    # UNCONDITIONAL, BECAUSE THE ABSENCE IS UNCONDITIONAL. It is not a fact
+    # about this tenant's corpus but about the connectors: `PROSPECT_KEYS` is
+    # read in four places and written in none, so no source this engine can
+    # ingest records which side of the sale an account sits on. A gap phrased
+    # against the kept inventory would come and go with a tick-box and imply
+    # that connecting something closes it.
+    #
+    # AND IT SAYS ONLY THAT THE DISTINCTION IS NOT MADE. The obvious second
+    # sentence — that a prospect would score zero against a retention goal —
+    # describes a filter production does not run: `build_findings` takes a
+    # `goal_accounts` argument and every caller leaves it `None`. Writing it
+    # here would be a fresh instance of the exact defect the surrounding work
+    # exists to remove, one paragraph after removing three others.
+    gaps.append(Gap(
+        question="Which of these accounts are customers, and which are "
+                "prospects?",
+        because="no connected source records which side of the sale an "
+                "account is on, so every named account is counted as a "
+                "customer",
+        remedy="record the distinction on the accounts themselves — until "
+               "something carries it, this reading cannot tell them apart",
+    ))
+
     produce = [
         "Themes ranked by how much of your book they touch, each with the "
         "source documents it rests on",
@@ -1047,7 +1080,6 @@ def build_plan(
         observations = tuple(getattr(recon_report, "observations", ()) or ())
         summary = getattr(recon_report, "summary", None)
         coverage = summary() if callable(summary) else {}
-        derived_value, derived_note = derived_account_value(observations)
 
         # ── WHAT THIS GOAL MAKES OF THE EVIDENCE, DECIDED BEFORE ANY MODEL
         # CALL. Deterministic, from facts already in hand: the kept inventory,
@@ -1074,6 +1106,13 @@ def build_plan(
         # the routing narrates it and must not restate the decision.
         verdict = weighting_verdict(
             observations, business_model_unit(business_type))
+        # READ AFTER THE VERDICT, BECAUSE THE NOTE DISCLAIMS AGAINST IT. This
+        # used to be taken a few lines above, before the unit existed, which
+        # is how a weighted run ended up storing a note saying its sizes stay
+        # a count of accounts. Nothing between here and there consumed the
+        # value, so moving the call is the whole change.
+        derived_value, derived_note = derived_account_value(
+            observations, weighting_unit=verdict.unit)
         goal_routing = routing_mod.resolve(
             goal_text=goal_text,
             definition_text=definition_text,

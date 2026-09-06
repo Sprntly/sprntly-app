@@ -538,3 +538,71 @@ def test_a_plan_built_without_a_reconnaissance_pass_carries_no_routing(monkeypat
                        definition_text="")
     assert built.to_json()["routing"] == {}
     assert built.to_json()["set_aside"] == []
+
+
+# ─── The other half of the same pair, one branch over ──────────────────────
+
+
+#: Prose asserting that a theme's size IS a count and never money. The honest
+#: sentence on a counted run and a false one on a weighted run — the same
+#: defect as `_CLAIMS_MONEY_SIZING` catches, pointing the other way.
+_CLAIMS_COUNT_SIZING = re.compile(
+    r"size\b[^.]{0,60}\bcount of the accounts"
+    r"|stated in accounts touched"
+    r"|count of accounts",
+    re.IGNORECASE)
+
+
+def test_the_derived_value_note_drops_its_disclaimer_on_a_weighted_run():
+    """A DISCLAIMER LEFT STANDING AFTER THE ENGINE STARTED WEIGHTING.
+
+    The `unit_value_available` branch ends "It does not change how anything is
+    sized here: a theme's size is still a count of the accounts it touches,
+    never money." That was true of every run when it was written. It is now
+    false on a weighted one, and it renders IMMEDIATELY ABOVE
+    `weighting_because`, which says themes are ranked by the revenue behind
+    them — so the plan contradicts itself on the one field this feature exists
+    to get right, and `prompt_block` hands both to the composition model as
+    settled fact.
+
+    The planner's own version of this sentence is already gated (its step is
+    emitted only when there is no `priceable_coverage`); this note was the one
+    site that was not.
+    """
+    out = routing.resolve(
+        goal_text="reduce churn",
+        definition_text="accounts lost in the period",
+        unit_value_available=True,
+        weighting_unit="value",
+        weighting_because=("62.0% of what I read names an account your "
+                           "contracts can price, so themes are ranked by the "
+                           "revenue behind them rather than by how many "
+                           "accounts raised them."),
+    )
+    assert any("read from your own data" in n for n in out.notes), (
+        "the note must still tell the reader the figure was recognised, or "
+        "the fix was a deletion and this test is vacuous"
+    )
+    offenders = [n for n in out.notes if _CLAIMS_COUNT_SIZING.search(n)]
+    assert not offenders, (
+        "A routing note tells the reader a theme's size is a count of "
+        "accounts on a run whose approved unit is revenue:\n"
+        + "\n".join(f"  {n}" for n in offenders)
+    )
+
+
+def test_a_counted_run_keeps_the_disclaimer_and_must():
+    """The guard above must not be satisfiable by deleting the sentence
+    everywhere. On a counted run the disclaimer is the whole point of the
+    note — it is what stops a reader who connected contract data assuming the
+    figure moved the sizing."""
+    for unit in ("", "count"):
+        out = routing.resolve(
+            goal_text="reduce churn",
+            definition_text="accounts lost in the period",
+            unit_value_available=True,
+            weighting_unit=unit,
+        )
+        assert any(_CLAIMS_COUNT_SIZING.search(n) for n in out.notes), (
+            f"weighting_unit={unit!r} lost the disclaimer: {out.notes}"
+        )
