@@ -1114,6 +1114,14 @@ def execute_run(
     #: approve block below and read by the pipeline. A run that never reaches
     #: that block counts, which is what every run did before this existed.
     weighting_unit = ""
+    #: AND THE SENTENCE THAT DECIDED IT, carried to the pipeline beside the
+    #: unit. `build_findings` discloses on each counted finding WHY the run
+    #: counts, and the only non-contradicting answer is the verdict the
+    #: reader approved — composing a second one at the finding level is what
+    #: put "no revenue data connected" under findings on a run whose source
+    #: inventory listed revenue. Empty here for the same reason the unit is:
+    #: a run that never reaches the approve block recorded no verdict.
+    weighting_because = ""
     value_map: dict[str, float] = {}
     try:
         runs_db.heartbeat(run_id, company_id)
@@ -1567,6 +1575,7 @@ def execute_run(
                         ),
                     )
                 weighting_unit = verdict.unit
+                weighting_because = verdict.because
                 plan_json["weighting_unit"] = verdict.unit
                 plan_json["weighting_because"] = verdict.because
                 plan_json["weighting_priceable_share"] = verdict.priceable_share
@@ -1795,7 +1804,8 @@ def execute_run(
         weighted = weighting_unit == "value"
         result = build_findings(claims, currency="accounts", now=now,
                                 dates_are_ingest_clock=ingest_clock,
-                                value_map=value_map, weighted=weighted)
+                                value_map=value_map, weighted=weighted,
+                                weighting_because=weighting_because)
         # READ BACK FROM THE CALL ABOVE, NEVER ASSERTED HERE — see
         # `pipeline.build_findings`'s own comment on this stats key. This is
         # what lets the report say "reach was never narrowed to your goal's

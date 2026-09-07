@@ -1008,6 +1008,67 @@ def _named_unpriced(names: Sequence[str]) -> str:
     return ", ".join(head) + (f" and {rest} more" if rest > 0 else "")
 
 
+#: How long a weighting verdict may be when it is read back onto a finding.
+#:
+#: `report.MAX_PARAM_BASIS_CHARS` bounds the cell this lands in and clips past
+#: it with an ellipsis, and the longest verdict `plan.decide_weighting` can
+#: write is 330 characters — so the sentence a reader most needs to see whole
+#: is exactly the one that would arrive severed. Trimmed to WHOLE SENTENCES
+#: here instead.
+#:
+#: NOT IMPORTED FROM `report`. The pipeline does not depend on the renderer,
+#: and this bounds what is PERSISTED on every finding rather than what one
+#: page happens to show: a renderer that later raises its own cap must not
+#: silently lengthen stored rows, and one that lowers it must not truncate a
+#: sentence this module promised was complete.
+MAX_HOISTED_BASIS_CHARS = 300
+
+#: What a counted finding's basis says when the run recorded no verdict.
+#:
+#: `weighting_unit` — and with it `weighting_because` — defaults to empty on a
+#: run that never reaches the approve block in `routes.crucible.execute_run`,
+#: so there is genuinely no reason to read back. IT MUST NOT RE-ASSERT
+#: CONNECTIVITY. The string this replaced said "no revenue data connected" on
+#: what is a WEIGHTING decision, and the same document's source inventory and
+#: unit-capability sentences said revenue was connected — one report, three
+#: sentences about three different facts, two of which read as a
+#: contradiction. Absence of a verdict is what is true here, and it is all
+#: that is claimed.
+NO_WEIGHTING_VERDICT_BASIS = (
+    "counted in accounts; no weighting verdict was recorded for this run."
+)
+
+
+def _counted_basis(weighting_because: str) -> str:
+    """Why this run counts rather than weights, in the run's own words.
+
+    READ BACK, NEVER RESTATED. `plan.decide_weighting` already wrote this
+    sentence, and the reader approved it at the gate. Composing a second one
+    here is how a document came to say revenue was connected in one section
+    and not connected in another: two copies of one fact, free to stop
+    agreeing. Same hazard `relevance.py` names about derived state.
+
+    Trimmed on a SENTENCE boundary, never mid-word — a basis that ends "…and
+    weighting the whole book as though it were sales-assi" reads as a bug in
+    the report rather than as a bounded field. A verdict whose very first
+    sentence is already over the bound is handed on whole, because the
+    renderer's own clipper cuts at a word boundary and marks the cut, which is
+    strictly better than anything this function could do blind.
+    """
+    text = " ".join((weighting_because or "").split())
+    if not text:
+        return NO_WEIGHTING_VERDICT_BASIS
+    if len(text) <= MAX_HOISTED_BASIS_CHARS:
+        return text
+    kept = ""
+    for sentence in re.split(r"(?<=\.)\s+", text):
+        candidate = f"{kept} {sentence}" if kept else sentence
+        if len(candidate) > MAX_HOISTED_BASIS_CHARS:
+            break
+        kept = candidate
+    return kept or text
+
+
 def build_findings(
     claims: Iterable[Claim],
     *,
@@ -1026,6 +1087,12 @@ def build_findings(
     #: whatever the corpus looks like at execute could weight a run the reader
     #: approved as counted.
     weighted: bool = False,
+    #: THE VERDICT'S OWN SENTENCE, alongside the unit it decided. A counted
+    #: finding discloses WHY it was counted, and the only correct answer is
+    #: the one `plan.decide_weighting` already wrote and the reader already
+    #: approved — see `_counted_basis`. Empty is a real state, not a caller
+    #: oversight: a run that never reached the approve block has no verdict.
+    weighting_because: str = "",
 ) -> PipelineResult:
     """The whole deterministic middle of the engine.
 
@@ -1199,7 +1266,15 @@ def build_findings(
             assumed = (AssumedParam(
                 name="value_per_account",
                 value=None,
-                basis=("no revenue data connected; accounts weighted equally"
+                # TWO DIFFERENT FACTS, AND THEY ARE NOT INTERCHANGEABLE.
+                # A counted run has a run-level VERDICT about the unit, read
+                # back verbatim; a weighted run has a finding-level fact that
+                # THIS theme's accounts are not in the contracts. The first
+                # arm used to assert "no revenue data connected", which is a
+                # claim about connectivity made on the strength of a
+                # weighting decision — and false on every run whose source
+                # inventory listed revenue two sections above.
+                basis=(_counted_basis(weighting_because)
                        if not weighted else
                        "none of the accounts this touches is in your "
                        "contracts, so it is ranked by accounts touched"),
