@@ -255,6 +255,33 @@ def get_run(run_id: int, company: WorkspaceContext = Depends(require_crucible_mo
     }
 
 
+@router.get("/{run_id}/claims/{claim_id}/source")
+def get_claim_source(
+    run_id: int, claim_id: str,
+    company: WorkspaceContext = Depends(require_crucible_module),
+):
+    """Where one cited claim came from — a resolver, not a renderer.
+
+    404 only for the RUN not belonging to this company (same posture as
+    `get_run`: "exists but not yours" must read identically to "does not
+    exist"). A claim id that cannot be resolved is never a 404 or a 500 —
+    it is a normal 200 with a `status` a reader can act on
+    (`app.crucible.resolve.ClaimSource`), because "we don't know where this
+    came from" is itself something the caller needs to be told, not an
+    error to hide behind.
+    """
+    row = runs_db.get(run_id, company.company_id)
+    if not row:
+        raise HTTPException(404, "Run not found")
+    from dataclasses import asdict
+
+    from app.crucible.resolve import resolve_claim_source
+
+    result = resolve_claim_source(
+        company.company_id, run_id, claim_id, run_row=row)
+    return asdict(result)
+
+
 @router.post("/{run_id}/confirm")
 async def confirm(
     run_id: int,
@@ -2514,7 +2541,11 @@ def _load_signals_by_id(company_id: str, ids: set[str]) -> list[dict]:
     corpus for a
     handful of already-selected findings. Claim ids ARE signal ids
     (`app.crucible.claims.project_signal`), so this is the same table and the
-    same columns `_load_signals` reads, filtered by id instead of paged.
+    same columns `_load_signals` reads, filtered by id instead of paged —
+    PLUS `source_call_id`, which `_load_signals`/`_signal_page` do not select
+    (the pipeline never needed it) but `crucible.resolve` does: it is the
+    join key back to `call_index` for the one human-meaningful source
+    pointer this table can produce on its own.
     """
     if not ids:
         return []
@@ -2523,7 +2554,7 @@ def _load_signals_by_id(company_id: str, ids: set[str]) -> list[dict]:
     client = require_client()
     cols = (
         "id,kind,source_type,content,properties,provenance,"
-        "valid_at,created_at,source_id"
+        "valid_at,created_at,source_id,source_call_id"
     )
     id_list = list(ids)
     rows: list[dict] = []
