@@ -2632,7 +2632,7 @@ def test_the_account_naming_sentence_survives_a_run_with_no_pricing_at_all():
 def test_the_account_naming_sentence_now_names_the_call_title_route():
     """The claim-source identifier below is a FIFTH route by which an account
     name reaches the reader — measured on staging, 410 of 500 (82%) resolved
-    call titles carry one ("BayCare Clinic + ChaosTrack Briefing"). The
+    call titles carry one ("Northwind Utilities + Vendor Quarterly Review"). The
     disclosure has to say so, still identically at both sites, or shipping
     the identifier makes a sentence the report already prints false."""
     from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
