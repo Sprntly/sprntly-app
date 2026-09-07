@@ -3482,7 +3482,13 @@ def _ledger_section(ledger: list[dict], run: Optional[dict] = None) -> str:
     return "".join(out)
 
 
-def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
+def _limits_section(
+    plan: dict,
+    *,
+    relevance_gate_ran: bool = False,
+    relevance_prompt_version: str = "",
+    relevance_population_note_sent: Optional[bool] = None,
+) -> str:
     out = ["<h2>What this cannot tell you</h2>"]
     out.append(_p(
         "This reading is qualitative. It sizes a theme by reach — how many "
@@ -3504,14 +3510,52 @@ def _limits_section(plan: dict, *, relevance_gate_ran: bool = False) -> str:
     # a run that predates the gate, or whose gate call failed and kept
     # everything, gets the original, still-true sentence.
     if relevance_gate_ran:
-        out.append(_p(
-            "<strong>These findings were filtered for relevance to your "
-            "goal.</strong> A model checked every theme against your goal "
-            "and definition and kept what could plausibly bear on it; what "
-            "did not is listed separately below, with the reason. Being in "
-            "the evidence you approved AND surviving that check is still not "
-            "a claim about how much a theme matters — judge that yourself."
-        ))
+        # WHETHER TO NAME A POPULATION IS ITS OWN, SEPARATE FACT — READ BACK,
+        # NEVER ASSERTED. `relevance_population_note_sent` is `True` only when
+        # `routes.crucible._run_enrichment` recorded that `judge_relevance`
+        # actually sent a population line for THIS run (see that module's own
+        # comment on where it comes from and `relevance.population_note` for
+        # the predicate it mirrors). `relevance_prompt_version` is required
+        # alongside it, not decorative: a run recording one without the other
+        # is not a run this code wrote, and the safe reading of a fact this
+        # document cannot fully corroborate is not to make the stronger claim.
+        #
+        # A RUN WITH NEITHER KEY RECORDED — the gate ran under an EARLIER
+        # version of this code, before it recorded either fact — falls
+        # through to the plain sentence below, exactly like a run that
+        # recorded `relevance_population_note_sent=False`. That is not
+        # guessing "no": `population_label` only ever unlocks the STRONGER
+        # sentence, so the weaker, still-true one is what a genuinely absent
+        # fact gets, the same direction `_nothing_cut_note` already refuses to
+        # guess zero in.
+        population_label = ""
+        if relevance_population_note_sent is True and relevance_prompt_version:
+            from app.crucible.routing import GOAL_CLASS_NOTE
+            goal_class = str(
+                _as_dict(plan.get("routing")).get("goal_class") or ""
+            ).strip()
+            population_label = GOAL_CLASS_NOTE.get(goal_class, "")
+        if population_label:
+            out.append(_p(
+                "<strong>These findings were filtered for relevance to your "
+                "goal, including which part of your book it is about.</strong> "
+                f"A model checked every theme against your goal and "
+                f"definition, was told this goal is about "
+                f"{_esc(population_label)}, and kept what could plausibly "
+                "bear on both; what did not is listed separately below, "
+                "with the reason. Being in the evidence you approved AND "
+                "surviving that check is still not a claim about how much a "
+                "theme matters — judge that yourself."
+            ))
+        else:
+            out.append(_p(
+                "<strong>These findings were filtered for relevance to your "
+                "goal.</strong> A model checked every theme against your goal "
+                "and definition and kept what could plausibly bear on it; what "
+                "did not is listed separately below, with the reason. Being in "
+                "the evidence you approved AND surviving that check is still not "
+                "a claim about how much a theme matters — judge that yourself."
+            ))
     else:
         out.append(_p(
             "<strong>These findings were not selected for your goal.</strong> "
@@ -3873,6 +3917,18 @@ def render_report_html(
     # `_definition_section` and `_limits_section` for what turns on it.
     relevance_gate_ran = bool(prioritisation.get("relevance_gate_ran"))
     relevance_judged_info = _as_dict(prioritisation.get("relevance_judged"))
+    # WHICH PROMPT RAN, AND WHETHER IT NAMED A POPULATION — see
+    # `routes.crucible._run_enrichment` for where these are written and
+    # `_limits_section` for how a run missing either is handled. Read as the
+    # RAW stored value, not coerced to a bare bool: `is True` at the read
+    # site is what keeps "recorded False" and "never recorded" from becoming
+    # the same claim by accident.
+    relevance_prompt_version = str(
+        prioritisation.get("relevance_prompt_version") or ""
+    ).strip()
+    relevance_population_note_sent = prioritisation.get(
+        "relevance_population_note_sent"
+    )
 
     # WHETHER REACH WAS EVER NARROWED TO THE GOAL'S OWN POPULATION. Read back
     # from what `pipeline.build_findings` actually did on this run
@@ -3953,7 +4009,12 @@ def render_report_html(
                 written=len(written),
             ),
             _ledger_section(ledger, run=run),
-            _limits_section(plan, relevance_gate_ran=relevance_gate_ran),
+            _limits_section(
+                plan,
+                relevance_gate_ran=relevance_gate_ran,
+                relevance_prompt_version=relevance_prompt_version,
+                relevance_population_note_sent=relevance_population_note_sent,
+            ),
         ]
         return "".join(p for p in parts if p)
 

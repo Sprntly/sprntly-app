@@ -1206,6 +1206,97 @@ def test_a_run_whose_gate_never_ran_keeps_the_original_honest_sentence():
     assert "filtered for relevance to your goal" not in html
 
 
+# ─── The limits section, said from what the gate actually did ───────────────
+#
+# `_limits_section`'s filtered-for-relevance sentence used to say, always,
+# unconditionally: "A model checked every theme against your goal and
+# definition." True when written; false the day the gate learned about goal
+# population and started applying a wrong-population rule the sentence never
+# named. These four tests are the cases that sentence now has to tell apart
+# — see `routes.crucible._run_enrichment` for where the two new facts are
+# recorded and why.
+
+def test_the_limits_section_names_the_population_when_one_was_sent():
+    """The gate ran, and it was actually told which population this goal is
+    about — the sentence may say so, and must name the SAME population
+    `routing.GOAL_CLASS_NOTE` names for it, not a paraphrase."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        "relevance_prompt_version": "crucible-relevance-v3",
+        "relevance_population_note_sent": True,
+    }
+    plan = {**_full_plan(), "routing": {"goal_class": "retention"}}
+    html = render_report_html(run, [_finding()], plan=plan)
+    assert "filtered for relevance to your goal" in html
+    assert "keeping the accounts you already have" in html
+    para = _para_containing(html, "keeping the accounts you already have")
+    assert "filtered for relevance to your goal" in para, para
+
+
+def test_the_limits_section_names_no_population_when_none_was_sent():
+    """The gate ran, but this run's goal could not be placed against a
+    population (`relevance_population_note_sent` recorded as `False`, not
+    merely absent) — the plain, still-true sentence, with no population
+    claim in it at all."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        "relevance_prompt_version": "crucible-relevance-v3",
+        "relevance_population_note_sent": False,
+    }
+    plan = {**_full_plan(), "routing": {"goal_class": "unclassified"}}
+    html = render_report_html(run, [_finding()], plan=plan)
+    assert "filtered for relevance to your goal" in html
+    assert "keeping the accounts you already have" not in html
+    assert "including which part of your book" not in html
+
+
+def test_the_limits_section_does_not_claim_population_awareness_for_a_run_missing_both_keys():
+    """THE CASE WITH A RULE ATTACHED. A run whose gate ran under an EARLIER
+    version of this code — before it recorded either fact — has neither
+    `relevance_prompt_version` nor `relevance_population_note_sent` at all.
+    Absent is not evidence of absence: this must NOT render as "no
+    population note was used" (a claim about what happened that nothing
+    here can support), and it must not invent a population claim either.
+    It gets the same plain sentence a recorded `False` gets — the weaker
+    true thing — even though the plan's own `routing.goal_class` (stored
+    independently, for an unrelated purpose) could in principle have named
+    one; that goal_class is not evidence of what THIS gate call actually
+    sent."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        # No `relevance_prompt_version`, no `relevance_population_note_sent`.
+    }
+    plan = {**_full_plan(), "routing": {"goal_class": "retention"}}
+    html = render_report_html(run, [_finding()], plan=plan)
+    assert "filtered for relevance to your goal" in html
+    assert "keeping the accounts you already have" not in html
+    assert "including which part of your book" not in html
+
+
+def test_the_limits_section_needs_both_keys_before_naming_a_population():
+    """DEFENCE IN DEPTH, not a case the current write path can produce: a run
+    recording `relevance_population_note_sent=True` with no
+    `relevance_prompt_version` is not a run this code wrote in one piece, and
+    the safe reading of a fact this document cannot fully corroborate is the
+    weaker claim, never the stronger one."""
+    run = _run()
+    run["prioritisation"] = {
+        **_as_meta(run),
+        "relevance_gate_ran": True,
+        "relevance_population_note_sent": True,
+        # No `relevance_prompt_version`.
+    }
+    plan = {**_full_plan(), "routing": {"goal_class": "retention"}}
+    html = render_report_html(run, [_finding()], plan=plan)
+    assert "keeping the accounts you already have" not in html
+
+
 def test_the_relevance_truncation_is_disclosed_even_with_nothing_set_aside():
     """The relevance gate's disclosure half. It has a hard budget (`MAX_JUDGED`) and a
     wall-clock deadline that can stop it early — `_funnel_section` alone is
