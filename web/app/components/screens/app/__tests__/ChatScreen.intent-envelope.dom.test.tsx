@@ -24,7 +24,9 @@ if (typeof window !== "undefined" && !window.matchMedia) {
     }) as unknown as MediaQueryList
 }
 
-const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration, changeTemplate, ticketsChangeTemplate } = vi.hoisted(() => ({
+const { generateFromTask, classifyCommand, clarifyTask, resolveIntent, runTicketSetGeneration, changeTemplate, ticketsChangeTemplate, createProject } = vi.hoisted(() => ({
+  // POST /v1/projects. Deferred per-test so the IN-FLIGHT window is assertable.
+  createProject: vi.fn(),
   changeTemplate: vi.fn().mockResolvedValue({
     prd_id: 501, status: "generating", artifact_template_id: "tpl-acme",
   }),
@@ -67,6 +69,7 @@ vi.mock("../../../../lib/api", () => {
       get: vi.fn(),
     },
     artifactsApi: { chatSummary: vi.fn().mockResolvedValue({ summary: null }) },
+    projectsApi: { create: (...a: unknown[]) => createProject(...a) },
     conversationsApi: {
       create: vi.fn().mockResolvedValue({ id: 1 }),
       addTurn: vi.fn().mockResolvedValue({}),
@@ -164,6 +167,7 @@ beforeEach(() => {
   changeTemplate.mockClear()
   ticketsChangeTemplate.mockClear()
   runTicketSetGeneration.mockClear()
+  createProject.mockReset()
   resolveIntent.mockReset()
   resolveIntent.mockResolvedValue({
     intent: "answer", confidence: 0.9, task: null, instruction: null,
@@ -482,5 +486,92 @@ describe("ChatScreen — action-envelope dispatch (flag on)", () => {
     expect(runTicketSetGeneration.mock.calls[0][0]).toBe("the webhook retry work")
     expect(runAskGeneration).not.toHaveBeenCalled()
     expect(generateFromTask).not.toHaveBeenCalled()
+  })
+})
+
+// ── create_project SHOWS ITSELF while it runs ────────────────────────────────
+//
+// REPORTED: "no indication that it is creating a project, and then it
+// automatically takes me to the project screen." The create is not instant — it
+// binds the conversation and sweeps the thread's prior artifacts onto the new
+// project — and it used to run with the composer cleared and NOTHING on screen,
+// the project being the first thing the user saw. These drive the real screen,
+// so they cover the dispatch → action → turn-lifecycle path end to end.
+describe("ChatScreen — creating a project is visible while it happens", () => {
+  const CREATE_ENVELOPE = {
+    intent: "create_project", confidence: 0.95, task: "Billing revamp",
+    instruction: null, reason: "wants a project", source: "llm",
+    prd_id: null, prd_title: null,
+  }
+
+  /** A create the test resolves by hand, so the in-flight window can be looked
+   *  at rather than raced. */
+  function deferCreate() {
+    let settle: (v: { id: number; name: string }) => void = () => {}
+    createProject.mockImplementation(
+      () => new Promise((res) => { settle = res as typeof settle }),
+    )
+    return {
+      finish: async (project = { id: 42, name: "Billing revamp" }) => {
+        await act(async () => { settle(project) })
+      },
+    }
+  }
+
+  it("puts the message and a working state on screen BEFORE the project exists", async () => {
+    const create = deferCreate()
+    resolveIntent.mockResolvedValue(CREATE_ENVELOPE)
+    renderChat()
+    await typeAndSend("create a project for the billing revamp")
+
+    // The create is genuinely in flight and has NOT returned.
+    await waitFor(() => expect(createProject).toHaveBeenCalledTimes(1))
+    // Rung 0: the first 400ms deliberately shows no indicator (a fast action
+    // must not flash a spinner), so this waits for rung 1 — the same ladder
+    // every other async command in this app waits on.
+    await waitFor(() => expect(document.querySelector(".cw")).toBeTruthy())
+    expect(document.querySelector(".cw-phase-sr")?.textContent).toBe("Working on your question")
+    // Nothing has been claimed yet — the confirmation belongs to the settle.
+    expect(document.body.textContent).not.toContain("Created the project")
+
+    await create.finish()
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("Created the project “Billing revamp”"),
+    )
+    // …and the working state is gone once it has.
+    expect(document.querySelector(".cw")).toBeNull()
+  })
+
+  it("carries the thread with it, and says so", async () => {
+    // The conversation is resolved INSIDE the in-flight turn now. It still has
+    // to reach the create — that is what makes the new project arrive holding
+    // this chat's history and artifacts rather than empty.
+    const create = deferCreate()
+    resolveIntent.mockResolvedValue(CREATE_ENVELOPE)
+    renderChat()
+    await typeAndSend("start a project with this")
+    await waitFor(() => expect(createProject).toHaveBeenCalledTimes(1))
+
+    expect(createProject.mock.calls[0][0]).toMatchObject({
+      name: "Billing revamp", origin: "manual", conversation_id: 1,
+    })
+    await create.finish()
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("came with it"),
+    )
+  })
+
+  it("a failed create settles the same turn and says nothing was made", async () => {
+    createProject.mockRejectedValue(new Error("seat limit reached"))
+    resolveIntent.mockResolvedValue(CREATE_ENVELOPE)
+    renderChat()
+    await typeAndSend("create a project for the billing revamp")
+
+    await waitFor(() =>
+      expect(document.body.textContent).toContain("couldn't create the project"),
+    )
+    expect(document.body.textContent).toContain("Nothing was created")
+    // No stranded working state over a run that already ended.
+    expect(document.querySelector(".cw")).toBeNull()
   })
 })
