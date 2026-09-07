@@ -457,11 +457,32 @@ def test_a_bare_open_prefers_this_conversations_own_report(monkeypatch):
     assert out["artifact"]["report_id"] == 2
 
 
-def test_a_thread_owning_none_falls_back_to_the_library(monkeypatch):
-    """The narrowing only ever narrows: a conversation that produced no report
-    gets exactly the workspace-wide verdict it got before."""
+def test_a_thread_owning_none_gets_nothing_not_someone_elses(monkeypatch):
+    """REPORTED: a chat with no ticket set of its own was handed the
+    workspace's only one — another conversation's tickets, opened inside this
+    one. A thread-born kind is scoped to its thread, so "none here" is the
+    answer, never a substitution from the library."""
     _patch_fanout(monkeypatch, [
         _report(1, "One", conversation_id=7), _report(2, "Two", conversation_id=9),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "not_found"
+    assert out["artifact"] is None
+    assert out["candidates"] == []
+
+
+def test_a_thread_owning_several_asks_among_ITS_OWN(monkeypatch):
+    """REPORTED: a chat holding two reports was asked to choose between five
+    from across the whole workspace. Two of this thread's is still a question —
+    but the question is about this thread's two."""
+    _patch_fanout(monkeypatch, [
+        _report(1, "Mine A", conversation_id=88),
+        _report(2, "Mine B", conversation_id=88),
+        _report(3, "Someone else's", conversation_id=9),
+        _report(4, "Also not mine", conversation_id=None),
     ])
     out = ao.resolve_open_artifact(
         artifact_type="report", query="", dataset="acme",
@@ -471,17 +492,78 @@ def test_a_thread_owning_none_falls_back_to_the_library(monkeypatch):
     assert {c["report_id"] for c in out["candidates"]} == {1, 2}
 
 
-def test_a_thread_owning_several_does_not_guess(monkeypatch):
-    """Two reports from THIS chat is still a question, not a pick — the same
-    rule the library-wide branch applies."""
-    _patch_fanout(monkeypatch, [
-        _report(1, "One", conversation_id=88), _report(2, "Two", conversation_id=88),
-    ])
+def test_a_TITLED_open_is_thread_scoped_too(monkeypatch):
+    """The scope is the thread, not the phrasing. Naming a title must not be a
+    way back out to the library — otherwise "show me the churn report" opens a
+    document from a conversation the reader has never seen."""
+    _patch_fanout(monkeypatch, [_report(3, "Churn review", conversation_id=9)])
     out = ao.resolve_open_artifact(
-        artifact_type="report", query="", dataset="acme",
+        artifact_type="report", query="churn review", dataset="acme",
         company_id="co-1", conversation_id=88,
     )
-    assert out["status"] == "ambiguous"
+    assert out["status"] == "not_found"
+
+
+def test_tickets_and_documents_are_thread_scoped_the_same_way(monkeypatch):
+    """All three thread-born kinds, one rule — the ticket set is the one the
+    report actually named."""
+    _patch_fanout(monkeypatch, [
+        _ticket_set(3, "Checkout rework", conversation_id=9),
+        _document(4, "Launch plan", conversation_id=9),
+    ])
+    for kind in ("tickets", "document"):
+        out = ao.resolve_open_artifact(
+            artifact_type=kind, query="", dataset="acme",
+            company_id="co-1", conversation_id=88,
+        )
+        assert out["status"] == "not_found", kind
+
+
+def test_a_PROJECT_scope_is_not_narrowed_to_the_open_chat(monkeypatch):
+    """A project's container is the PROJECT, and its listing holds artifacts no
+    chat produced — a document uploaded to it has no conversation at all.
+    Filtering those down to whichever chat is open would hide artifacts that
+    genuinely belong to the project the reader is standing in."""
+    seen: dict = {}
+
+    def _list(*, project_id, dataset, company_id):
+        seen.update(project_id=project_id)
+        return [_document(4, "Launch plan", conversation_id=None)]
+
+    import app.db.artifacts as db_artifacts
+    monkeypatch.setattr(db_artifacts, "list_artifacts_for_project", _list)
+
+    out = ao.resolve_open_artifact(
+        artifact_type="document", query="", dataset="acme",
+        company_id="co-1", project_id=12, conversation_id=88,
+    )
+    assert seen["project_id"] == 12, "the project listing is the source"
+    assert out["status"] == "resolved"
+    assert out["artifact"]["custom_artifact_id"] == 4
+
+
+def test_a_first_turn_with_no_conversation_row_still_reads_the_library(monkeypatch):
+    """`conversation_id` is None before the row exists. There is no thread to
+    scope to and a brand-new chat has produced nothing, so the library-wide
+    behaviour stands rather than refusing everything."""
+    _patch_fanout(monkeypatch, [_report(1, "Only one", conversation_id=7)])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme", company_id="co-1",
+    )
+    assert out["status"] == "resolved"
+
+
+def test_prds_are_exempt_from_thread_scoping(monkeypatch):
+    """A PRD is a LIBRARY document — any chat may legitimately open one, and it
+    has its own resume-the-originating-thread path. Scoping it to the open chat
+    would break "open the checkout PRD" from anywhere but the chat that wrote
+    it."""
+    _patch_index(monkeypatch, [_prd(1, "Checkout")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="checkout", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "resolved"
 
 
 def test_a_thread_kind_without_a_company_reads_nothing(monkeypatch):

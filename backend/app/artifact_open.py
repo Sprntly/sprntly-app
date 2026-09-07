@@ -294,14 +294,16 @@ def resolve_open_artifact(
     single PRD or an ambiguous chip list — never the "UI action" refusal a bare
     open used to fall through to.
 
-    `conversation_id` is what keeps that generic branch USEFUL for the thread-
-    born kinds. "Show me the report", said in the chat that just wrote one,
-    means THAT report — but a workspace accumulates reports, so scored against
-    the whole library the same sentence would return a five-way disambiguation
-    over documents the reader never mentioned. When this conversation owns
-    exactly one artifact of the kind asked for, it IS the answer, and the
-    library is not consulted. It narrows only; a thread that produced none
-    falls through to the workspace-wide behaviour above, unchanged.
+    `conversation_id` SCOPES the thread-born kinds (report / tickets /
+    document) to the thread the message was sent in — a hard filter, not a
+    ranking preference. Each of those is born in a conversation, so in a chat
+    "the report" can only mean this chat's; a thread with none gets
+    `not_found`, never another conversation's document. PRDs and evidence are
+    exempt: they are library documents any chat may legitimately open.
+
+    It does NOT apply under a project scope (the project's own listing is the
+    right container there, and it holds artifacts no chat produced), nor on a
+    first-turn classify where no conversation row exists yet.
 
     Never raises: a lookup failure degrades to `not_found`, which the client
     renders as "I couldn't find that" — the same thing the user sees when the
@@ -388,6 +390,40 @@ def resolve_open_artifact(
         logger.exception("artifact open lookup failed; reporting not_found")
         return out
 
+    # THE THREAD IS THE SCOPE for its own kinds — a FILTER, not a preference.
+    #
+    # This was a preference first ("prefer this conversation's when it owns
+    # exactly one, else fall through to the library") and that was wrong in both
+    # directions, immediately and visibly. A chat holding TWO reports fell
+    # through and asked the reader to choose between five reports from across
+    # the whole workspace; a chat holding NO ticket set fell through, found the
+    # workspace's only one, and OPENED another conversation's tickets inside
+    # this one. Reported as the chat returning things that did not belong to the
+    # thread at all.
+    #
+    # There is no version of that fallback worth keeping. A report, a ticket set
+    # and a team document are each BORN in a conversation, so in a chat "the
+    # report" can only mean this chat's; if this chat has none, the honest
+    # answer is that it has none, which is what `not_found` says. PRDs and
+    # evidence are deliberately exempt — they are library documents that any
+    # chat may legitimately open, and they have their own resume-the-originating-
+    # thread path.
+    #
+    # NOT APPLIED UNDER A PROJECT SCOPE. There the container is the PROJECT, and
+    # its listing already holds only that project's artifacts — including ones
+    # no chat produced (a document uploaded to the project). Filtering those down
+    # to the chat that happens to be open would hide artifacts that genuinely
+    # belong to the project the reader is standing in.
+    #
+    # `conversation_id` is None on a first-turn classify, before the row exists.
+    # There is no thread to scope to yet, and a brand-new chat has produced
+    # nothing, so that case keeps the library-wide behaviour.
+    if conversation_id is not None and project_id is None and kind in _THREAD_KINDS:
+        items = [
+            i for i in items
+            if (i.get("source") or {}).get("conversation_id") == conversation_id
+        ]
+
     if generic:
         # No title named — resolve to the openable artifacts of this kind
         # themselves (the listing is already recency-sorted and family-collapsed,
@@ -398,18 +434,6 @@ def resolve_open_artifact(
             if i.get("type") == listing_kind
             and (i.get("status") or "") not in _UNOPENABLE_STATUSES
         ]
-        # THIS CONVERSATION'S OWN FIRST, for the kinds that have one. See the
-        # `conversation_id` paragraph above: unqualified, "the report" means the
-        # one this chat wrote, and only when the thread owns exactly one is that
-        # unambiguous enough to act on. Anything else — none, or several — falls
-        # straight through to the library-wide list built above.
-        if conversation_id is not None and kind in _THREAD_KINDS:
-            mine = [
-                i for i in candidates
-                if (i.get("source") or {}).get("conversation_id") == conversation_id
-            ]
-            if len(mine) == 1:
-                candidates = mine
         candidates.sort(key=lambda i: i.get("created_at") or "", reverse=True)
         if not candidates:
             return out
