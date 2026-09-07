@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from functools import lru_cache
 from html import escape
@@ -42,6 +43,8 @@ from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
 
 from app.html_style import inject_canonical_css
+
+logger = logging.getLogger(__name__)
 
 from app.crucible.data_gaps import (
     DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_header,
@@ -1320,16 +1323,24 @@ KILL_SIGNAL_CAVEAT = (
 #: be two DIFFERENT sentences, both false: neither "this reading ... does not
 #: keep their names" nor "where a name appears it is a source document"
 #: survives contact with what the pipeline actually does. Names reach the
-#: reader by (at least) four routes: the strongest claim's assertion, cut at
+#: reader by (at least) FIVE routes: the strongest claim's assertion, cut at
 #: a connective, becomes a finding's rendered example (`pipeline.example_for`
 #: / `_THEME_LEAD_IN`); the same assertions are fed to both recommendation
 #: prompts and copied back as `cited_claim`; a set-aside reason can quote an
-#: account by way of `example`; and a weighted run's unpriced-account list
+#: account by way of `example`; a weighted run's unpriced-account list
 #: (`pipeline._named_unpriced`) names accounts ON PURPOSE, by design, so the
 #: reader can see whether their biggest accounts are the ones a value could
-#: not reach. What is never true is that a NAMED LIST of every account behind
-#: a finding is the answer we hand back — `pipeline.build_findings` keeps
-#: `len(accounts_named)` and drops the tuple itself.
+#: not reach; and, as of the claim-source identifier below, the CALL a claim
+#: is traced to — `app.crucible.resolve._call_pointer` returns `call_index
+#: .title` verbatim, and measured on staging 410 of 500 call titles (82%)
+#: contain the account's own name ("BayCare Clinic + ChaosTrack Briefing").
+#: That is the same saturation as the four routes already named here, on a
+#: surface this file did not touch until this identifier existed, which is
+#: why the sentence gains a clause rather than the identifier shipping
+#: silently under a promise the report was already making false. What is
+#: never true is that a NAMED LIST of every account behind a finding is the
+#: answer we hand back — `pipeline.build_findings` keeps `len(accounts_named)`
+#: and drops the tuple itself.
 #:
 #: SAYS "BIGGEST", NOT "LARGEST" — a word choice, not a synonym swap.
 #: `_decision_section` owns "largest" for a single, load-bearing claim ("it
@@ -1343,10 +1354,11 @@ ACCOUNT_NAMING_DISCLOSURE = (
     "We size a finding by how many accounts it touches, and never produce a "
     "roster of them as the answer. Names that occur in the evidence may "
     "appear wherever that evidence is summarised — in the example under a "
-    "finding, in a reason for setting a theme aside, and in a "
-    "recommendation. And where a value could not reach some accounts, those "
-    "accounts are named on purpose, so you can see whether the biggest ones "
-    "are the ones missing."
+    "finding, in a reason for setting a theme aside, in a recommendation, "
+    "and in the call a claim is traced to, when that call's own title names "
+    "one. And where a value could not reach some accounts, those accounts "
+    "are named on purpose, so you can see whether the biggest ones are the "
+    "ones missing."
 )
 
 
@@ -1546,6 +1558,85 @@ _STATEMENT_EXAMPLE_LEAD_IN = "— summarising one source:"
 #: under what it qualifies, in a smaller, quieter face, so the dash was
 #: punctuation joining it to a sentence it is not part of.
 _SOURCE_LEAD_IN = "Summarised from the source:"
+
+# ─── Where a claim came from, as text ───────────────────────────────────────
+#
+# `app.crucible.resolve.resolve_claim_source` answers "where did this claim
+# come from" with a HUMAN pointer — a call's title and date, or a document
+# label — never a bare UUID (see that module's own docstring for why a claim
+# id in a printed document is decoration). This section renders that answer
+# on the two spots in this document that cite an individual claim id: a
+# written-up finding's own evidence, and a named row in the ruled-out ledger.
+#
+# THE ONE DATABASE READ IN AN OTHERWISE PURE RENDERER, and it is contained
+# on purpose. `render_report_html`'s own docstring promises "same row in,
+# same bytes out" — a promise this module keeps for everything else it
+# renders — so a lookup failure here degrades to SILENCE (no identifier
+# line) rather than to an exception or a placeholder, the same posture
+# `resolve._call_pointer` already takes for the one query inside IT that can
+# fail incidentally. `render_report_html`'s test suite constructs its `run`
+# fixture with no `company_id` at all, which is exactly the shape that skips
+# this path — no test in this file pays for a database it never configured.
+#
+# BOUNDED BY THE SAME CAPS THE DOCUMENT ALREADY APPLIES. A finding gets this
+# treatment only inside `_finding_block`, called for the (typically two)
+# findings that get a full write-up — never the tail in `_other_considered_
+# section`, which is a table of clipped labels with no per-row detail at
+# all. A ledger row gets it only among the `named` rows `_ledger_section`
+# already prints one label for, itself capped at `MAX_LEDGER_ROWS`. So one
+# render resolves at most a small, fixed number of claims, never one per row
+# of a ledger that can hold thousands.
+_SOURCE_NOT_FOUND = "no longer available"
+_SOURCE_DROPPED_FOR_SPACE = (
+    "cited here, but this run did not keep enough detail to look it up again"
+)
+_SOURCE_NO_POINTER = (
+    "a real claim with nothing a person could open — no linked call and no "
+    "named document"
+)
+
+
+def _source_pointer_text(pointer: dict) -> str:
+    """A resolved `ClaimSource.pointer` as one line of prose — the human
+    pointer itself, never the claim id underneath it."""
+    if pointer.get("kind") == "call":
+        title = str(pointer.get("title") or "").strip()
+        date = str(pointer.get("call_date") or "").strip()
+        return f"{title}, {date}" if date else title
+    return str(pointer.get("label") or "").strip()
+
+
+def _resolve_source_line(run: Optional[dict], claim_id: str) -> str:
+    """Where `claim_id` came from, as one line of prose — or "" when there is
+    nothing to say (no claim id, no run to scope the lookup to, or the lookup
+    itself failed). NEVER RAISES; see the section header above for why."""
+    claim_id = str(claim_id or "").strip()
+    if not claim_id or not isinstance(run, dict):
+        return ""
+    company_id, run_id = run.get("company_id"), run.get("id")
+    if not company_id or not run_id:
+        return ""
+    try:
+        from app.crucible.resolve import resolve_claim_source
+        source = resolve_claim_source(str(company_id), int(run_id), claim_id)
+    except Exception:
+        logger.warning(
+            "crucible: could not resolve claim %s for run %s",
+            claim_id, run_id, exc_info=True,
+        )
+        return ""
+    if source.status == "resolved" and source.pointer:
+        text = _source_pointer_text(source.pointer)
+        if text:
+            return text
+    if source.status == "no_pointer":
+        return _SOURCE_NO_POINTER
+    if source.status == "dropped_for_space":
+        return _SOURCE_DROPPED_FOR_SPACE
+    # "not_found", or a "resolved" row whose pointer somehow carried no text —
+    # the same honest fallback, since neither is a source a reader can act on.
+    return _SOURCE_NOT_FOUND
+
 
 #: The theme lead-in `pipeline._statement_parts` writes, and the quoted shape
 #: it used to write. Both are matched below.
@@ -1913,6 +2004,7 @@ def _finding_block(
     defer_comparison: bool = True,
     defer_gaps: bool = False,
     show_call_note: bool = True,
+    run: Optional[dict] = None,
 ) -> str:
     """One finding, written out so it can be read on its own.
 
@@ -2033,6 +2125,21 @@ def _finding_block(
         # `_findings_section` for the first block it applies to.
         if show_call_note and has_call_count(surfaced):
             out.append(_p(f"<em>{_esc(CALL_COUNT_FLOOR_NOTE)}</em>"))
+
+    # AN IDENTIFIER FOR THIS FINDING'S OWN EVIDENCE, not the corpus's. Source
+    # documents above name what a THEME rests on in aggregate; this names
+    # where ONE CITED CLAIM came from — the first in `claim_ids`, the same one
+    # `pipeline.example_for` already drew this finding's quoted example from —
+    # via `resolve_claim_source`, a title and a date or the honest reason
+    # there is neither. Rendered here, in the body every envelope shares, so
+    # the editable document and the forked/printed copy carry it as text too:
+    # both are `body_html` with no script and no run behind them once forked,
+    # so a live, click-driven lookup can never reach them again.
+    claim_ids = [c for c in _as_list(finding.get("claim_ids")) if c]
+    if claim_ids:
+        source_line = _resolve_source_line(run, claim_ids[0])
+        if source_line:
+            out.append(_p(f"<strong>Source</strong> {_esc(source_line)}"))
 
     confidence = _as_dict(finding.get("confidence"))
     # The weakest leg is the ACTIONABLE half of a confidence score: it says
@@ -2562,6 +2669,7 @@ def _findings_section(
     # gets the memo rather than a dump.
     full_cap: int = MAX_WRITTEN_UP_FINDINGS,
     plan: Optional[dict] = None,
+    run: Optional[dict] = None,
 ) -> str:
     """The findings that get a full write-up, and the facts hoisted above them.
 
@@ -2727,6 +2835,7 @@ def _findings_section(
             defer_comparison=defer_comparison,
             defer_gaps=True,
             show_call_note=show_call_note,
+            run=run,
         ))
     out.extend(blocks)
     return "".join(out)
@@ -3248,7 +3357,22 @@ def _hypotheses_section(plan: dict) -> str:
     ])
 
 
-def _ledger_section(ledger: list[dict]) -> str:
+def _ledger_source_suffix(run: Optional[dict], row: dict) -> str:
+    """A ruled-out candidate's own identifier, appended to its `<li>`, or ""
+    when there is nothing to say. Same lookup, same four readings, as the
+    finding-level identifier above — see that section's header. Bounded to
+    the rows `_ledger_section` already names (`MAX_LEDGER_ROWS`), not the
+    full ledger, which can hold thousands."""
+    claim_ids = [c for c in _as_list(row.get("claim_ids")) if c]
+    if not claim_ids:
+        return ""
+    source_line = _resolve_source_line(run, claim_ids[0])
+    if not source_line:
+        return ""
+    return f' — <em class="src">Source: {_esc(source_line)}</em>'
+
+
+def _ledger_section(ledger: list[dict], run: Optional[dict] = None) -> str:
     if not ledger:
         return ""
     # BOUNDED. `label` traces to `pipeline._label()` -> `claim.subject` ->
@@ -3331,6 +3455,7 @@ def _ledger_section(ledger: list[dict]) -> str:
                 f"{_esc_clipped(r.get('stopped_at_stage'), 60)})</em>"
                 if r.get("stopped_at_stage") else ""
             )
+            + _ledger_source_suffix(run, r)
             for r in named
         ))
         if len(rows) > len(named):
@@ -3814,7 +3939,7 @@ def render_report_html(
             _why_this_section(synthesized_recommendation, written),
             _decision_section(plan, kept),
             _stat_strip(plan, findings, kept),
-            _findings_section(kept, full_cap, plan),
+            _findings_section(kept, full_cap, plan, run=run),
             _before_you_spend_section(written),
             _framework_section(kept, plan),
             _other_considered_section(kept, full_cap, overflow_cap),
@@ -3827,7 +3952,7 @@ def render_report_html(
                 recommendation_basis=recommendation_basis,
                 written=len(written),
             ),
-            _ledger_section(ledger),
+            _ledger_section(ledger, run=run),
             _limits_section(plan, relevance_gate_ran=relevance_gate_ran),
         ]
         return "".join(p for p in parts if p)

@@ -2629,6 +2629,176 @@ def test_the_account_naming_sentence_survives_a_run_with_no_pricing_at_all():
     assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
 
 
+def test_the_account_naming_sentence_now_names_the_call_title_route():
+    """The claim-source identifier below is a FIFTH route by which an account
+    name reaches the reader — measured on staging, 410 of 500 (82%) resolved
+    call titles carry one ("BayCare Clinic + ChaosTrack Briefing"). The
+    disclosure has to say so, still identically at both sites, or shipping
+    the identifier makes a sentence the report already prints false."""
+    from app.crucible.report import ACCOUNT_NAMING_DISCLOSURE
+
+    assert "call a claim is traced to" in ACCOUNT_NAMING_DISCLOSURE
+    html = render_report_html(_run(), [_finding()])
+    assert html.count(ACCOUNT_NAMING_DISCLOSURE) == 2
+
+
+# ─── Where a claim came from, rendered as text ──────────────────────────────
+#
+# `resolve_claim_source` is a live database lookup, and this file's fixtures
+# never configure one (`_run()` carries no `company_id`, on purpose — see
+# `test_a_claim_with_no_run_to_scope_it_to_renders_no_identifier` below). Every
+# test here monkeypatches the resolver directly rather than exercising a real
+# Supabase, the same posture this suite already takes toward every other
+# database `render_report_html` does not otherwise touch.
+
+def _claim_source(**over):
+    from app.crucible.resolve import ClaimSource
+
+    fields = {
+        "status": "resolved", "content": None, "source_type": None,
+        "valid_at": None, "pointer": None,
+    }
+    fields.update(over)
+    return ClaimSource(**fields)
+
+
+#: A claim id shaped like the real thing, so a test asserting it never
+#: reaches the page is asserting something a bare UUID could plausibly do.
+_A_CLAIM = "11111111-1111-1111-1111-111111111111"
+
+
+def test_a_written_up_finding_renders_the_call_it_came_from(monkeypatch):
+    """The resolver's `resolved` state, call pointer — a title and a date,
+    never the claim id underneath it."""
+    from app.crucible import resolve as resolve_mod
+
+    monkeypatch.setattr(
+        resolve_mod, "resolve_claim_source",
+        lambda company_id, run_id, claim_id: _claim_source(pointer={
+            "kind": "call", "title": "Renewal check-in", "call_date": "2026-08-03",
+        }),
+    )
+    html = render_report_html(
+        _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM, "c2"])],
+    )
+    assert "Renewal check-in, 2026-08-03" in html
+    # THE HUMAN POINTER, NEVER THE BARE ID underneath it — a UUID in a
+    # printed document is decoration, not something a reader can act on.
+    assert _A_CLAIM not in html
+
+
+def test_a_written_up_finding_renders_a_document_pointer_without_a_call(monkeypatch):
+    """The resolver's `resolved` state, doc pointer — the same treatment,
+    with no call in the picture at all."""
+    from app.crucible import resolve as resolve_mod
+
+    monkeypatch.setattr(
+        resolve_mod, "resolve_claim_source",
+        lambda company_id, run_id, claim_id: _claim_source(
+            pointer={"kind": "doc", "label": "renewal-playbook.pdf"},
+        ),
+    )
+    html = render_report_html(
+        _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM])],
+    )
+    assert "renewal-playbook.pdf" in html
+
+
+def test_the_three_unresolved_states_read_differently(monkeypatch):
+    """`not_found`, `dropped_for_space` and `no_pointer` are three distinct
+    failures a reader must be able to tell apart — never collapsed into one
+    "unresolved" sentence."""
+    from app.crucible import resolve as resolve_mod
+    from app.crucible.report import (
+        _SOURCE_DROPPED_FOR_SPACE, _SOURCE_NO_POINTER, _SOURCE_NOT_FOUND,
+    )
+
+    # Three distinct sentences to begin with.
+    assert len({_SOURCE_NOT_FOUND, _SOURCE_DROPPED_FOR_SPACE,
+                _SOURCE_NO_POINTER}) == 3
+
+    for status, expect in (
+        ("not_found", _SOURCE_NOT_FOUND),
+        ("dropped_for_space", _SOURCE_DROPPED_FOR_SPACE),
+        ("no_pointer", _SOURCE_NO_POINTER),
+    ):
+        monkeypatch.setattr(
+            resolve_mod, "resolve_claim_source",
+            lambda company_id, run_id, claim_id, _status=status:
+                _claim_source(status=_status),
+        )
+        html = render_report_html(
+            _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM])],
+        )
+        assert expect in html, (status, expect)
+
+
+def test_a_ruled_out_row_carries_its_own_identifier_too(monkeypatch):
+    """The ledger cites claim ids the same way a finding does, and its named
+    rows are equally meant to be traceable."""
+    from app.crucible import resolve as resolve_mod
+
+    monkeypatch.setattr(
+        resolve_mod, "resolve_claim_source",
+        lambda company_id, run_id, claim_id: _claim_source(pointer={
+            "kind": "call", "title": "Pricing follow-up", "call_date": "2026-07-01",
+        }),
+    )
+    html = render_report_html(
+        _run(company_id="co-1"), [_finding()],
+        [{"label": "Mobile parity", "reason": "no claim survived the echo check",
+          "stopped_at_stage": "verification", "claim_ids": [_A_CLAIM]}],
+    )
+    assert "Pricing follow-up, 2026-07-01" in html
+
+
+def test_a_claim_with_no_run_to_scope_it_to_renders_no_identifier():
+    """`_run()`'s own fixture — the shape every other test in this file
+    already uses — carries no `company_id`. That has to degrade to silence,
+    not to an exception: a lookup this renderer cannot scope must never
+    become a crash or a placeholder."""
+    html = render_report_html(_run(), [_finding(claim_ids=[_A_CLAIM])])
+    assert _A_CLAIM not in html
+
+
+def test_a_resolver_failure_degrades_to_silence_not_to_a_crash(monkeypatch):
+    """A database call inside an otherwise pure renderer can fail — and a
+    report is not allowed to 500, or to drop everything else it knows,
+    because one claim's provenance lookup did."""
+    from app.crucible import resolve as resolve_mod
+
+    def _boom(company_id, run_id, claim_id):
+        raise RuntimeError("Supabase client unavailable")
+
+    monkeypatch.setattr(resolve_mod, "resolve_claim_source", _boom)
+    html = render_report_html(
+        _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM])],
+    )
+    assert "Renewals stall on the parts flow" in html
+
+
+def test_only_the_written_up_findings_get_resolved_not_the_overflow_table(monkeypatch):
+    """`MAX_WRITTEN_UP_FINDINGS` findings get a full write-up; everything
+    past that is a clipped row in a table with no per-claim detail at all —
+    and must not cost this render a database call it will never show."""
+    from app.crucible import resolve as resolve_mod
+
+    calls: list[str] = []
+
+    def _record(company_id, run_id, claim_id):
+        calls.append(claim_id)
+        return _claim_source(pointer={"kind": "doc", "label": "x.pdf"})
+
+    monkeypatch.setattr(resolve_mod, "resolve_claim_source", _record)
+    findings = [
+        _finding(claim_ids=["a1"]), _finding(claim_ids=["a2"]),
+        _finding(claim_ids=["a3"]),
+    ]
+    assert MAX_WRITTEN_UP_FINDINGS == 2
+    render_report_html(_run(company_id="co-1"), findings)
+    assert "a3" not in calls
+
+
 # ─── A recommendation set says when nothing was cut ────────────────────────
 
 #: Every `NARRATED_DROPS` reason at zero — the shape `_progress` writes when

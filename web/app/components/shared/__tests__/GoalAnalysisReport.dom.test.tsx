@@ -51,7 +51,8 @@
 // reader intact, whether it can execute anything, whether a run without one
 // says so, and whether the two document actions are offered — and warned
 // about — before they are irreversible.
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react"
+import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 vi.hoisted(() => {
@@ -59,8 +60,13 @@ vi.hoisted(() => {
   ;(globalThis as Record<string, unknown>).React = require("react")
 })
 
+const claimSource = vi.fn()
+vi.mock("../../../lib/api", () => ({
+  goalAnalysisApi: { claimSource: (...a: unknown[]) => claimSource(...a) },
+}))
+
 import { GoalAnalysisReport } from "../GoalAnalysisReport"
-import type { GoalRunDetail } from "../../../lib/api"
+import type { ClaimSource, GoalRunDetail } from "../../../lib/api"
 
 /** A stand-in for what `render_report_document` emits. It only has to be
  *  recognisable: the panel's job is to pass it through unchanged, and what a
@@ -92,6 +98,15 @@ const RUN = {
 
 const frame = () => screen.getByTitle("Goal analysis") as HTMLIFrameElement
 
+// NO `beforeEach(() => claimSource.mockReset())` HERE, DELIBERATELY. A reset
+// hook immediately ahead of a test that rejects the mock (below) produces a
+// phantom "unhandled rejection" test failure under this vitest/tinyspy
+// version even though the component's own try/catch demonstrably runs (the
+// resolved UI state proves it) — confirmed by bisection, not a guess.
+// Every test below sets its own implementation before calling the mock, and
+// the two tests that assert `not.toHaveBeenCalled()` run first, before
+// anything in this file ever calls it — so an explicit reset buys nothing
+// here and costs this false failure.
 afterEach(cleanup)
 
 describe("the document reaches the reader", () => {
@@ -240,5 +255,86 @@ describe("a cut option is reopenable, not just readable", () => {
     const details = screen.getByTestId("goal-considered")
     expect(details.textContent).not.toContain("only 2 supporting claims")
     expect(details.textContent).not.toContain("single account")
+  })
+})
+
+describe("a claim's source is checkable live, in the panel only", () => {
+  const FINDING = {
+    id: 1, label: "Export latency", statement: "9 claims concern export latency",
+    claim_ids: ["11111111-1111-1111-1111-111111111111"],
+  }
+  const CONSIDERED = [
+    { id: 2, label: "self-serve onboarding", reason: "an anecdote",
+      stopped_at_stage: "clustering", claim_ids: ["c9"] },
+  ]
+  const withSources = {
+    ...RUN, findings: [FINDING], considered: CONSIDERED,
+  } as unknown as GoalRunDetail
+
+  it("offers nothing when nothing on the run carries a claim id", () => {
+    render(<GoalAnalysisReport run={RUN} />)
+    expect(screen.queryByTestId("goal-sources")).toBeNull()
+    expect(claimSource).not.toHaveBeenCalled()
+  })
+
+  it("lists one checkable row per finding and per cut option, closed by default", () => {
+    render(<GoalAnalysisReport run={withSources} />)
+    const details = screen.getByTestId("goal-sources") as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    const rows = screen.getAllByTestId("goal-source-check")
+    expect(rows).toHaveLength(2)
+    expect(rows[0].textContent).toContain("Export latency")
+    expect(rows[1].textContent).toContain("self-serve onboarding")
+    // Nothing resolves until it is clicked.
+    expect(claimSource).not.toHaveBeenCalled()
+  })
+
+  it("resolves the FIRST claim id of the row that was clicked, against this run", async () => {
+    claimSource.mockResolvedValue({
+      status: "resolved", content: null, source_type: null, valid_at: null,
+      pointer: { kind: "call", title: "Renewal check-in", call_date: "2026-08-03" },
+    } satisfies ClaimSource)
+    render(<GoalAnalysisReport run={withSources} />)
+    fireEvent.click(screen.getAllByTestId("goal-source-check")[0])
+    expect(claimSource).toHaveBeenCalledWith(
+      RUN.id, "11111111-1111-1111-1111-111111111111",
+    )
+    await waitFor(() => {
+      expect(screen.getByTestId("goal-source-result").textContent)
+        .toContain("Renewal check-in, 2026-08-03")
+    })
+    // THE HUMAN POINTER, NEVER THE BARE ID — a claim id in the panel is
+    // exactly the decoration the resolver exists to replace.
+    expect(screen.getByTestId("goal-source-result").textContent)
+      .not.toContain("11111111-1111-1111-1111-111111111111")
+  })
+
+  it("reads the three unresolved states differently from each other", async () => {
+    for (const [status, expected] of [
+      ["not_found", "no longer available"],
+      ["dropped_for_space", "did not keep enough detail"],
+      ["no_pointer", "nothing a person could open"],
+    ] as const) {
+      claimSource.mockReset()
+      claimSource.mockResolvedValue({
+        status, content: null, source_type: null, valid_at: null, pointer: null,
+      } satisfies ClaimSource)
+      const { unmount } = render(<GoalAnalysisReport run={withSources} />)
+      fireEvent.click(screen.getAllByTestId("goal-source-check")[0])
+      await waitFor(() => {
+        expect(screen.getByTestId("goal-source-result").textContent)
+          .toContain(expected)
+      })
+      unmount()
+    }
+  })
+
+  it("says so, rather than hanging, when the live check itself fails", async () => {
+    const user = userEvent.setup()
+    claimSource.mockRejectedValue(new Error("network error"))
+    render(<GoalAnalysisReport run={withSources} />)
+    await user.click(screen.getAllByTestId("goal-source-check")[0])
+    expect(screen.getByTestId("goal-source-result").textContent)
+      .toContain("Could not check this right now")
   })
 })
