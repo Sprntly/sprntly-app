@@ -17,6 +17,9 @@ import {
   execDocumentCommand,
 } from "../../lib/documentToolbarExec"
 import { documentFailureCopy } from "../../lib/documentFailure"
+import { GeneratingPane } from "./GenerationState"
+import { DOCUMENT_GEN } from "./generationPhases"
+import { IconFileText } from "@tabler/icons-react"
 
 // ── The chat panel's Document tab ────────────────────────────────────────────
 //
@@ -111,9 +114,9 @@ export function DocumentTab({
       // beside it passed the check, while `toString()` serialized both — so the
       // thread's own text would have been quoted as if it came from the
       // document. `commonAncestorContainer` is inside the container only when
-      // BOTH ends are. Most reachable while the document is `generating`, where
-      // the body is a plain div and the browser does not confine the selection
-      // to an editor host.
+      // BOTH ends are — most reachable on a document whose body renders outside
+      // a contenteditable host (the browser does not confine the selection to
+      // an editor the way it does inside one).
       const range = sel && sel.rangeCount > 0 ? sel.getRangeAt(0) : null
       if (!text.trim() || !range ||
           !container.contains(range.commonAncestorContainer)) {
@@ -260,6 +263,29 @@ export function DocumentTab({
   if (loading) return <div style={S.muted}>Loading document…</div>
   if (failed || !doc) return <div style={S.muted}>This document could not be loaded.</div>
 
+  // ── Generating: the document is being written, right here ────────────────
+  // Same shape as the PRD and Reports panels (GenerationState.tsx): a full
+  // working pane — pulsing icon, rotating phase line, skeleton — instead of a
+  // static sentence sitting over a permanently empty body. Custom-artifact
+  // generation writes its body in ONE call at the end (`custom_artifact_
+  // generate.py` has no partial-write path the way the PRD stream does), so
+  // there is genuinely nothing to render early; the poll above still ends this
+  // the moment `finish_artifact` lands the real content.
+  if (doc.status === "generating") {
+    return (
+      <div data-document-tab style={{ padding: "4px 2px 24px" }}>
+        <div style={{ minHeight: 280 }}>
+          <GeneratingPane
+            {...DOCUMENT_GEN}
+            testId="document-generating"
+            icon={<IconFileText size={19} />}
+            title="Generating document…"
+          />
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div data-document-tab style={{ padding: "4px 2px 24px" }}>
       {/* FIRST in the panel, straight after the artifact tabs and ahead of the
@@ -309,9 +335,6 @@ export function DocumentTab({
           The save state moved into the toolbar's own status pill, which is the
           one place in this panel that already reports it. */}
 
-      {doc.status === "generating" && (
-        <div data-document-writing style={S.notice}>Writing this document…</div>
-      )}
       {doc.status === "failed" && (
         <div data-document-failed data-failure-code={doc.error_code ?? "unknown"} style={S.notice}>
           {documentFailureCopy(doc.error_code)}
@@ -359,29 +382,21 @@ export function DocumentTab({
           Ask in chat
         </button>
       )}
-      {doc.status === "generating" ? (
-        // Read-only while it writes: an editable buffer over a document being
-        // replaced would have every keystroke overwritten by the next poll.
-        <div style={S.body} dangerouslySetInnerHTML={{ __html: doc.body_html }} />
-      ) : (
-        <>
-          {!doc.body_html.trim() && (
-            <p data-document-empty style={S.muted}>
-              This document is empty. Start typing, or ask in chat for a draft.
-            </p>
-          )}
-          <DocumentEditor
-            key={`${doc.id}:${doc.status}:${doc.version}`}
-            initialHtml={doc.body_html}
-            editable={doc.status === "ready"}
-            onChange={onChange}
-            onBlur={() => void schedulerRef.current?.flush()}
-            onReady={setEditor}
-            // The bar is pinned above the scroll area instead — see the header.
-            hideToolbar
-          />
-        </>
+      {!doc.body_html.trim() && (
+        <p data-document-empty style={S.muted}>
+          This document is empty. Start typing, or ask in chat for a draft.
+        </p>
       )}
+      <DocumentEditor
+        key={`${doc.id}:${doc.status}:${doc.version}`}
+        initialHtml={doc.body_html}
+        editable={doc.status === "ready"}
+        onChange={onChange}
+        onBlur={() => void schedulerRef.current?.flush()}
+        onReady={setEditor}
+        // The bar is pinned above the scroll area instead — see the header.
+        hideToolbar
+      />
       </div>
     </div>
   )
@@ -423,7 +438,6 @@ const S: Record<string, React.CSSProperties> = {
     background: "var(--surface, #fff)",
     margin: "0 0 10px",
   },
-  body: { fontSize: 14, lineHeight: 1.7, color: "var(--ink, #1A1A17)" },
   muted: { fontSize: 13, color: "var(--ink-3, #8C8A84)" },
   quoteCta: {
     position: "absolute", zIndex: 20,
