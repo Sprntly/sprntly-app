@@ -666,18 +666,13 @@ def test_the_payload_body_is_the_document_and_nothing_appended(ctx):
     assert not payload["body_html"].endswith(payload["title"])
 
 
-def test_the_linked_report_is_not_stamped_with_the_conversation(ctx):
-    """A linked report carries NO `conversation_id`, though its run has one.
-
-    This is invisible from the Goal Analysis panel, which is why it needs its
-    own test. `useThreadDocumentSync` attaches the newest document of a
-    conversation to the panel's DOCUMENT tab on reload — stamp the report and
-    every Goal Analysis run grows a phantom Document tab beside it, holding the
-    same report the analysis tab already shows.
-
-    The FORK is stamped, deliberately: that one is a document the user asked
-    for. Asserting both halves is what makes this a distinction rather than a
-    column nobody writes.
+def test_the_linked_report_is_stamped_with_the_conversation(ctx):
+    """Parity with every other custom artifact, and with its own FORK: the
+    linked report now carries the run's `conversation_id`, same as the copy
+    already did. Without the stamp the report is invisible to
+    `documents_with_bodies_for_conversation` (the chat agent's grounding read)
+    and to `maybe_pin_custom_artifact_to_project` (the project manifest) — see
+    the two tests below for each of those.
     """
     from app.db import crucible_runs as runs_db
     from app.db.custom_artifacts import get_artifact
@@ -687,10 +682,103 @@ def test_the_linked_report_is_not_stamped_with_the_conversation(ctx):
     runs_db.update(run_id, ctx.company_id, conversation_id=convo["id"])
 
     doc = ctx.client.post(f"/v1/crucible/{run_id}/document").json()
-    assert get_artifact(ctx.company_id, doc["id"]).get("conversation_id") is None
+    assert get_artifact(ctx.company_id, doc["id"]).get("conversation_id") == convo["id"]
 
     copy = ctx.client.post(f"/v1/crucible/{run_id}/document/fork").json()
     assert copy["conversation_id"] == convo["id"]
+
+
+def test_a_run_with_no_conversation_still_creates_its_report(ctx):
+    """A run started outside a chat (none exists yet) must not fail to render
+    just because there is nothing to stamp — `conversation_id` stays NULL, the
+    same as every other custom artifact with no owning thread."""
+    from app.db.custom_artifacts import get_artifact
+
+    run_id = _ready_run(ctx)
+    doc = ctx.client.post(f"/v1/crucible/{run_id}/document").json()
+    assert get_artifact(ctx.company_id, doc["id"]).get("conversation_id") is None
+
+
+def test_the_linked_report_is_agent_visible_in_its_conversation(ctx):
+    """PARITY, PROVEN NOT ASSERTED: the mechanism that lets the chat agent
+    answer "what does the report say" is `documents_with_bodies_for_conversation`
+    (`app.thread_context`), which filters on `conversation_id`. Before this
+    ticket the report was permanently absent from this read no matter how the
+    run's conversation was set — this is the test that would have failed
+    against the old NULL-stamped write."""
+    from app.db import crucible_runs as runs_db
+    from app.db.custom_artifacts import documents_with_bodies_for_conversation
+
+    run_id = _ready_run(ctx)
+    convo = ctx.client.post("/v1/conversations", json={"title": "goal chat"}).json()
+    runs_db.update(run_id, ctx.company_id, conversation_id=convo["id"])
+
+    doc = ctx.client.post(f"/v1/crucible/{run_id}/document").json()
+
+    found = documents_with_bodies_for_conversation(ctx.company_id, convo["id"])
+    assert [row["id"] for row in found] == [doc["id"]]
+
+
+def test_the_linked_report_lands_on_its_bound_projects_manifest(ctx):
+    """PARITY, PROVEN NOT ASSERTED: every other custom artifact reaches its
+    project through `maybe_pin_custom_artifact_to_project`
+    (`routes/custom_artifacts.py`'s own call site), and the report now goes
+    through the exact same function rather than a parallel path. Without this
+    the report is on no project's `project_artifacts`, so
+    `list_project_artifacts`/`get_artifact_content` can never surface it."""
+    from app.db.client import require_client
+    from app.db import crucible_runs as runs_db
+    from app.db.conversations import bind_conversation_to_project
+    from app.db.projects import create_project
+
+    run_id = _ready_run(ctx)
+    convo = ctx.client.post("/v1/conversations", json={"title": "goal chat"}).json()
+    runs_db.update(run_id, ctx.company_id, conversation_id=convo["id"])
+    project = create_project(
+        company_id=ctx.company_id, workspace_id="ws-1", name="Renewals",
+        created_by=ctx.user_id, origin="manual",
+    )
+    assert bind_conversation_to_project(
+        convo["id"], project["id"], ctx.company_id, ctx.user_id
+    )
+
+    doc = ctx.client.post(f"/v1/crucible/{run_id}/document").json()
+
+    refs = (
+        require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id")
+        .eq("project_id", project["id"])
+        .execute()
+        .data
+    )
+    assert ("custom_artifact", doc["id"]) in {
+        (r["artifact_type"], r["artifact_id"]) for r in refs
+    }
+
+
+def test_the_linked_report_does_not_pin_when_its_conversation_is_unbound(ctx):
+    """The pin is ATTACH-ONLY (`maybe_pin_custom_artifact_to_project`'s own
+    contract) — a run whose conversation was never forked into a project must
+    not gain one, and must not error either."""
+    from app.db.client import require_client
+    from app.db import crucible_runs as runs_db
+
+    run_id = _ready_run(ctx)
+    convo = ctx.client.post("/v1/conversations", json={"title": "goal chat"}).json()
+    runs_db.update(run_id, ctx.company_id, conversation_id=convo["id"])
+
+    doc = ctx.client.post(f"/v1/crucible/{run_id}/document")
+    assert doc.status_code == 200
+
+    refs = (
+        require_client().table("project_artifacts")
+        .select("artifact_id")
+        .eq("artifact_type", "custom_artifact")
+        .eq("artifact_id", doc.json()["id"])
+        .execute()
+        .data
+    )
+    assert refs == []
 
 
 def test_a_lost_link_race_returns_the_winner_and_leaves_no_orphan(ctx, monkeypatch):

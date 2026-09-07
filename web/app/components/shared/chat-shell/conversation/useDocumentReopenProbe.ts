@@ -5,6 +5,15 @@ import { customArtifactsApi } from "../../../../lib/api"
 import type { ContentPanelTab } from "../../../../context/NavigationContext"
 import type { AppContentState } from "../../../../types/content"
 
+// A Goal Analysis report's own kind, mirroring the backend's
+// `app.crucible.report.ARTIFACT_KIND` and `useThreadDocument.ts`'s identical
+// guard. The report is stamped with its run's conversation_id (parity with
+// every other artifact type) but reopens through its OWN dedicated Goal
+// Analysis tab, not this one — without this guard, a reload of that thread
+// would auto-open the panel on a "document" view of the exact report the
+// Goal Analysis tab already restores on its own.
+const GOAL_ANALYSIS_ARTIFACT_KIND = "goal_analysis"
+
 /**
  * The shared "a thread that produced a DOCUMENT reopens on it" probe.
  *
@@ -59,8 +68,11 @@ export function useDocumentReopenProbe(
     void (async () => {
       try {
         const docs = await customArtifactsApi.listForConversation(convId).catch(() => [])
-        if (!docs.length) return
-        const newest = docs[0]
+        // Skip a linked Goal Analysis report — see GOAL_ANALYSIS_ARTIFACT_KIND
+        // above. `docs` is newest-first, so this is still the newest ordinary
+        // document in the thread.
+        const newest = docs.find((d) => d.kind !== GOAL_ANALYSIS_ARTIFACT_KIND)
+        if (!newest) return
         // The user may have moved off this target during the round trip.
         if (!probe.stillActive()) return
         if (newest.status === "failed") return
