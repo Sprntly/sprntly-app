@@ -339,6 +339,89 @@ def test_seed_generic_no_name_writes_nothing(fake_seed_llm, caplog):
     assert any("project_origin_seed_empty" in r.getMessage() for r in caplog.records)
 
 
+# ── manual / artifact origin FROM AN ONGOING CHAT (routes/projects.py's
+# `create_project` conversation_id — "start a project with this") ──────
+
+
+def test_seed_manual_with_conversation_writes_brief_from_turns(fake_seed_llm):
+    """A `manual` project started from a real thread reads its OWN turns
+    (`_read_turns`) rather than a flat `seed_text` string — the same raw
+    material `prd_auto` reads, minus the PRD. Written entry is tagged with
+    the REAL conversation id, unlike the seed_text branch's `None`."""
+    fake_seed_llm["turns"] = "User: we need a bulk-close action\n\nAssistant: got it, scoping now."
+    fake_seed_llm["brief_summary"] = "This project stands up a self-serve bulk-close action."
+    seed_mod.seed_project_origin_memory(
+        project_id=707, origin="manual", project_name="Bulk Close", conversation_id=31,
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == fake_seed_llm["brief_summary"]
+    assert written[0]["source_conversation_id"] == 31
+    assert fake_seed_llm["regen_calls"] == [707]
+    call = fake_seed_llm["calls"][0]
+    assert "Bulk Close" in call["user"]
+    assert "bulk-close action" in call["user"]
+
+
+def test_seed_manual_with_conversation_wins_over_seed_text(fake_seed_llm):
+    """Both fields present (shouldn't happen from the one real caller today,
+    but the dispatch order is a contract worth pinning): the real
+    conversation is richer grounding, so it wins — the prompt is built from
+    the thread's turns, not the flat `seed_text` string."""
+    fake_seed_llm["turns"] = "User: draft a launch plan for the Q3 pricing change"
+    seed_mod.seed_project_origin_memory(
+        project_id=708, origin="manual", project_name="Q3 Pricing",
+        seed_text="unrelated grounding text that must not be read",
+        conversation_id=32,
+    )
+    call = fake_seed_llm["calls"][0]
+    assert "launch plan for the Q3 pricing change" in call["user"]
+    assert "unrelated grounding text" not in call["user"]
+    assert fake_seed_llm["written"][0]["source_conversation_id"] == 32
+
+
+def test_seed_artifact_with_conversation_writes_brief_from_turns(fake_seed_llm):
+    """The `artifact` origin gets the same conversation-aware branch as
+    `manual` — the dispatch is keyed on `conversation_id`, not `origin`."""
+    fake_seed_llm["turns"] = "User: turn this into a project — the audit above"
+    seed_mod.seed_project_origin_memory(
+        project_id=709, origin="artifact", project_name="Onboarding Redesign", conversation_id=33,
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["source_conversation_id"] == 33
+
+
+def test_seed_manual_with_conversation_falls_back_when_thread_is_thin(fake_seed_llm):
+    """No recorded turns yet (a brand-new thread whose only message so far is
+    the "start a project" command itself) skips the LLM call — nothing to
+    summarize — and writes the deterministic name-only floor, same as the
+    seed_text branch's empty-string case."""
+    fake_seed_llm["turns"] = ""
+    seed_mod.seed_project_origin_memory(
+        project_id=710, origin="manual", project_name="Bulk Close", conversation_id=34,
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == 'This project, "Bulk Close", was just created.'
+    assert written[0]["source_conversation_id"] == 34
+    assert fake_seed_llm["calls"] == [], "no turns means nothing to summarize"
+
+
+def test_seed_manual_with_conversation_survives_summarizer_failure(fake_seed_llm):
+    """AC-8's guarantee extends to this branch: a raising summarizer falls
+    through to the name-only floor rather than leaving memory unseeded or
+    letting the exception escape."""
+    fake_seed_llm["turns"] = "User: we need a bulk-close action"
+    fake_seed_llm["raise_error"] = True
+    seed_mod.seed_project_origin_memory(
+        project_id=711, origin="manual", project_name="Bulk Close", conversation_id=35,
+    )
+    written = fake_seed_llm["written"]
+    assert len(written) == 1
+    assert written[0]["body"] == 'This project, "Bulk Close", was just created.'
+
+
 # ── Cost line / PII discipline (AC-7) ───────────────────────────────────
 
 

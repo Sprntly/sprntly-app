@@ -4,9 +4,11 @@ and the project's memory summary both read.
 
 Generalized across ALL project origins (private-first memory wave): a
 `prd_auto` project seeds from the originating chat + PRD; a `manual` or
-`artifact` project seeds from its name plus whatever grounding text is
-available at creation (the creator's first message/instructions, or the
-seeding artifact's own title/excerpt) — never fabricated when that text
+`artifact` project started FROM AN ONGOING CHAT ("start a project with this")
+seeds from that chat's own turns, same as `prd_auto` minus the PRD; one
+started with no source thread seeds from its name plus whatever grounding
+text is available at creation (the creator's first message/instructions, or
+the seeding artifact's own title/excerpt) — never fabricated when that text
 isn't available, in which case a name-only deterministic brief is written
 instead. Before this wave, only `prd_auto` ever got a "why" — manual/
 artifact projects opened with memory permanently empty.
@@ -147,6 +149,31 @@ _SCHEMA_GENERIC = {
     "required": ["brief_summary"],
     "additionalProperties": False,
 }
+
+# `manual`/`artifact` WITH a real source conversation — "start a project with
+# this" from an ongoing chat, rather than the create-modal's blank/seed-text
+# flow. There IS a thread to ground on here, unlike the two branches above, so
+# this reads its actual turns instead of a flat instructions string — the same
+# raw material `_seed_prd_auto` reads, just with no PRD alongside it.
+_SYSTEM_MANUAL_FROM_CHAT = """You seed the shared "project memory" for a NEW \
+project that was just created FROM AN ONGOING CHAT — someone in that \
+conversation asked to turn it into a project. You are given the \
+conversation's turns so far (the human's messages and the assistant's \
+replies).
+
+Produce ONE thing, GROUNDED STRICTLY in the material provided — never invent \
+a goal, constraint, or rationale that is not actually present:
+
+brief_summary: 1-3 plain sentences stating what this project is about and \
+the problem or goal being discussed, drawn from the conversation. If the \
+conversation says little beyond the request to create a project, say little \
+— do not pad it out with invented detail.
+
+Hard rules:
+- No markdown headings or bullet characters inside the string. Plain prose.
+- Do not address the reader or offer next steps ("Want me to…", "Shall I…"). \
+State the fact; stop.
+"""
 
 
 def _clip(text: str, cap: int) -> str:
@@ -353,6 +380,66 @@ def _seed_prd_auto(*, project_id: int, prd_id: int, prd_title: str, conversation
     )
 
 
+def _seed_manual_from_conversation(
+    *, project_id: int, conversation_id: int, project_name: str | None,
+) -> None:
+    """`manual`/`artifact` origin WITH a real source conversation — "start a
+    project with this" from a chat that already had something in it. Reads
+    the thread's own turns (`_read_turns`, the same helper `_seed_prd_auto`
+    reads) rather than a flat `seed_text` string, since there is a real
+    conversation to ground on here and it is a richer source than whatever
+    short instructions a caller might also send.
+
+    Falls back to the name-only deterministic brief when the thread is thin
+    (no messages yet) or the summarizer fails — the same non-empty guarantee
+    every other branch keeps. `source_conversation_id` is stamped with the
+    REAL conversation id (unlike `_seed_generic`'s NULL), so this entry
+    traces back to the thread it came from like `prd_auto`'s do."""
+    start = time.monotonic()
+    name = (project_name or "").strip()
+    turns = _read_turns(conversation_id)
+    fallback = _fallback_brief_generic(name)
+
+    brief = ""
+    meta: dict = {}
+    if turns:
+        try:
+            out = call_json(
+                system=_SYSTEM_MANUAL_FROM_CHAT,
+                user=f"Project name: {name or '(untitled)'}\n\nOriginating conversation:\n{turns}",
+                model=DEFAULT_MODEL,
+                schema=_SCHEMA_GENERIC,
+                meta_out=meta,
+            )
+            brief = str(out.get("brief_summary") or "").strip()
+        except Exception as exc:  # noqa: BLE001 — fall through to the fallback brief
+            logger.warning(
+                "project_origin_seed_summarize_failed project_id=%s origin=manual_conversation error=%s",
+                project_id, type(exc).__name__,
+            )
+
+    used_fallback = not brief
+    if not brief:
+        brief = fallback
+    if not brief:
+        # Only reachable when there is no project name at all — nothing
+        # grounded to say, so nothing is written.
+        logger.warning(
+            "project_origin_seed_empty project_id=%s origin=manual_conversation conversation_id=%s",
+            project_id, conversation_id,
+        )
+        return
+
+    memory_db.add_agent_promoted_entry(
+        project_id, body=brief, source_conversation_id=conversation_id
+    )
+    schedule_regen(project_id)
+    _log_seed_run(
+        project_id=project_id, conversation_id=conversation_id,
+        meta=meta, start=start, entries=1, used_fallback=used_fallback,
+    )
+
+
 def _seed_generic(*, project_id: int, origin: str, project_name: str | None, seed_text: str | None) -> None:
     """The `manual`/`artifact` seed body: a single `brief_summary` entry
     grounded in the project's name plus whatever grounding text the
@@ -424,12 +511,20 @@ def seed_project_origin_memory(
     required for this branch) into a brief summary PLUS each key decision
     as its own entry, all tagged with `source_conversation_id=conversation_id`.
 
-    `origin="manual"` / `origin="artifact"`: summarizes `project_name` +
-    `seed_text` (the creator's first message/instructions for `manual`; the
-    seeding artifact's title/excerpt for `artifact`) into a single brief
-    summary entry, `source_conversation_id=None` (no conversation exists for
-    either origin). Falls back to a name-only deterministic brief when
-    `seed_text` is empty or the summarizer fails.
+    `origin="manual"` / `origin="artifact"` WITH a `conversation_id` — "start
+    a project with this" from an ongoing chat (`routes/projects.py`'s
+    `create_project`, second call site for the bind-then-sweep pair): reads
+    the thread's own turns, same raw material as `prd_auto` but with no PRD,
+    into a single brief summary entry stamped with the real
+    `source_conversation_id`. `seed_text` is ignored in this branch — a real
+    conversation is richer grounding than a flat string.
+
+    `origin="manual"` / `origin="artifact"` WITHOUT a `conversation_id`:
+    summarizes `project_name` + `seed_text` (the creator's first message/
+    instructions for `manual`; the seeding artifact's title/excerpt for
+    `artifact`) into a single brief summary entry, `source_conversation_id=
+    None` (no conversation to attribute it to). Falls back to a name-only
+    deterministic brief when `seed_text` is empty or the summarizer fails.
 
     Every branch schedules exactly ONE summary regen and never raises
     (AD-P7) — a seed failure never blocks project creation.
@@ -439,6 +534,11 @@ def seed_project_origin_memory(
             _seed_prd_auto(
                 project_id=project_id, prd_id=prd_id, prd_title=prd_title or "",
                 conversation_id=conversation_id,
+            )
+        elif conversation_id is not None:
+            _seed_manual_from_conversation(
+                project_id=project_id, conversation_id=conversation_id,
+                project_name=project_name,
             )
         else:
             _seed_generic(

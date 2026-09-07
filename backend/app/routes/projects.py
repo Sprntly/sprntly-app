@@ -58,7 +58,10 @@ from app.project_chat_edit import apply_chat_edit_scoped
 from app.project_prd_gate import ProjectPrdWriteDenied, assert_prd_on_project
 from app.realtime import publish_broadcast
 from app.project_artifact_capture import save_chat_output_as_report
-from app.project_from_prd import find_existing_prd_auto_project
+from app.project_from_prd import (
+    backfill_conversation_artifacts_to_project,
+    find_existing_prd_auto_project,
+)
 from app.project_origin_seed import seed_project_origin_memory
 from app.project_title import generate_project_title
 from app.delegation_status_ingest import maybe_ingest_status, notify_requester_task_completed
@@ -118,6 +121,14 @@ class CreateProjectRequest(BaseModel):
     # (`project_origin_seed._fallback_brief_generic`) until a future ticket
     # wires the field into the create-modal UI.
     seed_text: str | None = Field(default=None, max_length=4000)
+    # The chat thread this project is being started FROM — "start a project
+    # with this" in an ongoing conversation. When present (any origin), the
+    # thread's history and whatever it has already produced come with it: the
+    # SAME bind-and-sweep the `prd_auto` fork hook runs
+    # (`app/project_from_prd.py`), reached from a second call site. Ownership-
+    # gated below like every other conversation-id caller; absent for the
+    # create-modal's blank/artifact flows, which have no originating thread.
+    conversation_id: int | None = Field(default=None, ge=1)
 
 
 class AddMemberRequest(BaseModel):
@@ -236,7 +247,54 @@ def create_project(
         origin=payload.origin,
     )
     logger.info("project_created project_id=%s", project["id"])
-    if payload.origin != "prd_auto" and payload.seed_text:
+
+    # "Start a project with this" FROM AN ONGOING CHAT. Without a conversation
+    # id a project created here is a bare container — right for the Projects
+    # screen's own "+ New Project", wrong for a chat command whose whole point
+    # is "make what's already in this thread into a project": the thread's
+    # history and whatever it had already produced (reports, tickets, team
+    # documents) used to stay behind, so the reader landed in an empty project
+    # after asking for exactly the opposite. Reuses the SAME bind-then-sweep
+    # the `prd_auto` fork hook runs for a PRD auto-forking its thread
+    # (`app/project_from_prd.py`'s `maybe_auto_create_project_for_prd`) — this
+    # is a second call site for that pair, not a new mechanism.
+    #
+    # Best-effort and origin-agnostic (any origin may name a source thread):
+    # an invalid/foreign/already-bound conversation id must never turn a
+    # successful project creation into a failed request, so failures here are
+    # logged and swallowed rather than raised. `conversation_belongs_to_company`
+    # keeps a foreign id from sweeping another tenant's rows in;
+    # `bind_conversation_to_project`'s own fill-only-NULL guard (never
+    # overwrites an existing binding) keeps this from ever re-parenting a
+    # conversation that already belongs to a project — a chat command run a
+    # second time, or inside a project's own chat, just attaches nothing.
+    #
+    # `owned_conversation_id` (validated, or None) also gates the memory seed
+    # below: a project started FROM a thread should be seeded from what that
+    # thread actually discussed, not the thin name-only floor.
+    owned_conversation_id: int | None = None
+    if payload.conversation_id is not None:
+        try:
+            if conversations_db.conversation_belongs_to_company(
+                payload.conversation_id, ctx.company_id
+            ):
+                owned_conversation_id = payload.conversation_id
+                conversations_db.bind_conversation_to_project(
+                    payload.conversation_id, project["id"], ctx.company_id, ctx.user_id,
+                )
+                backfill_conversation_artifacts_to_project(
+                    conversation_id=payload.conversation_id,
+                    company_id=ctx.company_id,
+                    project_id=project["id"],
+                )
+        except Exception:  # noqa: BLE001 — best-effort, mirrors the fork hook's own guard
+            logger.warning(
+                "Failed to bind conversation %s to newly created project %s",
+                payload.conversation_id, project["id"],
+                exc_info=True,
+            )
+
+    if payload.origin != "prd_auto" and (payload.seed_text or owned_conversation_id is not None):
         # Seed the new project's memory with a grounded "why" — the
         # prd_auto origin already gets this from the chat-time fork hook
         # (`app/project_from_prd.py`) when it runs; a project created here
@@ -245,22 +303,23 @@ def create_project(
         # so it is left as-is rather than seeding a thin, conversation-less
         # brief under the same origin label.
         #
-        # Gated on `payload.seed_text` being present: the create modal does
-        # not send it yet (a future ticket wires the field into the UI), so
-        # this call is inert today — no side effect on the many existing
-        # tests/flows that create a manual/artifact project with no
-        # instructions. Once a caller DOES send `seed_text`, the seed's own
-        # `_fallback_brief_generic` floor still applies inside
-        # `seed_project_origin_memory` for the (rarer) case where the text
-        # turns out to be pure whitespace. `seed_project_origin_memory` is
-        # best-effort and never raises (AD-P7) — no extra try/except needed
-        # at this call site.
+        # `owned_conversation_id` wins over `seed_text` when both are somehow
+        # present: a real conversation is richer grounding than whatever flat
+        # text rode alongside it, and `seed_project_origin_memory` reads the
+        # thread's own turns rather than the caller-supplied string in that
+        # branch (see `project_origin_seed.py`). Gated so the many existing
+        # tests/flows that create a manual/artifact project with neither is
+        # unaffected — no seed call, no side effect, same as before this
+        # field existed. `seed_project_origin_memory` is best-effort and
+        # never raises (AD-P7) — no extra try/except needed at this call site.
         seed_project_origin_memory(
             project_id=project["id"],
             origin=payload.origin,
             project_name=name,
             seed_text=payload.seed_text,
+            conversation_id=owned_conversation_id,
         )
+
     return project
 
 
