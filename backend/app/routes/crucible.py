@@ -2163,10 +2163,20 @@ def _run_enrichment(
     relevance_gate_ran = False
     relevance_judged_info: dict = {}
     relevance_verdicts_meta: dict = {}
+    # WHICH PROMPT RAN, AND WHETHER IT SENT A POPULATION LINE — both `None`
+    # until the `try` below actually completes a judged pass, so a gate that
+    # never ran (or raised) records neither, the same direction every other
+    # fact in this function fails in. See `report._limits_section`, which
+    # reads these back rather than hand-describing what the gate does: the
+    # hand-written version of that sentence is exactly what went stale when
+    # this gate learned about goal population and nobody updated the prose.
+    relevance_prompt_version: Optional[str] = None
+    relevance_population_note_sent: Optional[bool] = None
     try:
         from app.crucible.relevance import (
-            VERDICTS_KEY, dump_verdicts, judge_relevance,
-            load_verdicts, partition,
+            PROMPT_VERSION as _RELEVANCE_PROMPT_VERSION,
+            VERDICTS_KEY, dump_verdicts, judge_relevance, load_verdicts,
+            partition, population_note as _relevance_population_note,
         )
         from app.crucible.routing import UNCLASSIFIED
 
@@ -2231,6 +2241,16 @@ def _run_enrichment(
         # was filtered" sentence is just as false for it as for a run with a
         # full appendix.
         relevance_gate_ran = True
+        # WHICH PROMPT RAN, AND WHETHER IT NAMED A POPULATION — recorded only
+        # now, once a pass has actually completed, so both stay `None` on a
+        # gate that raised before reaching here. `_relevance_population_note`
+        # is the exact predicate `_input` used for this call (read back, not
+        # re-derived — see that function's own docstring), so this can never
+        # disagree with what the model was actually sent.
+        relevance_prompt_version = _RELEVANCE_PROMPT_VERSION
+        relevance_population_note_sent = (
+            _relevance_population_note(goal_class) is not None
+        )
         # THE COVERAGE DISCLOSURE. `len(verdicts)` is exactly the findings the
         # gate returned a usable answer for — the same count `partition` reads
         # to decide kept/aside — so it is the honest number of "evaluated",
@@ -2496,6 +2516,16 @@ def _run_enrichment(
         # everything" from "no gate ever touched this run" — see
         # `report.py`'s `_definition_section`/`_limits_section`.
         "relevance_gate_ran": relevance_gate_ran,
+        # WHICH PROMPT RAN, AND WHETHER IT NAMED A POPULATION. Both `None` on
+        # a run whose gate never completed a pass — a run from before this
+        # existed has neither key at all, and `.get(...)` reads that back the
+        # same way as an explicit `None`, so `report.py` cannot tell "this
+        # run's gate predates population-awareness" from "this run's gate ran
+        # under it but recording failed" and must not claim either. It ONLY
+        # claims population-awareness when `relevance_population_note_sent`
+        # is exactly `True` — see `_limits_section`.
+        "relevance_prompt_version": relevance_prompt_version,
+        "relevance_population_note_sent": relevance_population_note_sent,
         # THE VERDICTS THEMSELVES, so this run never draws them twice. Merged
         # rather than set: empty on a pass that read them back (or on one
         # where the gate failed), and `**` of an empty dict adds no key, so a

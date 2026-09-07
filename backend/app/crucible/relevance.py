@@ -100,6 +100,14 @@ DEADLINE_SECONDS = 75.0
 #: list and have no way to know the filter ran out.
 MAX_JUDGED = 240
 
+#: The prompt version `_judge_chunk` sends on every call it makes. A single
+#: constant, not a literal inlined at the call site, because the report needs
+#: the SAME string to record on the run — see `routes.crucible._run_enrichment`,
+#: which persists this alongside whether a population line was sent so the
+#: report can tell a run judged under this prompt from one judged under an
+#: earlier one that had no population awareness at all.
+PROMPT_VERSION = "crucible-relevance-v3"
+
 RELEVANCE_SCHEMA: dict = {
     "type": "object",
     "additionalProperties": False,
@@ -197,6 +205,20 @@ def _offline() -> bool:
     return "pytest" in sys.modules
 
 
+def population_note(goal_class: str = UNCLASSIFIED) -> Optional[str]:
+    """The population line `_input` would send for this goal class, or `None`
+    when it would send none.
+
+    THE EXACT PREDICATE `_input` USES, EXTRACTED SO A CALLER RECORDING WHAT
+    HAPPENED READS IT BACK RATHER THAN RE-DERIVING IT. `routes.crucible`
+    persists whether this returned something onto the run
+    (`relevance_population_note_sent`), and it must never drift from what
+    `_input` actually sent — two copies of "does this goal class get a
+    population line" is exactly the kind of pair that stops agreeing.
+    """
+    return GOAL_CLASS_NOTE.get(goal_class) if goal_class != UNCLASSIFIED else None
+
+
 def _input(
     goal_text: str, definition_text: str, findings: Sequence[Finding],
     goal_class: str = UNCLASSIFIED,
@@ -218,7 +240,7 @@ def _input(
         f"GOAL: {goal_text}",
         f"THE READER'S OWN DEFINITION OF THE METRIC: {definition_text}",
     ]
-    note = GOAL_CLASS_NOTE.get(goal_class) if goal_class != UNCLASSIFIED else None
+    note = population_note(goal_class)
     if note:
         lines.append(f"THE POPULATION THIS GOAL IS ABOUT: {note}")
     lines += [
@@ -248,7 +270,7 @@ def _judge_chunk(
         # and `_input` may carry `THE POPULATION THIS GOAL IS ABOUT` — a
         # different prompt should not share a version with the one that let
         # a pre-purchase theme outrank retention findings on a churn goal.
-        prompt_version="crucible-relevance-v3",
+        prompt_version=PROMPT_VERSION,
         # HIGH-VOLUME, closed-set, short-output — exactly the shape
         # `FAST_MODEL`'s own charter names (`app/llm.py`). Ranking eight
         # letters is not the reasoning-depth job `DEFAULT_MODEL` is for.

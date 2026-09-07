@@ -1212,6 +1212,61 @@ def test_the_relevance_gate_is_told_the_goals_population(ctx, monkeypatch):
     assert seen.get("goal_class") == "retention", seen
 
 
+# ─── What the report can later say about this run's gate ────────────────────
+#
+# `report._limits_section` used to hand-describe what the relevance gate
+# does, and the description went stale the day the gate learned about goal
+# population. These two facts are what let it derive the sentence instead —
+# see that function's own docstring for the four cases it has to tell apart.
+
+def test_a_judged_run_records_which_prompt_ran_and_that_it_named_a_population(ctx):
+    """A retention goal — the gate is handed a known population — must leave
+    both facts on the run: the prompt version that ran, and that a population
+    line was actually sent for THIS run, not merely that one exists in code."""
+    from app.crucible.relevance import PROMPT_VERSION
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
+    _confirm(ctx, run_id,
+             text="accounts that cancel or fail to renew, measured over "
+                  "accounts held at the start of the period")
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["routing"]["goal_class"] == "retention", plan.get("routing")
+
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    meta = _prioritisation(run_id)
+    assert meta.get("relevance_gate_ran") is True, meta
+    assert meta.get("relevance_prompt_version") == PROMPT_VERSION, meta
+    assert meta.get("relevance_population_note_sent") is True, meta
+
+
+def test_a_judged_run_records_no_population_note_for_an_unclassified_goal(ctx):
+    """A goal `classify_goal` cannot place against one part of the book gets
+    no population line — `relevance.population_note` returns `None` — and
+    that absence must also be RECORDED, as `False`, not left unset: an unset
+    key here would be indistinguishable from a run whose gate predates this
+    recording entirely, which is a different, weaker fact."""
+    from app.crucible.relevance import PROMPT_VERSION
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal=NO_METRIC).json()["id"]
+    _confirm(ctx, run_id,
+             text="the current value at the end of the period, no other "
+                  "adjustment")
+    plan = _prioritisation(run_id)["plan"]
+    assert plan["routing"]["goal_class"] == "unclassified", plan.get("routing")
+
+    approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+    assert approved.status_code == 200
+    meta = _prioritisation(run_id)
+    assert meta.get("relevance_gate_ran") is True, meta
+    assert meta.get("relevance_prompt_version") == PROMPT_VERSION, meta
+    assert meta.get("relevance_population_note_sent") is False, meta
+
+
 def test_the_literal_ask_never_changes_which_metric_convention_is_adopted(ctx):
     """I9: `asked_text` must never become a back door to inferring the
     definition from words the extraction itself dropped. A sentence naming a

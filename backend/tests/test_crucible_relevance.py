@@ -208,6 +208,20 @@ def test_an_unrecognised_goal_class_also_adds_no_population_line():
     assert "THE POPULATION THIS GOAL IS ABOUT" not in text
 
 
+def test_population_note_is_the_exact_predicate_input_uses():
+    """`population_note` is `_input`'s own population-line decision, pulled
+    out so a caller recording what happened (`routes.crucible`) reads it back
+    rather than re-deriving it. It must return the same thing `_input` would
+    have sent — `None` for `UNCLASSIFIED`, the note for a known class."""
+    from app.crucible.relevance import population_note
+    from app.crucible.routing import RETENTION, UNCLASSIFIED
+
+    assert population_note(RETENTION) == "keeping the accounts you already have"
+    assert population_note(UNCLASSIFIED) is None
+    assert population_note() is None  # the default is UNCLASSIFIED
+    assert population_note("not-a-real-class") is None
+
+
 def test_the_chunk_threads_goal_class_into_the_prompt():
     """`_judge_chunk` must hand `goal_class` to `_input` rather than judging
     every run as if the population were unknown."""
