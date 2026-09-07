@@ -242,16 +242,40 @@ def get_run(run_id: int, company: WorkspaceContext = Depends(require_crucible_mo
     # report and a run that disagree. It is string assembly over data already
     # in memory.
     #
-    # `findings` may be empty mid-run; the renderer handles that and returns
-    # the document it can honestly produce, which is what the panel should
-    # show while the rest is still generating.
+    # RENDERED ONLY ONCE THE RUN IS READY, and this is a poll endpoint.
+    #
+    # The panel polls every 3 seconds for the whole length of a run, and this
+    # document was being assembled from scratch on every one of those polls —
+    # the full findings pass, the ledger, the plan, the chain — for a reader
+    # who cannot see any of it yet. `GoalAnalysisReport` is the only thing in
+    # the app that reads `report_html`, and it is mounted BELOW the
+    # `status !== "ready"` early return in `GoalAnalysisTab`, so on a
+    # mid-run poll these bytes were rendered, serialised, sent, and dropped.
+    #
+    # NOT AN ETAG. The row carries `progress`, which is rewritten on every
+    # narration step, so it changes between essentially every pair of polls —
+    # a validator keyed on the row would miss on each one and re-render
+    # anyway, which is the cost this avoids.
+    #
+    # The key is still PRESENT and null rather than absent, so the response
+    # shape does not change between a running and a ready run: the reader
+    # already treats an empty report as "nothing to show" (`(run.report_html
+    # || "").trim()`), which is exactly what a run with no report yet is.
+    #
+    # `findings`/`considered` are still loaded and returned. They are part of
+    # this response's contract independently of the document, and unlike
+    # `report_html` there is no equivalent evidence that nothing reads them
+    # before the run is ready.
     from app.crucible.report import render_report_document
 
     return {
         **_public(row),
         "findings": findings,
         "considered": ledger,
-        "report_html": render_report_document(row, findings, ledger),
+        "report_html": (
+            render_report_document(row, findings, ledger)
+            if row.get("status") == "ready" else None
+        ),
     }
 
 

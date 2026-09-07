@@ -771,6 +771,55 @@ def test_a_failure_in_one_recommendation_pass_still_leaves_the_other(ctx):
     assert "Route parts-blocked renewals to the ops queue" in actions, actions
 
 
+def test_a_mid_run_poll_does_not_render_the_report(ctx):
+    """THE PANEL POLLS EVERY 3 SECONDS FOR THE WHOLE LENGTH OF A RUN.
+
+    `report_html` was assembled from scratch on each of those polls — the
+    findings pass, the ledger, the plan, the chain — for a reader who cannot
+    see any of it yet: the only component that reads `report_html` is mounted
+    below `GoalAnalysisTab`'s `status !== "ready"` early return.
+
+    Asserted through a spy on the renderer rather than on elapsed time, so it
+    states which calls happened rather than how fast the box was.
+    """
+    from app.crucible import report as report_mod
+
+    renders: list = []
+    real_render = report_mod.render_report_document
+
+    def _spy(run, *a, **kw):
+        renders.append(run.get("status"))
+        return real_render(run, *a, **kw)
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal="reduce churn").json()["id"]
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(report_mod, "render_report_document", _spy)
+        # Mid-run: the gate has not been answered, so the run is not ready.
+        body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+        assert body["status"] != "ready"
+        # THE KEY IS PRESENT AND NULL, not absent — the response shape must
+        # not change between a running and a ready run.
+        assert "report_html" in body
+        assert body["report_html"] is None
+        assert renders == [], f"the report was rendered mid-run: {renders}"
+
+        # ...and the document still arrives once the run IS ready.
+        _confirm(ctx, run_id)
+        assert ctx.client.post(
+            f"/v1/crucible/{run_id}/approve", json={}).status_code == 200
+        ready = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    finally:
+        monkeypatch.undo()
+
+    assert ready["status"] == "ready"
+    assert renders == ["ready"], renders
+    assert (ready["report_html"] or "").lstrip().startswith("<!doctype")
+
+
 def test_sweep_recovery_publishes_the_actual_deep_recommendation_count(ctx):
     """The narration recap's "top N written up in full" line reads
     `progress.deep`. It used to freeze at Stage 10a's screening-tier cap the
