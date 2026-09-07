@@ -2547,6 +2547,21 @@ def _bucket_and_conflict_parts(findings: list[dict]) -> tuple[str, str]:
     `_rank`'s FIRST TWO key terms, which weighting does not touch: the claim
     bucket and the authoritative conflict sit above size on both paths. Two
     copies would be two sentences about one rule, free to disagree.
+
+    BOTH GATED ON THE TERM HAVING DONE WORK, which is `_ordering_note`'s own
+    stated rule and was obeyed by only one of them. The bucket clause has
+    always been gated on there being more than one bucket; the conflict
+    clause was unconditional, so every report ever rendered promised that an
+    authoritative disagreement is placed above everything — on runs where no
+    disagreement existed, and in fact on runs where none COULD.
+
+    That is not a corpus accident. `claims.py` hardcodes `direction="neutral"`
+    on the only production `Claim` constructor and `pipeline._adjudicate`
+    filters `!= "neutral"` before counting directions, so the conflict verdict
+    is unreachable end to end today. The clause is kept rather than deleted
+    because the ranking rule is real and the day something writes a direction
+    it starts rendering again on its own — see the tripwire in
+    `test_crucible_document_consistency`, which exists to be deleted then.
     """
     buckets = {
         type_bucket([str(t) for t in _as_list(f.get("claim_types"))])
@@ -2557,12 +2572,15 @@ def _bucket_and_conflict_parts(findings: list[dict]) -> tuple[str, str]:
         "for, whatever their sizes."
         if len(buckets) > 1 else ""
     )
+    conflicted = any(
+        (f.get("adjudication") or "") == "conflict" for f in findings
+    )
     conflict_clause = (
         " An authoritative disagreement is placed above "
         + ("both" if bucket_clause else "all of it")
         + ": two sources that may both speak contradicting each other is "
         "worth more than either alone."
-    )
+    ) if conflicted else ""
     return bucket_clause, conflict_clause
 
 

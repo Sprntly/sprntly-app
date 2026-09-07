@@ -509,8 +509,14 @@ _PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         id="rank_findings",
         group="ranking",
-        description="Order what survived: a disagreement between two sources "
-                    "first, then blockers, then size, then how sure we are.",
+        # NAMES ONLY WHAT A RUN CAN PRODUCE. The conflict term led this
+        # sentence and is unreachable in production — `claims.py` hardcodes a
+        # neutral direction on the only `Claim` constructor — so the catalogue
+        # advertised a placement no run has ever made. `pipeline._rank` still
+        # keys on it first; the day a direction is written, this line and the
+        # two others named in the tripwire go back together.
+        description="Order what survived: blockers first, then size, then "
+                    "how sure we are.",
         params=(),
         status="implemented",
         implemented_by="app.crucible.pipeline._rank",

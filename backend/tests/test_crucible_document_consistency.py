@@ -1080,6 +1080,115 @@ def test_the_tier_sweep_would_catch_a_bare_use():
     assert hits, "the sweep no longer detects a bare use"
 
 
+# ── A clause that names a mechanism is gated on that mechanism having run ───
+#
+# `report._ordering_note`'s own docstring states the rule: "Each clause is
+# stated only when the term it names did work on this run." Its bucket clause
+# obeyed it. Its conflict clause did not, so every report ever rendered
+# promised that "an authoritative disagreement is placed above..." — on runs
+# with no disagreement, and in fact on runs where none COULD exist.
+#
+# The existing tests reached "conflict" only through fixtures production
+# cannot produce, which is exactly why this survived. Two tests: one that
+# survives the day conflict is wired, and one that exists to be deleted then.
+
+_CONFLICT_CLAUSE = "An authoritative disagreement is placed above"
+
+
+def test_the_conflict_clause_is_absent_when_no_finding_is_a_conflict():
+    """Production-shaped claims: every direction neutral, so `_adjudicate`
+    can never return "conflict" and the promise names a placement the run did
+    not make."""
+    doc = _document(_mixed_corpus())
+    assert all(r["adjudication"] != "conflict" for r in doc.rows)
+    assert _CONFLICT_CLAUSE not in doc.html
+
+
+def test_the_conflict_clause_renders_when_a_finding_is_a_conflict():
+    """AND IT MUST STILL RENDER. Gating a real ranking rule out of existence
+    would be the opposite error — the rule is real, `pipeline._rank` keys on
+    it first, and the day something writes a direction the sentence comes
+    back on its own."""
+    doc = _document(_conflict_led_corpus())
+    assert any(r["adjudication"] == "conflict" for r in doc.rows)
+    assert _CONFLICT_CLAUSE in doc.html
+
+
+def test_the_plan_and_the_catalogue_do_not_promise_the_placement_either():
+    """THE TWO SITES THAT CANNOT BE GATED. The plan is composed before any
+    claim is adjudicated and the primitive catalogue is static, so neither has
+    an outcome to condition on — they were reworded instead. Pinned here,
+    beside the clause and the tripwire, because a reword nothing asserts is a
+    reword the next edit undoes."""
+    from app.crucible.planner import compose_deterministic
+    from app.crucible.primitives import implemented
+
+    plan_steps, _ = compose_deterministic(
+        goal_text="increase revenue by 5%", currency="accounts",
+        source_types=("customer_voice",),
+    )
+    step = next(s for s in plan_steps if s.primitive == "rank_findings")
+    primitive = next(p for p in implemented() if p.id == "rank_findings")
+
+    assert step.why.startswith("Blockers first")
+    for text in (step.why, primitive.description):
+        assert "disagree" not in text.lower(), text
+        assert "may both speak" not in text.lower(), text
+    # THE STEP AND THE PRIMITIVE BOTH STAY. `pipeline._rank` is what runs and
+    # the catalogue registers it as implemented; the reword is about what is
+    # PROMISED, never about removing the ranking itself.
+    assert primitive.status == "implemented"
+
+
+def test_no_production_claim_carries_a_non_neutral_direction():
+    """A TRIPWIRE. IT EXISTS TO BE DELETED, and the deletion is the point.
+
+    DELETE THIS TEST when any production code path writes a `Claim` with a
+    direction other than "neutral" — that is the day an authoritative
+    disagreement becomes reachable, and the day the three sentences gated or
+    reworded around its absence have to be restored TOGETHER:
+
+      1. `report._bucket_and_conflict_parts` — the conflict clause is gated
+         on `adjudication == "conflict"`; it un-gates itself, but check that
+         the two sentences below now agree with it.
+      2. `planner.py`'s `rank_findings` step ("Blockers first, ...") — the
+         conflict term was removed from the sentence and must lead again,
+         because the plan is composed before adjudication and cannot be
+         gated on the outcome.
+      3. `primitives.py`'s `rank_findings` description — same sentence, same
+         removal, same restoration.
+
+    Restoring one without the others is how the memo comes to describe a
+    ranking its own plan denies. This test is what forces them into one
+    change rather than three.
+
+    ASSERTED OVER SOURCE, not over a run: `_adjudicate` only sees whatever
+    directions the projection actually wrote, so a run-level assertion would
+    prove nothing about the code path that writes them.
+    """
+    from app.crucible import claims as claims_mod
+
+    tree = ast.parse(inspect.getsource(claims_mod))
+    directions = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "Claim"):
+            directions += [
+                kw.value for kw in node.keywords if kw.arg == "direction"
+            ]
+    assert directions, (
+        "no `Claim(direction=...)` found in the projection — either the "
+        "constructor moved, or the field is no longer set explicitly, and "
+        "either way this test is no longer watching anything"
+    )
+    assert all(isinstance(d, ast.Constant) and d.value == "neutral"
+               for d in directions), (
+        "a production Claim now carries a non-neutral direction — read this "
+        "test's docstring: three sentences have to come back together"
+    )
+
+
 # ── 4. The copy this file renders is the one the server writes ──────────────
 
 def test_the_projection_this_suite_renders_is_the_one_the_route_stores():
