@@ -1208,12 +1208,21 @@ def compose_deterministic(
             "confident. That is a statement about the evidence, not about "
             "any one finding.",
         ))
+    # THE STEP CANNOT BE GATED, SO IT IS WORDED FOR WHAT IT CAN PROMISE.
+    #
+    # The plan is composed BEFORE any claim is adjudicated, so there is no
+    # outcome here to condition on the way `report._bucket_and_conflict_parts`
+    # conditions its clause. This used to lead with the conflict term, which
+    # made every plan ever rendered promise a placement nothing in the engine
+    # can currently produce — `claims.py` hardcodes a neutral direction, so
+    # the conflict verdict is unreachable. The terms named are the ones that
+    # do order a real run. The step itself stays: `primitives` registers
+    # `rank_findings` as implemented and `pipeline._rank` is what runs.
     steps.append(_plain(
         "rank_findings",
         "Order what survived",
-        "Two sources that may both speak disagreeing goes first, because it "
-        "is worth more than either claim. Then blockers, then size, then how "
-        "sure we are.",
+        "Blockers first, because what stops an account outranks what an "
+        "account only asks for. Then size, then how sure we are.",
     ))
     steps.append(_plain(
         "select_top_n",

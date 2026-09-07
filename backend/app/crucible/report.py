@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 from app.crucible.data_gaps import (
     DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_header,
-    option_numbers, options_are_one_topic,
+    option_numbers, options_are_one_topic, recommended_index,
 )
 from app.crucible.moscow import (
     CALL_COUNT_FLOOR_NOTE, TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE,
@@ -2291,9 +2291,15 @@ def _finding_block(
                 _esc_clipped(g, MAX_STATEMENT_CHARS) for g in data_gaps
             ))
     elif not (action and because):
+        # BOTH TIERS NAMED, because this card is the one that has NEITHER and
+        # a reader has just come past cards headed "Suggested." A bare "no
+        # recommendation" leaves them working out which kind is missing here
+        # — the document uses one word for a deep write-up and for a flat
+        # suggestion, and this is the sentence where that ambiguity costs the
+        # most.
         out.append(_p(
-            "We wrote no recommendation for this one. What is above is what "
-            "the evidence carries on its own."
+            "We wrote neither a full recommendation nor a flat one for this "
+            "one. What is above is what the evidence carries on its own."
         ))
     return "".join(x for x in out if x)
 
@@ -2541,6 +2547,21 @@ def _bucket_and_conflict_parts(findings: list[dict]) -> tuple[str, str]:
     `_rank`'s FIRST TWO key terms, which weighting does not touch: the claim
     bucket and the authoritative conflict sit above size on both paths. Two
     copies would be two sentences about one rule, free to disagree.
+
+    BOTH GATED ON THE TERM HAVING DONE WORK, which is `_ordering_note`'s own
+    stated rule and was obeyed by only one of them. The bucket clause has
+    always been gated on there being more than one bucket; the conflict
+    clause was unconditional, so every report ever rendered promised that an
+    authoritative disagreement is placed above everything — on runs where no
+    disagreement existed, and in fact on runs where none COULD.
+
+    That is not a corpus accident. `claims.py` hardcodes `direction="neutral"`
+    on the only production `Claim` constructor and `pipeline._adjudicate`
+    filters `!= "neutral"` before counting directions, so the conflict verdict
+    is unreachable end to end today. The clause is kept rather than deleted
+    because the ranking rule is real and the day something writes a direction
+    it starts rendering again on its own — see the tripwire in
+    `test_crucible_document_consistency`, which exists to be deleted then.
     """
     buckets = {
         type_bucket([str(t) for t in _as_list(f.get("claim_types"))])
@@ -2551,12 +2572,15 @@ def _bucket_and_conflict_parts(findings: list[dict]) -> tuple[str, str]:
         "for, whatever their sizes."
         if len(buckets) > 1 else ""
     )
+    conflicted = any(
+        (f.get("adjudication") or "") == "conflict" for f in findings
+    )
     conflict_clause = (
         " An authoritative disagreement is placed above "
         + ("both" if bucket_clause else "all of it")
         + ": two sources that may both speak contradicting each other is "
         "worth more than either alone."
-    )
+    ) if conflicted else ""
     return bucket_clause, conflict_clause
 
 
@@ -3054,7 +3078,7 @@ def _chain_summary_section(
         "<h2>The chain, in six lines</h2>",
         _p(
             "Where each part of this reading is answered, in order. The "
-            "full detail is below the recommendation, not repeated here."
+            "full detail is below \"What we recommend,\" not repeated here."
         ),
         _ul(items),
     ])
@@ -3110,11 +3134,30 @@ def _answer_section(
     options = option_numbers(written)
     numbered = [(n, f) for n, f in zip(options, written) if n]
     if not numbered:
+        # WHICH TIER IS MISSING, AND HOW MANY OF THE OTHER SURVIVED.
+        #
+        # "Nothing to recommend" printed above a page of cards headed
+        # "Suggested." is the document using one word for two tiers, and it
+        # reads as an outright error rather than as the true, narrow claim it
+        # is: no finding cleared the citation bar for a FULL write-up. The
+        # flat count is COUNTED off the same rows the cards are rendered from
+        # — "the suggestion under each finding still stands" would be false,
+        # since the flat pass covers only the top `recommend.MAX_RECOMMENDED`
+        # and can drop or fail an item within them.
+        flat = sum(
+            1 for f in kept
+            if (_as_dict(f.get("recommendation")).get("action") or "").strip()
+            and (_as_dict(f.get("recommendation")).get("because") or "").strip()
+        )
         out.append(_p(
             "Nothing in this evidence produced a build we can stand behind, "
-            "so there is nothing to recommend. What we did find is ranked "
-            "below, and it is worth reading before you conclude there is "
-            "nothing here."
+            "so there is no full recommendation on this run. What we did "
+            "find is ranked below"
+            + (f", and {flat:,} of those findings "
+               f"{'carries' if flat == 1 else 'carry'} a flat recommendation"
+               if flat else "")
+            + " — it is worth reading before you conclude there is nothing "
+              "here."
         ))
         return "".join(out)
 
@@ -3145,6 +3188,39 @@ def _answer_section(
         for num, f in numbered
     )
     out.append(f'<table class="opts"><tbody>{rows}</tbody></table>')
+
+    # ── WHEN NUMBER ONE IS NOT RANK ONE, SAY SO. ───────────────────────────
+    #
+    # `option_numbers` and `recommended_index` bind the options to the first
+    # finding that KEPT a full write-up, deliberately not to rank 1 — see
+    # `data_gaps.recommended_index`, which records why: rank 1 may have had
+    # its deep pass dropped at the citation gate, and in that case the memo
+    # is recommending something else and must follow that rather than lead
+    # it. THAT BINDING IS NOT CHANGED HERE. What was missing is the sentence
+    # reconciling it with "Why the first finding is first," which reads rank
+    # 1 — two true sentences naming two different findings, which together
+    # read as the document contradicting itself.
+    #
+    # NOTHING IS ADDED ON THE ALIGNED PATH, which is most runs: the common
+    # case does not get wordier for the sake of the uncommon one. `-1` cannot
+    # reach here — `numbered` is non-empty above, so some finding in
+    # `written` kept a write-up.
+    if recommended_index(written) > 0:
+        # THE FLAT TIER IS GUARDED, NOT ASSUMED. The flat pass is its own
+        # model call and can fail or drop an item, so rank 1 may carry
+        # NEITHER tier — and pointing a reader at a suggestion that is not
+        # there is the same class of promise this pass exists to remove.
+        rank_one = _as_dict(kept[0].get("recommendation"))
+        has_flat = bool((rank_one.get("action") or "").strip()
+                        and (rank_one.get("because") or "").strip())
+        out.append(_p(
+            "<strong>Number one above is not the top-ranked finding.</strong> "
+            "The ranking's first place carries no full write-up on this run, "
+            "so it is not among the options above. Why it ranks first is set "
+            'out in "Why the first finding is first," in the appendix'
+            + (", and its flat recommendation is on its own card below."
+               if has_flat else ".")
+        ))
 
     if n > 1:
         comparison = ""

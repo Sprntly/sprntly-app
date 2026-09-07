@@ -20,6 +20,7 @@ from app.crucible.pipeline import (
     ECHO_WINDOW,
     MIN_CLAIMS_PER_FINDING,
     NARRATED_DROPS,
+    NO_WEIGHTING_VERDICT_BASIS,
     SIZE_BANDS,
     _rank_fractions,
     build_findings,
@@ -174,6 +175,93 @@ def test_a_sized_finding_discloses_the_missing_value_per_account():
     out = run(claims)
     names = {p.name for p in out.impacts[0].assumed_params}
     assert "value_per_account" in names
+
+
+# ── Why a counted run counted: the verdict, read back ────────────────────────
+#
+# The basis line on a counted finding used to read "no revenue data connected;
+# accounts weighted equally". That is a WEIGHTING decision wearing CONNECTIVITY
+# wording, and the same document's source inventory and unit-capability
+# sentences describe revenue as connected — so the report contradicted itself
+# on a run where nothing was wrong. The verdict already exists, is already
+# stored, and is already what the reader approved.
+
+
+def _counted_basis_of(out, **kw):
+    """The `value_per_account` basis on a counted, unpriceable finding."""
+    return next(p.basis for p in out.impacts[0].assumed_params
+                if p.name == "value_per_account")
+
+
+def test_a_counted_finding_reads_back_the_runs_own_weighting_verdict():
+    """ONE FACT, ONE SENTENCE. The reason a run counts is decided once, at the
+    gate, and disclosed here verbatim rather than re-derived into a different
+    reason that can disagree with it."""
+    verdict = ("Nothing read here prices an account, so a theme's size is the "
+               "number of accounts it touches and never money.")
+    claims = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+              for i, d in enumerate([5, 60])]
+    out = run(claims, weighting_because=verdict)
+    assert _counted_basis_of(out) == verdict
+
+
+def test_a_counted_finding_never_claims_revenue_is_not_connected():
+    """THE CONTRADICTION ITSELF, asserted as an invariant rather than as one
+    string. Whatever this basis says, it may not make a claim about what is
+    plugged in — that is the source inventory's fact, three sections away and
+    free to say the opposite."""
+    claims = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+              for i, d in enumerate([5, 60])]
+    for because in ("", "Only 3.0% of the accounts named in your evidence "
+                        "could be priced, so this is counted, not weighted."):
+        basis = _counted_basis_of(run(claims, weighting_because=because))
+        assert "no revenue data connected" not in basis
+        assert "not connected" not in basis
+
+
+def test_a_run_with_no_recorded_verdict_says_so_rather_than_inventing_one():
+    """THE PATH NO BENCHMARK RUN TOOK. A run that never reaches the approve
+    block carries no verdict at all, and the honest disclosure is that
+    absence — not a reason manufactured to fill the gap."""
+    claims = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+              for i, d in enumerate([5, 60])]
+    basis = _counted_basis_of(run(claims))
+    assert basis == NO_WEIGHTING_VERDICT_BASIS
+    assert "no weighting verdict was recorded" in basis
+
+
+def test_the_longest_verdict_the_planner_can_write_survives_the_basis_cell():
+    """THE OTHER PATH NO BENCHMARK RUN TOOK. `report` clips this cell at 300
+    characters and the self-serve verdict is 330, so the sentence a reader
+    most needs whole is exactly the one that would have arrived severed. Cut
+    on a sentence boundary here instead, and never mid-word."""
+    from types import SimpleNamespace
+
+    from app.crucible.plan import WEIGHTING_UNIT_COUNT, weighting_verdict
+    from app.crucible.recon import WEIGHTING_MIN_PRICEABLE_SHARE
+    from app.crucible.report import MAX_PARAM_BASIS_CHARS
+
+    # THE REAL VERDICT BUILDER, not a hand-typed copy of its longest string —
+    # a fixture would go on passing after the sentence it stands for was
+    # shortened, which is the one change that makes this test unnecessary.
+    verdict = weighting_verdict(
+        [SimpleNamespace(
+            kind="priceable_coverage",
+            figures={"priceable_share": 0.9,
+                     "threshold": WEIGHTING_MIN_PRICEABLE_SHARE},
+        )],
+        business_model=WEIGHTING_UNIT_COUNT,
+    ).because
+    assert len(verdict) > MAX_PARAM_BASIS_CHARS, (
+        "this test is about a verdict that does NOT fit; pick a longer one"
+    )
+
+    claims = [claim(f"c{i}", days_ago=d, accounts=(f"A{i}",))
+              for i, d in enumerate([5, 60])]
+    basis = _counted_basis_of(run(claims, weighting_because=verdict))
+    assert len(basis) <= MAX_PARAM_BASIS_CHARS
+    assert verdict.startswith(basis)
+    assert basis.endswith("."), f"cut mid-sentence: {basis!r}"
 
 
 # ── Grounded commercial figures ride alongside Impact, never inside it ───────

@@ -991,6 +991,204 @@ def test_an_unsized_finding_ranked_above_a_sized_one_denies_neither():
     assert_internally_consistent(doc)
 
 
+# ── The document has two recommendation tiers, so it must use two words ─────
+#
+# A finding may carry a DEEP write-up (it cleared the citation bar) or only a
+# FLAT suggestion. The renderer already models both correctly and the codebase
+# already names both — "full write-up" / "full recommendation" against
+# "suggestion" / "the plain version". The PROSE did not, so one word meant two
+# things in one document and a reader met "nothing to recommend" printed above
+# a page of cards headed "Suggested."
+#
+# THIS IS AN EXISTING CONVENTION MADE ENFORCEABLE, not a new principle — which
+# is the only reason a sweep is the right shape for it. Without the sweep the
+# rule is advice, and the sixth bare use lands the same way the first five did.
+
+_RECOMMEND_WORD = re.compile(r"\brecommend(?:ation)?s?\b", re.I)
+
+#: The tier prefixes. One of these must sit immediately before the word.
+_TIERS = ("full ", "flat ")
+
+#: The uses that name no tier BY CONSTRUCTION. Each is here with the reason it
+#: is not simply an unfixed sixth site, because an allowlist nobody can argue
+#: with is an allowlist anybody can extend.
+_TIERLESS_USES = {
+    # THE SECTION'S OWN TITLE, and the chain lines that point at it by that
+    # title. A name is not a verdict: "answered in 'What we recommend'" says
+    # where to look, and no reader takes it as a claim that a tier exists.
+    "What we recommend",
+    # NOTHING SURVIVED VERIFICATION, so neither tier exists to distinguish.
+    # This is the one place a bare word is the honest word, and pinning it
+    # here keeps it from being "fixed" into naming a tier that is absent.
+    "we have nothing to recommend",
+    # WHERE A NAME MAY APPEAR. Equally true of both tiers, and a claim about
+    # account naming rather than about what the run produced.
+    "in a recommendation, and in the call",
+    # THE APPENDIX PREAMBLE, about the memo's conclusion as a whole rather
+    # than about which tier produced it.
+    "needed to act on the recommendation",
+}
+
+
+def _tierless_spans(text: str) -> list[tuple[int, int]]:
+    spans = []
+    for phrase in _TIERLESS_USES:
+        start = text.find(phrase)
+        while start != -1:
+            spans.append((start, start + len(phrase)))
+            start = text.find(phrase, start + 1)
+    return spans
+
+
+@pytest.mark.parametrize("shape", sorted(_CORPORA))
+def test_every_use_of_the_word_recommend_names_which_tier_it_means(shape):
+    """THE RULE, SWEPT — over real pipeline output rather than one pinned
+    sentence, because the defect is a vocabulary that drifts one site at a
+    time and any single assertion only ever catches the site it was written
+    for.
+
+    Every occurrence is either preceded by "full " or "flat ", or is one of
+    the four uses above that name no tier by construction.
+    """
+    html = _document(_CORPORA[shape]()).html
+    text = re.sub(r"<[^>]+>", " ", html)
+    allowed = _tierless_spans(text)
+
+    bare = []
+    for m in _RECOMMEND_WORD.finditer(text):
+        if text[:m.start()].lower().endswith(_TIERS):
+            continue
+        if any(a <= m.start() and m.end() <= b for a, b in allowed):
+            continue
+        bare.append(text[max(0, m.start() - 70):m.end() + 40].strip())
+    assert not bare, (
+        "the word names no tier here — say 'full' (a deep write-up) or "
+        "'flat' (a plain suggestion), or add it to _TIERLESS_USES with the "
+        f"reason it names neither:\n" + "\n".join(f"  ...{b}..." for b in bare)
+    )
+
+
+def test_the_tier_sweep_would_catch_a_bare_use():
+    """THE SWEEP'S OWN GUARD. Its allowlist is a set of substrings, so a rule
+    that quietly stopped matching anything would pass every shape silently.
+    A sentence with a bare use must be rejected."""
+    text = "so there is nothing to recommend on this run"
+    allowed = _tierless_spans(text)
+    hits = [m for m in _RECOMMEND_WORD.finditer(text)
+            if not text[:m.start()].lower().endswith(_TIERS)
+            and not any(a <= m.start() and m.end() <= b for a, b in allowed)]
+    assert hits, "the sweep no longer detects a bare use"
+
+
+# ── A clause that names a mechanism is gated on that mechanism having run ───
+#
+# `report._ordering_note`'s own docstring states the rule: "Each clause is
+# stated only when the term it names did work on this run." Its bucket clause
+# obeyed it. Its conflict clause did not, so every report ever rendered
+# promised that "an authoritative disagreement is placed above..." — on runs
+# with no disagreement, and in fact on runs where none COULD exist.
+#
+# The existing tests reached "conflict" only through fixtures production
+# cannot produce, which is exactly why this survived. Two tests: one that
+# survives the day conflict is wired, and one that exists to be deleted then.
+
+_CONFLICT_CLAUSE = "An authoritative disagreement is placed above"
+
+
+def test_the_conflict_clause_is_absent_when_no_finding_is_a_conflict():
+    """Production-shaped claims: every direction neutral, so `_adjudicate`
+    can never return "conflict" and the promise names a placement the run did
+    not make."""
+    doc = _document(_mixed_corpus())
+    assert all(r["adjudication"] != "conflict" for r in doc.rows)
+    assert _CONFLICT_CLAUSE not in doc.html
+
+
+def test_the_conflict_clause_renders_when_a_finding_is_a_conflict():
+    """AND IT MUST STILL RENDER. Gating a real ranking rule out of existence
+    would be the opposite error — the rule is real, `pipeline._rank` keys on
+    it first, and the day something writes a direction the sentence comes
+    back on its own."""
+    doc = _document(_conflict_led_corpus())
+    assert any(r["adjudication"] == "conflict" for r in doc.rows)
+    assert _CONFLICT_CLAUSE in doc.html
+
+
+def test_the_plan_and_the_catalogue_do_not_promise_the_placement_either():
+    """THE TWO SITES THAT CANNOT BE GATED. The plan is composed before any
+    claim is adjudicated and the primitive catalogue is static, so neither has
+    an outcome to condition on — they were reworded instead. Pinned here,
+    beside the clause and the tripwire, because a reword nothing asserts is a
+    reword the next edit undoes."""
+    from app.crucible.planner import compose_deterministic
+    from app.crucible.primitives import implemented
+
+    plan_steps, _ = compose_deterministic(
+        goal_text="increase revenue by 5%", currency="accounts",
+        source_types=("customer_voice",),
+    )
+    step = next(s for s in plan_steps if s.primitive == "rank_findings")
+    primitive = next(p for p in implemented() if p.id == "rank_findings")
+
+    assert step.why.startswith("Blockers first")
+    for text in (step.why, primitive.description):
+        assert "disagree" not in text.lower(), text
+        assert "may both speak" not in text.lower(), text
+    # THE STEP AND THE PRIMITIVE BOTH STAY. `pipeline._rank` is what runs and
+    # the catalogue registers it as implemented; the reword is about what is
+    # PROMISED, never about removing the ranking itself.
+    assert primitive.status == "implemented"
+
+
+def test_no_production_claim_carries_a_non_neutral_direction():
+    """A TRIPWIRE. IT EXISTS TO BE DELETED, and the deletion is the point.
+
+    DELETE THIS TEST when any production code path writes a `Claim` with a
+    direction other than "neutral" — that is the day an authoritative
+    disagreement becomes reachable, and the day the three sentences gated or
+    reworded around its absence have to be restored TOGETHER:
+
+      1. `report._bucket_and_conflict_parts` — the conflict clause is gated
+         on `adjudication == "conflict"`; it un-gates itself, but check that
+         the two sentences below now agree with it.
+      2. `planner.py`'s `rank_findings` step ("Blockers first, ...") — the
+         conflict term was removed from the sentence and must lead again,
+         because the plan is composed before adjudication and cannot be
+         gated on the outcome.
+      3. `primitives.py`'s `rank_findings` description — same sentence, same
+         removal, same restoration.
+
+    Restoring one without the others is how the memo comes to describe a
+    ranking its own plan denies. This test is what forces them into one
+    change rather than three.
+
+    ASSERTED OVER SOURCE, not over a run: `_adjudicate` only sees whatever
+    directions the projection actually wrote, so a run-level assertion would
+    prove nothing about the code path that writes them.
+    """
+    from app.crucible import claims as claims_mod
+
+    tree = ast.parse(inspect.getsource(claims_mod))
+    directions = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "Claim"):
+            directions += [
+                kw.value for kw in node.keywords if kw.arg == "direction"
+            ]
+    assert directions, (
+        "no `Claim(direction=...)` found in the projection — either the "
+        "constructor moved, or the field is no longer set explicitly, and "
+        "either way this test is no longer watching anything"
+    )
+    assert all(isinstance(d, ast.Constant) and d.value == "neutral"
+               for d in directions), (
+        "a production Claim now carries a non-neutral direction — read this "
+        "test's docstring: three sentences have to come back together"
+    )
+
+
 # ── 4. The copy this file renders is the one the server writes ──────────────
 
 def test_the_projection_this_suite_renders_is_the_one_the_route_stores():
