@@ -1640,3 +1640,162 @@ def test_persisting_a_figure_class_cannot_create_a_row_for_a_prose_claim():
 
     assert written == 0
     assert touched == []
+
+
+# ─── The same answer, however many workers ran ──────────────────────────────
+#
+# Segment extraction runs `prose.MAX_PARALLEL_SEGMENTS`-wide. Measured before
+# that: 10 calls, 133.3s, 13ms of overlap.
+#
+# WHY THESE TESTS COMPARE AGAINST A HAND-WRITTEN SERIAL LOOP rather than
+# against a golden string. `cluster.py`'s reproducibility invariant excludes
+# anything "whose output depends on how many workers happened to run", and
+# within-group claim position decides four things downstream (`example`/
+# `strongest` take the FIRST maximal element; `claim_ids[:6]` decides what the
+# recommendation model sees; `_label`'s tie-break; `_accounts` first-seen
+# order). The property is therefore "identical to the serial implementation",
+# and the only way to assert that is to keep a serial implementation.
+#
+# STUBBED, NEVER THE LIVE MODEL. `_extract_segment`'s own docstring says "Zero
+# does not make the API deterministic", so a live byte-identical assertion
+# would fail on draw variance and prove nothing about ordering. The stub below
+# is deterministic PER TEXT, which is exactly the guarantee the real cache
+# gives the serial path for a repeated segment.
+
+
+def _serial_extract_documents(docs, *, enterprise_id, now):
+    """`extract_documents` as it ran BEFORE the fan-out: one call per segment,
+    in document-then-segment order. Kept verbatim in shape — including the
+    quirk that `read` is appended when `conversations` is non-zero even if
+    THIS document produced nothing — so the comparison below is against what
+    the code actually did, not against what it looks like it should have."""
+    rows: list[dict] = []
+    items_by_id: dict[str, dict] = {}
+    read: list[tuple[str, str]] = []
+    conversations = 0
+    failed = 0
+    for doc in docs:
+        produced = 0
+        for seg in doc.segments:
+            artifact_id = doc.artifact_id_for(seg)
+            try:
+                items = prose._usable(
+                    prose._extract_segment(
+                        seg.text[:prose.MAX_SEGMENT_CHARS],
+                        artifact_id=artifact_id, enterprise_id=enterprise_id),
+                    enterprise_id=enterprise_id, doc_name=artifact_id)
+            except Exception:  # noqa: BLE001
+                failed += 1
+                continue
+            conversations += 1
+            if not items:
+                continue
+            built = prose._signals_for(
+                items, artifact_id=artifact_id, enterprise_id=enterprise_id,
+                observed_at=seg.observed_at or now)
+            for item, sig in zip(items, built):
+                items_by_id[sig.id] = item
+                rows.append(prose.signal_to_row(sig, created_at=now))
+            produced += len(built)
+        if produced or conversations:
+            read.append((doc.name, doc.how_it_was_read))
+    return prose.ProseEvidence(
+        rows=tuple(rows), items_by_id=items_by_id, read=tuple(read),
+        unread=(), conversations=conversations, failed_segments=failed)
+
+
+#: Per-segment text. "alpha" appears TWICE, in two different documents and
+#: under two different titles, which is the duplicate case: same bytes, so one
+#: extraction, but two distinct artifact ids and therefore two distinct claims.
+#: "boom" fails, so failure accounting is compared too. It appears ONCE on
+#: purpose — a failure fans out to its duplicates under the pre-pass but got
+#: its own retry serially, which is the one documented divergence.
+_SEG_TEXTS_A = [("Northwind renewal", "alpha"), ("Contoso renewal", "beta"),
+                ("Fabrikam renewal", "boom")]
+_SEG_TEXTS_B = [("AdventureWorks renewal", "gamma"),
+                ("Litware renewal", "alpha")]
+
+
+def _prose_doc(name, pairs):
+    return prose.ProseDocument(
+        name=name, sha256=name, chars=sum(len(t) for _, t in pairs),
+        segments=tuple(
+            prose.ProseSegment(i, title, NOW + timedelta(days=i), text)
+            for i, (title, text) in enumerate(pairs)),
+        per_conversation=True, markers_found=len(pairs),
+        stated_count=len(pairs))
+
+
+def _deterministic_extract(monkeypatch):
+    """Stub `_extract_segment` so the answer depends ONLY on the text, and
+    count the calls. Returns the call log."""
+    calls: list[str] = []
+
+    def _fake(text, *, artifact_id, enterprise_id):
+        calls.append(text)
+        if text == "boom":
+            raise RuntimeError("extraction failed for this segment")
+        return [
+            _item(f"{text} claim one", "Northwind"),
+            _item(f"{text} claim two", "Contoso"),
+        ]
+
+    monkeypatch.setattr(prose, "_extract_segment", _fake)
+    return calls
+
+
+def test_parallel_segment_extraction_matches_the_serial_loop_exactly(monkeypatch):
+    """Same rows, same order, same ids, same counts, same failures."""
+    docs = [_prose_doc("callsA.txt", _SEG_TEXTS_A),
+            _prose_doc("callsB.txt", _SEG_TEXTS_B)]
+
+    serial_calls = _deterministic_extract(monkeypatch)
+    expected = _serial_extract_documents(docs, enterprise_id=CO, now=NOW)
+
+    parallel_calls = _deterministic_extract(monkeypatch)
+    actual = prose.extract_documents(docs, enterprise_id=CO, now=NOW)
+
+    # ORDER, not just membership: `rows` is a tuple and every consumer reads
+    # it positionally.
+    assert [r["id"] for r in actual.rows] == [r["id"] for r in expected.rows]
+    assert actual.rows == expected.rows
+    assert actual.items_by_id == expected.items_by_id
+    assert actual.read == expected.read
+    # FAILURE ACCOUNTING, reproduced from the ordered list rather than from
+    # futures as they complete.
+    assert actual.conversations == expected.conversations == 4
+    assert actual.failed_segments == expected.failed_segments == 1
+
+    # ONE EXTRACTION FOR THE DUPLICATE, TWO CLAIM SETS FROM IT. Serially the
+    # cache gave the second occurrence the first answer; the pre-pass gives it
+    # the same answer without the second call.
+    assert sorted(serial_calls) == ["alpha", "alpha", "beta", "boom", "gamma"]
+    assert sorted(parallel_calls) == ["alpha", "beta", "boom", "gamma"]
+    assert parallel_calls.count("alpha") == 1
+    # ...and both occurrences of "alpha" still produced their own claims,
+    # under their own artifact ids, so deduplicating the CALL never
+    # deduplicated the CLAIMS.
+    alpha_rows = [r for r in actual.rows if r["content"].startswith("alpha")]
+    assert len(alpha_rows) == 4
+    assert len({r["id"] for r in alpha_rows}) == 4
+
+
+@pytest.mark.parametrize("workers", [1, 2, 4])
+def test_segment_extraction_output_does_not_depend_on_the_worker_count(
+    monkeypatch, workers,
+):
+    """`cluster.py`'s invariant, asserted directly: reproducibility excludes
+    anything whose output depends on how many workers happened to run."""
+    docs = [_prose_doc("callsA.txt", _SEG_TEXTS_A),
+            _prose_doc("callsB.txt", _SEG_TEXTS_B)]
+
+    _deterministic_extract(monkeypatch)
+    baseline = _serial_extract_documents(docs, enterprise_id=CO, now=NOW)
+
+    _deterministic_extract(monkeypatch)
+    monkeypatch.setattr(prose, "MAX_PARALLEL_SEGMENTS", workers)
+    actual = prose.extract_documents(docs, enterprise_id=CO, now=NOW)
+
+    assert actual.rows == baseline.rows
+    assert actual.conversations == baseline.conversations
+    assert actual.failed_segments == baseline.failed_segments
