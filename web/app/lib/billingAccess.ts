@@ -5,8 +5,8 @@
  * (`ACTIVE_SUBSCRIPTION_STATUSES` / `subscription_grants_access`). The backend
  * is the authority — `enforce.bill` is what actually refuses work, and nothing
  * here can grant access the server will not honour. This copy exists so the
- * onboarding gate can decide where to send someone from the company row it has
- * already fetched, without a round trip on every sign-in.
+ * onboarding plan step and the subscription lock can answer "does this company
+ * pay?" from the company row already in hand, without a round trip.
  *
  * Keep the two in step. The rule is small on purpose: if it ever needs more
  * than these few lines, it belongs on the server behind one endpoint instead of
@@ -27,10 +27,15 @@
  * Settings showed Billing throughout, and a curious user could read it and
  * even start a checkout — it was only that nothing there stood between them
  * and the product. The two places that DID stand in the way come back with the
- * gates: the onboarding plan step, reached only by a guard redirect, and the
+ * gates: the onboarding plan step — the LAST step since 2026-09-07, which
+ * every signup now walks into rather than being redirected to — and the
  * sidebar trial countdown, which checks this flag at its call site along with
  * the product-tour step anchored to it. `trialDaysLeft` stayed honest the
  * whole time, so the countdown reads correctly the moment it reappears.
+ *
+ * With it false the plan step still renders, but `companyHasPaid` answers true
+ * and it completes onboarding on mount instead of asking for a card — so the
+ * flow stays six steps and the last one is a pass-through, not a wall.
  *
  * TO HIDE PAYMENTS AGAIN: set this to false, and its backend mirror
  * `BILLING_ENABLED` in `backend/app/billing/plans.py` to False. That is the

@@ -636,22 +636,19 @@ def _capture_checkout(monkeypatch) -> dict:
     return seen
 
 
-def test_a_companys_first_subscription_gets_the_trial(ctx, monkeypatch):
-    """Still mid-onboarding: this is the case the trial exists for."""
-    seen = _capture_checkout(monkeypatch)
+def test_no_checkout_gets_a_trial_while_trials_are_off(ctx, monkeypatch):
+    """NOBODY IS TRIALLED TODAY (owner decision 2026-09-07).
 
-    ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    The first subscription a company ever buys used to get one, because payment
+    was the SECOND step of onboarding and asking a stranger for money before a
+    single brief existed was the steepest drop-off available. Payment is the
+    LAST step now — the workspace is built and the context read before anyone
+    sees a price — so the card is charged at checkout.
 
-    assert seen["trial_days"] == plans.TRIAL_DAYS
-
-
-def test_buying_from_settings_after_onboarding_gets_NO_trial(ctx, monkeypatch):
-    """THE TRIAL IS AN ONBOARDING OFFER, and only that. It exists so a stranger
-    is not asked for money before seeing a single brief. Someone buying from
-    Settings has already used the product — they pay on the day they buy."""
-    require_client().table("companies").update(
-        {"onboarding_completed_at": "2026-07-21T00:00:00Z"}
-    ).eq("id", ctx.company_id).execute()
+    `None` is what `create_subscription_checkout` reads as "bill immediately";
+    Stripe rejects a zero, so the key must be absent rather than falsy.
+    """
+    assert plans.TRIALS_ENABLED is False
     seen = _capture_checkout(monkeypatch)
 
     ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
@@ -659,10 +656,41 @@ def test_buying_from_settings_after_onboarding_gets_NO_trial(ctx, monkeypatch):
     assert seen["trial_days"] is None
 
 
+def test_the_trial_rules_still_stand_when_trials_are_switched_back_on(
+    ctx, monkeypatch
+):
+    """The switch is a switch, not a deletion — `_trial_days` still decides the
+    same way underneath it.
+
+    Flipping TRIALS_ENABLED must restore the ONBOARDING-ONLY offer, not a free
+    week for everyone: a company still mid-signup gets one, a company that
+    finished signup (i.e. is buying from Settings, having already used the
+    product) does not.
+    """
+    monkeypatch.setattr(plans, "TRIALS_ENABLED", True)
+    seen = _capture_checkout(monkeypatch)
+
+    ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    assert seen["trial_days"] == plans.TRIAL_DAYS
+
+    require_client().table("companies").update(
+        {"onboarding_completed_at": "2026-07-21T00:00:00Z"}
+    ).eq("id", ctx.company_id).execute()
+    seen = _capture_checkout(monkeypatch)
+
+    ctx.client.post("/v1/billing/checkout", json={"plan": plans.STARTER})
+    assert seen["trial_days"] is None
+
+
 def test_the_onboarding_return_path_cannot_buy_a_trial(ctx, monkeypatch):
     """Keyed on a SERVER fact, not on which screen claims to have started the
-    checkout. Pointing `return_path` at the onboarding gate must not resurrect
-    a trial for a company that has finished signup."""
+    checkout. Pointing `return_path` at the onboarding plan step must not
+    resurrect a trial for a company that has finished signup.
+
+    Asserted with trials switched ON, because that is the state in which the
+    hole would exist at all — with them off every checkout is charged anyway.
+    """
+    monkeypatch.setattr(plans, "TRIALS_ENABLED", True)
     require_client().table("companies").update(
         {"onboarding_completed_at": "2026-07-21T00:00:00Z"}
     ).eq("id", ctx.company_id).execute()
@@ -679,7 +707,9 @@ def test_the_onboarding_return_path_cannot_buy_a_trial(ctx, monkeypatch):
 def test_a_company_that_has_paid_before_gets_no_trial(ctx, monkeypatch):
     """A cancel-and-resubscribe has already seen the product. The trial exists
     to stop us charging someone who has seen nothing — not to hand a free week
-    to anyone willing to cancel first."""
+    to anyone willing to cancel first. Asserted with trials switched ON, since
+    that is the only state where this rule has anything to refuse."""
+    monkeypatch.setattr(plans, "TRIALS_ENABLED", True)
     billing_db.set_billing(ctx.company_id, {"first_paid_at": "2026-01-01T00:00:00Z"})
     seen = _capture_checkout(monkeypatch)
 
@@ -690,7 +720,9 @@ def test_a_company_that_has_paid_before_gets_no_trial(ctx, monkeypatch):
 
 def test_the_trial_is_not_a_client_flag(ctx, monkeypatch):
     """Nothing in the request body can ask for a trial. If it could, the trial
-    would be available to anyone who could spell the field name."""
+    would be available to anyone who could spell the field name — so this holds
+    with trials switched ON, where a client flag would have something to win."""
+    monkeypatch.setattr(plans, "TRIALS_ENABLED", True)
     billing_db.set_billing(ctx.company_id, {"first_paid_at": "2026-01-01T00:00:00Z"})
     seen = _capture_checkout(monkeypatch)
 

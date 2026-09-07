@@ -172,6 +172,14 @@ def _trial_days(company: CompanyContext) -> int | None:
     for anyone who could spell it. A company that cancelled and came back has
     already seen the product, so it pays on day one.
     """
+    # NOBODY GETS A TRIAL TODAY (owner decision 2026-09-07 — see
+    # plans.TRIALS_ENABLED for why, and for why the rest of this function is
+    # still here). Payment is now the LAST step of onboarding rather than the
+    # second, so the drop-off the trial was bought to prevent is gone: a plan
+    # is chosen after the workspace exists, not before. `None` is what
+    # `stripe_client.create_subscription_checkout` reads as "bill immediately".
+    if not plans.TRIALS_ENABLED:
+        return None
     row = billing_db.get_billing(company.company_id) or {}
     # A cancel-and-resubscribe has already seen the product; no second trial.
     if row.get("first_paid_at"):

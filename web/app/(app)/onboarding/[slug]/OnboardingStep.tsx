@@ -7,6 +7,7 @@ import {
   Connectors,
   InviteStep,
   PersonalizeStep,
+  PlanStep,
   ReviewStep,
 } from "../../../components/screens/onboarding"
 import {
@@ -28,8 +29,18 @@ import {
  *   5. personalize → PersonalizeStep (what to surface + brief delivery; hands
  *                                     off to /onboarding/define-metrics when
  *                                     analytics is connected AND metrics have
- *                                     been picked, otherwise completes
- *                                     onboarding itself)
+ *                                     been picked, otherwise straight on to
+ *                                     the plan step)
+ *   6. plan        → PlanStep        (choose a plan and pay, then complete
+ *                                     onboarding and enter the app)
+ *
+ * PAYMENT IS THE LAST STEP as of 2026-09-07, and became a NUMBERED one with
+ * the move. It was previously its own unnumbered route at position two
+ * (`(app)/onboarding/plan/page.tsx`, now deleted) so that it stayed out of the
+ * `onboarding_step` index math; at the end of the flow it no longer has to,
+ * because appending shifts nothing. Being numbered is what makes an abandoned
+ * checkout resume by itself: the marker names `plan` like any other step, and
+ * the ordinary resume path routes there with no payment-specific branch.
  *
  * CUT FROM TEN TO FOUR on 2026-09-03 (via five): import-context, api-key,
  * product, workspace, metrics and invite were removed and their screen
@@ -56,6 +67,7 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
   { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },
   { slug: "personalize", Component: PersonalizeStep },
+  { slug: "plan", Component: PlanStep },
 ]
 
 // Dev-time guard: the route map and the slug source of truth must agree in

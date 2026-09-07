@@ -103,9 +103,9 @@ export type WorkspaceCompany = {
   slug: string
   display_name: string
   /** Billing, read straight off the companies row (the `companies(*)` embed
-   *  already returns them). Present so the onboarding payment gate can decide
-   *  where to send someone without a round trip on every sign-in — see
-   *  lib/billingAccess. Null on a company created before billing shipped. */
+   *  already returns them). Present so the onboarding plan step can tell a
+   *  company that already pays from one that must buy — without a round trip —
+   *  see lib/billingAccess. Null on a company created before billing shipped. */
   plan: string | null
   subscription_status: string | null
   /** While `subscription_status` is "trialing" this IS the trial end — the
@@ -312,7 +312,8 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order.
  *
- * FIVE STEPS (2026-09-07: invite is back). The 2026-09-03 cut took the flow
+ * SIX STEPS (2026-09-07: invite is back, and payment moved to the end). The
+ * 2026-09-03 cut took the flow
  * from ten to four, removing a questionnaire that asked someone who had not
  * seen the product yet for their OKRs, their success metrics, their
  * prioritization framework, their team's scope and who else should join —
@@ -335,8 +336,32 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *   4. review      → ReviewStep     (AI-drafted business context — read, edit,
  *                                    accept)
  *   5. personalize → PersonalizeStep (what the workspace surfaces + brief
- *                                    delivery cadence/channel/time, then
- *                                    completes onboarding)
+ *                                    delivery cadence/channel/time)
+ *   6. plan        → PlanStep       (choose a plan and pay — THE LAST THING,
+ *                                    and the step that completes onboarding)
+ *
+ * PAYMENT IS THE LAST STEP (owner decision 2026-09-07). It used to be an
+ * UNNUMBERED gate wedged in at position two, right after the company row was
+ * created, enforced by a guard on every step. The argument for that placement
+ * was reachability — an abandoned signup with a company row and a verified
+ * email is still a lead. The argument against it is the one that won: it asked
+ * a stranger to choose between a $59 and a $99 plan before they had connected
+ * a single tool, seen the business context we drafted for them, or been shown
+ * one thing the product does. Now they build the workspace first and pay for
+ * the thing they can see.
+ *
+ * This is APPENDED, not inserted, which is why it needs no rebase migration
+ * (unlike 20260903160000 / 20260903170000 / 20260907000000 below). Adding a
+ * slug at the END shifts no existing index: every stored marker still names
+ * the step it always named. Only the ceiling moves, and `clampStep` widening
+ * cannot strand anyone.
+ *
+ * Completion moved with it. `finishOnboardingAndEnterApp` is now called from
+ * the plan step alone — reached only after `billingApi.summary()` says Stripe
+ * holds a live subscription — so "you cannot finish onboarding without paying"
+ * is a property of where the closer lives, not of a guard that has to
+ * out-argue every route the user can type. The old `OnboardingPaymentGuard`
+ * was deleted with the reorder; there is nothing left for it to gate.
  *
  * Everything else the ten-step flow asked is still cut, and still editable in
  * Settings once there is a reason to answer it:
@@ -412,6 +437,9 @@ export const ONBOARDING_STEP_SLUGS = [
   "invite",
   "review",
   "personalize",
+  // Payment, last. Appended deliberately — see the note above on why an
+  // append needs no marker rebase where an insertion would.
+  "plan",
 ] as const
 
 export type OnboardingStepSlug = (typeof ONBOARDING_STEP_SLUGS)[number]

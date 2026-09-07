@@ -58,6 +58,7 @@ describe("slugForStep — resume index → slug (clamped)", () => {
     expect(slugForStep(3)).toBe("invite")
     expect(slugForStep(4)).toBe("review")
     expect(slugForStep(5)).toBe("personalize")
+    expect(slugForStep(6)).toBe("plan")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
@@ -66,9 +67,8 @@ describe("slugForStep — resume index → slug (clamped)", () => {
     // 20260903170000, 20260907000000) so they name the right screen; this
     // clamp is the backstop for anything a migration did not reach — a row
     // restored from an old backup, say.
-    expect(slugForStep(6)).toBe("personalize")
-    expect(slugForStep(10)).toBe("personalize")
-    expect(slugForStep(20)).toBe("personalize")
+    expect(slugForStep(10)).toBe("plan")
+    expect(slugForStep(20)).toBe("plan")
     expect(slugForStep(0)).toBe("company")
   })
 })
@@ -88,7 +88,7 @@ describe("stepForSlug — slug → 1-based index", () => {
 })
 
 describe("isOnboardingStepSlug", () => {
-  it("accepts the 5 numbered slugs and rejects analyzing / removed / unknown", () => {
+  it("accepts the 6 numbered slugs and rejects analyzing / removed / unknown", () => {
     for (const slug of ONBOARDING_STEP_SLUGS) {
       expect(isOnboardingStepSlug(slug)).toBe(true)
     }
@@ -108,6 +108,10 @@ describe("isOnboardingStepSlug", () => {
     expect(isOnboardingStepSlug("business-context")).toBe(false)
     expect(isOnboardingStepSlug("first-brief")).toBe(false)
     expect(isOnboardingStepSlug("personalize")).toBe(true)
+    // Payment became a NUMBERED step when it moved to the end (2026-09-07) —
+    // that is what lets an abandoned checkout resume through slugForStep with
+    // no payment-specific branch in the resume path.
+    expect(isOnboardingStepSlug("plan")).toBe(true)
     // The steps folded into the old `workspace` card were never routes either.
     expect(isOnboardingStepSlug("team")).toBe(false)
     expect(isOnboardingStepSlug("strategy")).toBe(false)

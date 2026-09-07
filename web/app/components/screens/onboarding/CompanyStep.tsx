@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from "react"
 import { useRouter } from "next/navigation"
-import { ONBOARDING_PLAN_PATH } from "../../../lib/billingPlans"
 import { useAuth } from "../../../lib/auth"
 import { useFieldValidation } from "../../onboarding/InterviewLayout"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
@@ -20,6 +19,7 @@ import {
 import {
   DEFAULT_WORKSPACE_NAME,
   DEFAULT_WORKSPACE_SCOPE,
+  ONBOARDING_STEP_SLUGS,
   stepForSlug,
 } from "../../../lib/onboarding/types"
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
@@ -29,8 +29,10 @@ const DRAFT_KEY = "company-step"
 /**
  * Onboarding step 01 — "Tell us about your company and product".
  *
- * FOUR FIELDS, NOTHING ELSE (2026-09-03): company name*, company website,
- * product name, product website. Mission & vision, strategy / OKRs and the
+ * FOUR FIELDS, NOTHING ELSE (2026-09-03), ALL FOUR REQUIRED (2026-09-07):
+ * company name, company website, product name, product website. Only the name
+ * was mandatory at first; see the note on the validators below for why the
+ * other three stopped being optional. Mission & vision, strategy / OKRs and the
  * "Add more" disclosure (portfolio, planning cycle) came off this page and are
  * edited in Settings instead — Company Profile owns mission / strategy /
  * portfolio, Process & Planning owns the planning cycle, and all four still
@@ -48,8 +50,9 @@ const DRAFT_KEY = "company-step"
  * URL wearing a company label, which was harmless while only one of them was
  * ever shown. With both on one page it stops being harmless: whichever saved
  * last would clobber the other. `companies.website` (migration
- * 20260903150000) is the company's own, and it is nullable because every
- * company onboarded before today has its site recorded on the product instead.
+ * 20260903150000) is the company's own, and the COLUMN stays nullable even now
+ * that the FIELD is required: every company onboarded before it existed has its
+ * site recorded on the product instead, and a NOT NULL would strand them.
  *
  * IT RUNS FIRST BECAUSE EVERYTHING ELSE IS KEYED ON WHAT IT COLLECTS: the
  * company row does not exist until this step saves, and the website analysis it
@@ -115,11 +118,37 @@ export function CompanyStep() {
     return () => document.removeEventListener("visibilitychange", onHide)
   }, [companyName, companyWebsite, productName, productWebsite])
 
+  // ALL FOUR ARE REQUIRED (owner decision 2026-09-07). Three of them were
+  // optional: the websites because we could work without them, the product name
+  // because it fell back to the company's. But the company site is what the
+  // background analysis reads to draft the business context two steps later,
+  // and a signup that skipped it arrived at the review step with nothing to
+  // review. Asking for four short answers once is cheaper than the empty
+  // workspace on the other side of skipping them.
+  //
+  // Emptiness is checked here, per field. The URL SHAPE check stays in `save`
+  // and surfaces in the banner at the top — one rule, one place, and it already
+  // names the field it rejected.
   const { errors, validate, clearError, containerRef } = useFieldValidation(() => [
     {
       key: "companyName",
       valid: companyName.trim().length > 0,
       message: "Enter your company name.",
+    },
+    {
+      key: "companyWebsite",
+      valid: companyWebsite.trim().length > 0,
+      message: "Enter your company website.",
+    },
+    {
+      key: "productName",
+      valid: productName.trim().length > 0,
+      message: "Enter your product name.",
+    },
+    {
+      key: "productWebsite",
+      valid: productWebsite.trim().length > 0,
+      message: "Enter your product website.",
     },
   ])
 
@@ -208,18 +237,14 @@ export function CompanyStep() {
         || normalizedCompanySite
         || normalizedProductSite
       if (ws && analysisSite) startWebsiteAnalysis(analysisSite, ws.id)
-      // The PAYMENT GATE sits between company creation and the rest of the
-      // flow. `onboarding_step` above is still the NEXT step on purpose: the
-      // gate is unnumbered, so the persisted marker names the step they will
-      // resume ONCE they have paid, and postLoginPath keeps routing them back
-      // here until they have. Someone who abandons at Checkout therefore comes
-      // back to the gate rather than to a half-built workspace, and their
-      // company row — the reason to put payment this early — already exists.
-      //
-      // The gate forwards straight through for a company that already has a
-      // live subscription, so an invited teammate never sees it. With payments
-      // hidden it forwards for everyone (see lib/billingAccess).
-      router.push(ONBOARDING_PLAN_PATH)
+      // Straight on to the next step. This used to push to the PAYMENT GATE,
+      // which sat between company creation and the rest of the flow: the
+      // company row, a verified email and a profile all existed by then, so an
+      // abandoned signup was still a lead we could reach. Payment is now the
+      // LAST step (2026-09-07) — a stranger picking between a $59 and a $99
+      // plan here has connected nothing and seen nothing — so this step just
+      // hands on like every other one.
+      router.push(`/onboarding/${ONBOARDING_STEP_SLUGS[nextStep - 1]}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your company.")
       setSaving(false)
@@ -269,47 +294,61 @@ export function CompanyStep() {
 
           <div className="field" data-field="companyWebsite">
             <div className="field-l">
-              Company website <span className="opt">optional</span>
+              Company website <span className="req">*</span>
             </div>
             <input
-              className="inp"
+              className={`inp ${errors.companyWebsite ? "has-error" : ""}`}
               type="url"
               value={companyWebsite}
-              onChange={(e) => setCompanyWebsite(e.target.value)}
+              onChange={(e) => {
+                setCompanyWebsite(e.target.value)
+                clearError("companyWebsite")
+              }}
               placeholder="https://yourcompany.com"
               autoComplete="url"
             />
-            <p className="onb-field-hint">
-              We&apos;ll read this in the background to draft your business
-              context, and fill it into the prompt on the next step.
-            </p>
+            {errors.companyWebsite && (
+              <p className="onb-field-error">{errors.companyWebsite}</p>
+            )}
           </div>
 
           <div className="field" data-field="productName">
             <div className="field-l">
-              Product name <span className="opt">optional</span>
+              Product name <span className="req">*</span>
             </div>
             <input
-              className="inp"
+              className={`inp ${errors.productName ? "has-error" : ""}`}
               value={productName}
-              onChange={(e) => setProductName(e.target.value)}
+              onChange={(e) => {
+                setProductName(e.target.value)
+                clearError("productName")
+              }}
               maxLength={100}
               placeholder="The product you're onboarding (you can add more later)"
             />
+            {errors.productName && (
+              <p className="onb-field-error">{errors.productName}</p>
+            )}
           </div>
 
           <div className="field" data-field="productWebsite">
             <div className="field-l">
-              Product website <span className="opt">optional</span>
+              Product website <span className="req">*</span>
             </div>
             <input
-              className="inp"
+              className={`inp ${errors.productWebsite ? "has-error" : ""}`}
               type="url"
               value={productWebsite}
-              onChange={(e) => setProductWebsite(e.target.value)}
+              onChange={(e) => {
+                setProductWebsite(e.target.value)
+                clearError("productWebsite")
+              }}
               placeholder="https://yourproduct.com"
               autoComplete="url"
             />
+            {errors.productWebsite && (
+              <p className="onb-field-error">{errors.productWebsite}</p>
+            )}
           </div>
         </div>
       </div>

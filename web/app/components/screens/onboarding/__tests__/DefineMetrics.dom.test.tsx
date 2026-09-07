@@ -5,16 +5,19 @@
 // /onboarding/define-metrics. One screen per metric picked in step 3
 // (AI-drafted definition + analytics mapping, both editable), then a review
 // table (metric / mapping / baseline with "—" fallback), and "Looks right ·
-// generate knowledge graph" persists companies.metric_definitions, COMPLETES
-// onboarding, kicks the first brief and enters the app at /?new=1 — a fresh
-// chat tab next to Top Insights (the brief is still generating server-side, so
-// a chat is the useful landing).
+// choose your plan" persists companies.metric_definitions and hands on to the
+// PLAN step.
+//
+// IT NO LONGER COMPLETES ONBOARDING. Payment moved to the end of the flow on
+// 2026-09-07 and took the closer with it: `finishOnboardingAndEnterApp` runs
+// from PlanStep alone, after a live subscription is confirmed. This sub-flow
+// advances the marker to the plan step and routes there, so an abandoned
+// checkout resumes at the gate rather than walking these screens again.
 //
 // Covers: drafts requested from onboardingApi.draftMetricDefinitions (unless
 // definitions are already saved on the company); per-metric confirm walks
-// through to the review table; finish persists + completes + kicks the brief
-// pipeline (mocked lib/workspace-brief); a failed draft falls back to blank,
-// hand-written definitions.
+// through to the review table; finish persists + advances + routes to the plan
+// step; a failed draft falls back to blank, hand-written definitions.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -26,41 +29,25 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 const authMock = vi.fn()
 const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
-const setContentMock = vi.fn()
 const saveDefsMock = vi.fn()
-const completeMock = vi.fn()
+const advanceStepMock = vi.fn()
 const draftDefsMock = vi.fn()
-const ensureDatasetMock = vi.fn()
-const seedContextMock = vi.fn()
-const fetchBriefMock = vi.fn()
-const startBriefMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
-vi.mock("../../../../context/ContentContext", () => ({
-  useContent: () => ({ setContent: setContentMock }),
-}))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
-  completeOnboarding: (...a: unknown[]) => completeMock(...a),
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
   saveMetricDefinitions: (...a: unknown[]) => saveDefsMock(...a),
 }))
 vi.mock("../../../../lib/api", () => ({
   onboardingApi: { draftMetricDefinitions: (...a: unknown[]) => draftDefsMock(...a) },
 }))
-vi.mock("../../../../lib/brief-adapter", () => ({
-  briefToContentPatch: (b: unknown) => ({ patched: b }),
-}))
-vi.mock("../../../../lib/workspace-brief", () => ({
-  ensureDatasetForWorkspace: (...a: unknown[]) => ensureDatasetMock(...a),
-  seedWorkspaceContextFiles: (...a: unknown[]) => seedContextMock(...a),
-  fetchBriefWhenReady: (...a: unknown[]) => fetchBriefMock(...a),
-  startBriefGeneration: (...a: unknown[]) => startBriefMock(...a),
-}))
 
 import { DefineMetrics } from "../DefineMetrics"
+import { stepForSlug } from "../../../../lib/onboarding/types"
 import { _resetDraftPrefetchForTests } from "../../../../lib/onboarding/draftPrefetch"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
@@ -101,17 +88,13 @@ function confirmBtn(): HTMLButtonElement {
 
 function finishBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
-    /Looks right · generate knowledge graph/.test(b.textContent ?? ""),
+    /Looks right · choose your plan/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
 beforeEach(() => {
   _resetDraftPrefetchForTests()
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
-  ensureDatasetMock.mockResolvedValue(undefined)
-  seedContextMock.mockResolvedValue(undefined)
-  fetchBriefMock.mockResolvedValue(null)
-  startBriefMock.mockResolvedValue(undefined)
   window.localStorage.clear()
 })
 afterEach(() => {
@@ -161,10 +144,10 @@ describe("DefineMetrics (unnumbered define-metrics sub-flow)", () => {
     expect(rows[1].textContent).toContain("—")
   })
 
-  it("finish persists the definitions, completes onboarding, kicks the first brief and enters the app", async () => {
+  it("finish persists the definitions and hands on to the plan step", async () => {
     draftDefsMock.mockResolvedValue({ definitions: DRAFTED })
     saveDefsMock.mockResolvedValue(makeWorkspace())
-    completeMock.mockResolvedValue(undefined)
+    advanceStepMock.mockResolvedValue(undefined)
     mount()
 
     await waitFor(() => {
@@ -178,7 +161,7 @@ describe("DefineMetrics (unnumbered define-metrics sub-flow)", () => {
     })
 
     await waitFor(() => {
-      expect(routerMock.replace).toHaveBeenCalledWith("/?new=1")
+      expect(routerMock.replace).toHaveBeenCalledWith("/onboarding/plan")
     })
     // Definitions persisted as confirmed (metric/definition/mapping/baseline).
     expect(saveDefsMock).toHaveBeenCalledTimes(1)
@@ -197,16 +180,9 @@ describe("DefineMetrics (unnumbered define-metrics sub-flow)", () => {
         baseline: null,
       },
     ])
-    expect(completeMock).toHaveBeenCalledWith("ws-1", "u-1")
-    expect(window.localStorage.getItem("sprntly_active_company")).toBe("acme")
-    // The first-brief kick ran through the workspace-brief pipeline.
-    await waitFor(() => {
-      expect(ensureDatasetMock).toHaveBeenCalledTimes(1)
-      expect(seedContextMock).toHaveBeenCalledTimes(1)
-      expect(fetchBriefMock).toHaveBeenCalledWith("acme")
-      // No brief ready yet → generation is started.
-      expect(startBriefMock).toHaveBeenCalledWith("acme")
-    })
+    // The marker moves to the plan step BEFORE the route, so an abandoned
+    // checkout resumes at payment rather than back in this sub-flow.
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", stepForSlug("plan"))
   })
 
   it("uses saved metric_definitions instead of drafting when the company already has them", async () => {

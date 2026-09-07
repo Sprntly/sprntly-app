@@ -1,21 +1,35 @@
 // @vitest-environment jsdom
 //
-// THE GATE COVERS EVERY STEP, not just the way in.
+// THE PAYMENT GATE IS THE LAST STEP NOW, not a guard on every step.
 //
-// The hole this closes: `OnboardingRequiredGuard` defers on `/onboarding/*` —
-// it has to, or it would fight step navigation including going back a step —
-// so the payment check only ran on ENTRY to the app. Once a browser was on any
-// onboarding route, nothing re-checked, and typing `/onboarding/import-context`
-// walked straight past the plan screen. From there the whole flow could be
-// completed and `completeOnboarding()` called without a card ever being taken.
+// This file used to assert the opposite. Payment sat at position two, enforced
+// by an `OnboardingPaymentGuard` wrapped around every step this layout renders,
+// because `OnboardingRequiredGuard` defers on `/onboarding/*` — it has to, or
+// it would fight step navigation including going back — so without it a typed
+// step URL walked straight past the plan screen and the whole flow could be
+// completed without a card.
+//
+// Payment moved to the END of onboarding on 2026-09-07 and the guard was
+// deleted with it. Two things replace it, and this file asserts both:
+//
+//   1. The layout lets an unpaid company walk every step. That is the point of
+//      the move — a stranger picking between a $59 and a $99 plan at step one
+//      has connected nothing and seen nothing.
+//   2. Onboarding cannot be COMPLETED without paying, because
+//      `finishOnboardingAndEnterApp` is called from exactly one place: the plan
+//      step, on the far side of a `billingApi.summary()` that must report a
+//      live subscription. That is a property of where the closer lives, which
+//      is a much harder thing to walk around than a redirect.
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
 import * as React from "react"
-import { cleanup, render, waitFor } from "@testing-library/react"
+import { cleanup, render } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
 
 const replace = vi.fn()
-let pathname = "/onboarding/import-context"
+let pathname = "/onboarding/connectors"
 vi.mock("next/navigation", () => ({
   useRouter: () => ({ replace, push: vi.fn() }),
   usePathname: () => pathname,
@@ -38,7 +52,7 @@ vi.mock("../../../context/OnboardingContext", () => ({
 }))
 
 import OnboardingLayout from "../layout"
-import { BILLING_ENABLED } from "../../../lib/billingAccess"
+import { ONBOARDING_STEP_SLUGS } from "../../../lib/onboarding/types"
 
 const paid = { id: "ws-1", plan: "starter", subscription_status: "active" }
 const unpaid = { id: "ws-1", plan: "starter", subscription_status: null }
@@ -49,125 +63,75 @@ function mount() {
 
 beforeEach(() => {
   replace.mockReset()
-  pathname = "/onboarding/import-context"
+  pathname = "/onboarding/connectors"
   auth = { kind: "authed", user: { email: "a@b.c" }, isEmailVerified: () => true }
   onboarding = { loading: false, workspace: null }
 })
 afterEach(() => cleanup())
 
-// DORMANT WHILE PAYMENTS ARE HIDDEN — the gate is open, so there is no bounce
-// to assert. Every expectation here is the one the gate had and will have
-// again; the block below covers what replaces it meanwhile.
-describe.skipIf(!BILLING_ENABLED)("an unpaid company cannot walk the steps", () => {
-  it("bounces a typed step URL back to the plan gate", async () => {
-    onboarding = { loading: false, workspace: unpaid }
-    mount()
-    await waitFor(() => expect(replace).toHaveBeenCalledWith("/onboarding/plan"))
-  })
-
-  it("does not paint the step it is about to move you off", () => {
-    onboarding = { loading: false, workspace: unpaid }
-    const { queryByText } = mount()
-    expect(queryByText("STEP_CONTENT")).toBeNull()
-  })
-
-  it("covers EVERY step, not just the first", async () => {
-    for (const step of [
-      "/onboarding/import-context",
-      "/onboarding/connectors",
-      "/onboarding/product",
-      "/onboarding/metrics",
-      "/onboarding/review",
-      "/onboarding/personalize",
-      "/onboarding/define-metrics",
-    ]) {
+describe("an unpaid company walks the whole flow", () => {
+  it("paints every numbered step without being sent to the plan screen", () => {
+    // The inverse of what this file asserted before 2026-09-07. Nothing here
+    // asks for a card until the flow reaches the plan step on its own.
+    for (const slug of ONBOARDING_STEP_SLUGS) {
       cleanup()
       replace.mockReset()
-      pathname = step
-      onboarding = { loading: false, workspace: unpaid }
-      mount()
-      await waitFor(() => expect(replace, step).toHaveBeenCalledWith("/onboarding/plan"))
-    }
-  })
-})
-
-describe.runIf(!BILLING_ENABLED)("payments hidden: the gate is open", () => {
-  it("walks every step without ever asking for a card", async () => {
-    // The mirror of the dormant block above. `companyHasPaid` answers true, so
-    // a company with no subscription at all paints the step it asked for and
-    // is never sent to /onboarding/plan — which is the whole point: onboarding
-    // runs company → … → finish with no payment screen in it.
-    for (const step of [
-      "/onboarding/import-context",
-      "/onboarding/connectors",
-      "/onboarding/product",
-      "/onboarding/review",
-      "/onboarding/define-metrics",
-    ]) {
-      cleanup()
-      replace.mockReset()
-      pathname = step
+      pathname = `/onboarding/${slug}`
       onboarding = { loading: false, workspace: unpaid }
       const { getByText } = mount()
-      expect(getByText("STEP_CONTENT"), step).toBeTruthy()
-      expect(replace, step).not.toHaveBeenCalled()
+      expect(getByText("STEP_CONTENT"), slug).toBeTruthy()
+      expect(replace, slug).not.toHaveBeenCalled()
     }
   })
-})
 
-describe("what the gate must NOT block", () => {
-  it("never gates the plan route itself — that is the destination", () => {
-    pathname = "/onboarding/plan"
-    onboarding = { loading: false, workspace: unpaid }
-    const { getByText } = mount()
-    expect(getByText("STEP_CONTENT")).toBeTruthy()
-    expect(replace).not.toHaveBeenCalled()
-  })
-
-  it("lets a paid company through", () => {
+  it("lets a paid company through just the same", () => {
     onboarding = { loading: false, workspace: paid }
     const { getByText } = mount()
     expect(getByText("STEP_CONTENT")).toBeTruthy()
     expect(replace).not.toHaveBeenCalled()
   })
 
-  it("lets a TRIALLING company through — the card is on file", () => {
-    onboarding = {
-      loading: false,
-      workspace: { ...unpaid, subscription_status: "trialing" },
-    }
-    const { getByText } = mount()
-    expect(getByText("STEP_CONTENT")).toBeTruthy()
-  })
-
-  it("lets a plan that was never sold through Stripe through", () => {
-    onboarding = { loading: false, workspace: { id: "ws-1", plan: "legacy", subscription_status: null } }
-    const { getByText } = mount()
-    expect(getByText("STEP_CONTENT")).toBeTruthy()
-  })
-
   it("does not gate a brand-new user who has no company yet", () => {
-    // The company step comes BEFORE the gate. There is nothing to pay for.
     onboarding = { loading: false, workspace: null }
     const { getByText } = mount()
     expect(getByText("STEP_CONTENT")).toBeTruthy()
     expect(replace).not.toHaveBeenCalled()
   })
+})
 
-  it("waits for the workspace to load rather than bouncing on a slow read", () => {
-    // Bouncing a mid-onboarding user because the read had not landed yet would
-    // be worse than the hole this closes.
-    onboarding = { loading: true, workspace: null }
-    mount()
-    expect(replace).not.toHaveBeenCalled()
-  })
-
+describe("what still gates", () => {
   it("still defers to the email gate for an unverified user", () => {
     auth = { kind: "authed", user: { email: "a@b.c" }, isEmailVerified: () => false }
     onboarding = { loading: false, workspace: unpaid }
     const { queryByText } = mount()
     expect(queryByText("STEP_CONTENT")).toBeNull()
-    // Verify-email wins; the payment gate never gets a say.
-    expect(replace).not.toHaveBeenCalledWith("/onboarding/plan")
+    expect(replace).toHaveBeenCalledWith(expect.stringContaining("/verify-email"))
+  })
+
+  it("still keeps a COMPLETED user out of the flow", () => {
+    onboarding = {
+      loading: false,
+      workspace: { ...paid, onboarding_completed_at: "2026-09-01T00:00:00Z" },
+    }
+    const { queryByText } = mount()
+    expect(queryByText("STEP_CONTENT")).toBeNull()
+    expect(replace).toHaveBeenCalledWith("/")
+  })
+})
+
+describe("completion lives behind the payment step, and only there", () => {
+  // A source-level assertion on purpose. The old guard could be walked around
+  // by typing a URL; "there is exactly one caller of the closer, and it is the
+  // plan step" cannot be. If a future screen starts completing onboarding
+  // again, this fails and names the file.
+  const screens = join(__dirname, "..", "..", "..", "components", "screens", "onboarding")
+
+  it("only PlanStep calls finishOnboardingAndEnterApp", () => {
+    const callers = ["PlanStep", "PersonalizeStep", "DefineMetrics"].filter((name) =>
+      readFileSync(join(screens, `${name}.tsx`), "utf8").includes(
+        "finishOnboardingAndEnterApp(",
+      ),
+    )
+    expect(callers).toEqual(["PlanStep"])
   })
 })

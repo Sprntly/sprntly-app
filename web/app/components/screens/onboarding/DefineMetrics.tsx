@@ -4,13 +4,15 @@ import { useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { useContent } from "../../../context/ContentContext"
-import { saveMetricDefinitions } from "../../../lib/onboarding/store"
-import type { MetricDefinition } from "../../../lib/onboarding/types"
 import {
-  finishOnboardingAndEnterApp,
-  POST_ONBOARDING_PATH,
-} from "../../../lib/onboarding/finishOnboarding"
+  advanceOnboardingStep,
+  saveMetricDefinitions,
+} from "../../../lib/onboarding/store"
+import {
+  ONBOARDING_STEP_SLUGS,
+  stepForSlug,
+  type MetricDefinition,
+} from "../../../lib/onboarding/types"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
 import { ArrowLeft, ArrowRight } from "../../auth/icons"
 import { SprntlyLockup } from "../../shared/SprntlyMark"
@@ -24,15 +26,18 @@ import { SprntlyLockup } from "../../shared/SprntlyMark"
  * plain-English definition and the analytics event mapping (both editable;
  * drafts come from POST /v1/onboarding/metric-definitions, detected from the
  * connected analytics where possible). A closing review table shows metric /
- * mapping / best-effort current value ("—" when none), and "Looks right ·
- * generate knowledge graph" persists companies.metric_definitions, COMPLETES
- * onboarding, kicks the first brief, and enters the app — the same closer
- * the retired workspace step ran.
+ * mapping / best-effort current value ("—" when none), and the closing button
+ * persists companies.metric_definitions and hands on to the PLAN step, which
+ * is where onboarding is completed and the first brief kicked since payment
+ * moved to the end of the flow (2026-09-07).
  */
+
+/** The plan step's 1-based index — this sub-flow's only exit. */
+const PLAN_STEP = stepForSlug("plan") ?? ONBOARDING_STEP_SLUGS.length
+
 export function DefineMetrics() {
   const auth = useAuth()
   const { workspace, loading } = useOnboarding()
-  const { setContent } = useContent()
   const router = useRouter()
 
   // null = drafts still loading. Index === defs.length → the review screen.
@@ -107,12 +112,14 @@ export function DefineMetrics() {
     setFinishing(true)
     try {
       // Persist the confirmed definitions (best-effort content, hard save),
-      // then run the shared closer (first brief + complete onboarding).
+      // then hand on to the plan step. This used to run the closer itself;
+      // payment moved to the end of onboarding on 2026-09-07, so the plan step
+      // owns completion and the first brief now. Advance the marker before
+      // routing so an abandoned checkout resumes at the plan step rather than
+      // walking this sub-flow again.
       if (defs.length) await saveMetricDefinitions(workspace.id, defs)
-      // define-metrics is only reached with a live analytics connection, which
-      // is itself a data source — so always kick the first brief here.
-      await finishOnboardingAndEnterApp(workspace, auth.user.id, setContent, true)
-      router.replace(POST_ONBOARDING_PATH)
+      await advanceOnboardingStep(workspace.id, PLAN_STEP)
+      router.replace(`/onboarding/${ONBOARDING_STEP_SLUGS[PLAN_STEP - 1]}`)
     } catch (e) {
       setError(
         e instanceof Error ? e.message : "Couldn't finish setting up your workspace.",
@@ -209,7 +216,7 @@ export function DefineMetrics() {
             onClick={() => void finish()}
             disabled={finishing}
           >
-            {finishing ? "Building…" : "⚡ Looks right · generate knowledge graph"}
+            {finishing ? "Saving…" : "⚡ Looks right · choose your plan"}
           </button>
         </div>
       </>,

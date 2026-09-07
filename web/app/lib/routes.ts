@@ -78,6 +78,7 @@ export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-invite": "/onboarding/invite",
   "ob-review": "/onboarding/review",
   "ob-personalize": "/onboarding/personalize",
+  "ob-plan": "/onboarding/plan",
   chat: "/",
   chats: "/history",
   artifacts: "/artifacts",

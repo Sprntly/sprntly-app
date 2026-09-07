@@ -68,8 +68,7 @@ vi.mock("../../prdAccessApi", () => ({
 }))
 
 import { postLoginPath } from "../client"
-import { BILLING_ENABLED } from "../../billingAccess"
-import { ONBOARDING_STEP_SLUGS, slugForStep } from "../../onboarding/types"
+import { ONBOARDING_STEP_SLUGS, slugForStep, stepForSlug } from "../../onboarding/types"
 import { ApiError } from "../../api"
 
 const FIRST_STEP = `/onboarding/${ONBOARDING_STEP_SLUGS[0]}`
@@ -479,18 +478,21 @@ describe("postLoginPath — bare-link guest account state (pending_prd_public_id
   })
 })
 
-describe("postLoginPath — the onboarding payment gate", () => {
-  // Payment sits between creating a company and the rest of onboarding. This
-  // is the ROUTING half of that gate: `enforce.bill` on the backend is what
-  // actually refuses work, and nothing here can grant access the server will
-  // not honour.
+describe("postLoginPath — resuming an unfinished onboarding", () => {
+  // THERE IS NO PAYMENT BRANCH HERE ANY MORE. Until 2026-09-07 payment was an
+  // unnumbered gate at position two, and this function checked `companyHasPaid`
+  // before resuming: an unpaid company was sent to /onboarding/plan whatever
+  // step it had reached. Payment is the LAST step now, and a numbered one, so
+  // an unpaid company is simply a company whose marker says `plan` — the plain
+  // resume below lands them there with no payment-specific code in the path.
   //
-  // The gate is COMPANY-level, not user-level, which is what stops an invited
-  // teammate being charged for a company that already pays.
+  // What did NOT change: the marker is never rewound, which is what makes an
+  // abandoned checkout resumable.
 
-  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
-  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
-  it.skipIf(!BILLING_ENABLED)("sends an unpaid company's unfinished onboarding to the plan gate", async () => {
+  it("resumes an unpaid company at its own step, wherever it got to", async () => {
+    // The step it left, NOT a plan picker in front of it. Someone two steps in
+    // has connected nothing and seen nothing; asking them for $59 before they
+    // can carry on is the placement this move exists to undo.
     existingMemberUser({
       onboarding_completed_at: null,
       onboarding_step: 2,
@@ -498,49 +500,36 @@ describe("postLoginPath — the onboarding payment gate", () => {
       subscription_status: null,
     })
     acceptInviteMock.mockRejectedValue(new Error("no invite"))
-    expect(await postLoginPath()).toBe("/onboarding/plan")
+    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(2)}`)
   })
 
-  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
-  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
-  it.skipIf(!BILLING_ENABLED)("keeps sending them back there until they finish — the step is NOT rewound", async () => {
-    // Someone who abandons at Stripe still has a company row, a verified
-    // email and a persisted step naming where they carry on. That is the
-    // whole reason payment sits this early: an abandoned signup is a lead.
+  it("resumes an abandoned CHECKOUT at the plan step, because that is the marker", async () => {
+    // The one case the old payment branch existed for, now handled by the
+    // ordinary resume. Personalize/define-metrics advance the marker to the
+    // plan step BEFORE routing there, so someone who bails at Stripe comes
+    // back to the payment step rather than re-walking the flow.
+    const planStep = stepForSlug("plan")!
     existingMemberUser({
       onboarding_completed_at: null,
-      onboarding_step: 6,
+      onboarding_step: planStep,
       subscription_status: "canceled",
     })
     acceptInviteMock.mockRejectedValue(new Error("no invite"))
     expect(await postLoginPath()).toBe("/onboarding/plan")
 
-    // …and once paid, they resume on the step they left, not at the start.
+    // …and paying does not move the marker either — the plan step itself
+    // completes onboarding, and a completed company lands in the app.
     vi.resetAllMocks()
     existingMemberUser({
-      onboarding_completed_at: null,
-      onboarding_step: 6,
+      onboarding_completed_at: "2026-09-07T00:00:00Z",
+      onboarding_step: planStep,
       subscription_status: "active",
     })
     acceptInviteMock.mockRejectedValue(new Error("no invite"))
-    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)
+    expect(await postLoginPath()).toBe("/")
   })
 
-  it.runIf(!BILLING_ENABLED)("payments hidden: an unpaid company resumes its own step, not the gate", async () => {
-    // The step is still NOT rewound — that half never depended on payment.
-    // What changes is the destination: they carry on where they left off
-    // instead of being parked in front of a plan picker.
-    existingMemberUser({
-      onboarding_completed_at: null,
-      onboarding_step: 6,
-      plan: "starter",
-      subscription_status: "canceled",
-    })
-    acceptInviteMock.mockRejectedValue(new Error("no invite"))
-    expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(6)}`)
-  })
-
-  it("lets a trialling company straight through — the card is on file", async () => {
+  it("resumes a trialling company at its own step too", async () => {
     existingMemberUser({
       onboarding_completed_at: null,
       onboarding_step: 3,
@@ -550,10 +539,10 @@ describe("postLoginPath — the onboarding payment gate", () => {
     expect(await postLoginPath()).toBe(`/onboarding/${slugForStep(3)}`)
   })
 
-  it("does not gate a company whose plan was never sold through Stripe", async () => {
-    // LEGACY and ENTERPRISE carry a null subscription_status by design.
-    // Gating them on one would lock every pre-billing tenant out of their own
-    // unfinished onboarding the day this ships.
+  it("resumes a company whose plan was never sold through Stripe", async () => {
+    // LEGACY and ENTERPRISE carry a null subscription_status by design. They
+    // were the reason the old payment branch needed a bypass list; with no
+    // branch left there is nothing for them to be caught by.
     for (const plan of ["legacy", "enterprise"]) {
       vi.resetAllMocks()
       existingMemberUser({
@@ -567,8 +556,8 @@ describe("postLoginPath — the onboarding payment gate", () => {
     }
   })
 
-  it("never gates a company that has FINISHED onboarding", async () => {
-    // The gate is an onboarding step, not a paywall on the whole app. Someone
+  it("never re-routes a company that has FINISHED onboarding", async () => {
+    // Payment is an onboarding step, not a paywall on the whole app. Someone
     // already inside whose subscription lapses is the enforcement layer's
     // problem (402 on generation), not a reason to throw them back into
     // signup.
@@ -580,7 +569,7 @@ describe("postLoginPath — the onboarding payment gate", () => {
     expect(await postLoginPath()).toBe("/")
   })
 
-  it("still surfaces an invite conflict ahead of the gate", async () => {
+  it("still surfaces an invite conflict ahead of the resume", async () => {
     // A user who cannot join this company at all should be told that, not
     // asked to pay for it.
     existingMemberUser({
