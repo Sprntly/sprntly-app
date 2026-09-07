@@ -47,11 +47,11 @@ def _blob(path: str, *, size: int = 100) -> dict:
 
 
 _TREE = [
-    _blob("skills/sprint-planner/SKILL.md"),
+    _blob("skills/standup-planner/SKILL.md"),
     _blob("skills/pricing-review/SKILL.md"),
 ]
 _BODIES = {
-    "skills/sprint-planner/SKILL.md": _skill_md("sprint-planner", "Plans a sprint."),
+    "skills/standup-planner/SKILL.md": _skill_md("standup-planner", "Plans a sprint."),
     "skills/pricing-review/SKILL.md": _skill_md("pricing-review", "Reviews pricing."),
 }
 
@@ -119,7 +119,7 @@ def _import(client, paths, *, repo="octocat/methods", **body):
     )
 
 
-def _import_synced(client, paths=("sprint-planner",), path="skills"):
+def _import_synced(client, paths=("standup-planner",), path="skills"):
     """The common setup: import a folder with syncing turned on.
 
     `paths` are relative to `path` — discovery walks the requested folder, so a
@@ -158,7 +158,7 @@ def test_importing_without_sync_registers_nothing(tenant_client):
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        resp = _import(t.client, ["sprint-planner"], path="skills")
+        resp = _import(t.client, ["standup-planner"], path="skills")
     assert resp.status_code == 201, resp.text
     assert resp.json()["synced"] is False
     assert resp.json()["imported"][0]["synced"] is False
@@ -171,7 +171,7 @@ def test_syncing_a_repo_root_is_refused(tenant_client):
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        resp = _import(t.client, ["skills/sprint-planner"], sync=True)
+        resp = _import(t.client, ["skills/standup-planner"], sync=True)
     assert resp.status_code == 422
     assert "folder" in resp.json()["detail"].lower()
     assert _sources(t.client) == []
@@ -244,11 +244,11 @@ async def test_a_file_added_to_the_folder_becomes_a_skill_on_its_own(tenant_clie
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        # Only sprint-planner was ticked, but switching syncing on makes the
+        # Only standup-planner was ticked, but switching syncing on makes the
         # FOLDER the unit, so both of its skills land immediately.
         _import_synced(t.client)
     assert {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]} == {
-        "sprint-planner",
+        "standup-planner",
         "pricing-review",
     }
 
@@ -265,7 +265,7 @@ async def test_a_file_added_to_the_folder_becomes_a_skill_on_its_own(tenant_clie
     assert result.error == ""
     slugs = {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]}
     # Every .md in the folder, including the two nobody selected at import.
-    assert slugs == {"sprint-planner", "pricing-review", "retro-runner"}
+    assert slugs == {"standup-planner", "pricing-review", "retro-runner"}
 
 
 async def test_an_unchanged_folder_costs_one_call_and_imports_nothing(tenant_client):
@@ -296,11 +296,11 @@ async def test_a_file_removed_from_the_folder_leaves_its_skill_alone(tenant_clie
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        _import_synced(t.client, paths=("sprint-planner", "pricing-review"))
+        _import_synced(t.client, paths=("standup-planner", "pricing-review"))
 
     source = db.list_active_skill_sources()[0]
     # pricing-review is gone from the repo.
-    with _Github(tree=[_blob("skills/sprint-planner/SKILL.md")], sha="beefbeef"):
+    with _Github(tree=[_blob("skills/standup-planner/SKILL.md")], sha="beefbeef"):
         await sync_source(source)
 
     slugs = {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]}
@@ -416,7 +416,7 @@ async def test_a_push_to_the_synced_branch_syncs_the_folder_immediately(tenant_c
 
     assert len(results) == 1 and results[0].error == ""
     slugs = {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]}
-    assert slugs == {"sprint-planner", "pricing-review", "retro-runner"}
+    assert slugs == {"standup-planner", "pricing-review", "retro-runner"}
 
 
 async def test_a_push_elsewhere_syncs_nothing_and_reads_nothing(tenant_client):
@@ -513,7 +513,7 @@ async def test_sync_now_re_reads_even_when_the_commit_has_not_moved(tenant_clien
     assert resp.status_code == 200, resp.text
     assert resp.json()["error"] == ""
     slugs = {s["slug"] for s in t.client.get("/v1/skills").json()["skills"]}
-    assert slugs == {"sprint-planner", "pricing-review", "retro-runner"}
+    assert slugs == {"standup-planner", "pricing-review", "retro-runner"}
 
 
 def test_stop_syncing_keeps_the_skills_and_makes_them_editable(tenant_client):
@@ -529,14 +529,14 @@ def test_stop_syncing_keeps_the_skills_and_makes_them_editable(tenant_client):
     assert resp.json()["released"] == 2
 
     listed = t.client.get("/v1/skills").json()["skills"]
-    assert {s["slug"] for s in listed} == {"sprint-planner", "pricing-review"}, (
+    assert {s["slug"] for s in listed} == {"standup-planner", "pricing-review"}, (
         "stopping a sync must never remove a skill"
     )
     assert all(s["synced"] is False for s in listed)
     # Released means editable — that is the point of stopping.
     edit = t.client.patch(
         f"/v1/skills/{skill['id']}",
-        json={"name": "Sprint Planner", "description": "Ours now.", "method": "# mine"},
+        json={"name": "Standup Planner", "description": "Ours now.", "method": "# mine"},
     )
     assert edit.status_code == 200, edit.text
 

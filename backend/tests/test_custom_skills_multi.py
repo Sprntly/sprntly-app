@@ -70,8 +70,8 @@ def _staged_files() -> list[Path]:
 
 
 _TWO_SKILLS = {
-    "skills/sprint-planner/SKILL.md": _skill_md("sprint-planner", "Plans a sprint."),
-    "skills/sprint-planner/references/source.md": b"cited",
+    "skills/standup-planner/SKILL.md": _skill_md("standup-planner", "Plans a sprint."),
+    "skills/standup-planner/references/source.md": b"cited",
     "skills/pricing-review/SKILL.md": _skill_md("pricing-review", "Reviews pricing."),
 }
 
@@ -88,19 +88,19 @@ def test_multi_skill_zip_creates_one_row_per_skill(tenant_client):
     body = resp.json()
     assert body["skipped"] == []
     created = {s["name"]: s for s in body["skills"]}
-    assert sorted(created) == ["Pricing Review", "Sprint Planner"]
+    assert sorted(created) == ["Pricing Review", "Standup Planner"]
     # Each skill names ITSELF from its frontmatter — the form's name and
     # description cannot describe two skills, so they are ignored here.
-    assert created["Sprint Planner"]["description"] == "Plans a sprint."
-    assert created["Sprint Planner"]["trigger"] == "/sprint-planner"
+    assert created["Standup Planner"]["description"] == "Plans a sprint."
+    assert created["Standup Planner"]["trigger"] == "/standup-planner"
     assert created["Pricing Review"]["trigger"] == "/pricing-review"
     assert all(s["replaced"] is False for s in body["skills"])
     assert "Ignored Name" not in [s["name"] for s in body["skills"]]
 
     # Two library rows, each carrying only its own content.
     listed = t.client.get("/v1/skills").json()["skills"]
-    assert sorted(s["slug"] for s in listed) == ["pricing-review", "sprint-planner"]
-    planner = db.get_custom_skill(t.company_id, "sprint-planner")
+    assert sorted(s["slug"] for s in listed) == ["pricing-review", "standup-planner"]
+    planner = db.get_custom_skill(t.company_id, "standup-planner")
     assert planner["references"] == {"source.md": "cited"}
     assert "Reviews pricing" not in planner["method"]
     assert db.get_custom_skill(t.company_id, "pricing-review")["references"] == {}
@@ -116,14 +116,14 @@ def test_each_skill_gets_its_own_stored_original(tenant_client):
     by_name = {s["name"]: s for s in body["skills"]}
     # The skill with a supporting file round-trips as its own .zip; the one
     # that is just a method comes back as the .md it effectively was.
-    planner = t.client.get(f"/v1/skills/{by_name['Sprint Planner']['id']}/file")
+    planner = t.client.get(f"/v1/skills/{by_name['Standup Planner']['id']}/file")
     assert planner.status_code == 200, planner.text
-    assert planner.json()["name"] == "sprint-planner.zip"
+    assert planner.json()["name"] == "standup-planner.zip"
     pricing = t.client.get(f"/v1/skills/{by_name['Pricing Review']['id']}/file")
     assert pricing.json()["name"] == "pricing-review.md"
 
     # Deleting one leaves the other's original in place.
-    assert t.client.delete(f"/v1/skills/{by_name['Sprint Planner']['id']}").status_code == 200
+    assert t.client.delete(f"/v1/skills/{by_name['Standup Planner']['id']}").status_code == 200
     assert len(_staged_files()) == 1
 
 
@@ -154,19 +154,19 @@ def test_each_skill_replaces_the_companys_own_skill_of_that_name(tenant_client):
     # triggers, new content — and one new skill for the folder that was added.
     second = _upload(t.client, _zip_bytes({
         **_TWO_SKILLS,
-        "skills/sprint-planner/SKILL.md": _skill_md(
-            "sprint-planner", "Plans a sprint.", "Version two of the method."
+        "skills/standup-planner/SKILL.md": _skill_md(
+            "standup-planner", "Plans a sprint.", "Version two of the method."
         ),
         "skills/raci-builder/SKILL.md": _skill_md("raci-builder", "Builds a RACI."),
     })).json()
     by_name = {s["name"]: s for s in second["skills"]}
-    assert by_name["Sprint Planner"]["replaced"] is True
-    assert by_name["Sprint Planner"]["id"] == ids["Sprint Planner"]
+    assert by_name["Standup Planner"]["replaced"] is True
+    assert by_name["Standup Planner"]["id"] == ids["Standup Planner"]
     assert by_name["Raci Builder"]["replaced"] is False
 
     listed = t.client.get("/v1/skills").json()["skills"]
     assert len(listed) == 3  # not six
-    assert "Version two" in db.get_custom_skill(t.company_id, "sprint-planner")["method"]
+    assert "Version two" in db.get_custom_skill(t.company_id, "standup-planner")["method"]
     # One original per row still — the superseded ones were cleaned up.
     assert len(_staged_files()) == 3
 
@@ -213,11 +213,11 @@ def test_multi_skill_import_never_reaches_another_company(tenant_client):
     a = tenant_client.make(slug="acme")
     b = tenant_client.make(slug="globex")
     assert _upload(a.client, _zip_bytes(_TWO_SKILLS)).status_code == 201
-    theirs = db.get_custom_skill(a.company_id, "sprint-planner")
+    theirs = db.get_custom_skill(a.company_id, "standup-planner")
 
     resp = _upload(b.client, _zip_bytes({
-        "skills/sprint-planner/SKILL.md": _skill_md(
-            "sprint-planner", "Globex's own.", "Globex body."
+        "skills/standup-planner/SKILL.md": _skill_md(
+            "standup-planner", "Globex's own.", "Globex body."
         ),
         "skills/pricing-review/SKILL.md": _skill_md("pricing-review", "Globex pricing."),
     }))
@@ -225,9 +225,9 @@ def test_multi_skill_import_never_reaches_another_company(tenant_client):
     assert all(s["replaced"] is False for s in resp.json()["skills"])
     # Acme's rows are byte-for-byte what they were; the slugs coexist across
     # tenants because uniqueness is per company.
-    after = db.get_custom_skill(a.company_id, "sprint-planner")
+    after = db.get_custom_skill(a.company_id, "standup-planner")
     assert after["id"] == theirs["id"] and after["method"] == theirs["method"]
-    assert "Globex body" in db.get_custom_skill(b.company_id, "sprint-planner")["method"]
+    assert "Globex body" in db.get_custom_skill(b.company_id, "standup-planner")["method"]
 
 
 # ─── partial failure ─────────────────────────────────────────────────────────
@@ -239,7 +239,7 @@ def test_one_oversized_skill_is_skipped_and_the_rest_import(tenant_client):
     t = tenant_client.make(slug="acme")
     huge = b"a" * (MAX_SKILL_CONTENT_CHARS + 1)
     data = _zip_bytes({
-        "sprint-planner/SKILL.md": _skill_md("sprint-planner", "Plans a sprint."),
+        "standup-planner/SKILL.md": _skill_md("standup-planner", "Plans a sprint."),
         "bloated/SKILL.md": _skill_md("bloated", "Too much.").replace(b"Do the thing.", huge),
         "pricing-review/SKILL.md": _skill_md("pricing-review", "Reviews pricing."),
     })
@@ -248,7 +248,7 @@ def test_one_oversized_skill_is_skipped_and_the_rest_import(tenant_client):
     # fail: 201 with the reason attached to the folder that caused it.
     assert resp.status_code == 201, resp.text
     body = resp.json()
-    assert sorted(s["name"] for s in body["skills"]) == ["Pricing Review", "Sprint Planner"]
+    assert sorted(s["name"] for s in body["skills"]) == ["Pricing Review", "Standup Planner"]
     assert [s["path"] for s in body["skipped"]] == ["bloated"]
     assert f"{MAX_SKILL_CONTENT_CHARS:,} character" in body["skipped"][0]["reason"]
     # The rejected skill left nothing behind — two rows, two originals.

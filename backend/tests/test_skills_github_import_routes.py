@@ -49,13 +49,13 @@ def _blob(path: str, *, size: int = 100, mode: str = "100644", type_: str = "blo
 
 
 _TREE = [
-    _blob("skills/sprint-planner/SKILL.md"),
-    _blob("skills/sprint-planner/references/source.md"),
+    _blob("skills/standup-planner/SKILL.md"),
+    _blob("skills/standup-planner/references/source.md"),
     _blob("skills/pricing-review/SKILL.md"),
 ]
 _BODIES = {
-    "skills/sprint-planner/SKILL.md": _skill_md("sprint-planner", "Plans a sprint."),
-    "skills/sprint-planner/references/source.md": "cited",
+    "skills/standup-planner/SKILL.md": _skill_md("standup-planner", "Plans a sprint."),
+    "skills/standup-planner/references/source.md": "cited",
     "skills/pricing-review/SKILL.md": _skill_md("pricing-review", "Reviews pricing."),
 }
 
@@ -132,10 +132,10 @@ def test_discover_lists_the_repos_skills_without_writing_anything(tenant_client)
     body = resp.json()
     assert body["commit_sha"] == "c0ffee" and body["ref"] == "main"
     by_path = {s["path"]: s for s in body["skills"]}
-    assert sorted(by_path) == ["skills/pricing-review", "skills/sprint-planner"]
-    planner = by_path["skills/sprint-planner"]
-    assert planner["name"] == "Sprint Planner"
-    assert planner["trigger_preview"] == "/sprint-planner"
+    assert sorted(by_path) == ["skills/pricing-review", "skills/standup-planner"]
+    planner = by_path["skills/standup-planner"]
+    assert planner["name"] == "Standup Planner"
+    assert planner["trigger_preview"] == "/standup-planner"
     assert planner["status"] == "new"
     assert planner["file_count"] == 2 and planner["char_count"] > 0
     # Read-only: nothing was created by looking.
@@ -152,13 +152,13 @@ def test_discover_marks_a_skill_that_would_replace_one_of_ours(tenant_client):
     t.client.post(
         "/v1/skills",
         files={"file": ("s.md", b"# ours\n", "text/markdown")},
-        data={"name": "Sprint Planner", "description": "Ours."},
+        data={"name": "Standup Planner", "description": "Ours."},
     )
     with _Github():
         body = _discover(t.client).json()
-    planner = next(s for s in body["skills"] if s["path"] == "skills/sprint-planner")
+    planner = next(s for s in body["skills"] if s["path"] == "skills/standup-planner")
     assert planner["status"] == "replaces"
-    assert planner["trigger_preview"] == "/sprint-planner"
+    assert planner["trigger_preview"] == "/standup-planner"
 
 
 def test_discover_previews_the_trigger_a_builtin_name_would_get(tenant_client, monkeypatch):
@@ -166,14 +166,14 @@ def test_discover_previews_the_trigger_a_builtin_name_would_get(tenant_client, m
 
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
-    monkeypatch.setattr(mod, "list_skills", lambda: ["sprint-planner"])
+    monkeypatch.setattr(mod, "list_skills", lambda: ["standup-planner"])
     with _Github():
         body = _discover(t.client).json()
-    planner = next(s for s in body["skills"] if s["path"] == "skills/sprint-planner")
+    planner = next(s for s in body["skills"] if s["path"] == "skills/standup-planner")
     # A built-in is never overridden: the preview shows the trigger the import
     # will actually hand out, computed the same way the write path does.
     assert planner["status"] == "new"
-    assert planner["trigger_preview"] == "/sprint-planner-2"
+    assert planner["trigger_preview"] == "/standup-planner-2"
 
 
 def test_discover_reports_an_unimportable_skill_with_its_reason(tenant_client):
@@ -204,7 +204,7 @@ def test_another_companys_repo_is_404_not_403(tenant_client):
     _connect_repo(a.company_id)  # only Acme connected octocat
     with _Github():
         resp = _discover(b.client)
-        imported = _import(b.client, ["skills/sprint-planner"])
+        imported = _import(b.client, ["skills/standup-planner"])
     # 404 both times: a 403 would confirm the repo exists and is connected to
     # Sprntly by somebody, which is exactly what a foreign tenant must not learn.
     assert resp.status_code == 404
@@ -220,7 +220,7 @@ def test_import_without_an_origin_header_is_403(tenant_client):
     with _Github():
         resp = t.client.post(
             "/v1/skills/github/import",
-            json={"repo": "octocat/methods", "paths": ["skills/sprint-planner"]},
+            json={"repo": "octocat/methods", "paths": ["skills/standup-planner"]},
             headers={"Origin": ""},
         )
     assert resp.status_code == 403
@@ -236,16 +236,16 @@ def test_import_creates_one_row_and_one_file_per_selected_skill(tenant_client):
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        resp = _import(t.client, ["skills/sprint-planner", "skills/pricing-review"])
+        resp = _import(t.client, ["skills/standup-planner", "skills/pricing-review"])
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body["skipped"] == [] and body["commit_sha"] == "c0ffee"
     names = sorted(s["name"] for s in body["imported"])
-    assert names == ["Pricing Review", "Sprint Planner"]
+    assert names == ["Pricing Review", "Standup Planner"]
     assert all(s["replaced"] is False for s in body["imported"])
 
     # Each skill carries its own content and its own original file.
-    planner = db.get_custom_skill(t.company_id, "sprint-planner")
+    planner = db.get_custom_skill(t.company_id, "standup-planner")
     assert planner["references"] == {"source.md": "cited"}
     assert "Reviews pricing" not in planner["method"]
     assert len(_staged_files()) == 2
@@ -280,24 +280,24 @@ def test_reimporting_replaces_the_same_rows_in_place(tenant_client):
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
     with _Github():
-        first = _import(t.client, ["skills/sprint-planner"]).json()
+        first = _import(t.client, ["skills/standup-planner"]).json()
     original_id = first["imported"][0]["id"]
 
     updated_bodies = {
         **_BODIES,
-        "skills/sprint-planner/SKILL.md": _skill_md(
-            "sprint-planner", "Plans a sprint.", "Version two of the method."
+        "skills/standup-planner/SKILL.md": _skill_md(
+            "standup-planner", "Plans a sprint.", "Version two of the method."
         ),
     }
     with _Github(bodies=updated_bodies):
-        again = _import(t.client, ["skills/sprint-planner"]).json()
+        again = _import(t.client, ["skills/standup-planner"]).json()
     # Re-importing after the repo moved on is a new VERSION: same row, same id,
     # same trigger the team has learned — not a second card.
     assert again["imported"][0]["replaced"] is True
     assert again["imported"][0]["id"] == original_id
-    assert again["imported"][0]["slug"] == "sprint-planner"
+    assert again["imported"][0]["slug"] == "standup-planner"
     assert len(t.client.get("/v1/skills").json()["skills"]) == 1
-    assert "Version two" in db.get_custom_skill(t.company_id, "sprint-planner")["method"]
+    assert "Version two" in db.get_custom_skill(t.company_id, "standup-planner")["method"]
     assert len(_staged_files()) == 1  # the superseded original was cleaned up
 
 
@@ -308,11 +308,11 @@ def test_a_builtin_name_takes_the_next_trigger_and_overrides_nothing(
 
     t = tenant_client.make(slug="acme")
     _connect_repo(t.company_id)
-    monkeypatch.setattr(mod, "list_skills", lambda: ["sprint-planner"])
+    monkeypatch.setattr(mod, "list_skills", lambda: ["standup-planner"])
     with _Github():
-        body = _import(t.client, ["skills/sprint-planner"]).json()
+        body = _import(t.client, ["skills/standup-planner"]).json()
     ours = body["imported"][0]
-    assert ours["slug"] == "sprint-planner-2"
+    assert ours["slug"] == "standup-planner-2"
     assert ours["name_conflict"] is True
 
 
@@ -331,13 +331,13 @@ def test_one_bad_skill_is_skipped_and_the_batch_survives(tenant_client):
     with _Github(tree=tree, bodies=bodies):
         resp = _import(
             t.client,
-            ["skills/sprint-planner", "skills/bloated", "skills/pricing-review"],
+            ["skills/standup-planner", "skills/bloated", "skills/pricing-review"],
         )
     assert resp.status_code == 201, resp.text
     body = resp.json()
     # Eleven of twelve skills importing beats a request that fails outright.
     assert sorted(s["name"] for s in body["imported"]) == [
-        "Pricing Review", "Sprint Planner"
+        "Pricing Review", "Standup Planner"
     ]
     assert [s["path"] for s in body["skipped"]] == ["skills/bloated"]
     assert f"{MAX_SKILL_CONTENT_CHARS:,} character" in body["skipped"][0]["reason"]

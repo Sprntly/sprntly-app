@@ -1,0 +1,70 @@
+# Business Context — structured object (knowledge-graph ingestible)
+# Every leaf carries: value, src (given|inferred|unknown), conf (high|med|low), as_of (date),
+# and for inferred fields an `evidence` snippet (the exact source text that backs it).
+# Unknowns are explicit (value: null, src: unknown) — never omitted-as-if-known, never guessed.
+# A fact-check pass binds every inferred field to its evidence before this object ships.
+
+meta:
+  created:        { value: <date>,  src: given }
+  last_refreshed: { value: <date>,  src: given }
+  refresh_trigger: { value: "rebuild on pricing change, new segment, or after 6 months", src: given }
+  overall_confidence: { value: <high|med|low>, src: inferred }
+  sources: [ { url: <page>, as_of: <date> }, ... ]   # every page/material read
+
+identity:
+  legal_name:     { value: <name>,        src: given,    conf: high, as_of: <date> }
+  also_known_as:  { value: [<aka>],        src: inferred, conf: med,  as_of: <date> }
+  website:        { value: <url>,          src: given,    conf: high, as_of: <date> }
+  one_liner:      { value: <what they do, one sentence>, src: inferred, conf: <>, as_of: <date> }
+  industry:       { value: <industry>,     src: inferred, conf: <>,   as_of: <date> }
+  sub_vertical:   { value: <niche>,        src: inferred, conf: <>,   as_of: <date> }
+  company_size:   { value: <emp range or unknown>, src: <>, conf: <>, as_of: <date> }
+  stage:          { value: <seed|growth|public|unknown>, src: <>, conf: <>, as_of: <date> }
+  hq_geography:   { value: <location>,     src: inferred, conf: <>,   as_of: <date> }
+  markets_served: { value: [<geos/segments>], src: inferred, conf: <>, as_of: <date> }
+
+business_model:
+  model_type:     { value: <subscription|marketplace|transactional|ads|usage|services|hybrid>, src: <>, conf: <>, as_of: <date> }
+  revenue_model:  { value: <how they make money>, src: <>, conf: <>, as_of: <date> }
+  pricing_model:  { value: <per-seat|usage|flat|tiered|take-rate|unknown>, src: <>, conf: <>, as_of: <date> }
+  who_pays:       { value: <the buyer>,    src: <>, conf: <>, as_of: <date> }   # distinct from who_uses
+  who_uses:       { value: <the user>,     src: <>, conf: <>, as_of: <date> }
+  monetization_unit: { value: <seat|transaction|GMV|impression|unknown>, src: <>, conf: <>, as_of: <date> }
+  unit_economics_shape: { value: <null if not sourced>, src: unknown, conf: low, as_of: <date> }
+  good_outcome:   { value: <what a good business outcome looks like for THEM>, src: <>, conf: <>, as_of: <date> }
+
+users_segments:
+  segments:
+    - name:        { value: <segment>, src: <>, conf: <> }
+      description: { value: <who they are>, src: <>, conf: <> }
+      jtbd:        { value: <the job they hire the product for>, src: <>, conf: <> }
+      is_buyer:    { value: <true|false>, src: <>, conf: <> }
+      is_user:     { value: <true|false>, src: <>, conf: <> }
+      is_champion: { value: <true|false>, src: <>, conf: <> }
+      relative_size: { value: <large|med|small|unknown>, src: <>, conf: <> }
+  primary_segment: { value: <name>, src: <>, conf: <>, as_of: <date> }
+
+product_value:
+  what_it_does:   { value: <plain description>, src: <>, conf: <>, as_of: <date> }
+  core_value_moments: { value: [<the moments users get value>], src: <>, conf: <> }
+  activation_definition: { value: <activation IN THEIR TERMS, or unknown>, src: <>, conf: <> }
+  key_features:   { value: [<features>], src: inferred, conf: <> }
+  platforms:      { value: [<web|mobile|api|...>], src: inferred, conf: <> }
+
+market_competition:   # lightweight — defer depth to competitive-intelligence-review
+  category:       { value: <category>, src: <>, conf: <> }
+  main_alternatives: { value: [<named alternatives + "DIY/do nothing">], src: <>, conf: <> }
+  positioning_angle: { value: <how they frame themselves>, src: inferred, conf: <> }
+
+goals_strategy:
+  stated_goal:    { value: <their goal, verbatim where possible>, src: given, conf: high, as_of: <date> }
+  north_star:     { value: <metric or unknown>, src: <>, conf: <> }
+  current_priorities: { value: [<priorities>], src: <>, conf: <> }
+  known_constraints:  { value: [<constraints>], src: <>, conf: <> }
+
+vocabulary:   # the business's OWN words — what makes Sprntly speak their language
+  terms:
+    - term:        { value: <e.g. "operator"> }
+      their_meaning: { value: <what THEY mean by it>, src: <>, conf: <> }
+      sprntly_default: { value: <Sprntly's default reading, if it differs> }
+      note:        { value: <why the delta matters for interpreting signals> }
