@@ -323,3 +323,293 @@ def test_the_index_is_read_for_the_caller_scope_only(monkeypatch):
         dataset="acme--design",
     )
     assert seen == {"dataset": "acme--design", "openable_only": True}
+
+
+# ── The thread-born kinds: reports, ticket sets, team documents ──────────────
+#
+# These three were reported `unsupported_type` while the chat panel already had
+# a Reports tab, a Tickets tab and a Document tab — so "show me the report" was
+# answered by pointing at a different screen for a document the panel beside the
+# reader could render. OPENABLE_TYPES had simply gone stale against a panel that
+# grew tabs underneath it.
+#
+# They come from a DIFFERENT listing (the five-table fan-out, not the PRD/
+# evidence index) and speak a different type vocabulary ("ticket_set",
+# "custom_artifact" where the user said "tickets", "document"), so both the
+# source selection and the mapping are pinned here.
+
+def _report(id_, title, *, conversation_id=None, conversation_title=None,
+            created_at="2026-08-01"):
+    return {
+        "type": "report",
+        "id": id_,
+        "title": title,
+        "status": "",
+        "created_at": created_at,
+        "source": {"conversation_id": conversation_id,
+                   "conversation_title": conversation_title},
+        "open": {"report_id": id_},
+    }
+
+
+def _ticket_set(id_, title, *, status="ready", conversation_id=None):
+    return {
+        "type": "ticket_set",
+        "id": id_,
+        "title": title,
+        "status": status,
+        "created_at": "2026-08-01",
+        "source": {"conversation_id": conversation_id, "conversation_title": None},
+        "open": {"ticket_set_id": id_},
+    }
+
+
+def _document(id_, title, *, status="ready", conversation_id=None):
+    return {
+        "type": "custom_artifact",
+        "id": id_,
+        "title": title,
+        "status": status,
+        "created_at": "2026-08-01",
+        "source": {"conversation_id": conversation_id, "conversation_title": None},
+        "open": {"custom_artifact_id": id_},
+    }
+
+
+def _patch_fanout(monkeypatch, items):
+    """Stand in for the five-table listing the thread-born kinds read."""
+    seen: dict = {}
+
+    def _list(*, dataset, company_id):
+        seen.update(dataset=dataset, company_id=company_id)
+        return list(items)
+
+    import app.db.artifacts as db_artifacts
+
+    monkeypatch.setattr(db_artifacts, "list_artifacts_for_company", _list)
+    return seen
+
+
+def test_a_report_opens_instead_of_being_refused(monkeypatch):
+    """The reported bug at its narrowest: asking to see a report used to come
+    back "a report doesn't open in this panel"."""
+    _patch_fanout(monkeypatch, [_report(9, "Onboarding drop-off")])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="onboarding drop-off",
+        dataset="acme", company_id="co-1",
+    )
+    assert out["status"] == "resolved"
+    assert out["artifact"]["report_id"] == 9
+
+
+def test_the_users_word_is_mapped_onto_the_listings_type(monkeypatch):
+    """"tickets" and "document" are what the USER says; the listing says
+    "ticket_set" and "custom_artifact". Comparing the two directly filters every
+    row out and reports not_found for a document sitting right there."""
+    _patch_fanout(monkeypatch, [
+        _ticket_set(3, "Checkout rework"), _document(4, "Launch plan"),
+    ])
+    tickets = ao.resolve_open_artifact(
+        artifact_type="tickets", query="checkout rework",
+        dataset="acme", company_id="co-1",
+    )
+    assert tickets["status"] == "resolved"
+    assert tickets["artifact"]["ticket_set_id"] == 3
+
+    doc = ao.resolve_open_artifact(
+        artifact_type="document", query="launch plan",
+        dataset="acme", company_id="co-1",
+    )
+    assert doc["status"] == "resolved"
+    assert doc["artifact"]["custom_artifact_id"] == 4
+
+
+def test_the_open_id_and_the_conversation_stamps_travel(monkeypatch):
+    """The client opens on the SAME id its `list_artifacts` cards use, and needs
+    the conversation to decide whether the document is this thread's or another
+    one's (which is what `standalone` means in the panel)."""
+    _patch_fanout(monkeypatch, [
+        _report(9, "Churn review", conversation_id=41, conversation_title="Churn chat"),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="churn review",
+        dataset="acme", company_id="co-1",
+    )
+    assert out["artifact"]["report_id"] == 9
+    assert out["artifact"]["conversation_id"] == 41
+    assert out["artifact"]["conversation_title"] == "Churn chat"
+
+
+def test_a_bare_open_prefers_this_conversations_own_report(monkeypatch):
+    """"Show me the report", said in the chat that just wrote one, means THAT
+    report. Scored against the whole library the same sentence would return a
+    disambiguation over documents the reader never mentioned."""
+    _patch_fanout(monkeypatch, [
+        _report(1, "Older report", conversation_id=7),
+        _report(2, "This thread's", conversation_id=88),
+        _report(3, "Someone else's", conversation_id=9),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "resolved"
+    assert out["artifact"]["report_id"] == 2
+
+
+def test_a_thread_owning_none_gets_nothing_not_someone_elses(monkeypatch):
+    """REPORTED: a chat with no ticket set of its own was handed the
+    workspace's only one — another conversation's tickets, opened inside this
+    one. A thread-born kind is scoped to its thread, so "none here" is the
+    answer, never a substitution from the library."""
+    _patch_fanout(monkeypatch, [
+        _report(1, "One", conversation_id=7), _report(2, "Two", conversation_id=9),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "not_found"
+    assert out["artifact"] is None
+    assert out["candidates"] == []
+
+
+def test_a_thread_owning_several_asks_among_ITS_OWN(monkeypatch):
+    """REPORTED: a chat holding two reports was asked to choose between five
+    from across the whole workspace. Two of this thread's is still a question —
+    but the question is about this thread's two."""
+    _patch_fanout(monkeypatch, [
+        _report(1, "Mine A", conversation_id=88),
+        _report(2, "Mine B", conversation_id=88),
+        _report(3, "Someone else's", conversation_id=9),
+        _report(4, "Also not mine", conversation_id=None),
+    ])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "ambiguous"
+    assert {c["report_id"] for c in out["candidates"]} == {1, 2}
+
+
+def test_a_TITLED_open_is_thread_scoped_too(monkeypatch):
+    """The scope is the thread, not the phrasing. Naming a title must not be a
+    way back out to the library — otherwise "show me the churn report" opens a
+    document from a conversation the reader has never seen."""
+    _patch_fanout(monkeypatch, [_report(3, "Churn review", conversation_id=9)])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="churn review", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "not_found"
+
+
+def test_tickets_and_documents_are_thread_scoped_the_same_way(monkeypatch):
+    """All three thread-born kinds, one rule — the ticket set is the one the
+    report actually named."""
+    _patch_fanout(monkeypatch, [
+        _ticket_set(3, "Checkout rework", conversation_id=9),
+        _document(4, "Launch plan", conversation_id=9),
+    ])
+    for kind in ("tickets", "document"):
+        out = ao.resolve_open_artifact(
+            artifact_type=kind, query="", dataset="acme",
+            company_id="co-1", conversation_id=88,
+        )
+        assert out["status"] == "not_found", kind
+
+
+def test_a_PROJECT_scope_is_not_narrowed_to_the_open_chat(monkeypatch):
+    """A project's container is the PROJECT, and its listing holds artifacts no
+    chat produced — a document uploaded to it has no conversation at all.
+    Filtering those down to whichever chat is open would hide artifacts that
+    genuinely belong to the project the reader is standing in."""
+    seen: dict = {}
+
+    def _list(*, project_id, dataset, company_id):
+        seen.update(project_id=project_id)
+        return [_document(4, "Launch plan", conversation_id=None)]
+
+    import app.db.artifacts as db_artifacts
+    monkeypatch.setattr(db_artifacts, "list_artifacts_for_project", _list)
+
+    out = ao.resolve_open_artifact(
+        artifact_type="document", query="", dataset="acme",
+        company_id="co-1", project_id=12, conversation_id=88,
+    )
+    assert seen["project_id"] == 12, "the project listing is the source"
+    assert out["status"] == "resolved"
+    assert out["artifact"]["custom_artifact_id"] == 4
+
+
+def test_a_first_turn_with_no_conversation_row_still_reads_the_library(monkeypatch):
+    """`conversation_id` is None before the row exists. There is no thread to
+    scope to and a brand-new chat has produced nothing, so the library-wide
+    behaviour stands rather than refusing everything."""
+    _patch_fanout(monkeypatch, [_report(1, "Only one", conversation_id=7)])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="", dataset="acme", company_id="co-1",
+    )
+    assert out["status"] == "resolved"
+
+
+def test_prds_are_exempt_from_thread_scoping(monkeypatch):
+    """A PRD is a LIBRARY document — any chat may legitimately open one, and it
+    has its own resume-the-originating-thread path. Scoping it to the open chat
+    would break "open the checkout PRD" from anywhere but the chat that wrote
+    it."""
+    _patch_index(monkeypatch, [_prd(1, "Checkout")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="checkout", dataset="acme",
+        company_id="co-1", conversation_id=88,
+    )
+    assert out["status"] == "resolved"
+
+
+def test_a_thread_kind_without_a_company_reads_nothing(monkeypatch):
+    """The fan-out is keyed by the company UUID as well as the dataset slug.
+    Missing one is not_found, never a lookup against a guessed tenant."""
+    seen = _patch_fanout(monkeypatch, [_report(9, "Churn review")])
+    out = ao.resolve_open_artifact(
+        artifact_type="report", query="churn review", dataset="acme",
+    )
+    assert out["status"] == "not_found"
+    assert not seen
+
+
+def test_prds_still_come_from_the_openable_only_index(monkeypatch):
+    """The fan-out is for the thread-born kinds ONLY. A PRD open keeps reading
+    `list_document_artifacts(openable_only=True)`, whose filter-before-collapse
+    order is what keeps a family reachable after a restart invalidates its
+    head."""
+    fanout = _patch_fanout(monkeypatch, [_report(9, "Dark Mode")])
+    index = _patch_index(monkeypatch, [_prd(1, "Dark Mode")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prd", query="dark mode", dataset="acme", company_id="co-1",
+    )
+    assert out["status"] == "resolved"
+    assert index["openable_only"] is True
+    assert not fanout, "a PRD open must not pay for the five-table fan-out"
+
+
+def test_a_prototype_is_still_refused_and_still_costs_no_lookup(monkeypatch):
+    """The one kind that genuinely is not a panel: a prototype opens on its own
+    route, which means LEAVING the conversation."""
+    fanout = _patch_fanout(monkeypatch, [_report(9, "Dark Mode")])
+    index = _patch_index(monkeypatch, [_prd(1, "Dark Mode")])
+    out = ao.resolve_open_artifact(
+        artifact_type="prototype", query="dark mode", dataset="acme",
+        company_id="co-1",
+    )
+    assert out["status"] == "unsupported_type"
+    assert not fanout and not index
+
+
+def test_a_failed_document_is_not_offered(monkeypatch):
+    """A run that produced nothing is not an artifact, and offering it turns a
+    good match into a dead click."""
+    _patch_fanout(monkeypatch, [_document(4, "Launch plan", status="failed")])
+    out = ao.resolve_open_artifact(
+        artifact_type="document", query="", dataset="acme", company_id="co-1",
+    )
+    assert out["status"] == "not_found"

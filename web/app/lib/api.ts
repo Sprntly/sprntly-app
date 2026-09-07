@@ -2107,9 +2107,15 @@ export type ChatArtifactItem = {
   }
 }
 
-/** Artifact kinds an OPEN request can name. Both have an existing right-panel
- *  view in the chat; prototypes/reports deliberately do not appear here. */
-export type OpenArtifactKind = "prd" | "evidence"
+/** Artifact kinds an OPEN request can RESOLVE to — each has an existing
+ *  right-panel view in the chat (PRD, Evidence, Reports, Tickets, Document).
+ *  Mirrors `backend/app/artifact_open.py`'s OPENABLE_TYPES.
+ *
+ *  Prototypes deliberately do not appear: one opens on its own `/prototype`
+ *  route, which means LEAVING the conversation, so the backend reports it as
+ *  `unsupported_type` and the reply says where it lives instead. */
+export type OpenArtifactKind =
+  | "prd" | "evidence" | "report" | "tickets" | "document"
 
 /** One artifact the user's phrase could have meant — carrying the IDS needed to
  *  open it, so a disambiguation chip is a real action and never a re-sent
@@ -2139,6 +2145,13 @@ export type OpenArtifactCandidate = {
    *  id means the chat row is gone. */
   conversation_id?: number | null
   conversation_title?: string | null
+  /** The thread-born kinds each carry ONE id, and it is the same id the
+   *  `list_artifacts` cards open on (`ChatArtifactItem.open`) — so a resolved
+   *  open reuses that path rather than growing a second one beside it. Exactly
+   *  one is present, matching `type`. */
+  report_id?: number | null
+  ticket_set_id?: number | null
+  custom_artifact_id?: number | null
 }
 
 /** The 0/1/many verdict for an open request. All three outcomes are part of the

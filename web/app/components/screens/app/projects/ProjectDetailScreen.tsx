@@ -56,7 +56,7 @@ import {
   type ProjectMemorySummary,
 } from "../../../../lib/api"
 import { openArtifactDestination } from "../../../shared/chat-shell/openArtifactDestination"
-import { openArtifactCandidateAsItem } from "./artifactCandidates"
+import { candidateBrowseType, openArtifactCandidateAsItem } from "./artifactCandidates"
 import { ProjectMainThread, type ProjectChatSubmit, type ProjectChatSubmitRef } from "./ProjectMainThread"
 import { ProjectArtifactsDrawer } from "./ProjectArtifactsDrawer"
 import { ProjectSettingsModal, type SettingsTab } from "./ProjectSettingsModal"
@@ -292,7 +292,10 @@ export function ProjectDetailView({
         return true
       },
     })
-    if (!opened) onOpenArtifacts(candidate.type)
+    // `candidateBrowseType` because the browse filter speaks the STORAGE
+    // vocabulary ("ticket_set", "custom_artifact") while an open candidate
+    // speaks the user's ("tickets", "document").
+    if (!opened) onOpenArtifacts(candidateBrowseType(candidate.type))
   }
 
   return (

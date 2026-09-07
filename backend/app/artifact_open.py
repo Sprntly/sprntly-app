@@ -48,13 +48,45 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Artifact kinds this resolver can open. Both have an EXISTING right-panel view
-# in the chat (ContentPanel's PRD tab and Evidence tab), reached through the
-# same `openPrdTab` entry point every other in-app artifact open already uses.
-# Prototypes and reports are deliberately absent — a prototype opens on its own
-# `/prototype` route, not the chat panel, and wiring one here would promise a
-# panel that does not exist.
-OPENABLE_TYPES = ("prd", "evidence")
+# Artifact kinds this resolver can open, in the INTENT vocabulary
+# (`chat_intent.NAMEABLE_ARTIFACT_TYPES`). Each one has an EXISTING right-panel
+# view in the chat — ContentPanel's PRD, Evidence, Reports, Tickets and Document
+# tabs — and the client opens all five from a `list_artifacts` card already
+# (ChatScreen's `openChatArtifactItem`), so nothing new is being promised here.
+#
+# THIS LIST WENT STALE, and that is the defect it now closes. It was written
+# when the panel really did hold only a PRD and its evidence, and it was never
+# revisited as the panel grew Reports, Tickets and Document tabs. The result was
+# a refusal that had stopped being true: "show me the report" answered "a report
+# doesn't open in this panel — you'll find it in the Artifacts tab", pointing the
+# reader at a different screen for a document the panel beside them could render.
+# Reported as the chat being "confused" when asked to show a report.
+#
+# `prototype` stays out, and its refusal stays honest: a prototype opens on its
+# own `/prototype` route, which means LEAVING the conversation. That is a
+# navigation, not a panel open, and the copy that names where it lives is the
+# right answer for it.
+OPENABLE_TYPES = ("prd", "evidence", "report", "tickets", "document")
+
+# The intent vocabulary above mapped onto the `type` values the artifact
+# LISTINGS emit. The two disagree for exactly two kinds, and the mismatch is
+# load-bearing rather than cosmetic: the user says "tickets" and "document",
+# `db.artifacts` says "ticket_set" and "custom_artifact", and a resolver that
+# compared the two directly would filter every row out and report `not_found`
+# for a document sitting right there.
+_LISTING_TYPE: dict[str, str] = {
+    "prd": "prd",
+    "evidence": "evidence",
+    "report": "report",
+    "tickets": "ticket_set",
+    "document": "custom_artifact",
+}
+
+# The kinds that hang off a CHAT THREAD rather than off a brief, and therefore
+# come from the five-table fan-out instead of the PRD/evidence index. Kept as
+# its own set because it decides two separate things below — which listing to
+# read, and whether "the report", unqualified, means THIS conversation's.
+_THREAD_KINDS = frozenset({"report", "tickets", "document"})
 
 # Statuses that cannot be shown. A failed or invalidated row is not an artifact
 # the user can open, and offering it as a candidate turns a good match into a
@@ -92,6 +124,11 @@ _STOPWORDS = frozenset(
         "please", "up", "me", "at", "by", "from", "is", "are",
         "prd", "prds", "doc", "docs", "document", "documents", "spec", "specs",
         "evidence", "open", "show", "pull", "view", "find",
+        # The thread-born kinds, here for the identical reason: a report is very
+        # often titled "… Report" and a ticket set "Tickets for …", so counting
+        # the noun would score EVERY report as a partial match for every report
+        # request and turn the disambiguation list back into noise.
+        "report", "reports", "ticket", "tickets",
     }
 )
 
@@ -162,9 +199,24 @@ def _candidate(item: dict) -> dict:
     a client that fed that pair to the panel's Evidence tab would load the
     brief's FIRST finding under an unrelated document. False means "these
     coordinates identify the row, not a finding — don't resolve them".
+
+    The thread-born kinds carry ONE id each — `report_id`, `ticket_set_id`,
+    `custom_artifact_id` — which are exactly the three the client's existing
+    card-click path (`openChatArtifactItem`) already opens on. Emitting the same
+    names is what lets a resolved open reuse that path instead of growing a
+    second one that could drift from it.
+
+    The conversation stamps ride along for the same kinds. For a thread-born
+    artifact the chat that produced it IS its home — main's report and
+    ticket-set branches resume that thread and land the panel over it — so an
+    open without them can only ever manage the standalone fallback. PRD/evidence
+    rows get theirs from `chat_envelope._attach_open_conversations` instead,
+    which reads the newest binding rather than the listing; leaving that path
+    alone keeps this change off it.
     """
     open_ids = item.get("open") or {}
-    return {
+    source = item.get("source") or {}
+    candidate = {
         "type": item.get("type"),
         "id": item.get("id"),
         "title": item.get("title") or "Untitled",
@@ -173,8 +225,14 @@ def _candidate(item: dict) -> dict:
         "brief_id": open_ids.get("brief_id"),
         "insight_index": open_ids.get("insight_index"),
         "brief_anchored": bool(item.get("brief_anchored")),
-        "week_label": (item.get("source") or {}).get("week_label"),
+        "week_label": source.get("week_label"),
     }
+    for key in ("report_id", "ticket_set_id", "custom_artifact_id"):
+        if open_ids.get(key) is not None:
+            candidate[key] = open_ids[key]
+            candidate["conversation_id"] = source.get("conversation_id")
+            candidate["conversation_title"] = source.get("conversation_title")
+    return candidate
 
 
 def rank_artifacts(
@@ -210,6 +268,7 @@ def resolve_open_artifact(
     dataset: str,
     project_id: Optional[int] = None,
     company_id: Optional[str] = None,
+    conversation_id: Optional[int] = None,
 ) -> dict:
     """Resolve an open request to {status, artifact_type, query, artifact,
     candidates}.
@@ -235,6 +294,17 @@ def resolve_open_artifact(
     single PRD or an ambiguous chip list — never the "UI action" refusal a bare
     open used to fall through to.
 
+    `conversation_id` SCOPES the thread-born kinds (report / tickets /
+    document) to the thread the message was sent in — a hard filter, not a
+    ranking preference. Each of those is born in a conversation, so in a chat
+    "the report" can only mean this chat's; a thread with none gets
+    `not_found`, never another conversation's document. PRDs and evidence are
+    exempt: they are library documents any chat may legitimately open.
+
+    It does NOT apply under a project scope (the project's own listing is the
+    right container there, and it holds artifacts no chat produced), nor on a
+    first-turn classify where no conversation row exists yet.
+
     Never raises: a lookup failure degrades to `not_found`, which the client
     renders as "I couldn't find that" — the same thing the user sees when the
     phrase genuinely matches nothing, and strictly better than failing a send.
@@ -257,6 +327,9 @@ def resolve_open_artifact(
     generic = not (query or "").strip()
     if not dataset:
         return out
+    # Everything below matches on the LISTING's vocabulary, never the user's —
+    # see `_LISTING_TYPE`.
+    listing_kind = _LISTING_TYPE[kind]
 
     try:
         if project_id is not None and company_id is not None:
@@ -271,7 +344,27 @@ def resolve_open_artifact(
                 i for i in list_artifacts_for_project(
                     project_id=project_id, dataset=dataset, company_id=company_id,
                 )
-                if i.get("type") in OPENABLE_TYPES
+                if i.get("type") == listing_kind
+            ]
+        elif kind in _THREAD_KINDS:
+            # Reports, ticket sets and team documents are not in the PRD/evidence
+            # index at all — they are three separate tables — so this is the only
+            # listing that can see them. It is the SAME fan-out the Artifacts
+            # screen and the `list_artifacts` cards already render, which is what
+            # makes "show me the report" resolve to the row the user can see
+            # there rather than to something assembled a second way.
+            if not company_id:
+                # The fan-out is keyed by the company UUID as well as the
+                # dataset slug. Without one there is nothing to read — report
+                # not_found rather than guess at a tenant.
+                return out
+            from app.db.artifacts import list_artifacts_for_company
+
+            items = [
+                i for i in list_artifacts_for_company(
+                    dataset=dataset, company_id=company_id,
+                )
+                if i.get("type") == listing_kind
             ]
         else:
             from app.db.artifacts import list_document_artifacts
@@ -297,6 +390,40 @@ def resolve_open_artifact(
         logger.exception("artifact open lookup failed; reporting not_found")
         return out
 
+    # THE THREAD IS THE SCOPE for its own kinds — a FILTER, not a preference.
+    #
+    # This was a preference first ("prefer this conversation's when it owns
+    # exactly one, else fall through to the library") and that was wrong in both
+    # directions, immediately and visibly. A chat holding TWO reports fell
+    # through and asked the reader to choose between five reports from across
+    # the whole workspace; a chat holding NO ticket set fell through, found the
+    # workspace's only one, and OPENED another conversation's tickets inside
+    # this one. Reported as the chat returning things that did not belong to the
+    # thread at all.
+    #
+    # There is no version of that fallback worth keeping. A report, a ticket set
+    # and a team document are each BORN in a conversation, so in a chat "the
+    # report" can only mean this chat's; if this chat has none, the honest
+    # answer is that it has none, which is what `not_found` says. PRDs and
+    # evidence are deliberately exempt — they are library documents that any
+    # chat may legitimately open, and they have their own resume-the-originating-
+    # thread path.
+    #
+    # NOT APPLIED UNDER A PROJECT SCOPE. There the container is the PROJECT, and
+    # its listing already holds only that project's artifacts — including ones
+    # no chat produced (a document uploaded to the project). Filtering those down
+    # to the chat that happens to be open would hide artifacts that genuinely
+    # belong to the project the reader is standing in.
+    #
+    # `conversation_id` is None on a first-turn classify, before the row exists.
+    # There is no thread to scope to yet, and a brand-new chat has produced
+    # nothing, so that case keeps the library-wide behaviour.
+    if conversation_id is not None and project_id is None and kind in _THREAD_KINDS:
+        items = [
+            i for i in items
+            if (i.get("source") or {}).get("conversation_id") == conversation_id
+        ]
+
     if generic:
         # No title named — resolve to the openable artifacts of this kind
         # themselves (the listing is already recency-sorted and family-collapsed,
@@ -304,7 +431,7 @@ def resolve_open_artifact(
         # with real chips. This is the bare "open the PRD" path.
         candidates = [
             i for i in items
-            if i.get("type") == kind
+            if i.get("type") == listing_kind
             and (i.get("status") or "") not in _UNOPENABLE_STATUSES
         ]
         candidates.sort(key=lambda i: i.get("created_at") or "", reverse=True)
@@ -319,7 +446,7 @@ def resolve_open_artifact(
         out["candidates"] = [_candidate(i) for i in candidates[:MAX_CANDIDATES]]
         return out
 
-    ranked = rank_artifacts(items, query, kind)
+    ranked = rank_artifacts(items, query, listing_kind)
     if not ranked:
         return out
 

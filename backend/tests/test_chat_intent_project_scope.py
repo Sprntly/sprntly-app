@@ -308,3 +308,171 @@ def test_get_conversation_project_id_reads_binding(
     assert conversations_db.get_conversation_project_id(
         individual["id"], "some-other-company"
     ) is None
+
+
+# ─── open_artifact: a REPORT is scoped to the thread that produced it ────────
+#
+# REPORTED live: a chat holding two reports was asked to choose between reports
+# from all over the workspace, and a chat holding NO ticket set was handed
+# another conversation's — opened inside this one. Reports, ticket sets and team
+# documents are each BORN in a conversation, so in a chat "the report" can only
+# mean this chat's. These drive the real route, so they cover the whole path:
+# route → conversation binding → enrich → resolve_open_artifact.
+
+
+def _report_envelope(monkeypatch, query: str = "", kind: str = "report"):
+    """Force a bare `open_artifact` verdict for a thread-born kind — the shape
+    `detect_open_intent` produces for "show me the report" (no title at all)."""
+    import app.routes.chat as chat_route
+
+    def _resolve(enterprise_id, message, history=None, *, prd_id=None,
+                 prd_title=None, has_attachments=False, open_artifact=None,
+                 thread_artifact=None):
+        return {
+            "intent": "open_artifact", "confidence": 1.0, "task": None,
+            "instruction": None, "artifact_type": kind,
+            "artifact_query": query or None,
+            "reason": "deterministic open request", "source": "open_intent",
+        }
+
+    monkeypatch.setattr(chat_route, "resolve_chat_intent", _resolve)
+
+
+def _plain_conversation(t, title: str = "chat"):
+    from app.db.client import require_client
+
+    return require_client().table("conversations").insert(
+        {"company_id": t.company_id, "user_id": t.user_id, "title": title,
+         "query": title, "agent_type": "ask"}
+    ).execute().data[0]
+
+
+def _seed_report(t, *, title: str, conversation_id: int | None) -> int:
+    from app.db.reports import save_report
+
+    return save_report(
+        t.company_id, skill="voice-of-customer-report", title=title,
+        html="<p>body</p>", question="q", conversation_id=conversation_id,
+    )
+
+
+def test_a_chat_with_no_report_is_not_handed_another_chats(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The reported failure at its sharpest: the workspace's ONLY report belongs
+    to a different conversation, so without thread scoping it resolves and opens
+    right here. Nothing of this chat's exists, and that is the answer."""
+    t = tenant_client.make(slug="acme")
+    mine = _plain_conversation(t, "my chat")
+    theirs = _plain_conversation(t, "another chat")
+    _seed_report(t, title="Churn review", conversation_id=theirs["id"])
+    _report_envelope(monkeypatch)
+
+    body = t.client.post(
+        "/v1/chat/intent",
+        json={"message": "show me the report", "conversation_id": mine["id"]},
+    ).json()
+
+    assert body["open"]["status"] == "not_found"
+    assert body["open"]["artifact"] is None
+    assert body["open"]["candidates"] == []
+
+
+def test_a_chat_with_two_reports_is_asked_about_ITS_OWN_two(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The other half of the report: "this thread has just two reports, but it
+    returned everything". Two of its own is still a question — asked about the
+    two, not about the workspace."""
+    t = tenant_client.make(slug="acme")
+    mine = _plain_conversation(t, "my chat")
+    theirs = _plain_conversation(t, "another chat")
+    a = _seed_report(t, title="Onboarding drop-off", conversation_id=mine["id"])
+    b = _seed_report(t, title="Churn review", conversation_id=mine["id"])
+    _seed_report(t, title="Not mine", conversation_id=theirs["id"])
+    _seed_report(t, title="Standalone", conversation_id=None)
+    _report_envelope(monkeypatch)
+
+    body = t.client.post(
+        "/v1/chat/intent",
+        json={"message": "show me the report", "conversation_id": mine["id"]},
+    ).json()
+
+    assert body["open"]["status"] == "ambiguous"
+    assert {c["report_id"] for c in body["open"]["candidates"]} == {a, b}
+
+
+def test_a_chats_own_single_report_still_opens(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """Mutation proof, other direction: the scoping is what makes the two cases
+    above land where they do — with exactly one of its own, the chat still
+    opens it, amid reports it does not own."""
+    t = tenant_client.make(slug="acme")
+    mine = _plain_conversation(t, "my chat")
+    theirs = _plain_conversation(t, "another chat")
+    a = _seed_report(t, title="Onboarding drop-off", conversation_id=mine["id"])
+    _seed_report(t, title="Not mine", conversation_id=theirs["id"])
+    _report_envelope(monkeypatch)
+
+    body = t.client.post(
+        "/v1/chat/intent",
+        json={"message": "show me the report", "conversation_id": mine["id"]},
+    ).json()
+
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["report_id"] == a
+
+
+def test_a_project_chat_opens_the_PROJECTS_report_not_the_workspaces(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """The project half of the same question. A project chat's container is the
+    PROJECT: its own report opens, and an identically-titled workspace report
+    that is NOT on the project cannot make it ambiguous."""
+    t = tenant_client.make(slug="acme")
+    project_prd = _seed_prd(
+        isolated_settings["db"], dataset="acme", title="Anchor", theme_id="chat:rp",
+    )
+    project_id = _seed_project_with_prd(t, project_prd)
+    conv = conversations_db.create_individual_project_chat(project_id, t.user_id)
+    # The project's own report, plus a workspace twin that is NOT on it.
+    on_project = _seed_report(t, title="Churn review", conversation_id=conv["id"])
+    projects_db.add_artifact(project_id, "report", on_project)
+    _seed_report(t, title="Churn review", conversation_id=None)
+    _report_envelope(monkeypatch, "churn review")
+
+    body = t.client.post(
+        "/v1/chat/intent",
+        json={"message": "show me the churn review report",
+              "conversation_id": conv["id"]},
+    ).json()
+
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["report_id"] == on_project
+
+
+def test_a_project_report_no_chat_produced_is_still_openable(
+    tenant_client, isolated_settings, monkeypatch
+):
+    """Why the thread filter must NOT apply under a project scope: a report
+    attached to a project carries no conversation of its own, and narrowing to
+    whichever chat is open would hide an artifact that genuinely belongs to the
+    project the reader is standing in."""
+    t = tenant_client.make(slug="acme")
+    project_prd = _seed_prd(
+        isolated_settings["db"], dataset="acme", title="Anchor", theme_id="chat:rp2",
+    )
+    project_id = _seed_project_with_prd(t, project_prd)
+    conv = conversations_db.create_individual_project_chat(project_id, t.user_id)
+    orphan = _seed_report(t, title="Quarterly review", conversation_id=None)
+    projects_db.add_artifact(project_id, "report", orphan)
+    _report_envelope(monkeypatch)
+
+    body = t.client.post(
+        "/v1/chat/intent",
+        json={"message": "show me the report", "conversation_id": conv["id"]},
+    ).json()
+
+    assert body["open"]["status"] == "resolved"
+    assert body["open"]["artifact"]["report_id"] == orphan

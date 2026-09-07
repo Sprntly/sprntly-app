@@ -340,7 +340,12 @@ def chat_intent(
     # `project_id` was derived above (server-side from the conversation binding,
     # client `context_source` as fallback); main-chat rows carry None and stay
     # workspace-scoped, byte-identical to today.
-    enrich_chat_envelope(envelope, company, project_id=project_id)
+    enrich_chat_envelope(
+        envelope, company, project_id=project_id,
+        # The thread itself, so an unqualified "show me the report" resolves to
+        # the one THIS chat wrote instead of asking which of the library's.
+        conversation_id=body.conversation_id,
+    )
     return envelope
 
 
