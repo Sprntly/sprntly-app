@@ -67,12 +67,11 @@ class ClaimSource:
       exists but belongs to a different enterprise: `resolve_claim_source`
       never learns the difference, because every read it performs is already
       scoped to the caller's own `company_id`.
-    * ``"dropped_for_space"`` — the id was cited by a stored finding and once
-      known, but `crucible.prose.rows_for_recovery`'s cap (`MAX_PERSISTED_ROWS`)
-      meant it did not survive into what the run persisted. It existed; it is
-      not recoverable now. Only reachable once
-      `crucible.prose.truncated_ids_from_meta` exists on the running build —
-      see the module-level `_HAS_TRUNCATED_IDS` note.
+    * ``"dropped_for_space"`` — the id was cited by something the run
+      persists (a finding or the ledger) and once known, but
+      `crucible.prose.rows_for_recovery`'s cap (`MAX_PERSISTED_ROWS`) meant
+      it did not survive into what the run stored. It existed; it is not
+      recoverable now.
     * ``"no_pointer"`` — a real row was found (`content`/`source_type`/
       `valid_at` are populated) but it carries no pointer a human could act
       on: no linked call, and its only `provenance["doc"]` value is a sync-
@@ -171,33 +170,14 @@ def _project(company_id: str, signal: Mapping[str, Any]) -> ClaimSource:
     )
 
 
-#: Mirrors `crucible.prose.TRUNCATED_KEY` for a build that has not yet
-#: merged the sibling fix defining it
-#: (`fix/crucible/a-cut-option-can-cite-a-claim-that-was-never-saved`, which
-#: adds `prose.truncated_ids_from_meta` and writes this key). NEVER a second
-#: source of truth: `_truncated_ids` prefers the real helper the instant it
-#: exists and only falls back to reading this key by hand until it does.
-#: Delete this constant and the fallback branch below once that PR merges.
-_FALLBACK_TRUNCATED_KEY = "prose_claims_truncated"
-
-
 def _truncated_ids(meta: Mapping[str, Any]) -> list[str]:
-    """The ids this run wanted to persist but could not fit under the cap.
-
-    Prefers `crucible.prose.truncated_ids_from_meta` once it exists on the
-    running build. Until then, reads `_FALLBACK_TRUNCATED_KEY` directly —
-    same key, same shape — so "dropped for space" is a real, testable state
-    of this resolver regardless of merge order between the two branches.
-    """
+    """The ids this run wanted to persist but could not fit under the cap —
+    `crucible.prose.truncated_ids_from_meta`, called out here only so
+    `resolve_claim_source` reads as three checks (found / dropped / truly
+    unknown) rather than two plus an inline import."""
     from app.crucible import prose
 
-    reader = getattr(prose, "truncated_ids_from_meta", None)
-    if reader is not None:
-        return reader(meta)
-    stored = (meta or {}).get(_FALLBACK_TRUNCATED_KEY)
-    if not isinstance(stored, list):
-        return []
-    return [str(i) for i in stored if i]
+    return prose.truncated_ids_from_meta(meta)
 
 
 def resolve_claim_source(
