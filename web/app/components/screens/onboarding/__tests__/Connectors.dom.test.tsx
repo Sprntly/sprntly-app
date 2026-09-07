@@ -260,11 +260,11 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(footerSkip(container).textContent?.trim()).toBe("Skip")
     // On the last one, completing it leaves nothing incomplete → it leaves.
     advanceToLastCategory(container)
-    // The step this leaves for is `/onboarding/review`, and the label says so
-    // in that screen's own words. It used to promise an api-key step that was
-    // removed from the flow, which sent the reader looking for a key that was
-    // never coming.
-    expect(footerContinue(container).textContent).toMatch(/See what we learned/)
+    // The step this leaves for is `/onboarding/invite`, and the label says so
+    // in that screen's own words. It used to promise a review step, then an
+    // api-key step before that — a Continue that names a step the flow no
+    // longer sends you to is worse than a bare "Continue".
+    expect(footerContinue(container).textContent).toMatch(/Invite your team/)
     expect(footerContinue(container).textContent).not.toMatch(/key/i)
   })
 
@@ -710,14 +710,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(screen.queryByText("Heap")).toBeNull()
   })
 
-  it("advances to the review step once a connection is live (no skip marking)", async () => {
+  it("advances to the invite step once a connection is live (no skip marking)", async () => {
     const { container } = mountLoaded([{ provider: "mixpanel", status: "active" }])
     await screen.findByText("Live")
     advanceToLastCategory(container)
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
     expect(markSkippedMock).not.toHaveBeenCalled()
   })
@@ -729,7 +729,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     fireEvent.click(footerContinue(container))
     await waitFor(() => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
     // Continue (not Skip) doesn't stamp the field as skipped, even at zero.
     expect(markSkippedMock).not.toHaveBeenCalled()
@@ -742,7 +742,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
   })
 

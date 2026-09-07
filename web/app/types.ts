@@ -1,15 +1,13 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug (2026-07-21
-  // screenshot spec, keeping the optional api-key step, plus the optional
-  // import-context step added from client feedback 2026-07-22 — 10 steps), in
-  // flow order: company → import-context → connectors → api-key → workspace →
-  // product → metrics → invite → review → personalize (personalize closes
-  // via the unnumbered define-metrics sub-flow, or directly when analytics
-  // isn't connected). Reordered from the v7 spec so the two steps an import
-  // can't prefill (connectors, api-key) cover its background extraction — see
-  // ONBOARDING_STEP_SLUGS.
+  // Numbered onboarding steps, keyed by their semantic slug — 5 steps as of
+  // 2026-09-07 (invite reinstated): company → connectors → invite → review →
+  // personalize (personalize closes via the unnumbered define-metrics
+  // sub-flow, or directly when analytics isn't connected). See
+  // ONBOARDING_STEP_SLUGS for the full history of what was cut and why invite
+  // came back.
   | "ob-company"
   | "ob-connectors"
+  | "ob-invite"
   | "ob-review"
   | "ob-personalize"
   | "chat"
@@ -47,6 +45,7 @@ export type ScreenId =
 export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-company",
   "ob-connectors",
+  "ob-invite",
   "ob-review",
   "ob-personalize",
 ]
@@ -76,10 +75,11 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 4",
-  "ob-connectors": "Setup · Step 2 of 4",
-  "ob-review": "Setup · Step 3 of 4",
-  "ob-personalize": "Setup · Step 4 of 4",
+  "ob-company": "Setup · Step 1 of 5",
+  "ob-connectors": "Setup · Step 2 of 5",
+  "ob-invite": "Setup · Step 3 of 5",
+  "ob-review": "Setup · Step 4 of 5",
+  "ob-personalize": "Setup · Step 5 of 5",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

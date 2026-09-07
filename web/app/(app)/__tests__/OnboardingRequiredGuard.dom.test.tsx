@@ -100,9 +100,9 @@ describe("OnboardingRequiredGuard", () => {
       },
     }
     const { queryByText } = renderGuard()
-    // Step 3 → the third slug ("review"), mapped locally via slugForStep.
+    // Step 3 → the third slug ("invite"), mapped locally via slugForStep.
     await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/onboarding/review"),
+      expect(replace).toHaveBeenCalledWith("/onboarding/invite"),
     )
     // The cache was re-checked first, and the postLoginPath waterfall (getUser
     // → workspace fetch → invite accept) never ran for a known-workspace user.
@@ -234,7 +234,7 @@ describe("OnboardingRequiredGuard", () => {
     }
     renderGuard()
     await waitFor(() =>
-      expect(replace).toHaveBeenCalledWith("/onboarding/review"),
+      expect(replace).toHaveBeenCalledWith("/onboarding/invite"),
     )
   })
 

@@ -1,13 +1,13 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow — 4 steps since
-// 2026-09-03 (invite went last, folded into Settings → Team & roles):
-//   company -> connectors -> review -> personalize
-// import-context, api-key, product, workspace, metrics and invite were
-// removed; everything they collected is edited in Settings (see
-// lib/onboarding/types.ts for the full map of what moved where). The review
-// step closes the numbered flow, then the UNNUMBERED define-metrics sub-flow
-// completes onboarding.
+// Integrity tests for the semantic-slug onboarding flow — 5 steps as of
+// 2026-09-07 (invite reinstated, right where it sat before it was cut):
+//   company -> connectors -> invite -> review -> personalize
+// import-context, api-key, product, workspace and metrics stay removed;
+// everything they collected is edited in Settings (see lib/onboarding/types.ts
+// for the full map of what moved where, and why invite came back). The
+// personalize step closes the numbered flow, then the UNNUMBERED
+// define-metrics sub-flow completes onboarding.
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -27,6 +27,7 @@ vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../screens/onboarding", () => ({
   CompanyStep: () => React.createElement("div", { "data-screen": "company" }),
   Connectors: () => React.createElement("div", { "data-screen": "connectors" }),
+  InviteStep: () => React.createElement("div", { "data-screen": "invite" }),
   ReviewStep: () => React.createElement("div", { "data-screen": "review" }),
   PersonalizeStep: () =>
     React.createElement("div", { "data-screen": "personalize" }),
@@ -53,13 +54,15 @@ const EXPECTED_ORDER = [
   // leads.
   "company",
   "connectors",
+  // Reinstated 2026-09-07, back in its old slot.
+  "invite",
   "review",
   "personalize",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 4 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(4)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 5 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(5)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
@@ -106,7 +109,6 @@ describe("onboarding flow order — slug → screen", () => {
       "product",
       "workspace",
       "metrics",
-      "invite",
       "team",
       "strategy",
       "decisions",

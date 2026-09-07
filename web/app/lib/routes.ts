@@ -75,6 +75,7 @@ export function projectPath(
 export const SCREEN_PATH: Record<ScreenId, string> = {
   "ob-company": "/onboarding/company",
   "ob-connectors": "/onboarding/connectors",
+  "ob-invite": "/onboarding/invite",
   "ob-review": "/onboarding/review",
   "ob-personalize": "/onboarding/personalize",
   chat: "/",

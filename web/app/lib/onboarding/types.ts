@@ -257,8 +257,10 @@ export const MONETIZATION_OPTIONS = [
   { value: "free", label: "Free" },
 ] as const
 
-/** Job roles for step-8 teammate invites (distinct from the member/admin/viewer
- *  permission). Display-only free text on workspace_invites.job_role. */
+/** Job roles offered on the onboarding invite step and Settings' bulk invite
+ *  (distinct from the member/admin/viewer permission). Display-only free text
+ *  on workspace_invites.job_role. Named by purpose, not a step number — the
+ *  invite step's position has moved twice already. */
 export const JOB_ROLE_OPTIONS = [
   "Product Manager",
   "Engineer",
@@ -310,11 +312,16 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * The semantic slugs of the numbered onboarding steps, in flow order. This is
  * the single source of truth for the onboarding route order.
  *
- * FOUR STEPS SINCE 2026-09-03 (down from ten, briefly five). The flow was
- * asking someone who had not seen the product yet to write down their OKRs,
- * their success metrics, their prioritization framework, their team's scope —
- * and, last to go, who else should join a team of one. Everything cut is still
- * editable, in Settings, where it can be answered once there is a reason to:
+ * FIVE STEPS (2026-09-07: invite is back). The 2026-09-03 cut took the flow
+ * from ten to four, removing a questionnaire that asked someone who had not
+ * seen the product yet for their OKRs, their success metrics, their
+ * prioritization framework, their team's scope and who else should join —
+ * before they could find out whether any of it was worth doing. Inviting a
+ * teammate is different in kind from those: it is not a question ABOUT the
+ * product, it is how a company GROWS INTO one — the earlier someone invites
+ * their team, the sooner the product has more than one person's usage to
+ * learn from. So it is reinstated, right where it sat before: after
+ * connecting tools, before reading the AI-drafted context.
  *
  *   1. company     → CompanyStep    (company name* + website, product name +
  *                                    website. Kicks the website analysis in the
@@ -322,13 +329,17 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *                                    including its default "Main workspace".)
  *   2. connectors  → Connectors     (connect your tools — OPTIONAL, skippable;
  *                                    zero connectors is a supported finish)
- *   3. review      → ReviewStep     (AI-drafted business context — read, edit,
+ *   3. invite      → InviteStep     (invite teammates by email + job role +
+ *                                    permission, with bulk paste / CSV import
+ *                                    behind a disclosure — OPTIONAL, skippable)
+ *   4. review      → ReviewStep     (AI-drafted business context — read, edit,
  *                                    accept)
- *   4. personalize → PersonalizeStep (what the workspace surfaces + brief
+ *   5. personalize → PersonalizeStep (what the workspace surfaces + brief
  *                                    delivery cadence/channel/time, then
  *                                    completes onboarding)
  *
- * WHAT WAS REMOVED, AND WHERE IT WENT:
+ * Everything else the ten-step flow asked is still cut, and still editable in
+ * Settings once there is a reason to answer it:
  *
  *   import-context → gone. Uploading the .md your own assistant wrote fed a
  *                    background extraction that prefilled the very steps this
@@ -345,13 +356,11 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  *   metrics        → Settings → KPI Settings (metrics + definitions); the
  *                    prioritization framework it also collected is in
  *                    Settings → Process & Planning.
- *   invite         → Settings → Team & roles, which already sends the exact
- *                    same POST /v1/team/invites and now also carries the bulk
- *                    paste + CSV import this step had (see lib/teamApi.ts) —
- *                    the "individual joining, may not care about a team yet"
- *                    reasoning that emptied the workspace step applies here
- *                    too, and Team & roles was the one destination that could
- *                    take the capability with it rather than dropping it.
+ *
+ * invite ALSO stayed reachable from Settings → Team & roles the whole time it
+ * was out of the numbered flow (including the bulk paste + CSV import this
+ * step shares — see lib/teamApi.ts, the shared home for both callers) and
+ * still is; this is an ADDITIONAL front door, not a replacement for that one.
  *
  * The unnumbered `your-name` gate and the `define-metrics` sub-flow are
  * unchanged routes; define-metrics is now only reachable when metrics have been
@@ -362,12 +371,17 @@ export const DEFAULT_FEATURE_FLAGS: FeatureFlags = {
  * persisted values in range.
  *
  * MARKERS WRITTEN BY AN OLDER FLOW WERE REBASED IN SQL, not translated here —
- * migration 20260903160000 for the ten-step → five-step cut, and
- * 20260903170000 for five → four when the invite step followed. Nothing at
- * runtime can tell a legacy index from a current one meaning something else, so
- * a translation applied on read would have to fire for both directions,
- * permanently resuming everyone a step behind where they left off. The
- * one-time rebase leaves every stored value meaning what this array says.
+ * migration 20260903160000 for the ten-step → five-step cut, 20260903170000
+ * for five → four when invite was cut, and 20260907000000 for four → five now
+ * that it is back. Nothing at runtime can tell a legacy index from a current
+ * one meaning something else, so a translation applied on read would have to
+ * fire for both directions, permanently resuming everyone a step behind (or,
+ * for a reinstated step, ahead) of where they left off. The one-time rebase
+ * leaves every stored value meaning what this array says. Rebasing an
+ * INSERTION is not symmetric with rebasing a removal: a company already past
+ * the insertion point (resuming at personalize) is left alone rather than
+ * routed backward into a step that did not exist when they started — see that
+ * migration's own comment for the exact cutoff.
  */
 /**
  * The workspace every company starts with, named and described for them.
@@ -395,6 +409,7 @@ export const ONBOARDING_STEP_SLUGS = [
   // background website analysis are keyed on, so it still leads.
   "company",
   "connectors",
+  "invite",
   "review",
   "personalize",
 ] as const

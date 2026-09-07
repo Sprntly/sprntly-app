@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation"
 import {
   CompanyStep,
   Connectors,
+  InviteStep,
   PersonalizeStep,
   ReviewStep,
 } from "../../../components/screens/onboarding"
@@ -22,25 +23,29 @@ import {
  *                                     default "Main workspace", and kicks the
  *                                     website analysis in the background.)
  *   2. connectors  → Connectors      (connect your tools — all optional)
- *   3. review      → ReviewStep      (accept the AI business context)
- *   4. personalize → PersonalizeStep (what to surface + brief delivery; hands
+ *   3. invite      → InviteStep      (invite teammates — all optional)
+ *   4. review      → ReviewStep      (accept the AI business context)
+ *   5. personalize → PersonalizeStep (what to surface + brief delivery; hands
  *                                     off to /onboarding/define-metrics when
  *                                     analytics is connected AND metrics have
  *                                     been picked, otherwise completes
  *                                     onboarding itself)
  *
- * CUT FROM TEN TO FOUR on 2026-09-03 (via five). import-context, api-key,
+ * CUT FROM TEN TO FOUR on 2026-09-03 (via five): import-context, api-key,
  * product, workspace, metrics and invite were removed and their screen
- * components deleted; everything they collected is edited in Settings
+ * components deleted; everything they collected was edited in Settings
  * instead — bulk teammate invite moved into Settings → Team & roles rather
- * than being dropped. The flow was asking for OKRs, success metrics, a
- * prioritization framework and a teammate list from someone who had not yet
- * seen the product. See lib/onboarding/types.ts for the full map of what moved
- * where.
+ * than being dropped. invite CAME BACK on 2026-09-07, in its old slot: unlike
+ * the rest, it isn't a question about the product someone hasn't seen yet —
+ * it's how a company grows into having more than one user, so the earlier it
+ * happens the better. Settings → Team & roles keeps working exactly as it did
+ * while invite was out of the numbered flow. See lib/onboarding/types.ts for
+ * the full map of what moved where and why invite is the one that returned.
  *
  * The slug order MUST stay aligned with ONBOARDING_STEP_SLUGS (the integer
- * `onboarding_step` is the 1-based index into both). Markers written by the
- * ten-step flow were rebased in migration 20260903160000.
+ * `onboarding_step` is the 1-based index into both). Markers written by an
+ * older flow were rebased in migrations 20260903160000, 20260903170000 and
+ * 20260907000000.
  */
 export const ONBOARDING_STEPS: ReadonlyArray<{
   slug: OnboardingStepSlug
@@ -48,6 +53,7 @@ export const ONBOARDING_STEPS: ReadonlyArray<{
 }> = [
   { slug: "company", Component: CompanyStep },
   { slug: "connectors", Component: Connectors },
+  { slug: "invite", Component: InviteStep },
   { slug: "review", Component: ReviewStep },
   { slug: "personalize", Component: PersonalizeStep },
 ]

@@ -400,14 +400,14 @@ export function Connectors() {
     setSaving(true)
     try {
       if (skipped) await markSkippedFields(auth.user.id, ["connectors"])
-      // Derived, not hardcoded: the flow order has been renumbered twice and a
-      // stale literal here silently resumes the user onto the wrong step.
+      // Derived, not hardcoded: the flow order has been renumbered three times
+      // and a stale literal here silently resumes the user onto the wrong step.
       const updated = await advanceOnboardingStep(
         workspace.id,
-        stepForSlug("review") ?? 3,
+        stepForSlug("invite") ?? 3,
       )
       setWorkspace(updated)
-      router.push("/onboarding/review")
+      router.push("/onboarding/invite")
     } finally {
       setSaving(false)
     }
@@ -489,13 +489,13 @@ export function Connectors() {
       onBack={() => router.push("/onboarding/company")}
       onSkip={() => onFooterAdvance(true)}
       onContinue={() => onFooterAdvance(false)}
-      // NAMES THE NEXT SCREEN, and that screen changed underneath this label.
-      // The api-key step it promised was removed from the flow; leaving here
-      // goes to `/onboarding/review`, whose own heading is "Here's what we
-      // learned." So the button says that — a Continue that names a step the
-      // product no longer has is worse than a bare "Continue", because the
-      // reader spends the next screen looking for the key it promised.
-      continueLabel={leavesStep ? "See what we learned" : "Continue"}
+      // NAMES THE NEXT SCREEN, and that screen has changed twice underneath
+      // this label. Leaving here now goes to `/onboarding/invite`, whose own
+      // heading is "Invite your team." So the button says that — a Continue
+      // that names a step the flow no longer sends you to is worse than a
+      // bare "Continue", because the reader spends the next screen looking
+      // for whatever it promised.
+      continueLabel={leavesStep ? "Invite your team" : "Continue"}
       continueDisabled={saving}
       loading={saving}
     >
