@@ -3172,6 +3172,81 @@ def test_a_card_with_neither_tier_says_which_two_are_missing():
     assert "neither a full recommendation nor a flat one" in text
 
 
+# ─── When "1." on the answer screen is not rank 1 ──────────────────────────
+#
+# The options are bound to the first finding that KEPT a full write-up, which
+# is deliberately not rank 1 (`data_gaps.recommended_index` says so, and that
+# binding is not what these test). "Why the first finding is first" reads rank
+# 1. Both are correct; unreconciled they name two different findings and read
+# as the document contradicting itself.
+
+_NOT_RANK_ONE = "Number one above is not the top-ranked finding"
+
+
+def test_the_answer_screen_says_when_number_one_is_not_rank_one():
+    """Rank 1 kept no write-up, so the option numbered 1 is the SECOND
+    finding — and the sentence names the section that ranks them, so a reader
+    meeting "Why the first finding is first" below knows which question it is
+    answering."""
+    html = render_report_html(
+        _run(), [_finding(statement="A theme with no write-up"),
+                 _deep_finding(statement="The one we would build")])
+    text = _plain(html)
+    assert _NOT_RANK_ONE in text
+    assert "Why the first finding is first" in text
+
+
+def test_the_aligned_case_adds_nothing():
+    """MOST RUNS. The common path must not get wordier for the uncommon one.
+
+    THE SAME TWO FINDINGS, BOTH ORDERS. A bare "it is absent" assertion would
+    go on passing if the sentence stopped rendering at all; rendering the
+    reversed order in the same test is what makes the absence mean something.
+    """
+    findings = [_deep_finding(statement="The one we would build"),
+                _finding(statement="A theme with no write-up")]
+    assert _NOT_RANK_ONE not in _plain(render_report_html(_run(), findings))
+    assert _NOT_RANK_ONE in _plain(
+        render_report_html(_run(), list(reversed(findings))))
+
+
+def test_rank_one_with_a_flat_suggestion_is_pointed_at_it():
+    html = render_report_html(
+        _run(), [_finding(statement="A theme with no write-up",
+                          recommendation={"action": "Batch the export job",
+                                          "because": "three accounts said so"}),
+                 _deep_finding(statement="The one we would build")])
+    text = _plain(html)
+    assert _NOT_RANK_ONE in text
+    assert "its flat recommendation is on its own card below" in text
+
+
+def test_rank_one_with_neither_tier_is_not_pointed_at_a_suggestion():
+    """THE PATH NO BENCHMARK RUN TOOK. The flat pass is its own model call and
+    can fail outright, so rank 1 may carry neither tier — and a sentence
+    pointing at a suggestion that is not there is the same broken promise this
+    pass exists to remove."""
+    html = render_report_html(
+        _run(), [_finding(statement="A theme with no write-up"),
+                 _deep_finding(statement="The one we would build")])
+    text = _plain(html)
+    assert _NOT_RANK_ONE in text
+    assert "its flat recommendation" not in text
+
+
+def test_a_half_written_flat_suggestion_does_not_count_as_one():
+    """`_finding_block` renders "Suggested." only when BOTH halves are
+    present, so this sentence must use the same test or it points at a card
+    that renders nothing."""
+    html = render_report_html(
+        _run(), [_finding(statement="A theme with no write-up",
+                          recommendation={"action": "Batch the export job"}),
+                 _deep_finding(statement="The one we would build")])
+    text = _plain(html)
+    assert _NOT_RANK_ONE in text
+    assert "its flat recommendation" not in text
+
+
 # ─── The chain summary: a compact map, rendered above the answer ───────────
 
 

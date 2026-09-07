@@ -48,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 from app.crucible.data_gaps import (
     DATA_GAPS_HEADING, ONE_TOPIC_NOTE, data_gaps_for, option_header,
-    option_numbers, options_are_one_topic,
+    option_numbers, options_are_one_topic, recommended_index,
 )
 from app.crucible.moscow import (
     CALL_COUNT_FLOOR_NOTE, TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE,
@@ -3170,6 +3170,39 @@ def _answer_section(
         for num, f in numbered
     )
     out.append(f'<table class="opts"><tbody>{rows}</tbody></table>')
+
+    # ── WHEN NUMBER ONE IS NOT RANK ONE, SAY SO. ───────────────────────────
+    #
+    # `option_numbers` and `recommended_index` bind the options to the first
+    # finding that KEPT a full write-up, deliberately not to rank 1 — see
+    # `data_gaps.recommended_index`, which records why: rank 1 may have had
+    # its deep pass dropped at the citation gate, and in that case the memo
+    # is recommending something else and must follow that rather than lead
+    # it. THAT BINDING IS NOT CHANGED HERE. What was missing is the sentence
+    # reconciling it with "Why the first finding is first," which reads rank
+    # 1 — two true sentences naming two different findings, which together
+    # read as the document contradicting itself.
+    #
+    # NOTHING IS ADDED ON THE ALIGNED PATH, which is most runs: the common
+    # case does not get wordier for the sake of the uncommon one. `-1` cannot
+    # reach here — `numbered` is non-empty above, so some finding in
+    # `written` kept a write-up.
+    if recommended_index(written) > 0:
+        # THE FLAT TIER IS GUARDED, NOT ASSUMED. The flat pass is its own
+        # model call and can fail or drop an item, so rank 1 may carry
+        # NEITHER tier — and pointing a reader at a suggestion that is not
+        # there is the same class of promise this pass exists to remove.
+        rank_one = _as_dict(kept[0].get("recommendation"))
+        has_flat = bool((rank_one.get("action") or "").strip()
+                        and (rank_one.get("because") or "").strip())
+        out.append(_p(
+            "<strong>Number one above is not the top-ranked finding.</strong> "
+            "The ranking's first place carries no full write-up on this run, "
+            "so it is not among the options above. Why it ranks first is set "
+            'out in "Why the first finding is first," in the appendix'
+            + (", and its flat recommendation is on its own card below."
+               if has_flat else ".")
+        ))
 
     if n > 1:
         comparison = ""
