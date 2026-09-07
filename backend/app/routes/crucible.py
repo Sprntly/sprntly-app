@@ -615,6 +615,7 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
     """Render, store, link. Blocking; called from a thread."""
     from app.db.custom_artifacts import create_artifact, delete_artifact, get_artifact
     from app.crucible.report import ARTIFACT_KIND, body_fingerprint, report_title
+    from app.project_from_prd import maybe_pin_custom_artifact_to_project
 
     run_id, company_id = row["id"], company.company_id
     html = _render_document_html(row, company_id)
@@ -639,13 +640,21 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
         kind=ARTIFACT_KIND,
         title=report_title(row),
         body_html=html,
-        # NO `conversation_id`, deliberately, even though the run has one. The
-        # thread-resume probe (`useThreadDocumentSync`) attaches the newest
-        # document of a conversation to the panel's DOCUMENT tab on reload — so
-        # stamping it here would grow a phantom Document tab beside every Goal
-        # Analysis run, holding the same report the analysis tab already shows.
-        # The run carries the link, and the panel finds the report through the
-        # run, which is the relationship that actually exists.
+        # STAMPED, same as every other custom artifact and same as the FORK
+        # below — the run's own conversation, when it has one. This used to be
+        # deliberately NULL out of a real concern: the thread-resume probe
+        # (`useThreadDocumentSync`) attaches the newest document of a
+        # conversation to the panel's DOCUMENT tab on reload, and a linked
+        # report is ALSO reachable through its own dedicated Goal Analysis tab
+        # — stamping it risked a second tab for the same report. That risk is
+        # handled at the source of the phantom tab (`useThreadDocumentSync`
+        # skips this kind), not by hiding the artifact from the rest of the
+        # product: an unstamped report is invisible to
+        # `documents_with_bodies_for_conversation`, so the chat agent could
+        # never answer a question about "the report" or "your recommendations",
+        # and it never reaches `maybe_pin_custom_artifact_to_project`, so it
+        # never lands on the run's own project.
+        conversation_id=row.get("conversation_id"),
         created_by=company.user_id,
     )
     # The fingerprint is of the STORED body, not the rendered string: the
@@ -667,6 +676,16 @@ def _create_document(row: dict, company: WorkspaceContext) -> dict:
         if existing is None:
             raise HTTPException(409, "The report was being created; try again.")
         return _document_payload(winner, existing)
+    # Pinned only for the artifact that actually won the link race — the
+    # loser above is deleted, and pinning it first would leave a
+    # `project_artifacts` row pointing at nothing. Best-effort and total,
+    # exactly like `routes/custom_artifacts.py`'s own call: a missed pin never
+    # fails the request, and the project's own refetch reconciles it.
+    maybe_pin_custom_artifact_to_project(
+        company_id=company_id,
+        conversation_id=artifact.get("conversation_id"),
+        artifact_id=artifact["id"],
+    )
     return _document_payload(linked, artifact)
 
 

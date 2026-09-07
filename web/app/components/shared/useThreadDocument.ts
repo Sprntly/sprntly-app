@@ -4,6 +4,18 @@ import { useEffect, useRef } from "react"
 import { useContent } from "../../context/ContentContext"
 import { customArtifactsApi } from "../../lib/api"
 
+// A Goal Analysis report's own kind, mirroring the backend's
+// `app.crucible.report.ARTIFACT_KIND`. The report is a `custom_artifact` like
+// any other and IS stamped with its run's conversation_id (parity with every
+// other artifact type — the chat agent and the project manifest both need
+// that stamp to see it) but it must not ALSO populate the generic Document
+// tab below: it already has its own dedicated Goal Analysis tab
+// (`content.goalRunId`, `GoalAnalysisTab`), so attaching it here would open a
+// second tab holding the exact report the first one already shows. A fork of
+// the report ("Goal analysis copy") is a genuine team document with no run
+// behind it and is NOT this kind — it is meant to appear here.
+const GOAL_ANALYSIS_ARTIFACT_KIND = "goal_analysis"
+
 /**
  * Keeps the active thread's team document attached to the panel.
  *
@@ -40,8 +52,13 @@ export function useThreadDocumentSync() {
         // A generation started while this was in flight MUST win: it is the
         // document the user just asked for, and this is a stale read of the
         // same thread.
-        if (cancelled || rows.length === 0 || documentIdRef.current != null) return
-        setContent({ documentId: rows[0].id })
+        if (cancelled || documentIdRef.current != null) return
+        // Skip a linked Goal Analysis report — see GOAL_ANALYSIS_ARTIFACT_KIND
+        // above. `rows` is newest-first, so this is still the newest ordinary
+        // document in the thread.
+        const row = rows.find((r) => r.kind !== GOAL_ANALYSIS_ARTIFACT_KIND)
+        if (!row) return
+        setContent({ documentId: row.id })
       })
       // Silent by design: a thread with no document is the normal case, and a
       // failed lookup must not put an error in front of someone who never
