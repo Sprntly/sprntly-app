@@ -2289,20 +2289,32 @@ def _run_enrichment(
     #
     # TOTAL, like everything else on this path: a suggestion layer that failed
     # must not cost a reader the findings that succeeded.
+    #
+    # BOTH NARRATED BEFORE EITHER RUNS, because they no longer run in an
+    # order a reader could observe. The two passes below are independent —
+    # the deep pass takes findings, impacts, confidences and claims, never
+    # the flat pass's output — so they go out together and finish in whatever
+    # order they finish in. "deep_recommending" stays the last stage this
+    # function narrates, set unconditionally, which is the contract the
+    # sweep-recovery tests read off the row.
     _progress(run_id, company_id, enrichment_step="recommending")
+    _progress(run_id, company_id, enrichment_step="deep_recommending")
+
     recs = {}
-    try:
+    deep = {}
+    deep_attempted_ids: frozenset[str] = frozenset()
+    recommendation_basis = ""
+
+    def _flat():
         from app.crucible.recommend import build_recommendations
 
-        recs = build_recommendations(
+        return build_recommendations(
             enterprise_id=company_id,
             goal_text=goal_text,
             definition_text=definition_text,
             findings=relevant,
             claims=claims,
         )
-    except Exception:  # noqa: BLE001
-        logger.exception("crucible: recommendations skipped for run %s", run_id)
 
     # A DEEP RECOMMENDATION FOR THE TOP OF THE RANKING, SIZED BY THE GOAL.
     #
@@ -2310,14 +2322,10 @@ def _run_enrichment(
     # `build_deep_recommendations` decides how many with pure arithmetic over
     # the frozen `relevant_impacts` (I2/I10) — never an LLM, and never a count
     # this route invents. TOTAL, same reasoning as the flat pass above.
-    _progress(run_id, company_id, enrichment_step="deep_recommending")
-    deep = {}
-    deep_attempted_ids: frozenset[str] = frozenset()
-    recommendation_basis = ""
-    try:
+    def _deep():
         from app.crucible.recommend import build_deep_recommendations
 
-        deep_result = build_deep_recommendations(
+        return build_deep_recommendations(
             enterprise_id=company_id,
             goal_text=goal_text,
             definition_text=definition_text,
@@ -2327,11 +2335,40 @@ def _run_enrichment(
             claims=claims,
             asked_text=asked_text,
         )
-        deep = deep_result.by_id
-        deep_attempted_ids = deep_result.attempted_ids
-        recommendation_basis = deep_result.count.basis
-    except Exception:  # noqa: BLE001
-        logger.exception("crucible: deep recommendations skipped for run %s", run_id)
+
+    # TWO WORKERS, NOT MORE, and the number is the point rather than a
+    # default. `app.llm`'s concurrency gate (`LLM_MAX_CONCURRENCY`, default 6)
+    # is process-wide and shared with every interactive chat call on the box,
+    # and `_POOL` above already lets two runs reach this line at once. Two
+    # here is therefore up to four in flight against a cap of six; anything
+    # wider would spend the whole cap on background enrichment and make chat
+    # queue behind it.
+    #
+    # EACH PASS KEEPS ITS OWN try/except, unchanged: they were independently
+    # total before and are independently total now, so a failure in either
+    # still cannot cost a reader the other's output. Waiting on a future
+    # re-raises in THIS thread, which is what keeps that handling here rather
+    # than swallowed inside a worker.
+    with ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="crucible-recommend",
+    ) as ex:
+        flat_future = ex.submit(_flat)
+        deep_future = ex.submit(_deep)
+
+        try:
+            recs = flat_future.result()
+        except Exception:  # noqa: BLE001
+            logger.exception("crucible: recommendations skipped for run %s", run_id)
+
+        try:
+            deep_result = deep_future.result()
+            deep = deep_result.by_id
+            deep_attempted_ids = deep_result.attempted_ids
+            recommendation_basis = deep_result.count.basis
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "crucible: deep recommendations skipped for run %s", run_id,
+            )
 
     # ONE RECOMMENDATION FOR THE WHOLE REPORT, SYNTHESIZED ACROSS THE DEEP
     # PASS ABOVE.
