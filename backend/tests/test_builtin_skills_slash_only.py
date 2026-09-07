@@ -155,3 +155,83 @@ def test_no_restored_method_tells_the_model_to_run_a_file_it_never_gets():
         if re.search(r"scripts/[A-Za-z0-9_]+\.py", get_skill(sid).method)
     ]
     assert not offenders, f"methods naming a deleted script: {offenders}"
+
+
+# ── The palette: reachable AND discoverable ─────────────────────────────────
+#
+# The methods are summonable only by typing `/<slug>`, which without a palette
+# would mean knowing 69 slugs by heart. These pin the half that makes the
+# feature usable — and, just as importantly, that the palette can never
+# advertise a trigger the router would refuse.
+
+def test_the_palette_offers_every_summonable_method():
+    from app.skill_router import list_available_skills
+
+    listed = {e["id"] for e in list_available_skills(None)}
+    assert listed == set(_methods())
+
+
+def test_the_palette_never_offers_a_trigger_the_router_refuses():
+    """The failure this endpoint was emptied to avoid in the first place: it
+    used to advertise three built-ins the router could no longer select. Every
+    entry must survive the same check the `/` fast-path applies."""
+    from app.skill_router import list_available_skills
+
+    for entry in list_available_skills(None):
+        if entry["category"] != "Built-in":
+            continue
+        assert is_user_invocable_builtin(entry["id"]), entry["id"]
+        assert entry["trigger"] == f"/{entry['id']}"
+
+
+def test_pipeline_bound_and_pipelines_stay_out_of_the_palette():
+    """`/prd-author` names an engine with its own route and inputs, not a
+    method prompt, so offering it would hand the user a trigger that resolves
+    to nothing."""
+    from app.skill_router import list_available_skills
+
+    listed = {e["id"] for e in list_available_skills(None)}
+    assert not (listed & set(_PIPELINE_BOUND_SKILLS))
+    assert not (listed & set(PIPELINE_SKILLS))
+
+
+def test_every_palette_entry_carries_a_description():
+    """The description is the only thing distinguishing 69 similarly-named
+    methods in a filtered list. An entry without one is a blank row."""
+    from app.skill_router import list_available_skills
+
+    for entry in list_available_skills(None):
+        assert entry["description"].strip(), entry["id"]
+        assert entry["label"].strip(), entry["id"]
+
+
+def test_customs_come_first_then_builtins(monkeypatch):
+    """ORDER IS THE PRODUCT DECISION: a company's own skills head the list.
+    Asserted as a partition, not a sort, because within each half the existing
+    order (newest-first for uploads) is the one that already shipped."""
+    import app.db.custom_skills as db_custom
+    from app.skill_router import list_available_skills
+
+    monkeypatch.setattr(
+        db_custom, "list_custom_skills",
+        lambda _eid: [{"slug": "our-way", "name": "Our Way", "description": "House method."}],
+    )
+    cats = [e["category"] for e in list_available_skills("ent-1")]
+    assert cats[0] == "Custom"
+    assert set(cats) == {"Custom", "Built-in"}
+    # No interleaving: every Custom precedes every Built-in.
+    assert cats.index("Built-in") > max(i for i, c in enumerate(cats) if c == "Custom")
+
+
+def test_a_db_outage_still_leaves_the_builtins_listed(monkeypatch):
+    """The two halves fail independently. A picker that 500s is worse than a
+    short one, and a short one is worse than a wrong one."""
+    import app.db.custom_skills as db_custom
+    from app.skill_router import list_available_skills
+
+    def _boom(_eid):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(db_custom, "list_custom_skills", _boom)
+    listed = list_available_skills("ent-1")
+    assert {e["id"] for e in listed} == set(_methods())
