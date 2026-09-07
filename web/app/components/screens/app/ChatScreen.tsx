@@ -4122,7 +4122,7 @@ export function ChatScreen() {
     runConversationAsk, handleStopAsk, runActionTurnInTab, submitAsk,
     handleComposerSubmit, handleComposerKeyDown,
     listArtifactsFlow, prdChangeTemplateFlow, ticketsChangeTemplateFlow, documentCommandFlow,
-    openArtifactFlow, ticketSetCommandFlow, handleTicketSetAction,
+    openArtifactFlow, openThreadArtifact, ticketSetCommandFlow, handleTicketSetAction,
   } = useConversation({
       // A REF, because `startGoalAnalysis` is declared several hundred lines
       // below this call and a direct reference is a use-before-declaration.
@@ -6785,7 +6785,8 @@ export function ChatScreen() {
               onEditTurn: handleEditTurn,
               onSubmitTurnEdit: handleSubmitTurnEdit,
               onCancelTurnEdit: handleCancelTurnEdit,
-              openReportByTitle, openArtifactInPanel, openChatArtifactItem,
+              openReportByTitle, openArtifactInPanel, openThreadArtifact,
+              openChatArtifactItem,
               handleTicketSetAction, handleOpenEvidence, handleOpenPrd,
               handleViewPrototype, handlePrototypeSettled,
               // share_to_slack — the preview card riding a turn. The SEND is

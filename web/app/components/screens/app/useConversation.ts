@@ -551,7 +551,7 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
   const { runConversationAsk, runActionTurnInTab, handleStopAsk } = engine
   const {
     ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,
-    prdChangeTemplateFlow, ticketsChangeTemplateFlow,
+    prdChangeTemplateFlow, ticketsChangeTemplateFlow, openThreadArtifact,
   } = generation
 
   // ── The send pipeline (optimistic render → command/clarify intercept → ask) ─
@@ -1171,7 +1171,8 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
       applyPrdArtifactInTab, shareRefFor, setContent, content, setAttachments,
       setBusyTabs, askingTabsRef, stoppedTabsRef, askStartRef, resolveSendTarget, setActiveTabId,
       emitCommandTurn, runActionTurnInTab, runConversationAsk,
-      ticketSetCommandFlow, openArtifactFlow, listArtifactsFlow, documentCommandFlow,
+      ticketSetCommandFlow, openArtifactFlow, openThreadArtifact,
+      listArtifactsFlow, documentCommandFlow,
       prdChangeTemplateFlow, ticketsChangeTemplateFlow,
     ],
   )

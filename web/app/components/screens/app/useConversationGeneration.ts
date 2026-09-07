@@ -35,10 +35,25 @@ type PersistedAttachment = { name: string; content: string; key?: string | null;
 
 // Named artifact kinds that don't render in the shared panel — the open flow
 // says where they DO live instead of substituting the wrong document.
+//
+// ONE entry, where there used to be three. Reports and ticket sets were listed
+// here while the panel already had a Reports tab and a Tickets tab, so "show me
+// the report" was answered by pointing at a different screen for a document the
+// panel beside the reader could render. A prototype is genuinely not a panel:
+// it opens on its own `/prototype` route, which means leaving the conversation.
 const UNSUPPORTED_OPEN_KIND: Record<string, string> = {
   prototype: "A prototype",
-  report: "A report",
-  tickets: "Tickets",
+}
+
+// How each openable kind reads in the reply. The `?? "PRD"` fallbacks below are
+// what an older backend (or an unknown kind) lands on, matching the pre-existing
+// default rather than printing a raw enum value at the user.
+const OPEN_KIND_NOUN: Record<string, string> = {
+  prd: "PRD",
+  evidence: "evidence",
+  report: "report",
+  tickets: "ticket set",
+  document: "document",
 }
 
 const TICKET_SET_ACK =
@@ -489,22 +504,70 @@ export function useConversationGeneration({
     })()
   }, [seedGenerationTurn, makeHandle, persistence, setContent, openContentPanel, showToast, postSummary])
 
+  // A resolved REPORT / TICKET SET / TEAM DOCUMENT, into the panel tab that
+  // already renders it. Returns false for everything else, so the PRD/evidence
+  // open below is reached exactly as before.
+  //
+  // NOT injected like `openArtifactInPanel` is, and deliberately: these three
+  // land in the SHARED content panel through `setContent` + `openContentPanel`,
+  // which this hook already drives for the identical artifacts when it WRITES
+  // one (`documentCommandFlow`, `startTicketSetRun`). Every surface that has a
+  // panel therefore gets the same behaviour for free, and there is no second
+  // per-surface copy to drift from the first.
+  //
+  // NO THREAD RESUME HERE, unlike the Artifacts-screen card path. That path
+  // exists because a row on a library screen has no conversation around it; a
+  // chat does. `resolve_open_artifact` already prefers THIS conversation's own
+  // artifact for these kinds, so the overwhelmingly common case is a document
+  // born in the thread the reader is sitting in — nothing to navigate to. When
+  // it does belong to another chat, `standalone` says so and the panel reads it
+  // on its own rather than filing it under this thread's list.
+  const openThreadArtifact = useCallback((a: OpenArtifactCandidate): boolean => {
+    const foreign = a.conversation_id != null && a.conversation_id !== content.conversationId
+    if (a.type === "report" && a.report_id != null) {
+      setContent({ reportFocusId: a.report_id, reportFocusStandalone: foreign })
+      openContentPanel("reports")
+      return true
+    }
+    if (a.type === "tickets" && a.ticket_set_id != null) {
+      setContent({ ticketSetStandalone: foreign })
+      openContentPanel("tickets")
+      void loadTicketSet(a.ticket_set_id, setContent)
+      return true
+    }
+    if (a.type === "document" && a.custom_artifact_id != null) {
+      // Read from the row's own status rather than assumed false — the same
+      // rule `useDocumentReopenProbe` follows. Only `failed`/`invalidated` rows
+      // are unopenable, so a document still being WRITTEN can legitimately
+      // resolve here, and that is the live state the panel exists to show.
+      // Stating it also clears a stale spinner left by an earlier run.
+      setContent({
+        documentId: a.custom_artifact_id,
+        documentGenerating: a.status === "generating",
+      })
+      openContentPanel("document")
+      return true
+    }
+    return false
+  }, [content.conversationId, setContent, openContentPanel])
+
   // The whole open_artifact dispatch: 1 match opens (in the surface's
   // destination), 2+ ask, 0 says so — and a kind this panel can't show says
   // where it DOES live. The two destinations (`openArtifactInPanel` /
   // `postOpenArtifactReply`) are surface-divergent by design and injected.
   const openArtifactFlow = useCallback(
     (seedQuery: string, open: OpenArtifactResult) => {
-      const noun = open.artifact_type === "evidence" ? "evidence" : "PRD"
+      const noun = OPEN_KIND_NOUN[open.artifact_type] ?? "PRD"
       if (open.status === "unsupported_type") {
         postOpenArtifactReply(
           seedQuery,
-          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD or its evidence here.`,
+          `${UNSUPPORTED_OPEN_KIND[open.artifact_type] ?? "That kind of artifact"} doesn't open in this panel — you'll find it in the Artifacts tab. I can open a PRD, its evidence, a report, a ticket set or a team document here.`,
           [],
         )
         return
       }
       if (open.status === "resolved" && open.artifact) {
+        if (openThreadArtifact(open.artifact)) return
         if (openArtifactInPanel(open.artifact, seedQuery)) return
         // A match we cannot actually open (no usable id) is a NOT-FOUND from
         // the user's side; saying so beats opening an empty panel.
@@ -515,10 +578,16 @@ export function useConversationGeneration({
         )
         return
       }
+      // A BARE open ("show me the report") names no title, and quoting the
+      // empty string back — `matching ""` — reads as a bug. The two shapes get
+      // the sentence they each deserve; nothing else about the verdicts changes.
+      const named = (open.query || "").trim()
       if (open.status === "ambiguous") {
         postOpenArtifactReply(
           seedQuery,
-          `There's more than one ${noun} matching "${open.query}". Which one did you mean?`,
+          named
+            ? `There's more than one ${noun} matching "${named}". Which one did you mean?`
+            : `You have more than one ${noun}. Which one did you mean?`,
           open.candidates,
         )
         return
@@ -528,11 +597,13 @@ export function useConversationGeneration({
       // failure this action exists to prevent.
       postOpenArtifactReply(
         seedQuery,
-        `I couldn't find a ${noun} for "${open.query}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
+        named
+          ? `I couldn't find a ${noun} for "${named}". Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`
+          : `I couldn't find a ${noun} here. Nothing was opened — check the Artifacts tab, or tell me to generate one if you'd like it written.`,
         [],
       )
     },
-    [openArtifactInPanel, postOpenArtifactReply],
+    [openArtifactInPanel, openThreadArtifact, postOpenArtifactReply],
   )
 
   // ── Standalone ticket sets ──────────────────────────────────────────────────
@@ -630,6 +701,12 @@ export function useConversationGeneration({
     documentCommandFlow,
     importDocCommandFlow,
     openArtifactFlow,
+    // Exported for the DISAMBIGUATION CHIPS, which open a candidate directly
+    // rather than through `openArtifactFlow` — "show me the report" with two
+    // reports asks which, and the chip that answers has to reach the same three
+    // panels the resolved path does. Without this it called the PRD/evidence
+    // seam, which returns false for a report, and the chip did nothing at all.
+    openThreadArtifact,
     ticketSetCommandFlow,
     handleTicketSetAction,
   }

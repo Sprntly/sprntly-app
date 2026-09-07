@@ -80,13 +80,19 @@ INTENTS = (
     "open_artifact",
 )
 
-# Artifact kinds an open request may NAME. Wider than what the chat panel can
-# actually show (app.artifact_open.OPENABLE_TYPES = prd, evidence) on purpose:
-# a user who says "open the dark mode prototype" named a prototype, and the
-# honest answer is "prototypes open from the Artifacts tab", not a silently
-# substituted PRD. The resolver reports `unsupported_type` for the extras;
-# nothing here coerces one kind into another.
-NAMEABLE_ARTIFACT_TYPES = ("prd", "evidence", "prototype", "report", "tickets")
+# Artifact kinds an open request may NAME. Still wider than what the chat panel
+# can actually show (`app.artifact_open.OPENABLE_TYPES`) on purpose: a user who
+# says "open the dark mode prototype" named a prototype, and the honest answer
+# is "prototypes open from the Artifacts tab", not a silently substituted PRD.
+# The resolver reports `unsupported_type` for whatever it cannot show; nothing
+# here coerces one kind into another.
+#
+# The gap is now one kind wide rather than three. Reports, tickets and team
+# documents all have a panel and all open — see OPENABLE_TYPES, which had gone
+# stale against a panel that grew tabs underneath it.
+NAMEABLE_ARTIFACT_TYPES = (
+    "prd", "evidence", "prototype", "report", "tickets", "document",
+)
 
 # ── Deterministic OPEN-vs-GENERATE backstop ──────────────────────────────────
 # The prompt below carries the real rule, and the labeled evals that prove it
@@ -251,6 +257,13 @@ _ARTIFACT_NOUN_RE = re.compile(
     r"prototypes?|mock-?ups?|reports?|tickets?|stor(?:y|ies))\b",
     re.I,
 )
+# "doc" / "document" are deliberately NOT in there, even though `document` is
+# now an openable kind. The word is genuinely ambiguous in this product — "open
+# the compliance reporting doc" is at least as likely to mean that PRD as a team
+# document — and this detector's whole licence is that it is RIGHT rather than
+# complete. Deciding it here would hard-code a coin flip; left out, the message
+# reaches the model, which has the thread and can tell. See the module comment
+# above for why a false negative here costs nothing.
 
 # List/count asks ("which PRDs", "how many reports", "list my specs") are a
 # DIFFERENT intent (`list_artifacts`); leave them to the model rather than
@@ -273,6 +286,16 @@ _OPEN_SUBJECT_DROP = frozenset(
         "requirements", "evidence", "prototype", "prototypes", "mockup",
         "mockups", "report", "reports", "ticket", "tickets", "story", "stories",
         "doc", "docs", "document", "documents",
+        # WHERE, not WHICH. "Show the report in the artifact section" names a
+        # PLACE in the product, not a document called "artifact section" — but
+        # every word that is not chrome was treated as the title, so the
+        # resolver went looking for one and found nothing. Reported as the chat
+        # being confused when asked to show a report in the Artifacts tab.
+        # Only the words that name a SURFACE are here: "page", "screen",
+        # "right" and "left" are deliberately absent, because each is a
+        # plausible distinguishing word in a real document's title.
+        "artifact", "artifacts", "section", "tab", "tabs", "panel", "library",
+        "sidebar",
     }
 )
 

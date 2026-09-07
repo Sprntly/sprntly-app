@@ -93,9 +93,13 @@ vi.mock("../../../../lib/runPrdGeneration", () => ({
   loadPrdById: (...a: unknown[]) => loadPrdById(...a),
 }))
 
+const { loadTicketSet } = vi.hoisted(() => ({
+  loadTicketSet: vi.fn().mockResolvedValue({ ok: true }),
+}))
 vi.mock("../../../../lib/runTicketSetGeneration", () => ({
   runTicketSetGeneration: vi.fn(),
-  loadTicketSet: vi.fn().mockResolvedValue({ ok: true }),
+  followTicketSetSwitch: vi.fn(),
+  loadTicketSet: (...a: unknown[]) => loadTicketSet(...a),
 }))
 
 const runAskGeneration = vi.fn().mockResolvedValue({
@@ -144,14 +148,29 @@ import { ChatScreen } from "../ChatScreen"
  *  answerable here. */
 function ContentProbe() {
   const { content } = useContent()
+  const { contentPanelTab } = useNavigation()
   return React.createElement(
     "div",
-    { "data-testid": "content-probe", "data-prd-meta": JSON.stringify(content.prdMeta ?? null) },
+    {
+      "data-testid": "content-probe",
+      "data-prd-meta": JSON.stringify(content.prdMeta ?? null),
+      // The thread-born kinds land in the shared panel rather than in a PRD
+      // tab, so THIS is the only place "did the report actually open?" is
+      // answerable — the panel itself is not rendered by this suite.
+      "data-panel": contentPanelTab ?? "",
+      "data-report-focus": String(content.reportFocusId ?? ""),
+      "data-report-standalone": String(!!content.reportFocusStandalone),
+      "data-document-id": String(content.documentId ?? ""),
+      "data-tickets-standalone": String(!!content.ticketSetStandalone),
+    },
   )
 }
 
 const prdMetaFromProbe = (): { briefId: number; insightIndex: number } | null =>
   JSON.parse(screen.getByTestId("content-probe").getAttribute("data-prd-meta") || "null")
+
+const probeAttr = (name: string): string =>
+  screen.getByTestId("content-probe").getAttribute(`data-${name}`) || ""
 
 function renderChat() {
   return render(
@@ -676,5 +695,170 @@ describe("ChatScreen — disambiguation chips are actions, not messages", () => 
     expect(runAskGeneration).not.toHaveBeenCalled()
     expect(addTurn.mock.calls).toHaveLength(turnsBefore)
     expect(generateFromTask).not.toHaveBeenCalled()
+  })
+})
+
+// ── The thread-born kinds open in the panel they already have ───────────────
+//
+// Reported: "show the report in the artifact section" answered "a report
+// doesn't open in this panel — you'll find it in the Artifacts tab", pointing
+// the reader at another screen for a document the panel beside them renders.
+// The backend's openable-kinds list had gone stale against a panel that grew
+// Reports, Tickets and Document tabs underneath it.
+describe("ChatScreen — reports, ticket sets and documents open in the panel", () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    localStorage.clear()
+    protoMap.clear()
+  })
+  afterEach(cleanup)
+
+  /** A resolved open of one of the three thread-born kinds. `query` is empty
+   *  because these arrive from the DETERMINISTIC detector, which reports a bare
+   *  open ("show me the report") with no title at all. */
+  const threadOpen = (
+    artifactType: string,
+    artifact: Record<string, unknown>,
+  ) => ({
+    intent: "open_artifact", confidence: 1, task: null, instruction: null,
+    artifact_type: artifactType, artifact_query: null,
+    reason: "deterministic open request", source: "open_intent",
+    prd_id: null, prd_title: null,
+    open: {
+      artifact_type: artifactType, query: "", status: "resolved",
+      artifact, candidates: [artifact],
+    },
+  })
+
+  const reportCandidate = (extra = {}) => ({
+    type: "report", id: 9, title: "Onboarding drop-off", status: "",
+    prd_id: null, brief_id: null, insight_index: null,
+    brief_anchored: false, week_label: null, report_id: 9, ...extra,
+  })
+
+  it("a resolved report opens the Reports panel instead of being refused", async () => {
+    resolveIntent.mockResolvedValue(threadOpen("report", reportCandidate()))
+    renderChat()
+    await typeAndSend("show me the report")
+
+    await waitFor(() => expect(probeAttr("panel")).toBe("reports"))
+    expect(probeAttr("report-focus")).toBe("9")
+    // The refusal that used to stand in for this must be gone, and nothing was
+    // written: an open never degrades into a generation.
+    expect(screen.queryByText(/doesn't open in this panel/i)).toBeNull()
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("a report from ANOTHER chat opens standalone, not filed under this thread", async () => {
+    // `standalone` means "no thread behind it" to the panel — reading a foreign
+    // conversation's report inside this thread's report list would be a lie
+    // about where it came from.
+    resolveIntent.mockResolvedValue(
+      threadOpen("report", reportCandidate({ conversation_id: 4242 })),
+    )
+    renderChat()
+    await typeAndSend("show me the report")
+
+    await waitFor(() => expect(probeAttr("panel")).toBe("reports"))
+    expect(probeAttr("report-standalone")).toBe("true")
+  })
+
+  it("a resolved team document opens the Document panel", async () => {
+    resolveIntent.mockResolvedValue(threadOpen("document", {
+      type: "document", id: 12, title: "Launch plan", status: "ready",
+      prd_id: null, brief_id: null, insight_index: null,
+      brief_anchored: false, week_label: null, custom_artifact_id: 12,
+    }))
+    renderChat()
+    await typeAndSend("show me the launch plan document")
+
+    await waitFor(() => expect(probeAttr("panel")).toBe("document"))
+    expect(probeAttr("document-id")).toBe("12")
+  })
+
+  it("a resolved ticket set opens the Tickets panel and loads the set", async () => {
+    resolveIntent.mockResolvedValue(threadOpen("tickets", {
+      type: "tickets", id: 5, title: "Checkout rework", status: "ready",
+      prd_id: null, brief_id: null, insight_index: null,
+      brief_anchored: false, week_label: null, ticket_set_id: 5,
+    }))
+    renderChat()
+    await typeAndSend("show me the tickets")
+
+    await waitFor(() => expect(probeAttr("panel")).toBe("tickets"))
+    expect(loadTicketSet).toHaveBeenCalledWith(5, expect.any(Function))
+  })
+
+  it("a bare open with several matches asks WHICH without quoting an empty title", async () => {
+    // A deterministic open carries no title, so the old copy rendered
+    // `matching ""` — which reads as a bug rather than a question.
+    resolveIntent.mockResolvedValue({
+      intent: "open_artifact", confidence: 1, task: null, instruction: null,
+      artifact_type: "report", artifact_query: null,
+      reason: "deterministic open request", source: "open_intent",
+      prd_id: null, prd_title: null,
+      open: {
+        artifact_type: "report", query: "", status: "ambiguous", artifact: null,
+        candidates: [reportCandidate(), reportCandidate({ id: 10, report_id: 10, title: "Churn" })],
+      },
+    })
+    renderChat()
+    await typeAndSend("show me the report")
+
+    await waitFor(() =>
+      expect(screen.getByText(/You have more than one report\. Which one did you mean\?/i)).toBeTruthy(),
+    )
+    expect(screen.queryByText(/matching ""/)).toBeNull()
+  })
+
+  it("a bare open with nothing to find says so without quoting an empty title", async () => {
+    resolveIntent.mockResolvedValue({
+      intent: "open_artifact", confidence: 1, task: null, instruction: null,
+      artifact_type: "report", artifact_query: null,
+      reason: "deterministic open request", source: "open_intent",
+      prd_id: null, prd_title: null,
+      open: {
+        artifact_type: "report", query: "", status: "not_found",
+        artifact: null, candidates: [],
+      },
+    })
+    renderChat()
+    await typeAndSend("show me the report")
+
+    await waitFor(() =>
+      expect(screen.getByText(/I couldn't find a report here/i)).toBeTruthy(),
+    )
+    expect(generateFromTask).not.toHaveBeenCalled()
+  })
+
+  it("a disambiguation chip for a REPORT opens it, instead of being a dead click", async () => {
+    // The chip path does not go through `openArtifactFlow` — it opens the
+    // candidate directly — so the PRD/evidence destination it used to call
+    // returned false for a report and the click did nothing at all.
+    resolveIntent.mockResolvedValue({
+      intent: "open_artifact", confidence: 1, task: null, instruction: null,
+      artifact_type: "report", artifact_query: null,
+      reason: "deterministic open request", source: "open_intent",
+      prd_id: null, prd_title: null,
+      open: {
+        artifact_type: "report", query: "", status: "ambiguous", artifact: null,
+        candidates: [
+          reportCandidate(),
+          reportCandidate({ id: 10, report_id: 10, title: "Churn review" }),
+        ],
+      },
+    })
+    renderChat()
+    await typeAndSend("show me the report")
+    await waitFor(() => expect(screen.getByTestId("open-artifact-chips")).toBeTruthy())
+
+    const chip = screen
+      .getAllByTestId("open-artifact-chip")
+      .find((el) => el.getAttribute("data-artifact-id") === "10")!
+    await act(async () => { fireEvent.click(chip) })
+
+    await waitFor(() => expect(probeAttr("panel")).toBe("reports"))
+    // The one that was CLICKED — a "first candidate wins" shortcut would put 9 here.
+    expect(probeAttr("report-focus")).toBe("10")
   })
 })

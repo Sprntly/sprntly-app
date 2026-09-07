@@ -69,6 +69,7 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
     onCancelTurnEdit,
     openReportByTitle,
     openArtifactInPanel,
+    openThreadArtifact,
     openChatArtifactItem,
     handleTicketSetAction,
     handleOpenEvidence,
@@ -338,7 +339,13 @@ export function mapMainTurns(thread: ThreadTurn[], deps: MapMainTurnsDeps): Chat
       // A report answer is an ARTIFACT: it reads in the panel's Reports tab.
       onOpenReport: openReportByTitle,
       openCandidates: turn.openCandidates,
-      onOpenCandidate: (candidate) => { openArtifactInPanel(candidate) },
+      // A report / ticket set / team document chip opens in its own panel tab;
+      // the PRD/evidence destination returns false for those three, so trying
+      // it alone made the chip a dead click.
+      onOpenCandidate: (candidate) => {
+        if (openThreadArtifact?.(candidate)) return
+        openArtifactInPanel(candidate)
+      },
       artifactList: turn.artifactList,
       onOpenArtifactItem: openChatArtifactItem,
       artifactsDisabled: busy,

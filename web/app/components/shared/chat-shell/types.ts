@@ -543,6 +543,12 @@ export interface MapMainTurnsDeps {
   }) => void
   openReportByTitle: (title: string) => void
   openArtifactInPanel: (candidate: OpenArtifactCandidate) => void
+  /** Open a REPORT / TICKET SET / TEAM DOCUMENT candidate in its shared-panel
+   *  tab, returning false for the kinds `openArtifactInPanel` owns. Supplied by
+   *  `useConversationGeneration` on both surfaces, and tried FIRST for a
+   *  disambiguation chip — the PRD/evidence destination returns false for these
+   *  three, so without it a "which report did you mean?" chip does nothing. */
+  openThreadArtifact?: (candidate: OpenArtifactCandidate) => boolean
   openChatArtifactItem: (item: ChatArtifactItem) => void
   handleTicketSetAction: (tabId: string) => void | Promise<void>
   handleOpenEvidence: () => void

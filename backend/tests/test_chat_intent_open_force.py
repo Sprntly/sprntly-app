@@ -110,6 +110,15 @@ def _insert_legacy_group_conversation(t, project_id: int) -> dict:
         ("open the PRD for compliance reporting", ("prd", "compliance reporting")),
         ("open the checkout prd", ("prd", "checkout")),
         ("show me the dark mode prototype", ("prototype", "dark mode")),
+        # WHERE, not WHICH. The place-name must not be read as the document's
+        # title — the reported failure, where "show the report in the artifact
+        # section" sent the resolver looking for a report called "artifact
+        # section" and it honestly reported finding none.
+        ("show the report in the artifact section", ("report", None)),
+        ("show me the report in the artifacts tab", ("report", None)),
+        ("open the prd in the artifacts library", ("prd", None)),
+        # …but a real title is still a title, place-words or not.
+        ("open the checkout prd in the artifacts tab", ("prd", "checkout")),
     ],
 )
 def test_detect_open_intent_fires(message, expected):
@@ -129,6 +138,12 @@ def test_detect_open_intent_fires(message, expected):
         "list my specs",
         "open the door",
         "tell me about the roadmap",
+        # "doc" is ambiguous in this product — "the compliance reporting doc" is
+        # at least as likely to be that PRD as a team document — so it stays
+        # with the model even though `document` is now an openable kind. This
+        # detector's licence is that it is RIGHT, not that it is complete.
+        "open the compliance reporting doc",
+        "show me the launch document",
     ],
 )
 def test_detect_open_intent_declines(message):

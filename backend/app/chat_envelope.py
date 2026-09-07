@@ -54,6 +54,7 @@ def _dataset_for(company) -> str:
 def enrich_chat_envelope(
     envelope: dict, company, dataset: str | None = None,
     project_id: int | None = None,
+    conversation_id: int | None = None,
 ) -> dict:
     """Attach the render-data legs to one classify envelope, in place.
 
@@ -76,6 +77,12 @@ def enrich_chat_envelope(
     workspace's. When omitted (main chat) both legs keep the workspace-wide
     listing verbatim — the default changes nothing for existing callers.
 
+    `conversation_id` is the thread the message was sent in, and it narrows the
+    OPEN leg only: unqualified, "the report" means the one this chat produced,
+    not a five-way pick from the library (see `resolve_open_artifact`). Omitted
+    on a first-turn classify, where there is no conversation row yet — and the
+    library-wide behaviour it falls back to is what every open did before.
+
     Returns the same dict for call-site convenience; mutation is in place.
     """
     if envelope.get("intent") == "open_artifact":
@@ -87,12 +94,20 @@ def enrich_chat_envelope(
         # legs below do — a project surface's "open the PRD" must only ever
         # resolve against that project's own artifacts, never the whole
         # workspace's (see the `list_artifacts` branch's identical forward).
+        # `company_id` is passed UNCONDITIONALLY now, not just under a project
+        # scope. It gates the project listing exactly as before (that branch
+        # still requires a `project_id` alongside it), but the reports / ticket
+        # sets / team documents fan-out is keyed by the company UUID as well as
+        # the dataset slug — so withholding it on main chat would make those
+        # three kinds unreadable there and report `not_found` for a document the
+        # Artifacts screen lists.
         envelope["open"] = resolve_open_artifact(
             artifact_type=envelope.get("artifact_type") or "prd",
             query=envelope.get("artifact_query") or "",
             dataset=_dataset_for(company) if dataset is None else dataset,
             project_id=project_id,
-            company_id=company.company_id if project_id is not None else None,
+            company_id=company.company_id,
+            conversation_id=conversation_id,
         )
         _attach_open_conversations(envelope["open"], company.company_id)
     if envelope.get("intent") == "list_artifacts":

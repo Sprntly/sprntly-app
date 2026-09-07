@@ -4,7 +4,26 @@
 // destination, whose consumers read the candidate's `type`/ids. `type` is
 // wider than `OpenArtifactKind` on purpose — the modal filters by the item's
 // real kind.
-import type { ArtifactItem, ChatArtifactItem, OpenArtifactCandidate } from "../../../../lib/api"
+import { isProjectArtifactType, type ArtifactItem, type ChatArtifactItem, type OpenArtifactCandidate, type ProjectArtifactType } from "../../../../lib/api"
+
+/** THE TWO VOCABULARIES, bridged in one place.
+ *
+ *  An open request speaks the USER's words — `OpenArtifactKind` is "tickets"
+ *  and "document" — while every listing, badge map and browse filter speaks the
+ *  STORAGE words, "ticket_set" and "custom_artifact". The backend bridges the
+ *  same gap in `artifact_open._LISTING_TYPE`; this is the client half.
+ *
+ *  It also absorbs the smuggled kinds: `artifactItemAsCandidate` above casts a
+ *  card's real listing type straight into the candidate union (deliberately —
+ *  see the header comment), so a candidate reaching here can already be
+ *  carrying "ticket_set" or "prototype". Both spellings map to the same browse
+ *  filter, and anything unrecognised returns undefined, which browses the whole
+ *  library rather than a filter nothing matches.
+ */
+export function candidateBrowseType(type: string): ProjectArtifactType | undefined {
+  const storage = type === "tickets" ? "ticket_set" : type === "document" ? "custom_artifact" : type
+  return isProjectArtifactType(storage as ArtifactItem["type"]) ? storage as ProjectArtifactType : undefined
+}
 
 export function artifactItemAsCandidate(item: ChatArtifactItem): OpenArtifactCandidate {
   return {
