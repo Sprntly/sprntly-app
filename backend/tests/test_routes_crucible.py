@@ -649,6 +649,177 @@ def test_sweep_recovered_enrichment_step_is_not_clobbered_by_a_stale_snapshot(ct
     )
 
 
+def test_the_two_recommendation_passes_run_at_the_same_time(ctx):
+    """MEASURED SEQUENTIALLY AT 31.1s THEN 42.8s — nearly 74s of a reader's
+    wait spent running two passes that never needed each other.
+
+    The deep pass takes findings, impacts, confidences and claims; it does
+    NOT take the flat pass's output, and only the synthesis below both
+    consumes `deep`. So they overlap.
+
+    THE BARRIER IS THE PROOF. Each stub waits for the other to arrive before
+    either may return. Run sequentially, the first would wait alone until it
+    times out and this test fails; it can only pass if both are genuinely in
+    flight at once. A wall-clock assertion would prove the same thing far
+    more flakily on a loaded box.
+    """
+    import threading
+
+    from app.crucible import recommend as recommend_mod
+
+    both_in_flight = threading.Barrier(2, timeout=10)
+    # RECORDED AFTER THE RENDEZVOUS, NOT BEFORE IT. Appending on entry would
+    # make this test pass sequentially too: the first pass would wait alone,
+    # `wait()` would raise `BrokenBarrierError`, the route's own `except`
+    # would swallow it, and both names would still be on the list. Only a
+    # `wait()` that RETURNED means the other pass was genuinely in flight.
+    paired: list[str] = []
+
+    # THE REAL FUNCTIONS, called through after the rendezvous, so this test
+    # asserts overlap without also faking either pass's result: both
+    # short-circuit offline under pytest anyway.
+    real_flat = recommend_mod.build_recommendations
+    real_deep = recommend_mod.build_deep_recommendations
+
+    def _flat_stub(**kw):
+        both_in_flight.wait()
+        paired.append("flat")
+        return real_flat(**kw)
+
+    def _deep_stub(**kw):
+        both_in_flight.wait()
+        paired.append("deep")
+        return real_deep(**kw)
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(recommend_mod, "build_recommendations", _flat_stub)
+        monkeypatch.setattr(recommend_mod, "build_deep_recommendations", _deep_stub)
+        for i in range(3):
+            _signal(ctx.company_id, i)
+        run_id = _start(ctx, goal="reduce churn").json()["id"]
+        approved = ctx.client.post(f"/v1/crucible/{run_id}/approve", json={})
+        assert approved.status_code == 200
+    finally:
+        monkeypatch.undo()
+
+    assert sorted(paired) == ["deep", "flat"], (
+        "both passes must be in flight at the same time; got "
+        f"{paired} — a pass that never met the other timed out on the barrier"
+    )
+
+
+def test_a_failure_in_one_recommendation_pass_still_leaves_the_other(ctx):
+    """Each pass was independently total before the fan-out and stays
+    independently total after it: waiting on a future re-raises in the
+    CALLING thread, so the two `try`/`except` blocks still sit around each
+    pass individually rather than around the pair. A reader who loses the
+    deep pass keeps the flat one, and the run still completes.
+
+    Driven through the stalled-enrichment sweep because that path seeds a
+    real finding row — `recs` is merged onto findings by id, so a run with no
+    findings would assert nothing about either pass.
+    """
+    from app.crucible import recommend as recommend_mod
+    from app.routes.crucible import sweep_stalled_enrichment
+
+    def _deep_boom(**kw):
+        raise RuntimeError("deep pass unavailable")
+
+    # THE FLAT PASS RETURNS SOMETHING RECOGNISABLE, because that is the half
+    # this test is really about. Offline under pytest it returns `{}` — and
+    # `{}` is also what a pass swallowed by a SHARED `try`/`except` around
+    # both would leave behind, so without a real result here this test would
+    # pass whether or not the two passes are independently total.
+    def _flat_one(*, findings, **kw):
+        return {
+            f.id: recommend_mod.Recommendation(
+                finding_id=f.id,
+                action="Route parts-blocked renewals to the ops queue",
+                because="the flat pass survived the deep pass failing",
+            )
+            for f in findings
+        }
+
+    run_id = _stalled_run(
+        ctx, goal_text="raise renewals",
+        statement="Renewals stall on the parts flow",
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(recommend_mod, "build_deep_recommendations", _deep_boom)
+        monkeypatch.setattr(recommend_mod, "build_recommendations", _flat_one)
+        assert sweep_stalled_enrichment() == 1
+    finally:
+        monkeypatch.undo()
+
+    # The run reached the end rather than dying inside enrichment...
+    assert ctx.client.get(f"/v1/crucible/{run_id}").json()["status"] == "ready"
+    meta = _prioritisation(run_id)
+    # ...the deep pass's own outputs degraded to their documented empties...
+    assert not meta.get("recommendation_basis")
+    assert meta.get("progress", {}).get("deep") == 0
+    # ...and the FLAT pass's output still landed, which is the whole point of
+    # keeping the two `except` blocks separate. `label`/`example` and the flat
+    # recommendation are not stored columns: they live only in
+    # `findings_extra_by_rank`, read back positionally by the renderer.
+    actions = [
+        (e.get("recommendation") or {}).get("action")
+        for e in meta.get("findings_extra_by_rank") or []
+    ]
+    assert "Route parts-blocked renewals to the ops queue" in actions, actions
+
+
+def test_a_mid_run_poll_does_not_render_the_report(ctx):
+    """THE PANEL POLLS EVERY 3 SECONDS FOR THE WHOLE LENGTH OF A RUN.
+
+    `report_html` was assembled from scratch on each of those polls — the
+    findings pass, the ledger, the plan, the chain — for a reader who cannot
+    see any of it yet: the only component that reads `report_html` is mounted
+    below `GoalAnalysisTab`'s `status !== "ready"` early return.
+
+    Asserted through a spy on the renderer rather than on elapsed time, so it
+    states which calls happened rather than how fast the box was.
+    """
+    from app.crucible import report as report_mod
+
+    renders: list = []
+    real_render = report_mod.render_report_document
+
+    def _spy(run, *a, **kw):
+        renders.append(run.get("status"))
+        return real_render(run, *a, **kw)
+
+    for i in range(3):
+        _signal(ctx.company_id, i)
+    run_id = _start(ctx, goal="reduce churn").json()["id"]
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.setattr(report_mod, "render_report_document", _spy)
+        # Mid-run: the gate has not been answered, so the run is not ready.
+        body = ctx.client.get(f"/v1/crucible/{run_id}").json()
+        assert body["status"] != "ready"
+        # THE KEY IS PRESENT AND NULL, not absent — the response shape must
+        # not change between a running and a ready run.
+        assert "report_html" in body
+        assert body["report_html"] is None
+        assert renders == [], f"the report was rendered mid-run: {renders}"
+
+        # ...and the document still arrives once the run IS ready.
+        _confirm(ctx, run_id)
+        assert ctx.client.post(
+            f"/v1/crucible/{run_id}/approve", json={}).status_code == 200
+        ready = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    finally:
+        monkeypatch.undo()
+
+    assert ready["status"] == "ready"
+    assert renders == ["ready"], renders
+    assert (ready["report_html"] or "").lstrip().startswith("<!doctype")
+
+
 def test_sweep_recovery_publishes_the_actual_deep_recommendation_count(ctx):
     """The narration recap's "top N written up in full" line reads
     `progress.deep`. It used to freeze at Stage 10a's screening-tier cap the

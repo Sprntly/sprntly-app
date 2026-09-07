@@ -1618,7 +1618,14 @@ def _resolve_source_line(run: Optional[dict], claim_id: str) -> str:
         return ""
     try:
         from app.crucible.resolve import resolve_claim_source
-        source = resolve_claim_source(str(company_id), int(run_id), claim_id)
+        # THE ROW WE ALREADY HAVE, HANDED DOWN. `resolve_claim_source` falls
+        # back to its own tenant-scoped `crucible_runs.get` when this is
+        # None — a full run row, prose rows and all, refetched once per
+        # written-up finding AND once per named ledger row. This renderer was
+        # given that row by its caller, so there is nothing to go and find.
+        source = resolve_claim_source(
+            str(company_id), int(run_id), claim_id, run_row=run,
+        )
     except Exception:
         logger.warning(
             "crucible: could not resolve claim %s for run %s",

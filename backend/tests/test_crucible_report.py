@@ -2765,9 +2765,12 @@ def test_a_written_up_finding_renders_the_call_it_came_from(monkeypatch):
 
     monkeypatch.setattr(
         resolve_mod, "resolve_claim_source",
-        lambda company_id, run_id, claim_id: _claim_source(pointer={
-            "kind": "call", "title": "Renewal check-in", "call_date": "2026-08-03",
-        }),
+        lambda company_id, run_id, claim_id, *, run_row=None: _claim_source(
+            pointer={
+                "kind": "call", "title": "Renewal check-in",
+                "call_date": "2026-08-03",
+            },
+        ),
     )
     html = render_report_html(
         _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM, "c2"])],
@@ -2785,7 +2788,7 @@ def test_a_written_up_finding_renders_a_document_pointer_without_a_call(monkeypa
 
     monkeypatch.setattr(
         resolve_mod, "resolve_claim_source",
-        lambda company_id, run_id, claim_id: _claim_source(
+        lambda company_id, run_id, claim_id, *, run_row=None: _claim_source(
             pointer={"kind": "doc", "label": "renewal-playbook.pdf"},
         ),
     )
@@ -2815,8 +2818,8 @@ def test_the_three_unresolved_states_read_differently(monkeypatch):
     ):
         monkeypatch.setattr(
             resolve_mod, "resolve_claim_source",
-            lambda company_id, run_id, claim_id, _status=status:
-                _claim_source(status=_status),
+            lambda company_id, run_id, claim_id, *, run_row=None,
+            _status=status: _claim_source(status=_status),
         )
         html = render_report_html(
             _run(company_id="co-1"), [_finding(claim_ids=[_A_CLAIM])],
@@ -2831,9 +2834,12 @@ def test_a_ruled_out_row_carries_its_own_identifier_too(monkeypatch):
 
     monkeypatch.setattr(
         resolve_mod, "resolve_claim_source",
-        lambda company_id, run_id, claim_id: _claim_source(pointer={
-            "kind": "call", "title": "Pricing follow-up", "call_date": "2026-07-01",
-        }),
+        lambda company_id, run_id, claim_id, *, run_row=None: _claim_source(
+            pointer={
+                "kind": "call", "title": "Pricing follow-up",
+                "call_date": "2026-07-01",
+            },
+        ),
     )
     html = render_report_html(
         _run(company_id="co-1"), [_finding()],
@@ -2858,7 +2864,7 @@ def test_a_resolver_failure_degrades_to_silence_not_to_a_crash(monkeypatch):
     because one claim's provenance lookup did."""
     from app.crucible import resolve as resolve_mod
 
-    def _boom(company_id, run_id, claim_id):
+    def _boom(company_id, run_id, claim_id, *, run_row=None):
         raise RuntimeError("Supabase client unavailable")
 
     monkeypatch.setattr(resolve_mod, "resolve_claim_source", _boom)
@@ -2876,7 +2882,12 @@ def test_only_the_written_up_findings_get_resolved_not_the_overflow_table(monkey
 
     calls: list[str] = []
 
-    def _record(company_id, run_id, claim_id):
+    def _record(company_id, run_id, claim_id, *, run_row=None):
+        # The renderer hands its own row down rather than paying for a second
+        # read of it; a stub that silently tolerated `run_row=None` here would
+        # let this test's "never called for a3" assertion pass for the wrong
+        # reason, because every call would have raised instead.
+        assert run_row is not None
         calls.append(claim_id)
         return _claim_source(pointer={"kind": "doc", "label": "x.pdf"})
 
@@ -2888,6 +2899,65 @@ def test_only_the_written_up_findings_get_resolved_not_the_overflow_table(monkey
     assert MAX_WRITTEN_UP_FINDINGS == 2
     render_report_html(_run(company_id="co-1"), findings)
     assert "a3" not in calls
+
+
+def test_a_render_resolves_from_the_row_it_was_given_not_a_second_read(monkeypatch):
+    """THE RENDERER PAYS FOR NO RUN-ROW READS AT ALL.
+
+    `resolve_claim_source` falls back to its own tenant-scoped
+    `crucible_runs.get` when it is handed no row. This renderer resolves once
+    per written-up finding AND once per named ledger row, so that fallback
+    used to refetch the same run row — prose rows and all, up to the persist
+    cap — once per citation on the page.
+
+    Unlike every other test in this section, this one runs the REAL resolver:
+    a stub would prove nothing about which branch it takes internally. Only
+    the two reads BENEATH it are intercepted — the signal lookup (so the
+    prose branch is the one exercised) and the run-row fetch (so a fallback
+    read is counted rather than attempted against a database this suite
+    never configured).
+    """
+    from app.crucible import prose
+    from app.db import crucible_runs as runs_db
+    from app.routes import crucible as routes_crucible
+
+    refetches: list[tuple] = []
+
+    # RETURNS THE ROW, exactly as the real fallback would. A spy that returned
+    # None would make the fallback path fail the pointer assertion below for
+    # the wrong reason; returning the row leaves the READ COUNT as the only
+    # thing that can distinguish handing the row down from refetching it.
+    def _count_refetch(run_id, company_id):
+        refetches.append((run_id, company_id))
+        return run
+
+    monkeypatch.setattr(runs_db, "get", _count_refetch)
+    monkeypatch.setattr(
+        routes_crucible, "_load_signals_by_id", lambda company_id, ids: [],
+    )
+
+    prose_row = {
+        "id": _A_CLAIM,
+        "content": "renewals stall waiting on parts",
+        "source_type": "document",
+        "provenance": {"doc": "renewal-playbook.pdf"},
+    }
+    run = _run(company_id="co-1", prioritisation={
+        "plan": _plan(), prose.META_KEY: [prose_row],
+    })
+
+    html = render_report_html(
+        run,
+        [_finding(claim_ids=[_A_CLAIM])],
+        [{"label": "Mobile parity", "reason": "no claim survived the echo check",
+          "stopped_at_stage": "verification", "claim_ids": [_A_CLAIM]}],
+    )
+
+    # NOT ONE run-row read, for either citation on the page.
+    assert refetches == []
+    # ...and the pointer still reached the page, which is what says the prose
+    # rows on the handed-down row were genuinely in scope.
+    assert "renewal-playbook.pdf" in html
 
 
 # ─── A recommendation set says when nothing was cut ────────────────────────

@@ -102,10 +102,41 @@ def invalidate(company_id: str) -> None:
     _cache.pop(company_id, None)
 
 
+def _log_resolution(*, cached: bool, t0: float) -> None:
+    """[timing] — how long resolving this company's key posture took, and
+    whether it came off the cache.
+
+    THE ONE READ ON THE CALL PATH THAT LOGS NOTHING ON SUCCESS. A miss goes
+    to `get_company_llm_config`, a real database round trip, on a 30-second
+    TTL — so on a slow or contended database it is dead air inside a model
+    call's timing block with no line to attribute it to. Emitted on the same
+    `app.timing` logger, in the same `[timing] block=… event=…` shape, so it
+    lands beside the gateway's own start/pre_call/end lines for the call that
+    triggered it.
+
+    NEVER THE KEY, NOT EVEN ITS LENGTH OR WHETHER ONE EXISTS. This says how
+    long a lookup took and whether it was cached, which is all the latency
+    question needs; the company's key posture is not a fact for a log line.
+    Nothing here can raise into the caller — key resolution failing because
+    its telemetry failed would be a strictly worse outcome than the dead air
+    this exists to explain.
+    """
+    try:
+        from app.timing import logger as _timing_logger
+
+        _timing_logger.info(
+            "[timing] block=llm_keys:resolve event=end dur_ms=%d cached=%s",
+            int((time.monotonic() - t0) * 1000), "yes" if cached else "no",
+        )
+    except Exception:  # noqa: BLE001 — telemetry never breaks the call path
+        pass
+
+
 def _resolve(company_id: str) -> _Resolution:
     now = time.monotonic()
     hit = _cache.get(company_id)
     if hit is not None and now - hit[0] < _CACHE_TTL_S:
+        _log_resolution(cached=True, t0=now)
         return hit[1]
 
     company_key: str | None = None
@@ -130,6 +161,7 @@ def _resolve(company_id: str) -> _Resolution:
 
     res = _Resolution(company_key=company_key, provider=provider)
     _cache[company_id] = (now, res)
+    _log_resolution(cached=False, t0=now)
     return res
 
 

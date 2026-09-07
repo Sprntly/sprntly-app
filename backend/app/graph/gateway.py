@@ -314,6 +314,24 @@ def llm_call(
     with company_llm_key(enterprise_id), usage_scope(
         feature=feature_for_agent(agent), operation=purpose
     ):
+        # [timing] — HOW MUCH OF THIS BLOCK IS SPENT BEFORE THE CALL EVEN
+        # STARTS. A measured run showed 120,192ms inside `llm:recommend_
+        # synthesis` before the metered API call began, and the start/end pair
+        # above cannot tell that apart from a slow model: both are just a long
+        # block. This line splits them.
+        #
+        # It is NOT a retry (the ledger had zero failed rows) and NOT the
+        # concurrency gate (that warns past `llm._SLOT_WAIT_LOG_THRESHOLD_S`
+        # and did not). Note that key resolution is NOT in this region either
+        # — `company_llm_key` only binds a contextvar; the resolution that can
+        # touch the database happens inside `get_client`, below, and is timed
+        # where it actually lives (`llm_keys._resolve`).
+        #
+        # One extra log line per call, no branching, nothing retained.
+        _timing_logger.info(
+            "[timing] block=llm:%s event=pre_call agent=%s dur_ms=%d",
+            purpose, agent, int((time.monotonic() - t0) * 1000),
+        )
         if json_schema is not None:
             # The method (if any) is already merged into user_cacheable_prefix
             # above, so it stays cache-friendly across calls; the agent system

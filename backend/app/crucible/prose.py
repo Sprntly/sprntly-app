@@ -73,6 +73,7 @@ import hashlib
 import logging
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Optional, Sequence
@@ -165,6 +166,18 @@ MAX_SEGMENTS_PER_FILE = 40
 #: transcript; short enough that a pathological single-segment document cannot
 #: send an unbounded prompt.
 MAX_SEGMENT_CHARS = 60_000
+
+#: How many segment extractions may be in flight at once.
+#:
+#: TWO, AND THE NUMBER IS THE POINT. Measured serially: 10 calls, 133.3s,
+#: 13ms of overlap between them. `app.llm`'s concurrency gate
+#: (`LLM_MAX_CONCURRENCY`, default 6) is process-wide and shared with every
+#: interactive chat call on the box, and `routes.crucible._POOL` already
+#: admits two runs at once — so two here is up to four in flight against a
+#: cap of six, and four here would be eight against six and would starve
+#: chat. The same arithmetic, and the same answer, as
+#: `relevance.MAX_PARALLEL`.
+MAX_PARALLEL_SEGMENTS = 2
 
 
 # ── Segmentation ────────────────────────────────────────────────────────────
@@ -651,6 +664,103 @@ def signal_to_row(signal, *, created_at: datetime) -> dict:
     }
 
 
+class _ExtractedSegments:
+    """Every segment's raw extraction result, already computed, addressable by
+    `(document, segment)`.
+
+    Holds the RAISED EXCEPTION rather than re-raising at collection time, so
+    the caller's own `try` around `_usable` is what turns a failure into
+    `failed += 1` — exactly where it did when the call was inline.
+    """
+
+    def __init__(self) -> None:
+        self._by_seg: dict[tuple[int, int], str] = {}
+        self._raw: dict[str, Any] = {}
+        self._err: dict[str, BaseException] = {}
+
+    def result_for(self, doc: "ProseDocument", seg: "ProseSegment") -> Any:
+        key = self._by_seg[(id(doc), seg.index)]
+        err = self._err.get(key)
+        if err is not None:
+            raise err
+        return self._raw[key]
+
+
+def _extract_all_segments(
+    docs: Sequence[ProseDocument], *, enterprise_id: str,
+) -> _ExtractedSegments:
+    """Every segment across every document, extracted — DEDUPLICATED FIRST,
+    then run `MAX_PARALLEL_SEGMENTS`-wide.
+
+    DEDUPLICATED BEFORE THE POOL, NOT IN THE CACHE, and that is the whole
+    reason this is a pre-pass rather than a bare `map`. `prose_cache` is not
+    get-or-compute: two workers holding identical segment text would both
+    miss, both call the model, and the last `put` would win — paying twice
+    for one answer and, worse, breaking `_extract_segment`'s stated promise
+    that "the same bytes read twice inside this process get the first answer
+    rather than a second sample", which is the promise that keeps a draw from
+    becoming two draws. Grouping identical text up front makes that promise
+    hold under concurrency without touching the cache.
+
+    KEYED ON TEXT ALONE, matching the cache's own key exactly
+    (`sha256(text)` + prompt version; `artifact_id` reaches only the prompt's
+    `doc_name` and never the key). The first occurrence's `artifact_id` is
+    the one that makes the call, which is the one that would have made it
+    serially — every later duplicate hit the cache.
+
+    A FAILED EXTRACTION FANS OUT TO ITS DUPLICATES, and this is the one
+    behavioural difference in the change. Serially, a failure on the first
+    occurrence left no cache entry, so a second occurrence of the same text
+    got its own attempt; here it does not, and both are counted failed.
+
+    THE DELIBERATE SIDE, for two reasons. It is DETERMINISTIC: identical
+    bytes get one outcome, so a run's failed-segment count does not depend on
+    how the duplicates happened to be scheduled — the same reproducibility
+    rule `cluster.py` states for worker counts. And the behaviour it gives up
+    was never a designed retry, only an accidental one: re-attempting is
+    precisely the duplicate model call this pre-pass exists to remove. A
+    segment that genuinely warrants retrying should get one deliberately, at
+    the call site, not as a side effect of the cache having missed.
+    """
+    out = _ExtractedSegments()
+    order: list[str] = []
+    first_call: dict[str, tuple[str, str]] = {}
+
+    for doc in docs:
+        for seg in doc.segments:
+            text = seg.text[:MAX_SEGMENT_CHARS]
+            key = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            out._by_seg[(id(doc), seg.index)] = key
+            if key not in first_call:
+                first_call[key] = (doc.artifact_id_for(seg), text)
+                order.append(key)
+
+    if not order:
+        return out
+
+    with ThreadPoolExecutor(
+        max_workers=max(1, min(MAX_PARALLEL_SEGMENTS, len(order))),
+        thread_name_prefix="crucible-prose",
+    ) as ex:
+        # `max_workers` IS the bound — at most that many calls are ever in
+        # flight, whatever the submit order — so the whole list goes in at
+        # once. The relevance gate submits in explicit waves only because it
+        # re-checks a deadline between them; there is no deadline here, and
+        # the serial loop this replaces had none either.
+        futures = {key: ex.submit(
+            _extract_segment, text,
+            artifact_id=artifact_id, enterprise_id=enterprise_id,
+        ) for key, (artifact_id, text) in first_call.items()}
+
+        for key in order:
+            try:
+                out._raw[key] = futures[key].result()
+            except Exception as exc:  # noqa: BLE001 — re-raised per segment
+                out._err[key] = exc
+
+    return out
+
+
 def extract_documents(
     docs: Sequence[ProseDocument],
     *,
@@ -675,15 +785,32 @@ def extract_documents(
     conversations = 0
     failed = 0
 
+    extracted = _extract_all_segments(docs, enterprise_id=enterprise_id)
+
+    # THE SAME SERIAL LOOP AS BEFORE, over a list that is already ordered.
+    #
+    # ORDERING IS LOAD-BEARING, not cosmetic. Prose rows are appended after
+    # the id-ordered graph rows with no sort, and `_cluster` preserves input
+    # order, so within-group position decides four separate things
+    # downstream: which claim `example`/`strongest` picks (`max` returns the
+    # FIRST maximal element, and prose claims are ceilinged at `reported`, so
+    # ties are the norm rather than the exception), which six ids survive
+    # `claim_ids[:MAX_CLAIMS_PER_FINDING]` and therefore what the
+    # recommendation model is shown, `_label`'s first-seen tie-break, and
+    # `_accounts` first-seen order. `cluster.py`'s reproducibility invariant
+    # names the hazard exactly: nothing may depend on how many workers
+    # happened to run.
+    #
+    # So the fan-out above collects results into a map and this loop — the
+    # counting, the per-document `read` entry, the row order — is untouched
+    # and still runs in one thread, in document-then-segment order.
     for doc in docs:
         produced = 0
         for seg in doc.segments:
             artifact_id = doc.artifact_id_for(seg)
             try:
                 items = _usable(
-                    _extract_segment(seg.text[:MAX_SEGMENT_CHARS],
-                                     artifact_id=artifact_id,
-                                     enterprise_id=enterprise_id),
+                    extracted.result_for(doc, seg),
                     enterprise_id=enterprise_id, doc_name=artifact_id)
             except Exception:  # noqa: BLE001 — see the docstring
                 logger.warning(
