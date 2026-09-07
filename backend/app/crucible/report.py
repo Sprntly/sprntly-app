@@ -1333,7 +1333,7 @@ KILL_SIGNAL_CAVEAT = (
 #: not reach; and, as of the claim-source identifier below, the CALL a claim
 #: is traced to — `app.crucible.resolve._call_pointer` returns `call_index
 #: .title` verbatim, and measured on staging 410 of 500 call titles (82%)
-#: contain the account's own name ("BayCare Clinic + ChaosTrack Briefing").
+#: contain the account's own name ("Northwind Utilities + Vendor Quarterly Review").
 #: That is the same saturation as the four routes already named here, on a
 #: surface this file did not touch until this identifier existed, which is
 #: why the sentence gains a clause rather than the identifier shipping
