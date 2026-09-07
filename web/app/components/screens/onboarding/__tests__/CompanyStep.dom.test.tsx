@@ -23,6 +23,15 @@
 // workspace "Main workspace" (best-effort, and only while it is still
 // unnamed).
 //
+// ALL FOUR FIELDS ARE REQUIRED as of 2026-09-07 (only the name was, before),
+// and the explanatory hint under Company website is gone. Tests whose subject
+// is what happens after a successful save go through `fillAll`.
+//
+// CONTINUE GOES TO THE NEXT STEP, not to payment. Until 2026-09-07 this step
+// pushed straight to `/onboarding/plan` — the payment gate sat between creating
+// the company row and the rest of the flow. Payment is the LAST step now, so
+// this one hands on like any other.
+//
 // product-helpers (validateProductWebsite / normalizeProductWebsite) run REAL —
 // they're pure and accept an empty website.
 //
@@ -100,6 +109,21 @@ const productNameInput = () =>
   byPlaceholder("The product you're onboarding (you can add more later)")
 const productSiteInput = () => byPlaceholder("https://yourproduct.com")
 
+/** Fill every field. ALL FOUR ARE REQUIRED since 2026-09-07, so any test whose
+ *  subject is what happens AFTER a successful save has to get past the
+ *  validators first — the blocking behaviour has its own tests below. */
+function fillAll({
+  name = "Acme",
+  companySite = "acme.com",
+  productName = "Acme Pay",
+  productSite = "acme.app",
+} = {}) {
+  fireEvent.change(nameInput(), { target: { value: name } })
+  fireEvent.change(companySiteInput(), { target: { value: companySite } })
+  fireEvent.change(productNameInput(), { target: { value: productName } })
+  fireEvent.change(productSiteInput(), { target: { value: productSite } })
+}
+
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll("button")).find((b) =>
     /^next$/i.test((b.textContent ?? "").trim()),
@@ -117,7 +141,7 @@ afterEach(() => {
 })
 
 describe("CompanyStep (onboarding step 01 — company + product basics)", () => {
-  it("renders exactly the four fields, seeded from the workspace, with only the name starred", () => {
+  it("renders exactly the four fields, seeded from the workspace, all four starred", () => {
     mount()
     expect(screen.getByText(/Tell us about your/)).not.toBeNull()
     expect(nameInput()).not.toBeNull()
@@ -131,15 +155,27 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     expect(productNameInput().value).toBe("")
     expect(productSiteInput().value).toBe("")
 
-    // Only the company name is required; the other three are explicitly optional.
-    const nameField = document.querySelector('[data-field="companyName"]') as HTMLElement
-    expect(nameField.querySelector(".req")).not.toBeNull()
-    for (const f of ["companyWebsite", "productName", "productWebsite"]) {
+    // ALL FOUR REQUIRED (2026-09-07). Three of them used to be optional; the
+    // company site in particular is what the background analysis reads to draft
+    // the business context, so a signup that skipped it reached the review step
+    // with nothing to review.
+    for (const f of ["companyName", "companyWebsite", "productName", "productWebsite"]) {
       const field = document.querySelector(`[data-field="${f}"]`) as HTMLElement
       expect(field, f).not.toBeNull()
-      expect(field.querySelector(".req"), f).toBeNull()
-      expect(field.querySelector(".opt"), f).not.toBeNull()
+      expect(field.querySelector(".req"), f).not.toBeNull()
+      expect(field.querySelector(".opt"), f).toBeNull()
     }
+  })
+
+  it("does not explain the website field, it just asks for it", () => {
+    // The hint under Company website ("We'll read this in the background to
+    // draft your business context…") came off on 2026-09-07. It described our
+    // plumbing on the first screen after signup, where nobody has context for
+    // what a "business context" or "the prompt on the next step" is yet.
+    mount()
+    expect(screen.queryByText(/read this in the background/i)).toBeNull()
+    expect(screen.queryByText(/business context/i)).toBeNull()
+    expect(document.querySelector(".onb-field-hint")).toBeNull()
   })
 
   it("no longer asks for strategy, mission, portfolio or a planning cycle", () => {
@@ -166,7 +202,9 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     expect(routerMock.push).not.toHaveBeenCalled()
   })
 
-  it("EMPTY websites save fine (optional for everyone) — no analysis kicked", async () => {
+  it("EMPTY websites and product name now BLOCK Continue, each with its own error", async () => {
+    // The reverse of what this step did until 2026-09-07, when the three
+    // non-name fields were optional and an empty save was a supported finish.
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     upsertProductMock.mockResolvedValue(makeProduct())
     mount()
@@ -175,23 +213,40 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
       continueBtn().click()
     })
 
-    await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+    // The name is seeded from the workspace, so the other three are what fail.
+    expect(screen.getByText("Enter your company website.")).not.toBeNull()
+    expect(screen.getByText("Enter your product name.")).not.toBeNull()
+    expect(screen.getByText("Enter your product website.")).not.toBeNull()
+    expect(updateWorkspaceMock).not.toHaveBeenCalled()
+    expect(upsertProductMock).not.toHaveBeenCalled()
+    expect(createWorkspaceMock).not.toHaveBeenCalled()
+    expect(analysisSpy).not.toHaveBeenCalled()
+    expect(routerMock.push).not.toHaveBeenCalled()
+  })
+
+  it("a filled form saves the company\'s own columns and names the default workspace", async () => {
+    // What the old "empty websites save fine" test covered on the far side of
+    // the save: the columns this step writes (mission/strategy/portfolio/
+    // planning_cycle are no longer its business) and the workspace naming.
+    updateWorkspaceMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: 2, website: "https://acme.com" }),
+    )
+    upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.app" }))
+    mount()
+
+    fillAll()
+    await act(async () => {
+      continueBtn().click()
     })
-    // Only the company's own columns — mission/strategy/portfolio/planning_cycle
-    // are no longer this step's business.
+
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
+    })
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
-      website: null,
+      website: "https://acme.com",
       onboarding_step: 2,
     })
-    // Product name still falls back to the company name: products.name rejects
-    // an empty string.
-    expect(upsertProductMock).toHaveBeenCalledWith("ws-1", {
-      name: "Acme",
-      website: null,
-    })
-    expect(analysisSpy).not.toHaveBeenCalled()
     expect(createWorkspaceMock).not.toHaveBeenCalled()
     // `makeWorkspace()` carries `team_name: null` — the removed workspace step's
     // sentinel — so this save also names the default workspace for them.
@@ -212,11 +267,12 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     upsertProductMock.mockResolvedValue(makeProduct())
     mount(makeWorkspace({ team_name: "Growth Pod" }))
 
+    fillAll()
     await act(async () => {
       continueBtn().click()
     })
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(saveWorkspaceOwnedFieldsMock).not.toHaveBeenCalled()
   })
@@ -229,11 +285,12 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     saveWorkspaceOwnedFieldsMock.mockRejectedValue(new Error("network"))
     mount()
 
+    fillAll()
     await act(async () => {
       continueBtn().click()
     })
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(saveWorkspaceOwnedFieldsMock).toHaveBeenCalled()
   })
@@ -255,7 +312,7 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     // Both normalized to https, and landing in DIFFERENT places.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
@@ -271,24 +328,28 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     expect(analysisSpy).toHaveBeenCalledWith("https://acme.com", "ws-1")
   })
 
-  it("falls back to the product site for the analysis when only that one is filled", async () => {
-    // Nobody who fills in one field loses the prefill they used to get, and this
-    // is also the pre-split company's path: their URL lives on the product row.
+  it("falls back to the product site for the analysis when the saved row has no company website", async () => {
+    // The pre-split company's path: their URL lives on the product row, so the
+    // company row comes back with a null `website` even though the (now
+    // required) field was filled. The fallback is what stops them losing the
+    // prefill they used to get.
     updateWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     upsertProductMock.mockResolvedValue(makeProduct({ website: "https://acme.app" }))
     mount()
 
-    fireEvent.change(productSiteInput(), { target: { value: "acme.app" } })
+    fillAll()
     await act(async () => {
       continueBtn().click()
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
+    // The field was filled and written, as it must be — what this covers is the
+    // ROW coming back without it, which is the pre-split company's shape.
     expect(updateWorkspaceMock).toHaveBeenCalledWith("ws-1", {
       display_name: "Acme",
-      website: null,
+      website: "https://acme.com",
       onboarding_step: 2,
     })
     expect(analysisSpy).toHaveBeenCalledWith("https://acme.app", "ws-1")
@@ -311,22 +372,24 @@ describe("CompanyStep (onboarding step 01 — company + product basics)", () => 
     createWorkspaceMock.mockResolvedValue(makeWorkspace({ onboarding_step: 2 }))
     mount(null)
 
-    fireEvent.change(nameInput(), { target: { value: "Solo Co" } })
-    fireEvent.change(companySiteInput(), { target: { value: "solo.com" } })
-    fireEvent.change(productSiteInput(), { target: { value: "app.solo.com" } })
+    fillAll({
+      name: "Solo Co",
+      companySite: "solo.com",
+      productName: "Solo Pay",
+      productSite: "app.solo.com",
+    })
     await act(async () => {
       continueBtn().click()
     })
 
     await waitFor(() => {
-      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/connectors")
     })
     expect(createWorkspaceMock).toHaveBeenCalledTimes(1)
     const arg = createWorkspaceMock.mock.calls[0][0] as Record<string, unknown>
     expect(arg.companyName).toBe("Solo Co")
     expect(arg.website).toBe("https://solo.com")
-    // Untyped product name still falls back to the company name.
-    expect(arg.productName).toBe("Solo Co")
+    expect(arg.productName).toBe("Solo Pay")
     expect(arg.productWebsite).toBe("https://app.solo.com")
     // Sign-up always writes account_type "company" since v6.
     expect(arg.accountType).toBe("company")

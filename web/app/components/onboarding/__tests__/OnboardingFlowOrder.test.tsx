@@ -1,13 +1,14 @@
 // @vitest-environment jsdom
 //
-// Integrity tests for the semantic-slug onboarding flow — 5 steps as of
-// 2026-09-07 (invite reinstated, right where it sat before it was cut):
-//   company -> connectors -> invite -> review -> personalize
+// Integrity tests for the semantic-slug onboarding flow — 6 steps as of
+// 2026-09-07 (invite reinstated where it sat before, payment moved to the end):
+//   company -> connectors -> invite -> review -> personalize -> plan
 // import-context, api-key, product, workspace and metrics stay removed;
 // everything they collected is edited in Settings (see lib/onboarding/types.ts
-// for the full map of what moved where, and why invite came back). The
-// personalize step closes the numbered flow, then the UNNUMBERED
-// define-metrics sub-flow completes onboarding.
+// for the full map of what moved where, and why invite came back). The PLAN
+// step closes the flow and is where onboarding completes; the unnumbered
+// define-metrics sub-flow sits between personalize and plan when analytics is
+// connected.
 //
 // Asserts the slug→screen map renders the right component per numbered step (in
 // the right order, no gaps), that an unknown slug falls back to the first step,
@@ -31,6 +32,7 @@ vi.mock("../../screens/onboarding", () => ({
   ReviewStep: () => React.createElement("div", { "data-screen": "review" }),
   PersonalizeStep: () =>
     React.createElement("div", { "data-screen": "personalize" }),
+  PlanStep: () => React.createElement("div", { "data-screen": "plan" }),
 }))
 
 import { OnboardingStep } from "../../../(app)/onboarding/[slug]/OnboardingStep"
@@ -58,20 +60,25 @@ const EXPECTED_ORDER = [
   "invite",
   "review",
   "personalize",
+  // Payment, last (2026-09-07). Appended rather than inserted, so no stored
+  // `onboarding_step` shifted and no rebase migration was needed.
+  "plan",
 ] as const
 
 describe("onboarding flow order — slug → screen", () => {
-  it("ONBOARDING_STEP_SLUGS holds exactly the 5 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
+  it("ONBOARDING_STEP_SLUGS holds exactly the 6 numbered steps in flow order", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(6)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([...EXPECTED_ORDER])
   })
 
-  it("renders the closing personalize page at the 'personalize' slug (the last step)", () => {
+  it("renders the closing plan page at the 'plan' slug (the last step)", () => {
+    // Payment is the last thing asked for, and a NUMBERED step — it used to be
+    // an unnumbered route at position two.
     const { container } = render(
-      React.createElement(OnboardingStep, { slug: "personalize" }),
+      React.createElement(OnboardingStep, { slug: "plan" }),
     )
-    expect(container.querySelector('[data-screen="personalize"]')).not.toBeNull()
-    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("personalize")
+    expect(container.querySelector('[data-screen="plan"]')).not.toBeNull()
+    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("plan")
   })
 
   it("maps every numbered slug to the expected screen, in order, with no gaps", () => {

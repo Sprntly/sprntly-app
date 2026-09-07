@@ -1,17 +1,16 @@
 /**
- * The shared onboarding closer.
+ * The onboarding closer.
  *
- * Onboarding can finish from either of two places, depending on whether the
- * workspace has a live analytics connector:
+ * ONE CALLER SINCE 2026-09-07: `PlanStep`, the last step, once
+ * `billingApi.summary()` reports a live subscription. It used to be two —
+ * PersonalizeStep when no analytics connector was live, and the define-metrics
+ * sub-flow when one was — and payment sat back at step two behind a guard.
+ * Moving payment to the end moved completion with it, which is what makes
+ * "onboarding cannot be finished without paying" a fact about where this
+ * function is called rather than a redirect someone can walk around.
  *
- *   - with analytics → ReviewStep hands off to the define-metrics sub-flow,
- *     which confirms each metric's event mapping and then finishes here;
- *   - without analytics → define-metrics has nothing to map, so ReviewStep
- *     finishes here directly.
- *
- * Both paths must kick the first brief and complete onboarding identically, so
- * that work lives here rather than being duplicated (and drifting) across the
- * two components. Routing stays with the caller.
+ * Both screens that used to call it now advance the step marker and route to
+ * the plan step instead. Routing stays with the caller.
  */
 import { completeOnboarding } from "./store"
 import { briefToContentPatch } from "../brief-adapter"

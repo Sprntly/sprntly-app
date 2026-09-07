@@ -6,8 +6,10 @@ import { useAuth } from "../../../lib/auth"
 import { OnboardingChrome } from "../../onboarding/OnboardingChrome"
 import { OptionalDisclosure } from "../../onboarding/OptionalDisclosure"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { useContent } from "../../../context/ContentContext"
-import { updateWorkspace } from "../../../lib/onboarding/store"
+import {
+  advanceOnboardingStep,
+  updateWorkspace,
+} from "../../../lib/onboarding/store"
 import {
   SELECTABLE_INSIGHT_TYPES,
   selectableInsightTypes,
@@ -15,13 +17,8 @@ import {
 import { saveDraft, loadDraft, clearDraft } from "../../../lib/onboarding/useFormDraft"
 import { connectorsApi, type ConnectionSummary } from "../../../lib/api"
 import { hasLiveAnalyticsConnection } from "../../../lib/onboarding/connectorsWizard"
-import { hasDataSourceConnection } from "../../../lib/connectorsCatalog"
 import { prefetchMetricDefinitions } from "../../../lib/onboarding/draftPrefetch"
-import { stepForSlug } from "../../../lib/onboarding/types"
-import {
-  POST_ONBOARDING_PATH,
-  finishOnboardingAndEnterApp,
-} from "../../../lib/onboarding/finishOnboarding"
+import { ONBOARDING_STEP_SLUGS, stepForSlug } from "../../../lib/onboarding/types"
 import {
   BRIEF_DAYS,
   BRIEF_FREQUENCIES,
@@ -43,6 +40,11 @@ import { useConnectorConnectedSignal } from "../../../lib/useConnectorConnectedS
 import { Check } from "../../auth/icons"
 
 const DRAFT_KEY = "personalize-step"
+
+/** The plan step's 1-based index. Payment is the last thing (2026-09-07), so
+ *  both exits from this screen — straight on, or via define-metrics — end up
+ *  there rather than in the app. */
+const PLAN_STEP = stepForSlug("plan") ?? ONBOARDING_STEP_SLUGS.length
 
 // The insight-type chips come from the shared list of SELECTABLE types
 // (lib/insight-types) so onboarding and Settings → Comms & Brief always offer
@@ -86,12 +88,15 @@ const DESTINATIONS: { value: string; label: string }[] = [
  * ReviewStep, but personalize was inserted between review and the sub-flow, so
  * the branch moved with the hand-off: with a live analytics connection we go on
  * to confirm each metric's event mapping; without one there is nothing to map
- * against, so this screen runs the closer and enters the app directly.
+ * against, so this screen hands straight on.
+ *
+ * BOTH BRANCHES END AT THE PLAN STEP (2026-09-07). This screen used to run the
+ * onboarding closer itself and drop the PM into the app; payment is now the
+ * last step, so the closer moved there and this one only advances the marker.
  */
 export function PersonalizeStep() {
   const auth = useAuth()
   const { workspace, setWorkspace, loading } = useOnboarding()
-  const { setContent } = useContent()
   const router = useRouter()
 
   const draft = loadDraft(DRAFT_KEY)
@@ -268,18 +273,14 @@ export function PersonalizeStep() {
         router.push("/onboarding/define-metrics")
         return
       }
-      // No analytics connector — nothing to map metrics onto, so this is the
-      // last screen. Run the same closer define-metrics would have. Only kick
-      // the first brief if a real data source is connected (a non-analytics one
-      // can still qualify — e.g. Zendesk/HubSpot); otherwise the brief would be
-      // built from onboarding info alone, which we avoid.
-      await finishOnboardingAndEnterApp(
-        { ...updated, product: workspace.product },
-        auth.user.id,
-        setContent,
-        hasDataSourceConnection(connections),
-      )
-      router.replace(POST_ONBOARDING_PATH)
+      // No analytics connector — nothing to map metrics onto, so the workspace
+      // is built and the only thing left is paying for it. On to the plan step,
+      // which owns the closer now (2026-09-07): it is the last step, and
+      // completing onboarding anywhere before it would hand someone the app
+      // without a card. Advance the marker first so an abandoned checkout
+      // resumes AT the plan step rather than back on this screen.
+      await advanceOnboardingStep(workspace.id, PLAN_STEP)
+      router.push(`/onboarding/${ONBOARDING_STEP_SLUGS[PLAN_STEP - 1]}`)
     } catch (e) {
       setError(e instanceof Error ? e.message : "Couldn't save your preferences.")
       setSaving(false)
@@ -302,7 +303,7 @@ export function PersonalizeStep() {
       onBack={() => router.push("/onboarding/review")}
       onContinue={() => void save()}
       continueLabel={
-        hasAnalytics ? "Next · define metrics" : "Looks right · enter Sprntly"
+        hasAnalytics ? "Next · define metrics" : "Next · choose your plan"
       }
       continueDisabled={saving || hasAnalytics === null}
       loading={saving}

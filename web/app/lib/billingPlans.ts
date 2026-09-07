@@ -79,9 +79,27 @@ export const SALES_CONTACT = "sales@sprntly.ai"
  *  a URL — the backend validates it as an open-redirect boundary. */
 export const ONBOARDING_PLAN_PATH = "/onboarding/plan"
 
-/** Days before the first charge on a company's FIRST subscription. Mirrors
- *  `plans.TRIAL_DAYS`; the backend decides whether a given checkout actually
- *  gets one (on `first_paid_at`), this is only what we promise on screen. */
+/**
+ * NO FREE TRIAL — the first invoice is charged at checkout (owner decision
+ * 2026-09-07). The mirror of `plans.TRIALS_ENABLED`, which is the authority:
+ * the SERVER decides what Stripe is told, and this constant only decides what
+ * the plan step promises. Keep the two in step, or the screen offers a free
+ * week the checkout does not grant.
+ *
+ * NOTHING WAS REMOVED. `TRIAL_DAYS`, `TRIAL_CREDITS`, `trialDaysLeft`, the
+ * sidebar countdown, the trial-ending email and the `trialing` status that
+ * `subscriptionGrantsAccess` honours are all exactly as they were — this is a
+ * switch, in the same shape as `BILLING_ENABLED`, not a deletion. A company
+ * that is mid-trial today keeps it and reads correctly everywhere.
+ *
+ * TO SELL TRIALS AGAIN: set this true and `plans.TRIALS_ENABLED` to True.
+ */
+export const TRIALS_ENABLED = false
+
+/** Days before the first charge on a company's FIRST subscription, when
+ *  trials are on. Mirrors `plans.TRIAL_DAYS`; the backend decides whether a
+ *  given checkout actually gets one (on `TRIALS_ENABLED` and `first_paid_at`),
+ *  this is only what we promise on screen. */
 export const TRIAL_DAYS = 7
 
 /**

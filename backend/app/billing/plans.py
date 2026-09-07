@@ -271,12 +271,33 @@ def subscription_grants_access(plan: str | None, status: str | None) -> bool:
 # six, keep both the output and the money).
 REFUND_WINDOW_DAYS = 7
 
+# NO TRIALS ARE SOLD (owner decision, 2026-09-07). Every checkout is charged
+# immediately, first subscription or not.
+#
+# This reverses the 2026-08-28 decision below, and it reverses it because its
+# premise went away. The trial existed because payment was about to move to the
+# FRONT of onboarding: asking a stranger for money at step one, before a single
+# brief exists, is the steepest drop-off available, so we asked for the card
+# there and the money a week later. Payment is now the LAST step — the
+# workspace is built, the connectors are connected and the business context has
+# been read before anyone sees a price — so the trial is no longer buying us a
+# conversion; it is discounting a decision someone has already made.
+#
+# A SWITCH, NOT A DELETION, in the same shape as BILLING_ENABLED above.
+# TRIAL_DAYS, TRIAL_CREDITS, `period_credits`'s trialling branch, the
+# trial-ending email, the scheduler's warning and the `trialing` status in
+# ACTIVE_SUBSCRIPTION_STATUSES are all untouched and still correct — a company
+# mid-trial today keeps it, and its credits, and its countdown. Only the
+# granting of NEW trials is off. The web mirror is `TRIALS_ENABLED` in
+# web/app/lib/billingPlans.ts, which is what the plan step's copy reads, so the
+# promise on screen and the charge cannot disagree.
+#
+# TO SELL TRIALS AGAIN: set this True and the web mirror to true. Nothing else.
+TRIALS_ENABLED = False
+
 # THE FIRST SUBSCRIPTION A COMPANY EVER BUYS GETS A TRIAL (owner decision,
-# 2026-08-28), because payment is about to move to the front of onboarding.
-# Asking a stranger for money at step one of ten, before a single brief exists,
-# is the steepest drop-off available; asking for the CARD at step one and the
-# money a week later is not. Stripe Checkout still collects the card up front
-# on a trialling subscription, so nothing about "card on file" is given up.
+# 2026-08-28) — DORMANT while TRIALS_ENABLED is False, kept because the switch
+# above is meant to be flippable.
 #
 # Deliberately keyed on whether the company has EVER paid rather than on which
 # screen started the checkout. A client-supplied "this is onboarding" flag

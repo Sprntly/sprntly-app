@@ -2,50 +2,71 @@
 
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter, useSearchParams } from "next/navigation"
-import { ApiError, apiErrorMessage, billingApi } from "../../../lib/api"
+import {
+  ApiError,
+  apiErrorMessage,
+  billingApi,
+  connectorsApi,
+  type ConnectionSummary,
+} from "../../../lib/api"
+import { useAuth } from "../../../lib/auth"
 import { useWorkspace } from "../../../context/WorkspaceContext"
 import { useOnboarding } from "../../../context/OnboardingContext"
-import { ONBOARDING_STEP_SLUGS } from "../../../lib/onboarding/types"
+import { useContent } from "../../../context/ContentContext"
+import { hasDataSourceConnection } from "../../../lib/connectorsCatalog"
+import {
+  POST_ONBOARDING_PATH,
+  finishOnboardingAndEnterApp,
+} from "../../../lib/onboarding/finishOnboarding"
 import { SprntlyLockup } from "../../shared/SprntlyMark"
 import {
   ONBOARDING_PLAN_PATH,
   SALES_CONTACT,
   SELF_SERVE_PLANS,
+  TRIALS_ENABLED,
   TRIAL_CREDITS,
   TRIAL_DAYS,
 } from "../../../lib/billingPlans"
 import { companyHasPaid, subscriptionGrantsAccess } from "../../../lib/billingAccess"
 
 /**
- * The PAYMENT GATE — "choose a plan" — between creating a company and the rest
- * of onboarding.
+ * "Choose a plan" — THE LAST STEP of onboarding, and the one that completes it.
  *
- * UNNUMBERED, like `your-name` and `define-metrics`: it is NOT in
- * ONBOARDING_STEP_SLUGS, renders no progress dots, and touches none of the
- * 1-based `onboarding_step` index maths. That is not cosmetic. `onboarding_step`
- * is a persisted index into that array, so inserting a numbered step at
- * position two would silently shift every company already mid-flow — someone
- * sitting on step 5 (`product`) would resume on `workspace`.
+ * MOVED HERE FROM POSITION TWO (owner decision 2026-09-07). It used to be an
+ * unnumbered gate sitting between creating the company row and the rest of the
+ * flow, enforced by a guard on every step. The case for that placement was
+ * reachability: a company row, a verified email and a profile all existed by
+ * then, so an abandoned signup was still a lead. The case against it is that
+ * it asked a stranger to pick between a $59 and a $99 plan having connected
+ * nothing, read nothing we drafted for them, and seen nothing the product
+ * does. Now the workspace is built first and the plan is bought for something
+ * visible.
  *
- * WHY HERE. The company row, the verified email and the profile all exist by
- * the time this renders, so an abandoned signup is still a lead we can reach.
- * And the alternative — letting someone finish ten steps and then refusing
- * their first generation with a 402 — spends all of a person's effort before
- * telling them the price.
+ * IT IS A NUMBERED STEP NOW, appended to ONBOARDING_STEP_SLUGS rather than
+ * inserted — an append shifts no stored `onboarding_step`, which is exactly
+ * what made it safe to do without a rebase migration. Being numbered is what
+ * makes an abandoned checkout resume by itself: `slugForStep` routes here like
+ * any other step, with no payment-specific branch anywhere in the resume path.
  *
- * THE CARD IS TAKEN, THE MONEY IS NOT. Checkout runs with a trial (see
- * `plans.TRIAL_DAYS`), so a stranger is not charged before seeing a single
- * brief. Stripe still collects the card in subscription mode, so "card on
- * file" is not given up. The trial is granted server-side on `first_paid_at`
- * being null — nothing in this screen can ask for one.
+ * IT ALSO OWNS THE CLOSER. `finishOnboardingAndEnterApp` used to run from
+ * PersonalizeStep / DefineMetrics; both now hand on here instead, and it runs
+ * only after `billingApi.summary()` reports a live subscription. So "you
+ * cannot finish onboarding without paying" is a property of where completion
+ * lives rather than of a guard that has to out-argue every URL a user can
+ * type — the old `OnboardingPaymentGuard` was deleted with this move.
+ *
+ * THE MONEY IS TAKEN TODAY. No trial (owner decision 2026-09-07 — see
+ * `plans.TRIALS_ENABLED`): the first invoice is charged at checkout. The trial
+ * machinery is intact and switched off, not removed, so the copy below reads
+ * off the same flag the server decides on.
  */
 
 /** How long to keep asking whether the subscription landed, after Stripe sends
  *  the browser back. Checkout redirects the moment payment is accepted, but
  *  `subscription_status` is written by the WEBHOOK, which arrives on its own
- *  schedule. Trusting the redirect and forwarding immediately would bounce the
- *  user straight back here — the gate would re-read a company that has not been
- *  updated yet and conclude they had not paid. */
+ *  schedule. Trusting the redirect and completing immediately would stamp
+ *  onboarding done off a company row that has not been updated yet — and the
+ *  app's own guard, re-reading it, would send them straight back into signup. */
 const CONFIRM_TIMEOUT_MS = 30_000
 const CONFIRM_INTERVAL_MS = 1_500
 
@@ -60,23 +81,23 @@ type Phase =
 export function PlanStep() {
   const router = useRouter()
   const params = useSearchParams()
-  // PAID-STATE READS COME FROM THE ONBOARDING CONTEXT, NOT THE WORKSPACE ONE,
-  // because that is the context `OnboardingPaymentGuard` reads. The two hold
-  // separate copies of the same company, and when they disagreed about
-  // `companyHasPaid` the result was an infinite redirect loop: this step saw
-  // paid and pushed to the next slug, the guard saw unpaid and replaced back
-  // to /onboarding/plan, forever. The guard's own provider wraps the whole
-  // /onboarding subtree so it never remounts between steps — it fetched once
-  // and stayed stale — while this component DID remount on every bounce,
-  // resetting the `alreadyPaid` latch that would otherwise have stopped it.
+  // PAID-STATE READS COME FROM THE ONBOARDING CONTEXT, NOT THE WORKSPACE ONE.
+  // That began as a fix for an infinite redirect loop against the since-deleted
+  // `OnboardingPaymentGuard`, which read this context while the step read the
+  // other: the two held separate copies of the same company, so the step saw
+  // paid and moved on while the guard saw unpaid and replaced back here,
+  // forever.
   //
-  // Reading the same source the guard reads makes the disagreement
-  // unrepresentable, which is why this is not a redirect-count circuit breaker.
+  // The guard is gone; the rule stays, and now matters more. This step
+  // COMPLETES onboarding, so acting on a copy that disagrees with the one the
+  // flow reads means finishing signup off a stale read.
   const { workspace, refresh: refreshOnboarding } = useOnboarding()
   // orgRole only lives on the workspace context; its refresh is still called
   // after payment so the OUTER OnboardingRequiredGuard is not left stale when
   // onboarding later completes.
   const { orgRole, refresh: refreshWorkspace } = useWorkspace()
+  const auth = useAuth()
+  const { setContent } = useContent()
 
   const [interval, setInterval] = useState<"monthly" | "annual">("monthly")
   const [plan, setPlan] = useState<string>(SELF_SERVE_PLANS[0]!.id)
@@ -87,9 +108,54 @@ export function PlanStep() {
   const checkout = params.get("checkout")
   const cancelled = checkout === "cancelled"
 
-  const advance = useCallback(() => {
+  // PAID — so onboarding is done. This runs the shared closer (register the
+  // dataset, kick the first brief when a real data source is connected, stamp
+  // completion) and enters the app. It used to live on the two screens before
+  // this one; it moved here with payment, because completing anywhere earlier
+  // would hand someone a finished workspace without a card.
+  //
+  // `hasDataSourceConnection` needs the connector list, which this screen has
+  // no other reason to hold — one read, and a failure to read it counts as no
+  // data source. That is the same fail-open the personalize step used: the
+  // brief is regenerable from Settings, and stranding someone on a spinner at
+  // the very last step, having just been charged, is the worse failure.
+  //
+  // ITS INPUTS RIDE A REF, and that is not a style choice. `advance` is in the
+  // dependency array of the confirm effect below, whose cleanup STOPS the poll
+  // — so an `advance` that changed identity on every render would tear down and
+  // restart that poll on every render, forever. The workspace object, the auth
+  // object and `setContent` are all new references on most renders; reading
+  // them off a ref keeps `advance` stable while still seeing the latest values.
+  // (The same class of bug as the stable-router note in this file's test.)
+  const closerRef = useRef({ workspace, auth, setContent })
+  closerRef.current = { workspace, auth, setContent }
+
+  const advance = useCallback(async () => {
+    const { workspace: ws, auth: a, setContent: setC } = closerRef.current
+    if (!ws || a.kind !== "authed") return
     setPhase({ kind: "done" })
-    router.push(`/onboarding/${ONBOARDING_STEP_SLUGS[1]}`)
+    setError(null)
+    try {
+      const connections = await connectorsApi.list().then(
+        (r) => r.connections,
+        () => [] as ConnectionSummary[],
+      )
+      await finishOnboardingAndEnterApp(
+        ws,
+        a.user.id,
+        setC,
+        hasDataSourceConnection(connections),
+      )
+      router.replace(POST_ONBOARDING_PATH)
+    } catch {
+      // The money moved and the completion stamp did not. Stay on this screen
+      // with a retry rather than dropping back to the plan cards — a customer
+      // who has just been charged must never be shown "choose a plan" again.
+      setError(
+        "You're all paid up, but we couldn't finish setting up your workspace. "
+          + "Try again — you will not be charged twice.",
+      )
+    }
   }, [router])
 
   // A company that already has a live subscription must never be shown a
@@ -103,7 +169,7 @@ export function PlanStep() {
     if (checkout === "success") return   // the confirm effect owns this case
     if (companyHasPaid(workspace)) {
       alreadyPaid.current = true
-      advance()
+      void advance()
     }
   }, [workspace, checkout, advance])
 
@@ -132,7 +198,7 @@ export function PlanStep() {
             // advancing while the guard's copy still says unpaid is exactly
             // the redirect loop this ordering exists to prevent.
             await Promise.all([refreshOnboarding(), refreshWorkspace()])
-            if (!stopped) advance()
+            if (!stopped) await advance()
             return
           }
         } catch {
@@ -236,9 +302,26 @@ export function PlanStep() {
               ? "Payment went through — we're just waiting on the confirmation. This won't take much longer."
               : "One moment while we confirm your plan."}
           </div>
-          <div className="onb-plan-spinner" aria-live="polite" role="status">
-            Confirming your plan…
-          </div>
+          {/* Only reachable when the closer failed AFTER a successful payment
+              — see `advance`. Retry in place; the plan cards must not come
+              back for someone who has already been charged. */}
+          {error ? (
+            <>
+              <div className="onb-form-error">{error}</div>
+              <button
+                type="button"
+                className="btn primary onb-plan-continue"
+                data-testid="plan-finish-retry"
+                onClick={() => void advance()}
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <div className="onb-plan-spinner" aria-live="polite" role="status">
+              Confirming your plan…
+            </div>
+          )}
         </div>
       </div>
     )
@@ -256,13 +339,30 @@ export function PlanStep() {
         <div className="onb-h">
           Choose <em>your plan</em>
         </div>
+        {/* NO TRIAL, and the copy says so plainly. Payment is the last step,
+            so by the time anyone reads this their workspace is built and the
+            plan buys something they have already seen — which is the whole
+            reason the trial came off. The trialling wording is kept behind the
+            same flag the server charges on, so flipping `TRIALS_ENABLED` back
+            on restores the promise and the behaviour together rather than
+            leaving the screen promising a free week nobody gets. */}
         <div className="onb-sub">
           {workspace?.display_name ? `${workspace.display_name} is set up. ` : ""}
-          Pick a plan to carry on. Your card is saved now, but nothing is charged
-          for {TRIAL_DAYS} days — cancel any time before then and
-          you pay nothing. Your trial comes with{" "}
-          {TRIAL_CREDITS.toLocaleString()} credits; the plan's own monthly
-          credits start when the trial ends.
+          {TRIALS_ENABLED ? (
+            <>
+              Pick a plan to carry on. Your card is saved now, but nothing is
+              charged for {TRIAL_DAYS} days — cancel any time before then and
+              you pay nothing. Your trial comes with{" "}
+              {TRIAL_CREDITS.toLocaleString()} credits; the plan's own monthly
+              credits start when the trial ends.
+            </>
+          ) : (
+            <>
+              Last step — pick a plan and you're in. Your card is charged today,
+              and your plan's credits land straight away. Change or cancel any
+              time from Settings → Billing.
+            </>
+          )}
         </div>
 
         {cancelled && (

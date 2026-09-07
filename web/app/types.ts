@@ -1,15 +1,17 @@
 export type ScreenId =
-  // Numbered onboarding steps, keyed by their semantic slug — 5 steps as of
-  // 2026-09-07 (invite reinstated): company → connectors → invite → review →
-  // personalize (personalize closes via the unnumbered define-metrics
-  // sub-flow, or directly when analytics isn't connected). See
-  // ONBOARDING_STEP_SLUGS for the full history of what was cut and why invite
-  // came back.
+  // Numbered onboarding steps, keyed by their semantic slug — 6 steps as of
+  // 2026-09-07 (invite reinstated, payment moved to the end): company →
+  // connectors → invite → review → personalize → plan, with the unnumbered
+  // define-metrics sub-flow between the last two when analytics is connected.
+  // The plan step is where onboarding completes. See ONBOARDING_STEP_SLUGS for
+  // the full history of what was cut, why invite came back, and why payment
+  // stopped being the second thing anyone saw.
   | "ob-company"
   | "ob-connectors"
   | "ob-invite"
   | "ob-review"
   | "ob-personalize"
+  | "ob-plan"
   | "chat"
   | "chats"
   // The Artifacts library — a dedicated left-nav surface listing durable outputs
@@ -48,6 +50,7 @@ export const ONBOARDING_SCREENS: ScreenId[] = [
   "ob-invite",
   "ob-review",
   "ob-personalize",
+  "ob-plan",
 ]
 
 export const APP_SCREENS: ScreenId[] = [
@@ -75,11 +78,12 @@ export const APP_SCREENS: ScreenId[] = [
 
 /** Label for the main-column top chrome — align with sidebar nav labels where applicable. */
 const MAIN_CHROME_TITLE: Record<ScreenId, string> = {
-  "ob-company": "Setup · Step 1 of 5",
-  "ob-connectors": "Setup · Step 2 of 5",
-  "ob-invite": "Setup · Step 3 of 5",
-  "ob-review": "Setup · Step 4 of 5",
-  "ob-personalize": "Setup · Step 5 of 5",
+  "ob-company": "Setup · Step 1 of 6",
+  "ob-connectors": "Setup · Step 2 of 6",
+  "ob-invite": "Setup · Step 3 of 6",
+  "ob-review": "Setup · Step 4 of 6",
+  "ob-personalize": "Setup · Step 5 of 6",
+  "ob-plan": "Setup · Step 6 of 6",
   chat: "Home",
   chats: "History",
   artifacts: "Artifacts",

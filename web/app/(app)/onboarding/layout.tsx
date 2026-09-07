@@ -1,14 +1,12 @@
 "use client"
 
 import { useEffect } from "react"
-import { usePathname, useRouter } from "next/navigation"
+import { useRouter } from "next/navigation"
 import { useAuth } from "../../lib/auth"
 import {
   OnboardingProvider,
   useOnboarding,
 } from "../../context/OnboardingContext"
-import { companyHasPaid } from "../../lib/billingAccess"
-import { ONBOARDING_PLAN_PATH } from "../../lib/billingPlans"
 
 function OnboardingEmailGuard({ children }: { children: React.ReactNode }) {
   const auth = useAuth()
@@ -60,45 +58,22 @@ function OnboardingCompletedGuard({
   return <>{children}</>
 }
 
-// THE PAYMENT GATE, on every numbered step rather than only on the way in.
+// THE PAYMENT GATE USED TO LIVE HERE, wrapping every step, because payment was
+// step two and nothing else re-checked it: `OnboardingRequiredGuard` defers on
+// `/onboarding/*` (it must, or it would fight step navigation including going
+// back), so typing a later step's URL walked straight past the plan screen and
+// the whole flow could be completed without a card.
 //
-// `OnboardingRequiredGuard` deliberately defers on `/onboarding/*` — it must,
-// or it would fight step navigation, including going back a step. That left
-// the gate covering only ENTRY to the app: once a browser was on any step,
-// nothing re-checked payment, so typing `/onboarding/import-context` skipped
-// straight past the plan screen and the whole flow could be walked to
-// `completeOnboarding()` without a card. A gate that only guards the front
-// door is not a gate.
+// It was deleted when payment moved to the END of the flow (2026-09-07). There
+// is nothing left for it to gate: the plan step is the last step, and it is
+// the only place `finishOnboardingAndEnterApp` now runs. Walking the flow
+// without paying gets you as far as the plan step and no further, because
+// completion is on the far side of a `billingApi.summary()` that has to report
+// a live subscription — not because a guard bounced the URL.
 //
-// So it lives here, wrapping every step this layout renders. Three things it
-// deliberately does NOT do:
-//
-//   - It never gates the plan route itself. That is the destination.
-//   - It waits for the workspace to load. Bouncing a mid-onboarding user on a
-//     slow read would be worse than the hole it closes.
-//   - It never gates a company with no workspace yet — a brand-new user is on
-//     the company step, which comes BEFORE the gate, and has nothing to pay
-//     for yet.
-//
-// This is still the routing half. `enforce.bill` on the backend is what
-// actually refuses work; nothing here can grant access the server won't honour.
-function OnboardingPaymentGuard({ children }: { children: React.ReactNode }) {
-  const { loading, workspace } = useOnboarding()
-  const router = useRouter()
-  const pathname = usePathname()
-
-  const onGate = pathname?.startsWith(ONBOARDING_PLAN_PATH) ?? false
-  const blocked = !loading && workspace != null && !onGate && !companyHasPaid(workspace)
-
-  useEffect(() => {
-    if (blocked) router.replace(ONBOARDING_PLAN_PATH)
-  }, [blocked, router])
-
-  // Hold the shell rather than paint a step the user is about to be moved off.
-  if (blocked) return <div className="ob-shell">Loading…</div>
-
-  return <>{children}</>
-}
+// Re-adding a step-wide gate would now be actively wrong: it would bounce
+// every unpaid company off step one, which is the placement this move exists
+// to undo.
 
 export default function OnboardingLayout({
   children,
@@ -108,9 +83,7 @@ export default function OnboardingLayout({
   return (
     <OnboardingProvider>
       <OnboardingEmailGuard>
-        <OnboardingCompletedGuard>
-          <OnboardingPaymentGuard>{children}</OnboardingPaymentGuard>
-        </OnboardingCompletedGuard>
+        <OnboardingCompletedGuard>{children}</OnboardingCompletedGuard>
       </OnboardingEmailGuard>
     </OnboardingProvider>
   )

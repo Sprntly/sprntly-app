@@ -14,6 +14,9 @@
 // Branches pinned here:
 //   - completed user            → render the app
 //   - company exists, unfinished→ refresh, then local redirect to resume step
+//                                 (payment is the LAST step since 2026-09-07,
+//                                  so there is no payment branch here — an
+//                                  unpaid company resumes where it left off)
 //   - refresh flips completed   → render the app (no bounce back to onboarding)
 //   - no company (no invite)    → postLoginPath → redirect to onboarding entry
 //   - invite auto-accepted ("/")→ refresh workspace, then render
@@ -22,6 +25,7 @@
 import * as React from "react"
 import { cleanup, render, waitFor } from "@testing-library/react"
 import { BILLING_ENABLED } from "../../lib/billingAccess"
+import { stepForSlug } from "../../lib/onboarding/types"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -44,7 +48,7 @@ let ws: {
   workspace: {
     onboarding_completed_at: string | null
     onboarding_step: number
-    // The payment gate reads these off the company row.
+    // The subscription lock reads these off the company row.
     plan?: string | null
     subscription_status?: string | null
   } | null
@@ -94,7 +98,6 @@ describe("OnboardingRequiredGuard", () => {
       workspace: {
         onboarding_completed_at: null,
         onboarding_step: 3,
-        // Past the payment gate — see the gate's own tests below.
         plan: "starter",
         subscription_status: "active",
       },
@@ -199,13 +202,12 @@ describe("OnboardingRequiredGuard", () => {
     )
   })
 
-  // DORMANT WHILE PAYMENTS ARE HIDDEN — this is the gate itself, and it is
-  // open. Kept verbatim so flipping `BILLING_ENABLED` restores it.
-  it.skipIf(!BILLING_ENABLED)("sends an UNPAID company's unfinished onboarding to the payment gate", async () => {
-    // THE HOLE THIS CLOSES: postLoginPath gates a fresh sign-in, but this guard
-    // is the other door — a reload, a bookmark, a deep link, anyone already
-    // signed in. Gating only the sign-in path let all of them resume at their
-    // numbered step and never see the gate at all.
+  it("resumes an UNPAID company at its own step, not at a payment gate", async () => {
+    // Until 2026-09-07 this guard checked `companyHasPaid` first and diverted
+    // to /onboarding/plan — it was the second door into a gate that sat at
+    // position two, the other being postLoginPath. Payment is the LAST step
+    // now, so there is no payment branch on either door: someone three steps
+    // in carries on from three.
     ws = {
       loading: false,
       workspace: {
@@ -216,9 +218,26 @@ describe("OnboardingRequiredGuard", () => {
       },
     }
     renderGuard()
+    await waitFor(() => expect(replace).toHaveBeenCalledWith("/onboarding/invite"))
+    expect(replace).not.toHaveBeenCalledWith("/onboarding/plan")
+  })
+
+  it("resumes an abandoned checkout at the plan step, because that is the marker", async () => {
+    // The case the old payment branch existed for, now falling out of the
+    // ordinary resume: the screens before payment advance the marker to the
+    // plan step before routing there, so bailing at Stripe brings you back to
+    // payment rather than back through the flow.
+    ws = {
+      loading: false,
+      workspace: {
+        onboarding_completed_at: null,
+        onboarding_step: stepForSlug("plan"),
+        plan: "starter",
+        subscription_status: "canceled",
+      },
+    }
+    renderGuard()
     await waitFor(() => expect(replace).toHaveBeenCalledWith("/onboarding/plan"))
-    // NOT the resume step — the gate comes first.
-    expect(replace).not.toHaveBeenCalledWith("/onboarding/review")
   })
 
   it("does not gate a plan that was never sold through Stripe", async () => {

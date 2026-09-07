@@ -4,8 +4,7 @@ import { useEffect, useRef, useState } from "react"
 import { usePathname, useRouter } from "next/navigation"
 import { useWorkspace } from "../context/WorkspaceContext"
 import { slugForStep } from "../lib/onboarding/types"
-import { companyHasPaid, lockModeFor } from "../lib/billingAccess"
-import { ONBOARDING_PLAN_PATH } from "../lib/billingPlans"
+import { lockModeFor } from "../lib/billingAccess"
 import { postLoginPath } from "../lib/supabase/client"
 import { AppLoading } from "./AppLoading"
 
@@ -108,21 +107,12 @@ function OnboardingRequiredGuard({ children }: { children: React.ReactNode }) {
     }
     if (resolvePhase === "refreshed" && !redirectedRef.current) {
       redirectedRef.current = true
-      // THE PAYMENT GATE, and this is the second door into it. postLoginPath
-      // covers a fresh sign-in; this covers everyone who arrives at the app
-      // some other way — a reload, a bookmark, a deep link — with onboarding
-      // unfinished. Gating only the sign-in path left this one wide open, so
-      // anyone already signed in resumed at their numbered step and never saw
-      // the gate at all.
-      //
-      // Same rule as postLoginPath, deliberately: company-level (which is what
-      // stops an invited teammate paying for a company that already has), and
-      // the persisted step is NOT rewound, so they resume exactly where they
-      // left off once the card is down.
-      if (!companyHasPaid(workspace)) {
-        router.replace(ONBOARDING_PLAN_PATH)
-        return
-      }
+      // Resume at the persisted step. This used to check `companyHasPaid`
+      // first and divert to the plan gate — the second door into a gate that
+      // sat at position two. Payment moved to the END of onboarding on
+      // 2026-09-07 and became a numbered step, so an unpaid company is simply
+      // one whose marker says `plan`, and the plain resume below lands them
+      // there. Same rule as postLoginPath, which lost the identical branch.
       router.replace(`/onboarding/${slugForStep(workspace.onboarding_step)}`)
     }
   }, [shouldResolve, workspace, resolvePhase, router, refresh])

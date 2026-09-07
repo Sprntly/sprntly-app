@@ -1,8 +1,11 @@
 // Slug-routing integrity for the semantic-routes onboarding flow.
 //
-// FIVE STEPS AS OF 2026-09-07: company → connectors → invite → review →
-// personalize, then the UNNUMBERED define-metrics sub-flow completes
-// onboarding. The flow was cut from ten to four on 2026-09-03 — a
+// SIX STEPS AS OF 2026-09-07: company → connectors → invite → review →
+// personalize → plan, with the UNNUMBERED define-metrics sub-flow between the
+// last two when analytics is connected. The PLAN step — payment — completes
+// onboarding; it was an unnumbered gate at position two until it moved to the
+// end, and it was APPENDED to the slug list, which is why that move needed no
+// marker-rebase migration. The flow was cut from ten to four on 2026-09-03 — a
 // questionnaire asking someone who had not seen the product yet for their
 // OKRs, success metrics, prioritization framework and team scope, all still
 // editable in Settings — and invite came back into the numbered flow four
@@ -32,9 +35,9 @@ import { screenIdFromPathname, SCREEN_PATH } from "../../routes"
 import { ONBOARDING_SCREENS } from "../../../types"
 
 describe("onboarding slug routing", () => {
-  it("has exactly 5 numbered steps in flow order", () => {
-    expect(ONBOARDING_STEP_COUNT).toBe(5)
-    expect(ONBOARDING_SCREENS).toHaveLength(5)
+  it("has exactly 6 numbered steps in flow order, payment last", () => {
+    expect(ONBOARDING_STEP_COUNT).toBe(6)
+    expect(ONBOARDING_SCREENS).toHaveLength(6)
     expect([...ONBOARDING_STEP_SLUGS]).toEqual([
       // `company` still leads: the company row does not exist until it saves,
       // and the website analysis it kicks off is what `review` later reads.
@@ -44,7 +47,13 @@ describe("onboarding slug routing", () => {
       "invite",
       "review",
       "personalize",
+      // Payment, LAST — appended 2026-09-07, which is why no marker rebase was
+      // needed. It used to be an unnumbered gate at position two.
+      "plan",
     ])
+    // The one that matters most about this list: paying is the final act of
+    // onboarding, not the price of entering it.
+    expect(ONBOARDING_STEP_SLUGS[ONBOARDING_STEP_COUNT - 1]).toBe("plan")
     // Cut on 2026-09-03 — out of the numbered flow, screens deleted. Unlike
     // invite (reinstated 2026-09-07), these stayed folded into Settings.
     expect([...ONBOARDING_STEP_SLUGS]).not.toContain("import-context")

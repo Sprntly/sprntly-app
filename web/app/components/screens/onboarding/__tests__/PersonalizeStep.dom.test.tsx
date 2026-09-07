@@ -17,7 +17,9 @@
 //   - THE GATE, which moved here from ReviewStep when personalize was inserted
 //     between review and the define-metrics sub-flow: with a live analytics
 //     connection Continue hands off to /onboarding/define-metrics; without one
-//     it runs the shared closer and enters the app instead
+//     it goes straight to the PLAN step. Neither branch completes onboarding
+//     any more — payment moved to the end of the flow on 2026-09-07 and took
+//     the closer with it, so this step only advances the marker.
 //   - a connector probe that fails counts as "no analytics" (fail-open), so a
 //     flaky list call can't strand the PM on the last step
 //
@@ -33,29 +35,23 @@ const onboardingMock = vi.fn()
 const routerMock = { push: vi.fn(), replace: vi.fn() }
 const updateWorkspaceMock = vi.fn()
 const connectorsListMock = vi.fn()
-const finishMock = vi.fn()
+const advanceStepMock = vi.fn()
 const prefetchMetricsMock = vi.fn()
 
 vi.mock("../../../../lib/auth", () => ({ useAuth: () => authMock() }))
 vi.mock("../../../../context/OnboardingContext", () => ({
   useOnboarding: () => onboardingMock(),
 }))
-vi.mock("../../../../context/ContentContext", () => ({
-  useContent: () => ({ setContent: vi.fn() }),
-}))
 vi.mock("next/navigation", () => ({ useRouter: () => routerMock }))
 vi.mock("../../../../lib/onboarding/store", () => ({
   updateWorkspace: (...a: unknown[]) => updateWorkspaceMock(...a),
+  advanceOnboardingStep: (...a: unknown[]) => advanceStepMock(...a),
 }))
 vi.mock("../../../../lib/api", () => ({
   connectorsApi: { list: (...a: unknown[]) => connectorsListMock(...a) },
 }))
 vi.mock("../../../../lib/onboarding/draftPrefetch", () => ({
   prefetchMetricDefinitions: (...a: unknown[]) => prefetchMetricsMock(...a),
-}))
-vi.mock("../../../../lib/onboarding/finishOnboarding", () => ({
-  finishOnboardingAndEnterApp: (...a: unknown[]) => finishMock(...a),
-  POST_ONBOARDING_PATH: "/?new=1",
 }))
 // The real picker fetches Slack channels; stub to a marker.
 vi.mock("../../../connectors/SlackChannelPicker", () => ({
@@ -103,14 +99,14 @@ function mount(workspace = makeWorkspace({ onboarding_step: 9 })) {
   authMock.mockReturnValue({ kind: "authed", user: { id: "u-1" }, session: {} })
   onboardingMock.mockReturnValue(makeOnboardingCtx({ workspace }))
   updateWorkspaceMock.mockResolvedValue(workspace)
-  finishMock.mockResolvedValue(undefined)
+  advanceStepMock.mockResolvedValue(undefined)
   prefetchMetricsMock.mockResolvedValue(undefined)
   return render(React.createElement(PersonalizeStep))
 }
 
 function continueBtn(): HTMLButtonElement {
   return Array.from(document.querySelectorAll(".onb-footer button")).find((b) =>
-    /Next · define metrics|Looks right · enter Sprntly/.test(b.textContent ?? ""),
+    /Next · define metrics|Next · choose your plan/.test(b.textContent ?? ""),
   ) as HTMLButtonElement
 }
 
@@ -133,7 +129,7 @@ afterEach(() => {
 })
 
 describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
-  it("renders on the last dot with the insight chips", async () => {
+  it("renders on its own dot with the insight chips", async () => {
     // Derived (`stepForSlug`), not a literal — see Connectors.dom.test.tsx's
     // matching comment for why that distinction matters here.
     analyticsConnected()
@@ -273,8 +269,9 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     // default ["top_problems","build_priorities"], toggled top_problems off +
     // competitor_moves on
     expect(ns.brief_insight_types).toEqual(["build_priorities", "competitor_moves"])
-    // The closer belongs to define-metrics on this branch.
-    expect(finishMock).not.toHaveBeenCalled()
+    // This branch hands the marker to define-metrics, which advances it to
+    // the plan step itself — so nothing here jumps the queue to payment.
+    expect(advanceStepMock).not.toHaveBeenCalled()
   })
 
   it("merges into notification_settings rather than clobbering sibling keys", async () => {
@@ -306,7 +303,7 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     expect(typeof ns.timezone).toBe("string")
   })
 
-  it("with NO analytics connector, Continue finishes onboarding instead of routing to define-metrics", async () => {
+  it("with NO analytics connector, Continue goes to the PLAN step, not define-metrics", async () => {
     // A non-analytics live connection plus a revoked analytics one: neither
     // keeps the sub-flow alive.
     connectorsListMock.mockResolvedValue({
@@ -318,7 +315,7 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     mount()
 
     // Wait for the button to be ENABLED, not merely labelled. `hasAnalytics`
-    // starts null, which is falsy — so "Looks right · enter Sprntly" renders on
+    // starts null, which is falsy — so the no-analytics CTA renders on
     // the very first paint, while `continueDisabled` (saving || hasAnalytics ===
     // null) still holds the button shut until the connector probe resolves.
     // Matching the label alone let the click land on a disabled button, where it
@@ -327,7 +324,7 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     // sibling probe-failure test below already waits on `disabled` this way.
     await waitFor(() => {
       expect(continueBtn().disabled).toBe(false)
-      expect(continueBtn().textContent).toMatch(/Looks right · enter Sprntly/)
+      expect(continueBtn().textContent).toMatch(/Next · choose your plan/)
     })
 
     await act(async () => {
@@ -335,9 +332,11 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     })
 
     await waitFor(() => {
-      expect(routerMock.replace).toHaveBeenCalledWith("/?new=1")
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/plan")
     })
-    expect(finishMock).toHaveBeenCalledTimes(1)
+    // The marker is advanced to the plan step BEFORE routing, so someone who
+    // abandons at Stripe resumes at the gate rather than back on this screen.
+    expect(advanceStepMock).toHaveBeenCalledWith("ws-1", stepForSlug("plan"))
     expect(routerMock.push).not.toHaveBeenCalledWith("/onboarding/define-metrics")
     // Nothing to detect without analytics — the warm-up never fires either.
     expect(prefetchMetricsMock).not.toHaveBeenCalled()
@@ -346,10 +345,10 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
   it("treats a failed connector probe as 'no analytics' rather than stranding the PM", async () => {
     connectorsListMock.mockRejectedValue(new Error("connectors down"))
     mount()
-    // Continue resolves to the finishing CTA instead of staying disabled.
+    // Continue resolves to the no-analytics CTA instead of staying disabled.
     await waitFor(() => {
       expect(continueBtn().disabled).toBe(false)
-      expect(continueBtn().textContent).toMatch(/Looks right · enter Sprntly/)
+      expect(continueBtn().textContent).toMatch(/Next · choose your plan/)
     })
   })
 
