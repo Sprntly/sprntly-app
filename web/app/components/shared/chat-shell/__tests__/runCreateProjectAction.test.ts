@@ -56,6 +56,43 @@ describe("runCreateProjectAction", () => {
     expect(create).toHaveBeenCalledWith({ name: "Billing revamp", origin: "manual" })
     expect(onProjectCreated).toHaveBeenCalledWith({ id: 42, name: "Billing revamp" })
     expect(emitTurn.mock.calls[0][0].reply.answer).toContain("Billing revamp")
+    // No source thread known to this surface — the "add members" copy, not a
+    // claim that something came along with it.
+    expect(emitTurn.mock.calls[0][0].reply.answer).toContain("add members")
+  })
+
+  // BUG: "start a project with this" from an ongoing chat used to land in an
+  // EMPTY project — no history, no artifacts — because the create call never
+  // carried the conversation it came from. `sourceConversationId` is the fix's
+  // frontend half; the backend half (bind + backfill) is
+  // `test_projects_routes.py`'s `test_create_with_conversation_id_*`.
+  it("passes the surface's bound conversation through, and confirms that it came along", async () => {
+    create.mockResolvedValue({ id: 43, name: "Billing revamp" })
+    const emitTurn = vi.fn()
+
+    await runCreateProjectAction("start a project with this", envelope(), {
+      emitTurn,
+      sourceConversationId: 55,
+    })
+
+    expect(create).toHaveBeenCalledWith({
+      name: "Billing revamp", origin: "manual", conversation_id: 55,
+    })
+    const answer = emitTurn.mock.calls[0][0].reply.answer
+    expect(answer).toContain("came with it")
+    expect(answer).not.toContain("add members")
+  })
+
+  it("a null sourceConversationId (resolution failed) is a safe no-op, same as none at all", async () => {
+    create.mockResolvedValue({ id: 44, name: "Billing revamp" })
+    const emitTurn = vi.fn()
+
+    await runCreateProjectAction("start a project with this", envelope(), {
+      emitTurn,
+      sourceConversationId: null,
+    })
+
+    expect(create).toHaveBeenCalledWith({ name: "Billing revamp", origin: "manual" })
   })
 
   it("says nothing was created when the create fails, and does not navigate", async () => {

@@ -7210,11 +7210,19 @@ export const projectsApi = {
    *  non-empty the server seeds a grounded origin-memory entry from it;
    *  omit or leave empty to no-op (`prd_auto`'s "why" always comes from the
    *  PRD fork hook instead, never this field). */
+  /** `conversation_id` — "start a project with this" from an ongoing chat:
+   *  the thread's history and whatever it already produced (reports, ticket
+   *  sets, team documents) come with it, the same bind-and-sweep the
+   *  `prd_auto` fork hook runs when a PRD auto-forks its own thread. Absent
+   *  for the create-modal's blank/artifact flows, which have no originating
+   *  thread; best-effort server-side either way — an invalid id never fails
+   *  the create. */
   create: (payload: {
     name: string
     origin?: "manual" | "prd_auto" | "artifact"
     prd_id?: number
     seed_text?: string
+    conversation_id?: number
   }) => api.post<ProjectListItem>("/v1/projects", payload),
   /** Add an existing user to the project by email
    *  (`POST /v1/projects/{id}/members`). Throws `ApiError` with `.status`

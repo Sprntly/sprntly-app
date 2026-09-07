@@ -70,6 +70,129 @@ def test_create_project_origin_defaults_manual(isolated_settings, monkeypatch):
     assert r2.json()["origin"] == "artifact"
 
 
+# ── "Start a project with this" — conversation binding + sweep ───────────
+#
+# BUG: a project made from a chat command used to be a bare container — the
+# thread's history and whatever it had already produced (reports, ticket
+# sets, team documents) stayed behind, so the reader landed in an EMPTY
+# project after asking for the opposite. `conversation_id` reuses the SAME
+# bind-then-sweep the `prd_auto` fork hook runs (`app/project_from_prd.py`),
+# from a second call site — these pin that reuse at the route level.
+
+
+def _new_conversation(company_id: str, user_id: str) -> int:
+    row = {
+        "company_id": company_id, "user_id": user_id,
+        "title": "start a project", "query": "start a project with this", "agent_type": "ask",
+    }
+    from app.db.client import require_client
+
+    return require_client().table("conversations").insert(row).execute().data[0]["id"]
+
+
+def _seed_custom_artifact(company_id: str, conversation_id: int) -> int:
+    from app.db.custom_artifacts import create_artifact
+
+    return create_artifact(
+        company_id, kind="leadership-update", title="Weekly update",
+        body_html="<p>hello</p>", conversation_id=conversation_id,
+    )["id"]
+
+
+def test_create_with_conversation_id_binds_and_backfills_artifacts(isolated_settings, monkeypatch):
+    ctx = company_client(monkeypatch)
+    conv_id = _new_conversation(ctx.company_id, ctx.user_id)
+    doc_id = _seed_custom_artifact(ctx.company_id, conv_id)
+
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Billing revamp", "conversation_id": conv_id},
+    )
+    assert r.status_code == 200
+    project_id = r.json()["id"]
+
+    from app.db.client import require_client
+
+    conv = require_client().table("conversations").select("project_id").eq("id", conv_id).execute().data[0]
+    assert conv["project_id"] == project_id
+
+    artifacts = (
+        require_client().table("project_artifacts")
+        .select("artifact_type, artifact_id").eq("project_id", project_id).execute().data
+    )
+    assert ("custom_artifact", doc_id) in {(a["artifact_type"], a["artifact_id"]) for a in artifacts}
+
+    # The memory pane isn't left on the thin name-only floor either — a real
+    # conversation is grounding, and `seed_project_origin_memory`'s new branch
+    # (`project_origin_seed.py::_seed_manual_from_conversation`) is reached.
+    memory = (
+        require_client().table("project_memory_entries")
+        .select("id").eq("project_id", project_id).execute().data
+    )
+    assert len(memory) >= 1
+
+
+def test_create_with_conversation_id_never_fails_the_create_on_a_foreign_id(
+    isolated_settings, monkeypatch,
+):
+    """A conversation belonging to another company is ownership-gated —
+    silently skipped, never a 404/500 for the project create itself. The
+    project still gets made, just as a bare container, exactly as it did
+    before `conversation_id` existed. Mirrors `_seed_foreign_project`'s
+    "foreign-co" pattern (a bare cross-tenant row, not a second live
+    `company_client` — `seed_company`'s default slug collides on a second call
+    within one test)."""
+    foreign_conv_id = _new_conversation("foreign-co", "someone-else")
+
+    ctx = company_client(monkeypatch)
+    r = ctx.client.post(
+        "/v1/projects",
+        json={"name": "Billing revamp", "conversation_id": foreign_conv_id},
+    )
+    assert r.status_code == 200
+    project_id = r.json()["id"]
+
+    from app.db.client import require_client
+
+    # The foreign conversation is untouched — no cross-tenant re-parenting.
+    conv = require_client().table("conversations").select("project_id").eq(
+        "id", foreign_conv_id
+    ).execute().data[0]
+    assert conv["project_id"] is None
+
+    artifacts = (
+        require_client().table("project_artifacts")
+        .select("id").eq("project_id", project_id).execute().data
+    )
+    assert artifacts == []
+
+
+def test_create_with_conversation_id_does_not_reparent_an_already_bound_conversation(
+    isolated_settings, monkeypatch,
+):
+    """A conversation already bound to a project (a second "start a project"
+    in the same thread, or a stale client replaying the request) is left
+    alone — `bind_conversation_to_project`'s own fill-only-NULL guard — so
+    the SAME thread is never silently re-parented onto a different project."""
+    ctx = company_client(monkeypatch)
+    conv_id = _new_conversation(ctx.company_id, ctx.user_id)
+
+    first = ctx.client.post(
+        "/v1/projects", json={"name": "First project", "conversation_id": conv_id},
+    )
+    first_project_id = first.json()["id"]
+
+    second = ctx.client.post(
+        "/v1/projects", json={"name": "Second project", "conversation_id": conv_id},
+    )
+    assert second.status_code == 200  # the create itself still succeeds
+
+    from app.db.client import require_client
+
+    conv = require_client().table("conversations").select("project_id").eq("id", conv_id).execute().data[0]
+    assert conv["project_id"] == first_project_id
+
+
 # ── PRD-auto dedup (create-modal "Auto · from PRD" tab, AD-P9) ────────────
 #
 # FIX: re-selecting an already-forked PRD in the create-modal used to call

@@ -96,6 +96,12 @@ export interface ActionConfig {
    *  per this layer's hard rule: a surface that supplies nothing simply stays
    *  put and keeps the confirmation turn. */
   onProjectCreated?(project: { id: number; name: string }): void
+  /** THIS conversation's bound DB id, for `runCreateProjectAction` — "start a
+   *  project with this" needs a real id to bind and sweep the thread's prior
+   *  artifacts onto the new project, not just to confirm one in the thread.
+   *  Absent (or resolving to null) is a safe no-op: the project still gets
+   *  created, just as a bare container, same as before this field existed. */
+  sourceConversationId?: number | null
 }
 
 /** Mint a turn id (crypto when available). */
@@ -555,10 +561,18 @@ export async function runCreateProjectAction(
   }
   try {
     const { projectsApi } = await import("../../../../lib/api")
-    const project = await projectsApi.create({ name, origin: "manual" })
+    const conversationId = config.sourceConversationId ?? undefined
+    const project = await projectsApi.create({
+      name, origin: "manual", conversation_id: conversationId,
+    })
+    // The confirmation itself differs on whether there was a thread to bring
+    // along — "with its own memory" reads as empty-and-fresh, which is a lie
+    // the moment this chat's own history and artifacts rode along with it.
     config.emitTurn(proseTurn(
       seedQuery,
-      `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own memory.`,
+      conversationId != null
+        ? `Created the project “${project.name}”. Opening it now — this chat and everything you've already generated in it came with it.`
+        : `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own memory.`,
     ))
     config.onProjectCreated?.({ id: project.id, name: project.name })
   } catch (e) {
