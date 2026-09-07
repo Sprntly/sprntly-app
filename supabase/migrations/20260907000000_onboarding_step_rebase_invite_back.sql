@@ -1,0 +1,64 @@
+-- Rebase the onboarding resume marker again — the invite step is back.
+--
+-- `companies.onboarding_step` is a 1-based INDEX into ONBOARDING_STEP_SLUGS
+-- (web/app/lib/onboarding/types.ts). Migration 20260903160000 rebased it from
+-- the ten-step flow onto the five-step one; 20260903170000 rebased it again
+-- to four when the invite step (bulk teammate invite: paste + CSV) was
+-- removed, folded into Settings → Team & roles. Invite is now REINSTATED,
+-- back in its old slot right after connectors, so the flow is five steps
+-- again and every index from `review` onward shifts by one:
+--
+--   1 company     -> 1 company
+--   2 connectors  -> 2 connectors
+--   3 review      -> 4 review       (step re-inserted ahead of it)
+--   4 personalize -> 5 personalize
+--
+-- NOTHING AT RUNTIME can tell an index meant under the four-step flow from
+-- one meant under the five-step flow — the same integer names a different
+-- screen — so this is fixed once, here, exactly as the two prior rebases
+-- were.
+--
+-- REBASING AN INSERTION IS NOT SYMMETRIC WITH REBASING A REMOVAL. The two
+-- prior rebases moved every removed step's marker FORWARD, to the next step
+-- that still existed, so nobody already past a cut step was sent backward to
+-- redo it. Inserting a step raises the opposite question: does a company
+-- already resuming past the insertion point get routed BACK through the
+-- newly-available step, or left alone?
+--
+-- This migration answers it the same way the removals did — never move a
+-- company's resume pointer backward relative to where it already is:
+--
+--   * A company resuming at `review` (old index 3) has completed connectors
+--     but not yet reached review — invite did not exist when they got this
+--     far, so it is inserted into their remaining path: they resume at the
+--     re-inserted `invite` (new index 3), same integer, new meaning, then
+--     continue to review as before. Nothing here moves them backward; invite
+--     simply becomes their immediate next step, same as it always was for
+--     anyone who has only finished connectors.
+--   * A company resuming at `personalize` (old index 4) has already completed
+--     review — sending them back through invite would be exactly the
+--     backward move the two prior rebases were written to avoid. They finish
+--     onboarding exactly as they would have without this migration, the same
+--     way someone who onboarded before 2026-09-03 never saw the removed
+--     steps either. Their invite is one Settings → Team & roles visit away,
+--     unchanged the whole time invite was out of the numbered flow.
+--
+-- So the only stored VALUE that changes is 4 -> 5 (personalize); a company
+-- resuming at old index 3 keeps the integer 3, which now means `invite`
+-- instead of `review` purely because ONBOARDING_STEP_SLUGS says so.
+--
+-- NOT DESTRUCTIVE. It moves a resume pointer for signups still in flight; no
+-- column is dropped, no answer is discarded, and everything the review step
+-- collects stays exactly where it was.
+--
+-- SCOPED TO UNFINISHED ONBOARDING, same guard as the two prior rebases — a
+-- company that already completed never reads this column again.
+--
+-- Naturally idempotent (unlike the two prior rebases, which were explicitly
+-- NOT re-runnable): the WHERE clause targets the exact old value 4, which no
+-- longer matches once a row has been rewritten to 5, so running this twice is
+-- a no-op the second time.
+update companies
+   set onboarding_step = 5
+ where onboarding_completed_at is null
+   and onboarding_step = 4;

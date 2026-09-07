@@ -55,16 +55,18 @@ describe("slugForStep — resume index → slug (clamped)", () => {
   it("maps each in-range index to its ordered slug", () => {
     expect(slugForStep(1)).toBe("company")
     expect(slugForStep(2)).toBe("connectors")
-    expect(slugForStep(3)).toBe("review")
-    expect(slugForStep(4)).toBe("personalize")
+    expect(slugForStep(3)).toBe("invite")
+    expect(slugForStep(4)).toBe("review")
+    expect(slugForStep(5)).toBe("personalize")
   })
 
   it("maps a stale out-of-range index to the LAST step (no crash)", () => {
     // Indices past the end (older/longer flows) clamp to the last step. Markers
-    // from the ten-step flow were rebased in SQL (migration 20260903160000) so
-    // they name the right screen; this clamp is the backstop for anything that
-    // migration did not reach — a row restored from an old backup, say.
-    expect(slugForStep(5)).toBe("personalize")
+    // from an older flow were rebased in SQL (migrations 20260903160000,
+    // 20260903170000, 20260907000000) so they name the right screen; this
+    // clamp is the backstop for anything a migration did not reach — a row
+    // restored from an old backup, say.
+    expect(slugForStep(6)).toBe("personalize")
     expect(slugForStep(10)).toBe("personalize")
     expect(slugForStep(20)).toBe("personalize")
     expect(slugForStep(0)).toBe("company")
@@ -98,7 +100,8 @@ describe("isOnboardingStepSlug", () => {
     expect(isOnboardingStepSlug("product")).toBe(false)
     expect(isOnboardingStepSlug("workspace")).toBe(false)
     expect(isOnboardingStepSlug("metrics")).toBe(false)
-    expect(isOnboardingStepSlug("invite")).toBe(false)
+    // Reinstated 2026-09-07 — invite is a real numbered step again.
+    expect(isOnboardingStepSlug("invite")).toBe(true)
     // The removed agent-naming step + retired routes are no longer numbered.
     expect(isOnboardingStepSlug("coworkers")).toBe(false)
     expect(isOnboardingStepSlug("business-info")).toBe(false)

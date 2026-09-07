@@ -40,6 +40,11 @@ const DRAFT_SKELETON_WIDTHS = [
  * Draft resolution order: an in-progress local draft → the previously saved
  * summary → a fresh backend draft (with a graceful manual-writing fallback
  * when generation fails).
+ *
+ * The invite step's mount ALSO kicks this same prefetch (see draftPrefetch.ts
+ * and InviteStep) — reinstated 2026-09-07 right before this step, so the head
+ * start it used to give this draft is back too. Both calls are memoized by
+ * workspace id, so nothing here duplicates or goes stale because of it.
  */
 export function ReviewStep() {
   const auth = useAuth()
@@ -70,10 +75,10 @@ export function ReviewStep() {
   }, [loading, workspace, router])
 
   // Resolve the draft: local draft → saved summary → the backend draft. This
-  // call is memoized (draftPrefetch.ts), so it starts the generation itself —
-  // the earlier kick from the invite step's mount that used to give it a
-  // head start is gone with that step (2026-09-03); the difference is a
-  // slightly longer shimmer here, never a stale or duplicate draft.
+  // call is memoized (draftPrefetch.ts), so it joins the invite step's earlier
+  // kick when there was one, or starts the generation itself when the invite
+  // step was skipped straight past (its own prefetch effect never fired) —
+  // either way, never a stale or duplicate draft.
   useEffect(() => {
     if (!workspace || requested.current) return
     requested.current = true
@@ -116,7 +121,7 @@ export function ReviewStep() {
 
   return (
     <OnboardingChrome
-      step={stepForSlug("review") ?? 3}
+      step={stepForSlug("review") ?? 4}
       saveLabel="Saved · auto-saves"
       title={
         <>
@@ -125,7 +130,7 @@ export function ReviewStep() {
       }
       subtitle="Based on everything you shared — plus research across your website, reviews and connected data — here's the business context every agent will reason through. Read it, edit anything, and accept."
       footerMeta="Review business context"
-      onBack={() => router.push("/onboarding/connectors")}
+      onBack={() => router.push("/onboarding/invite")}
       onContinue={() => void accept()}
       continueLabel="Next · personalize"
       continueDisabled={saving || drafting || !summary.trim()}

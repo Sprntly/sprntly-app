@@ -4,9 +4,10 @@
  * earlier steps instead of starting when the display screen mounts:
  *
  *   - business-context prose ("Here's what we learned", the review step) —
- *     the review step's own mount is now the only kick (it used to also fire
- *     a step early, from the invite step, before that step was removed
- *     2026-09-03; memoized either way, so nothing else changes),
+ *     kicked a step early from the invite step's mount (2026-09-07: back in
+ *     the flow, right before review), AND from the review step's own mount
+ *     for whoever skips or never reaches invite; memoized either way, so
+ *     nothing double-drafts or goes stale,
  *   - per-metric definitions (define-metrics sub-flow) — kicked from the
  *     review step's mount, drafting while the user reads/edits the context.
  *

@@ -76,6 +76,7 @@ vi.mock("../../../connectors/ConnectorConnectModal", () => ({
 }))
 
 import { PersonalizeStep } from "../PersonalizeStep"
+import { stepForSlug } from "../../../../lib/onboarding/types"
 import { makeWorkspace, makeOnboardingCtx } from "./fixtures"
 
 /** A live Analytics connection — what keeps the define-metrics hand-off alive. */
@@ -139,7 +140,7 @@ describe("PersonalizeStep (onboarding step 09 — surface + delivery)", () => {
     const { container } = mount()
     expect(
       (container.querySelector(".onb-dots") as HTMLElement).getAttribute("data-step"),
-    ).toBe("4")
+    ).toBe(String(stepForSlug("personalize")))
     expect(
       (container.querySelector(".onb-card .onb-h") as HTMLElement).textContent,
     ).toBe("Personalize your workspace.")

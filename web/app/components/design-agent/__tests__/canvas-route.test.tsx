@@ -70,17 +70,17 @@ describe("non-prototype routes unchanged (no nav regression)", () => {
     ["/team", "team"],
     ["/sources", "sources"],
     ["/onboarding/company", "ob-company"],
+    ["/onboarding/invite", "ob-invite"],
     ["/onboarding/review", "ob-review"],
-    // Removed from the flow on 2026-09-03 (invite last, folded into
-    // Settings → Team & roles) — their routes fall through like any other
-    // retired step, which is what stops a stale bookmark rendering a screen
-    // the flow no longer has.
+    // Removed from the flow on 2026-09-03 — their routes fall through like
+    // any other retired step, which is what stops a stale bookmark rendering
+    // a screen the flow no longer has. Unlike these, invite (above) was
+    // reinstated 2026-09-07 and resolves to a real screen again.
     ["/onboarding/workspace", "chat"],
     ["/onboarding/import-context", "chat"],
     ["/onboarding/api-key", "chat"],
     ["/onboarding/product", "chat"],
     ["/onboarding/metrics", "chat"],
-    ["/onboarding/invite", "chat"],
     // The three steps the old workspace card replaced never resolved either.
     ["/onboarding/team", "chat"],
     ["/onboarding/strategy", "chat"],
