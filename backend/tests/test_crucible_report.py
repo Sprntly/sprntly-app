@@ -3117,6 +3117,61 @@ def test_reach_not_narrowed_note_does_not_characterise_the_evidence():
         )
 
 
+# ─── Two tiers, two words ──────────────────────────────────────────────────
+#
+# The answer screen said "nothing to recommend" over a page whose cards were
+# headed "Suggested." Both sentences were true; together they read as an error.
+# `test_crucible_document_consistency` sweeps the whole vocabulary over real
+# pipeline output — these pin the two branches a fixture can reach that an
+# offline pipeline run cannot, because the flat tier is its own model call.
+
+
+def _flat_finding(**over) -> dict:
+    """A finding with a flat suggestion and no full write-up — the tier the
+    answer screen used to deny the existence of while rendering it below."""
+    f = _finding(recommendation={
+        "action": "Batch the export job",
+        "because": "three accounts named the same timeout",
+    })
+    f.update(over)
+    return f
+
+
+def test_no_full_write_up_says_full_rather_than_denying_the_flat_ones():
+    """THE CONTRADICTION. "Nothing to recommend" is false on a page that is
+    about to print a suggestion; "no full recommendation" is the true, narrow
+    claim, and the flat ones are counted rather than promised."""
+    html = render_report_html(_run(), [_flat_finding(), _flat_finding()])
+    text = _plain(html)
+    assert "no full recommendation on this run" in text
+    assert "2 of those findings carry a flat recommendation" in text
+    assert "nothing to recommend" not in text
+
+
+def test_the_flat_count_is_singular_for_one():
+    html = render_report_html(
+        _run(), [_flat_finding(), _finding(statement="A second theme")])
+    text = _plain(html)
+    assert "1 of those findings carries a flat recommendation" in text
+
+
+def test_no_tier_at_all_promises_neither():
+    """A run where the flat pass also produced nothing must not point at
+    suggestions that are not there — the count is read off the rows, so it
+    disappears on its own."""
+    text = _plain(render_report_html(_run(), [_finding()]))
+    assert "no full recommendation on this run" in text
+    assert "flat recommendation" not in text
+
+
+def test_a_card_with_neither_tier_says_which_two_are_missing():
+    """The per-finding line. A reader arriving here has just passed cards
+    headed "Suggested," so "no recommendation" leaves them working out which
+    kind this card is missing."""
+    text = _plain(render_report_html(_run(), [_finding()]))
+    assert "neither a full recommendation nor a flat one" in text
+
+
 # ─── The chain summary: a compact map, rendered above the answer ───────────
 
 

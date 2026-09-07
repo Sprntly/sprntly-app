@@ -2291,9 +2291,15 @@ def _finding_block(
                 _esc_clipped(g, MAX_STATEMENT_CHARS) for g in data_gaps
             ))
     elif not (action and because):
+        # BOTH TIERS NAMED, because this card is the one that has NEITHER and
+        # a reader has just come past cards headed "Suggested." A bare "no
+        # recommendation" leaves them working out which kind is missing here
+        # — the document uses one word for a deep write-up and for a flat
+        # suggestion, and this is the sentence where that ambiguity costs the
+        # most.
         out.append(_p(
-            "We wrote no recommendation for this one. What is above is what "
-            "the evidence carries on its own."
+            "We wrote neither a full recommendation nor a flat one for this "
+            "one. What is above is what the evidence carries on its own."
         ))
     return "".join(x for x in out if x)
 
@@ -3054,7 +3060,7 @@ def _chain_summary_section(
         "<h2>The chain, in six lines</h2>",
         _p(
             "Where each part of this reading is answered, in order. The "
-            "full detail is below the recommendation, not repeated here."
+            "full detail is below \"What we recommend,\" not repeated here."
         ),
         _ul(items),
     ])
@@ -3110,11 +3116,30 @@ def _answer_section(
     options = option_numbers(written)
     numbered = [(n, f) for n, f in zip(options, written) if n]
     if not numbered:
+        # WHICH TIER IS MISSING, AND HOW MANY OF THE OTHER SURVIVED.
+        #
+        # "Nothing to recommend" printed above a page of cards headed
+        # "Suggested." is the document using one word for two tiers, and it
+        # reads as an outright error rather than as the true, narrow claim it
+        # is: no finding cleared the citation bar for a FULL write-up. The
+        # flat count is COUNTED off the same rows the cards are rendered from
+        # — "the suggestion under each finding still stands" would be false,
+        # since the flat pass covers only the top `recommend.MAX_RECOMMENDED`
+        # and can drop or fail an item within them.
+        flat = sum(
+            1 for f in kept
+            if (_as_dict(f.get("recommendation")).get("action") or "").strip()
+            and (_as_dict(f.get("recommendation")).get("because") or "").strip()
+        )
         out.append(_p(
             "Nothing in this evidence produced a build we can stand behind, "
-            "so there is nothing to recommend. What we did find is ranked "
-            "below, and it is worth reading before you conclude there is "
-            "nothing here."
+            "so there is no full recommendation on this run. What we did "
+            "find is ranked below"
+            + (f", and {flat:,} of those findings "
+               f"{'carries' if flat == 1 else 'carry'} a flat recommendation"
+               if flat else "")
+            + " — it is worth reading before you conclude there is nothing "
+              "here."
         ))
         return "".join(out)
 
