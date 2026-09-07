@@ -13,6 +13,9 @@ import {
 import { AppLayout } from "../../../components/screens/app/AppLayout"
 import { documentFailureCopy } from "../../../lib/documentFailure"
 import { DocumentEditor } from "./DocumentEditor"
+import { GeneratingPane } from "../../../components/shared/GenerationState"
+import { DOCUMENT_GEN } from "../../../components/shared/generationPhases"
+import { IconFileText } from "@tabler/icons-react"
 
 // ── The team-document surface ────────────────────────────────────────────────
 //
@@ -262,42 +265,51 @@ export function DocumentRoute() {
           />
           {doc.kind.trim() && <div style={S.kind}>{doc.kind.trim()}</div>}
 
-          {doc.status === "generating" && (
-            <div data-doc-writing style={S.notice}>Writing this document…</div>
-          )}
-          {doc.status === "failed" && (
-            <div data-doc-failed data-failure-code={doc.error_code ?? "unknown"} style={S.notice}>
-              {documentFailureCopy(doc.error_code)}
-            </div>
-          )}
-
-          {saveState.kind === "conflict" && (
-            <ConflictBanner theirs={saveState.theirs} onResolve={resolveConflict} />
-          )}
-
-          {doc.status === "ready" && !doc.body_html.trim() && (
-            // Slice 3 had this and slice 4 dropped it, leaving a ready-but-
-            // empty document rendering as a completely blank page — which
-            // reads as broken rather than as new. A cue, not a placeholder
-            // attribute: see the note in DocumentEditor's stylesheet.
-            <p data-doc-empty style={S.muted}>
-              This document is empty. Start typing, or ask in chat for a draft.
-            </p>
-          )}
-
           {doc.status === "generating" ? (
-            // Read-only while it writes: an editable buffer over a document
-            // being replaced would have every keystroke overwritten by the
-            // next poll.
-            <div data-doc-body style={S.body} dangerouslySetInnerHTML={{ __html: doc.body_html }} />
+            // Same working pane the PRD and Reports surfaces show
+            // (GenerationState.tsx) instead of a static sentence over a body
+            // that stays empty the whole time: custom-artifact generation
+            // writes in ONE call at the end, so there is nothing to stream in
+            // early. The poll above (`load` on the `generating` interval)
+            // still ends this the moment the real content lands.
+            <div style={{ minHeight: 280 }}>
+              <GeneratingPane
+                {...DOCUMENT_GEN}
+                testId="document-generating"
+                icon={<IconFileText size={19} />}
+                title="Generating document…"
+              />
+            </div>
           ) : (
-            <DocumentEditor
-              key={contentKey}
-              initialHtml={doc.body_html}
-              editable={!!editable}
-              onChange={handleChange}
-              onBlur={() => void schedulerRef.current?.flush()}
-            />
+            <>
+              {doc.status === "failed" && (
+                <div data-doc-failed data-failure-code={doc.error_code ?? "unknown"} style={S.notice}>
+                  {documentFailureCopy(doc.error_code)}
+                </div>
+              )}
+
+              {saveState.kind === "conflict" && (
+                <ConflictBanner theirs={saveState.theirs} onResolve={resolveConflict} />
+              )}
+
+              {doc.status === "ready" && !doc.body_html.trim() && (
+                // Slice 3 had this and slice 4 dropped it, leaving a ready-but-
+                // empty document rendering as a completely blank page — which
+                // reads as broken rather than as new. A cue, not a placeholder
+                // attribute: see the note in DocumentEditor's stylesheet.
+                <p data-doc-empty style={S.muted}>
+                  This document is empty. Start typing, or ask in chat for a draft.
+                </p>
+              )}
+
+              <DocumentEditor
+                key={contentKey}
+                initialHtml={doc.body_html}
+                editable={!!editable}
+                onChange={handleChange}
+                onBlur={() => void schedulerRef.current?.flush()}
+              />
+            </>
           )}
         </div>
       </div>
@@ -441,7 +453,6 @@ const S: Record<string, React.CSSProperties> = {
     border: "none", background: "var(--accent, #17191A)", color: "#fff",
     cursor: "pointer",
   },
-  body: { fontSize: 15, lineHeight: 1.7, color: "var(--ink, #1A1A17)" },
   muted: { fontSize: 13.5, color: "var(--ink-3, #8C8A84)" },
   link: {
     border: "none", background: "none", padding: 0, cursor: "pointer",

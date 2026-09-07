@@ -70,6 +70,25 @@ export const STANDALONE_TICKET_GEN: GenerationCopy = {
   slowNote: "Still working — a long conversation takes longer to break down. Each ticket appears here the moment it's written.",
 }
 
+/** Custom artifact — `custom_artifact_generate.py`: ground a thin brief against
+ *  the workspace's own data when there's little to go on, then one model call
+ *  writes the whole document. Genuinely two legs, not the four-or-five-stage
+ *  pipeline PRD/evidence/tickets run — a fabricated middle phase for a single
+ *  LLM call would be the "measured progress claim" this module's own header
+ *  comment says these lines must never be. Shared by BOTH the "document" and
+ *  "report" artifact_kind (a report reaches this generic writer only when the
+ *  chat's create_artifact action fires for it, rather than a report-producing
+ *  skill answering in the thread and being captured — see report_capture.py
+ *  and REPORT_GEN below for that other, phase-driven path). */
+export const DOCUMENT_GEN: GenerationCopy = {
+  phases: [
+    "Reading the brief and what's already been shared…",
+    "Writing the document…",
+  ],
+  note: "This usually takes under a minute. It opens here the moment it's ready.",
+  slowNote: "Still working — a longer brief takes a little more time to draft.",
+}
+
 /** Report — the intelligence pipelines (voice-of-customer, public feedback,
  *  competitive/market intelligence, company research): gather the corpus →
  *  read it → find the themes → write the document.
