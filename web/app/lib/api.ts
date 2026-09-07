@@ -798,6 +798,27 @@ export type GoalRejection = {
   claim_ids: string[]
 }
 
+/** Where one cited claim came from — `backend/app/crucible/resolve
+ *  .ClaimSource`, verbatim. `status` is always exactly one of these four; a
+ *  claim id that cannot be resolved is a normal 200 with a status to read,
+ *  never a 404 — "we don't know" is itself something to tell the reader.
+ *  `properties` is never a field here, deliberately: it is the tenant's
+ *  account/customer name, and handing it back would defeat the same naming
+ *  discipline the report itself applies (`ACCOUNT_NAMING_DISCLOSURE`). */
+export type ClaimSource = {
+  status: "resolved" | "no_pointer" | "dropped_for_space" | "not_found"
+  content: string | null
+  source_type: string | null
+  valid_at: string | null
+  /** The human pointer — a title and a date, or a document label. Present
+   *  only when `status === "resolved"`. Never a bare id: a UUID in a
+   *  rendered document is decoration, not something a person can act on. */
+  pointer:
+    | { kind: "call"; title: string; call_date: string | null }
+    | { kind: "doc"; label: string }
+    | null
+}
+
 /** One source the run will read: how much of it there is, and what it can
  *  actually witness. These counts are an INVENTORY — the plan step reads no
  *  content, which is why it returns in about a second rather than minutes. */
@@ -1353,6 +1374,13 @@ export const goalAnalysisApi = {
     }),
   list: () => api.get<{ runs: GoalRun[] }>("/v1/crucible"),
   get: (runId: number) => api.get<GoalRunDetail>(`/v1/crucible/${runId}`),
+  /** Where one claim this run cited came from — the live counterpart to the
+   *  identifier the report already prints as text. Never a 404 for an
+   *  unresolvable claim id; read `ClaimSource.status` instead. */
+  claimSource: (runId: number, claimId: string) =>
+    api.get<ClaimSource>(
+      `/v1/crucible/${runId}/claims/${encodeURIComponent(claimId)}/source`,
+    ),
   /** The I9 gate. Sends the definition the user confirmed — their words, which
    *  may be an edit of what we proposed. */
   confirm: (runId: number, definition_text: string) =>

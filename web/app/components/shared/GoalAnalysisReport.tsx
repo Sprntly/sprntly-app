@@ -63,9 +63,98 @@
  * does not restate the reason each was cut — that sentence already exists,
  * once, in the document above — only the label, which is what identifies the
  * option to ask about.
+ *
+ * A SECOND ADDITIVE LIST, BELOW THAT ONE: "where did this come from", for a
+ * finding or a cut option's own first claim id. `report.py` already prints
+ * this same lookup's answer AS TEXT inside the document above — baked in at
+ * render time, so it survives into the editable copy and the forked/printed
+ * one, which carry no script and (once forked) no run to ask again. This
+ * list is the one place a reader can ask LIVE, because it is the one place
+ * that still has both: a script-capable React tree and a run id to query.
+ * `HtmlReportView`'s iframe forbids exactly this (`allow-scripts` is never
+ * set, on purpose — see that file), which is why the click lives out here
+ * and not inside the document.
  */
+import { useCallback, useState } from "react"
 import { HtmlReportView } from "./HtmlReportView"
-import type { GoalRunDetail } from "../../lib/api"
+import { goalAnalysisApi, type ClaimSource, type GoalRunDetail } from "../../lib/api"
+
+//: THE SAME FOUR READINGS `backend/app/crucible/report.py`'s baked-in
+//: identifier prints, kept in step BY HAND — the same discipline that
+//: file's own `KILL_SIGNAL_CAVEAT`/`ACCOUNT_NAMING_DISCLOSURE` comments
+//: describe for prose shared between the two renderers. A live check here
+//: and the printed document are answering the same lookup about the same
+//: claim, so they say the same thing about it.
+function claimSourceText(source: ClaimSource): string {
+  if (source.status === "resolved" && source.pointer) {
+    if (source.pointer.kind === "call") {
+      return source.pointer.call_date
+        ? `${source.pointer.title}, ${source.pointer.call_date}`
+        : source.pointer.title
+    }
+    return source.pointer.label
+  }
+  if (source.status === "no_pointer") {
+    return (
+      "a real claim with nothing a person could open — no linked call and "
+      + "no named document"
+    )
+  }
+  if (source.status === "dropped_for_space") {
+    return (
+      "cited here, but this run did not keep enough detail to look it up "
+      + "again"
+    )
+  }
+  // "not_found", or any future status this client does not yet know —
+  // the same honest fallback the backend itself uses for both.
+  return "no longer available"
+}
+
+/** One row: a claim id, checkable on demand. Closed until clicked — a panel
+ *  that fired every lookup on mount would cost a database round trip per
+ *  finding and per cut option on every open, for an answer most readers
+ *  never ask for. */
+function ClaimSourceCheck({
+  runId, claimId, label,
+}: {
+  runId: number
+  claimId: string
+  label: string
+}) {
+  const [result, setResult] = useState<"idle" | "loading" | "error" | ClaimSource>("idle")
+  const check = useCallback(async () => {
+    setResult("loading")
+    try {
+      const source = await goalAnalysisApi.claimSource(runId, claimId)
+      setResult(source)
+    } catch {
+      setResult("error")
+    }
+  }, [runId, claimId])
+  return (
+    <li>
+      <button
+        type="button"
+        className="ga-doc-action"
+        data-testid="goal-source-check"
+        disabled={result === "loading"}
+        onClick={check}
+      >
+        Where &ldquo;{label}&rdquo; came from
+      </button>
+      {result !== "idle" ? (
+        <span className="ga-source-result" data-testid="goal-source-result">
+          {result === "loading"
+            ? "Checking…"
+            : result === "error"
+              ? "Could not check this right now."
+              : claimSourceText(result)}
+        </span>
+      ) : null}
+    </li>
+  )
+}
 
 export function GoalAnalysisReport({
   run,
@@ -97,6 +186,28 @@ export function GoalAnalysisReport({
   onSelectOption?: (label: string) => void
 }) {
   const html = (run.report_html || "").trim()
+
+  // WHAT CAN BE CHECKED LIVE: a finding or a cut option's own FIRST claim id
+  // — the same one `report.py` already resolved once, at render time, into
+  // the text sitting in the document above. Only rows that actually cite a
+  // claim are offered; a finding or a rejection stored before `claim_ids`
+  // existed has none, and there is nothing here for a click to ask about.
+  const sourceRows: { key: string; claimId: string; label: string }[] = [
+    ...run.findings
+      .filter((f) => f.claim_ids && f.claim_ids.length > 0)
+      .map((f) => ({
+        key: `finding-${f.id}`,
+        claimId: f.claim_ids[0],
+        label: f.label || f.statement,
+      })),
+    ...run.considered
+      .filter((c) => c.claim_ids && c.claim_ids.length > 0)
+      .map((c) => ({
+        key: `considered-${c.id}`,
+        claimId: c.claim_ids[0],
+        label: c.label,
+      })),
+  ]
 
   return (
     <article className="ga-doc" data-testid="goal-report">
@@ -174,6 +285,32 @@ export function GoalAnalysisReport({
                   Ask about &ldquo;{option.label}&rdquo;
                 </button>
               </li>
+            ))}
+          </ul>
+        </details>
+      ) : null}
+
+      {/* THE LIVE CHECK. Additive to the identifier `report.py` already
+          baked into the document above — see this file's own header for why
+          a live lookup can only ever live out here, in React, never inside
+          the sandboxed report or the editable/forked copy. Closed by
+          default, and silent when nothing on this run carries a claim id at
+          all. */}
+      {sourceRows.length > 0 ? (
+        <details className="ga-sources" data-testid="goal-sources">
+          <summary>
+            {sourceRows.length === 1
+              ? "1 source to check"
+              : `${sourceRows.length} sources to check`}
+          </summary>
+          <ul>
+            {sourceRows.map((row) => (
+              <ClaimSourceCheck
+                key={row.key}
+                runId={run.id}
+                claimId={row.claimId}
+                label={row.label}
+              />
             ))}
           </ul>
         </details>
