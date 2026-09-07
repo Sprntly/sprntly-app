@@ -970,11 +970,20 @@ META_KEY = "prose_claims"
 #: make every status request pay for evidence only the sweep ever reads.
 MAX_PERSISTED_ROWS = 300
 
+#: Where a run keeps the ids it wanted to persist but could not fit under
+#: `MAX_PERSISTED_ROWS`. SEPARATE FROM `META_KEY`, deliberately: a reader (or
+#: a future resolver) checking whether a cited id is recoverable has to be
+#: able to tell "dropped for space" from "never existed" — folding the two
+#: into one silently-shorter list would rebuild exactly the bug this module
+#: exists to close, just behind a cap instead of a missing call site.
+TRUNCATED_KEY = "prose_claims_truncated"
+
 
 def rows_for_recovery(
     rows: Sequence[Mapping[str, Any]], referenced: set[str],
-) -> list[dict]:
-    """The prose rows a stalled-enrichment sweep will need, and no others.
+) -> tuple[list[dict], list[str]]:
+    """The prose rows a stalled-enrichment sweep will need, and no others —
+    plus the ids of any that were cited but did not fit.
 
     THE HOLE THIS CLOSES. `routes.crucible._reenrich_stalled_run` rebuilds
     claims from `kg_signal` BY ID — and a prose claim's id is not in
@@ -985,20 +994,29 @@ def rows_for_recovery(
     Persisting the rows here is what lets the sweep reconstitute exactly the
     claims the first pass had.
 
-    Filtered to the ids the stored findings actually reference, because that is
-    precisely the set `_load_signals_by_id` asks for; carrying the rest would
-    grow the blob without changing any answer. `embedding` is never carried:
-    it is 1,536 floats the recovery path does not read.
+    Filtered to the ids anything the run PERSISTS actually references —
+    findings and the ledger both — because that is precisely the set a
+    resolver would ever ask for; carrying the rest would grow the blob
+    without changing any answer. `embedding` is never carried: it is 1,536
+    floats the recovery path does not read.
+
+    The SECOND return value is the referenced ids that could not fit under
+    the cap — never silently dropped. A caller that only reads the first
+    value gets the exact prior behaviour; one that reads both can tell a
+    cited-but-truncated id apart from one that never existed.
     """
     kept = [dict(r) for r in rows if str(r.get("id") or "") in referenced]
+    truncated: list[str] = []
     if len(kept) > MAX_PERSISTED_ROWS:
         logger.warning(
-            "crucible prose: %d prose rows referenced by findings, keeping "
-            "%d for recovery — a sweep of this run would ground fewer "
-            "citations than the first pass did",
+            "crucible prose: %d prose rows referenced by findings/ledger, "
+            "keeping %d for recovery — a sweep of this run would ground "
+            "fewer citations than the first pass did",
             len(kept), MAX_PERSISTED_ROWS)
+        truncated = sorted(
+            str(r.get("id")) for r in kept[MAX_PERSISTED_ROWS:])
         kept = kept[:MAX_PERSISTED_ROWS]
-    return kept
+    return kept, truncated
 
 
 def rows_from_meta(meta: Mapping[str, Any]) -> list[dict]:
@@ -1011,3 +1029,15 @@ def rows_from_meta(meta: Mapping[str, Any]) -> list[dict]:
     if not isinstance(stored, list):
         return []
     return [r for r in stored if isinstance(r, dict) and r.get("id")]
+
+
+def truncated_ids_from_meta(meta: Mapping[str, Any]) -> list[str]:
+    """The ids a run wanted to persist but could not fit under the cap.
+
+    Distinguishes "cited and once known, but dropped for space" from "never
+    existed" for any reader checking whether an id ought to be recoverable.
+    """
+    stored = (meta or {}).get(TRUNCATED_KEY)
+    if not isinstance(stored, list):
+        return []
+    return [str(i) for i in stored if i]

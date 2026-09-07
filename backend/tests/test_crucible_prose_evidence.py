@@ -812,23 +812,39 @@ def test_without_the_prose_theme_map_the_document_contributes_nothing():
 def test_only_the_rows_a_finding_cites_are_kept_for_recovery():
     rows, _items = _rows(per_conversation=True)
     cited = {rows[0]["id"], rows[2]["id"]}
-    kept = prose.rows_for_recovery(rows, cited)
+    kept, truncated = prose.rows_for_recovery(rows, cited)
     assert {r["id"] for r in kept} == cited
+    assert truncated == []
 
 
 def test_recovery_rows_never_carry_an_embedding():
     """1,536 floats per row, in a jsonb blob read on every poll of the run, to
     serve a path that does not read them."""
     rows, _items = _rows(per_conversation=True)
-    kept = prose.rows_for_recovery(rows, {r["id"] for r in rows})
+    kept, _truncated = prose.rows_for_recovery(rows, {r["id"] for r in rows})
     assert kept and not any("embedding" in r for r in kept)
 
 
 def test_recovery_rows_are_bounded(monkeypatch):
     monkeypatch.setattr(prose, "MAX_PERSISTED_ROWS", 2)
     rows, _items = _rows(per_conversation=True)
-    kept = prose.rows_for_recovery(rows, {r["id"] for r in rows})
+    kept, _truncated = prose.rows_for_recovery(rows, {r["id"] for r in rows})
     assert len(kept) == 2
+
+
+def test_truncation_past_the_cap_is_disclosed_not_silent(monkeypatch):
+    """THE CAP'S OWN INVARIANT: a referenced id dropped for space must be
+    distinguishable from one that never existed. A silent truncation would
+    rebuild the exact bug this module exists to close, just behind a limit
+    instead of a missing call site."""
+    monkeypatch.setattr(prose, "MAX_PERSISTED_ROWS", 2)
+    rows, _items = _rows(per_conversation=True)
+    referenced = {r["id"] for r in rows}
+    kept, truncated = prose.rows_for_recovery(rows, referenced)
+    assert len(kept) == 2
+    kept_ids = {r["id"] for r in kept}
+    assert set(truncated) == referenced - kept_ids
+    assert set(truncated) & kept_ids == set()
 
 
 def test_a_run_stored_before_this_existed_reads_back_as_no_prose():
@@ -906,7 +922,7 @@ def test_without_the_stored_rows_the_swept_run_loses_the_claim(monkeypatch):
     assert seen["claims"] == ()
 
 
-def test_remember_prose_stores_only_what_the_findings_cite(monkeypatch):
+def test_remember_prose_stores_what_findings_and_ledger_cite(monkeypatch):
     import app.routes.crucible as routes
 
     rows, _items = _rows(per_conversation=True)
@@ -915,12 +931,58 @@ def test_remember_prose_stores_only_what_the_findings_cite(monkeypatch):
     monkeypatch.setattr(routes.runs_db, "update",
                         lambda *a, **k: wrote.update(k))
     routes._remember_prose(
-        7, CO, rows, [{"claim_ids": [rows[1]["id"], "not-a-prose-id"]}])
+        7, CO, rows,
+        [{"claim_ids": [rows[1]["id"], "not-a-prose-id"]}],
+        [{"claim_ids": [rows[2]["id"]]}],
+    )
     stored = wrote["prioritisation"][prose.META_KEY]
-    assert [r["id"] for r in stored] == [rows[1]["id"]]
+    assert {r["id"] for r in stored} == {rows[1]["id"], rows[2]["id"]}
     # AND THE REST OF THE BLOB SURVIVES. A wholesale replace here would erase
     # the approved plan the report has to reprint.
     assert wrote["prioritisation"]["plan"] == {"a": 1}
+
+
+def test_a_claim_that_dies_as_echo_reaches_only_the_ledger_and_must_still_be_recoverable(
+    monkeypatch,
+):
+    """THE DEFECT THIS CLOSES, reproduced end to end through the real pipeline.
+
+    A cluster whose every claim names ONE artifact dies as `echo` before it
+    ever becomes a finding (see the per-file arm of test 1 above) — so its
+    claim ids are cited by nothing except the ledger `build_findings` returns
+    as `result.rejected`. Before this fix, `_remember_prose` was only ever
+    handed finding rows, so a prose claim that died this way was cited by the
+    run and resolvable by nothing on it forever: not in `kg_signal` (prose is
+    never written there, by design) and not in the run's own recovery blob
+    either.
+    """
+    rows, items_by_id = _rows(per_conversation=False)
+    _grouped, _unthemed, result, _stats = _run(rows, items_by_id)
+    assert not result.findings, (
+        "the fixture must kill the whole cluster as echo for this to isolate "
+        "the ledger-only case"
+    )
+    ledger_rows = [{"claim_ids": list(r.claim_ids)} for r in result.rejected]
+    dead_ids = {cid for r in ledger_rows for cid in r["claim_ids"]}
+    assert dead_ids, "the ledger recorded no rejected cluster to test against"
+
+    import app.routes.crucible as routes
+
+    wrote: dict = {}
+    monkeypatch.setattr(routes, "_meta_of", lambda *a, **k: {"plan": {}})
+    monkeypatch.setattr(routes.runs_db, "update",
+                        lambda *a, **k: wrote.update(k))
+
+    routes._remember_prose(7, CO, rows, [], ledger_rows)
+
+    stored_ids = {
+        r["id"] for r in
+        wrote.get("prioritisation", {}).get(prose.META_KEY, [])
+    }
+    assert dead_ids <= stored_ids, (
+        "a claim cited only by the ledger was not persisted for recovery — "
+        "it is a dead reference: not in kg_signal, not on the run"
+    )
 
 
 # ─── 7. And still nothing reaches the knowledge graph ───────────────────────
@@ -1411,12 +1473,13 @@ def test_approving_turns_the_document_into_claims_the_run_actually_reads(
     assert len({r["provenance"]["doc"] for r in stored}) == 3
     assert all(r["provenance"]["channel"] == prose.ATTACHMENT_CHANNEL
                for r in stored)
-    # AND EVERY ONE OF THEM IS CITED BY A FINDING — the filter kept the set
-    # the sweep will actually ask for.
+    # AND EVERY ONE OF THEM IS CITED BY SOMETHING THE RUN PERSISTS — a finding
+    # or the ledger — the filter kept the set either can actually ask for.
     from app.db import crucible_runs as runs_db
 
-    findings, _ledger = runs_db.load_findings(run_id, prose_ctx.company_id)
+    findings, ledger = runs_db.load_findings(run_id, prose_ctx.company_id)
     cited = {c for f in findings for c in (f.get("claim_ids") or ())}
+    cited |= {c for r in ledger for c in (r.get("claim_ids") or ())}
     assert {r["id"] for r in stored} <= cited
 
 
