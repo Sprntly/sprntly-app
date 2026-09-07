@@ -72,7 +72,7 @@ describe("runCreateProjectAction", () => {
 
     await runCreateProjectAction("start a project with this", envelope(), {
       emitTurn,
-      sourceConversationId: 55,
+      sourceConversationId: async () => 55,
     })
 
     expect(create).toHaveBeenCalledWith({
@@ -89,7 +89,7 @@ describe("runCreateProjectAction", () => {
 
     await runCreateProjectAction("start a project with this", envelope(), {
       emitTurn,
-      sourceConversationId: null,
+      sourceConversationId: async () => null,
     })
 
     expect(create).toHaveBeenCalledWith({ name: "Billing revamp", origin: "manual" })
@@ -129,5 +129,125 @@ describe("runCreateProjectAction", () => {
 
     expect(create).toHaveBeenCalled()
     expect(emitTurn.mock.calls[0][0].reply.answer).toContain("Pricing 2027")
+  })
+})
+
+// ── The create is VISIBLE while it runs ──────────────────────────────────────
+//
+// REPORTED: "no indication that it is creating a project, and then it
+// automatically takes me to the project screen". The create binds the
+// conversation and sweeps the thread's artifacts onto the new project, so it is
+// not instant — and it used to run with the composer cleared and nothing on
+// screen, the project itself being the first thing the user saw.
+//
+// `runActionTurn` is the surface's async-command lifecycle (optimistic turn →
+// busy → settle → persist), the same one the PRD edit and the Slack share use.
+// These pin that the action goes through it, that the round trip which resolves
+// the conversation happens INSIDE it, and that the navigation waits for it.
+describe("runCreateProjectAction — the wait is on screen", () => {
+  /** A stand-in for the surface's async-turn primitive that records the order
+   *  things happened in, the way the real one does: seed, run, settle. */
+  function recordingTurn(log: string[]) {
+    return async (query: string, worker: () => Promise<{ reply: { answer: string } }>) => {
+      log.push(`seeded:${query}`)
+      const patch = await worker()
+      log.push(`settled:${patch.reply.answer.slice(0, 20)}`)
+      return { turnId: "t1" }
+    }
+  }
+
+  it("runs through the async-turn lifecycle, not a settled turn after the fact", async () => {
+    create.mockResolvedValue({ id: 42, name: "Billing revamp" })
+    const log: string[] = []
+    const emitTurn = vi.fn()
+
+    await runCreateProjectAction("create a project for the billing revamp", envelope(), {
+      emitTurn,
+      runActionTurn: recordingTurn(log),
+    })
+
+    // The turn exists BEFORE the work runs — that is the whole indication.
+    expect(log[0]).toBe("seeded:create a project for the billing revamp")
+    expect(log[1]).toContain("settled:")
+    // …and it is ONE turn, settled in place, not a second one posted beside it.
+    expect(emitTurn).not.toHaveBeenCalled()
+  })
+
+  it("resolves the conversation INSIDE the turn, not in front of it", async () => {
+    // On a fresh tab this call CREATES the conversation row. Awaited by the
+    // caller it was the first half of the blank window; it has to happen where
+    // the wait state can cover it.
+    create.mockResolvedValue({ id: 42, name: "Billing revamp" })
+    const log: string[] = []
+
+    await runCreateProjectAction("start a project with this", envelope(), {
+      emitTurn: vi.fn(),
+      runActionTurn: recordingTurn(log),
+      sourceConversationId: async () => { log.push("resolved-conversation"); return 55 },
+    })
+
+    expect(log).toEqual([
+      "seeded:start a project with this",
+      "resolved-conversation",
+      expect.stringContaining("settled:"),
+    ])
+    expect(create).toHaveBeenCalledWith({
+      name: "Billing revamp", origin: "manual", conversation_id: 55,
+    })
+  })
+
+  it("navigates only AFTER the turn settles, so the confirmation is not raced", async () => {
+    // The thread travels WITH the project, so a redirect fired mid-flight could
+    // land it there missing its own last line.
+    create.mockResolvedValue({ id: 42, name: "Billing revamp" })
+    const log: string[] = []
+
+    await runCreateProjectAction("create a project for the billing revamp", envelope(), {
+      emitTurn: vi.fn(),
+      runActionTurn: recordingTurn(log),
+      onProjectCreated: () => { log.push("navigated") },
+    })
+
+    expect(log[log.length - 1]).toBe("navigated")
+  })
+
+  it("a failed create settles the turn and navigates NOWHERE", async () => {
+    create.mockRejectedValue(new Error("seat limit reached"))
+    const log: string[] = []
+    const onProjectCreated = vi.fn()
+    let settled = ""
+
+    await runCreateProjectAction("make a project for onboarding", envelope(), {
+      emitTurn: vi.fn(),
+      runActionTurn: async (_q, worker) => {
+        const patch = await worker()
+        settled = patch.reply.answer
+        log.push("settled")
+        return { turnId: "t1" }
+      },
+      onProjectCreated,
+    })
+
+    expect(settled).toContain("Nothing was created")
+    expect(settled).toContain("seat limit reached")
+    expect(onProjectCreated).not.toHaveBeenCalled()
+  })
+
+  it("a surface with no async primitive still works, exactly as before", async () => {
+    // The fallback is the pre-change behaviour verbatim: one settled turn, no
+    // wait state, because that surface has nowhere to put one.
+    create.mockResolvedValue({ id: 9, name: "Pricing 2027" })
+    const emitTurn = vi.fn()
+    const onProjectCreated = vi.fn()
+
+    await runCreateProjectAction("start a project called Pricing 2027", envelope(), {
+      emitTurn,
+      onProjectCreated,
+    })
+
+    expect(emitTurn).toHaveBeenCalledTimes(1)
+    expect(emitTurn.mock.calls[0][0].reply.answer).toContain("Pricing 2027")
+    expect(emitTurn.mock.calls[0][0].query).toBe("start a project called Pricing 2027")
+    expect(onProjectCreated).toHaveBeenCalledWith({ id: 9, name: "Pricing 2027" })
   })
 })

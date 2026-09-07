@@ -963,27 +963,34 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
               // `onProjectCreated`; the action itself knows nothing about
               // routes.
               onCreateProject: (env) => {
-                void (async () => {
+                const tabId = activeTab!.id
+                void runCreateProjectAction(trimmed, env, {
+                  emitTurn: emitCommandTurn,
+                  // The async-command lifecycle, so the create SHOWS while it
+                  // runs. Without it the composer cleared, nothing appeared,
+                  // and the next thing on screen was the project itself.
+                  runActionTurn: (q, w) => runActionTurnInTab(tabId, q, w),
                   // THE CONVERSATION HAS TO EXIST BEFORE THE PROJECT DOES, same
                   // reasoning as documentCommandFlow: on a tab's first message
                   // `dbConvId` is null (the create was fired, not awaited), and
                   // "start a project with this" has nothing to bind or sweep
                   // artifacts from without a real id. `ensureConversation` shares
                   // that in-flight create (create-once) rather than racing it.
-                  const tabId = activeTab!.id
-                  const sourceConversationId =
-                    activeTab?.dbConvId ??
+                  //
+                  // A THUNK, so that round trip happens INSIDE the turn above
+                  // rather than in front of it — awaited out here it was the
+                  // first half of the blank window, before any turn existed to
+                  // show a wait state on. Re-read from the live tab, because by
+                  // the time it runs the tab's own create may have landed.
+                  sourceConversationId: async () =>
+                    tabsRef.current?.find((t) => t.id === tabId)?.dbConvId ??
                     (await persistence.ensureConversation(tabId, {
                       turnId: id,
                       title: trimmed.length > 52 ? `${trimmed.slice(0, 49)}…` : trimmed,
                       query: trimmed,
-                    }))
-                  void runCreateProjectAction(trimmed, env, {
-                    emitTurn: emitCommandTurn,
-                    sourceConversationId,
-                    onProjectCreated: (project) => router.push(projectPath(project.id)),
-                  })
-                })()
+                    })),
+                  onProjectCreated: (project) => router.push(projectPath(project.id)),
+                })
                 settlePendingSend()
               },
               onShareToSlack: (env) => {

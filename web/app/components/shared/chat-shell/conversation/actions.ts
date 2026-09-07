@@ -100,8 +100,14 @@ export interface ActionConfig {
    *  project with this" needs a real id to bind and sweep the thread's prior
    *  artifacts onto the new project, not just to confirm one in the thread.
    *  Absent (or resolving to null) is a safe no-op: the project still gets
-   *  created, just as a bare container, same as before this field existed. */
-  sourceConversationId?: number | null
+   *  created, just as a bare container, same as before this field existed.
+   *
+   *  A THUNK rather than a value, because resolving it can CREATE the
+   *  conversation row (a fresh tab has none until its first send persists).
+   *  Awaited by the caller, that round trip ran BEFORE anything appeared on
+   *  screen — dead time in front of the very indication it was meant to
+   *  precede. Called inside the action's own in-flight turn instead. */
+  sourceConversationId?: () => Promise<number | null>
 }
 
 /** Mint a turn id (crypto when available). */
@@ -545,6 +551,26 @@ function proseTurn(seedQuery: string, answer: string): ThreadTurn {
  * AFTER the create returns, and a failure says plainly that no project exists
  * — the failure mode `create_artifact`'s own note records is the chat
  * announcing a thing it never made.
+ *
+ * THE WAIT IS VISIBLE, which is the other half of that. The create is not
+ * instant — it binds the conversation and sweeps the thread's prior artifacts
+ * onto the new project — and this used to run with NOTHING on screen: the
+ * composer cleared, no turn appeared, and the first thing the user saw was the
+ * project screen they had been silently navigated to. Reported as "no
+ * indication that it is creating a project, and then it takes me there".
+ *
+ * So it runs through `runActionTurn`, the surface's async-command lifecycle
+ * (optimistic turn → busy → settle → persist) — the same primitive the PRD edit
+ * and the Slack share already use, which is what puts the wait state under the
+ * message while the work runs. ONE turn, correct at every moment: in flight it
+ * shows as working, settled it says what happened. `emitTurn` remains the
+ * fallback for a surface that supplies no async primitive, which behaves
+ * exactly as this did before.
+ *
+ * THE NAVIGATION MOVED TOO — it now fires AFTER the turn settles, not from
+ * inside the work. Redirecting mid-flight raced the confirmation it was
+ * supposed to follow, so the thread the project carries away could arrive
+ * missing its own last line.
  */
 export async function runCreateProjectAction(
   seedQuery: string,
@@ -559,27 +585,48 @@ export async function runCreateProjectAction(
     ))
     return
   }
-  try {
-    const { projectsApi } = await import("../../../../lib/api")
-    const conversationId = config.sourceConversationId ?? undefined
-    const project = await projectsApi.create({
-      name, origin: "manual", conversation_id: conversationId,
-    })
-    // The confirmation itself differs on whether there was a thread to bring
-    // along — "with its own memory" reads as empty-and-fresh, which is a lie
-    // the moment this chat's own history and artifacts rode along with it.
-    config.emitTurn(proseTurn(
-      seedQuery,
-      conversationId != null
-        ? `Created the project “${project.name}”. Opening it now — this chat and everything you've already generated in it came with it.`
-        : `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own memory.`,
-    ))
-    config.onProjectCreated?.({ id: project.id, name: project.name })
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : "something went wrong"
-    config.emitTurn(proseTurn(
-      seedQuery,
-      `I couldn't create the project — ${msg}. Nothing was created, so nothing is half-made; you can try again, or create it on the Projects screen.`,
-    ))
+
+  // Captured by the worker, read after the turn settles — see the navigation
+  // note above. Null means nothing was created, and nothing is navigated to.
+  let created: { id: number; name: string } | null = null
+
+  const work = async (): Promise<ActionTurnPatch> => {
+    try {
+      const { projectsApi } = await import("../../../../lib/api")
+      // Resolved HERE, inside the in-flight turn: on a fresh tab this creates
+      // the conversation row, and awaiting it in front of the turn is what put
+      // the round trip in the blank window this whole change exists to close.
+      const conversationId = (await config.sourceConversationId?.()) ?? undefined
+      const project = await projectsApi.create({
+        name, origin: "manual", conversation_id: conversationId,
+      })
+      created = { id: project.id, name: project.name }
+      // The confirmation itself differs on whether there was a thread to bring
+      // along — "with its own memory" reads as empty-and-fresh, which is a lie
+      // the moment this chat's own history and artifacts rode along with it.
+      return {
+        reply: asReply(
+          conversationId != null
+            ? `Created the project “${project.name}”. Opening it now — this chat and everything you've already generated in it came with it.`
+            : `Created the project “${project.name}”. Opening it now — add members, and any PRD, evidence, prototype or ticket set you attach to it lives there with its own memory.`,
+        ),
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "something went wrong"
+      return {
+        reply: asReply(
+          `I couldn't create the project — ${msg}. Nothing was created, so nothing is half-made; you can try again, or create it on the Projects screen.`,
+        ),
+      }
+    }
   }
+
+  if (config.runActionTurn) {
+    await config.runActionTurn(seedQuery, work)
+  } else {
+    // No async primitive on this surface: settle the same turn in one go. The
+    // wait is invisible here, exactly as it was everywhere before.
+    config.emitTurn({ id: newTurnId(), query: seedQuery, ...(await work()) })
+  }
+  if (created) config.onProjectCreated?.(created)
 }
