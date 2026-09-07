@@ -93,8 +93,9 @@ def test_every_call_provider_threads_a_source_ref(captured, provider):
 
 def test_non_call_provider_still_batches_with_no_source_ref(captured):
     """A non-call provider (github) keeps char-budget batching: two small
-    records go into ONE extraction, with no source_ref and the unchanged
-    `<provider>-sync-batch-<n>` doc_name."""
+    records go into ONE extraction, with no source_ref. The doc_name names
+    the real items in the batch (sorted external_id range) rather than a
+    per-run batch position — see `runner._unit_doc_name`."""
     runner.sync_provider(None, "ent-A", "github", token="t", records=[
         _rec("github", "PR1", "diff of pr one"),
         _rec("github", "PR2", "diff of pr two"),
@@ -102,7 +103,7 @@ def test_non_call_provider_still_batches_with_no_source_ref(captured):
 
     assert len(captured) == 1, "small non-call records must batch into one call"
     assert captured[0]["source_ref"] is None
-    assert captured[0]["doc_name"] == "github-sync-batch-0"
+    assert captured[0]["doc_name"] == "github/PR1..PR2"
     assert "diff of pr one" in captured[0]["text"]
     assert "diff of pr two" in captured[0]["text"]
 

@@ -228,11 +228,22 @@ def _extraction_units(
     whole — these keep the pre-existing ingest-time default.
 
     The ``<provider>-sync-batch-<n>`` doc_name shape is DELIBERATELY preserved
-    for both — ``call_digest`` identifies a call-provider signal by matching
-    that shape against ``provenance["doc"]`` (``call_digest._SYNC_BATCH_DOC``,
-    the double-counting filter), so changing it here would silently break that
-    filter. The per-call linkage rides ``source_id`` and
-    ``provenance["provider"]/["external_id"]`` instead, not the doc name.
+    for CALL providers only — ``call_digest`` identifies a call-provider
+    signal by matching that shape against ``provenance["doc"]``
+    (``call_digest._SYNC_BATCH_DOC``, the double-counting filter), so changing
+    it here would silently break that filter. The per-call linkage rides
+    ``source_id`` and ``provenance["provider"]/["external_id"]`` instead, not
+    the doc name.
+
+    Every OTHER provider's doc_name names the item(s) the batch actually
+    holds (``_unit_doc_name``) instead of ``i``, its position in THIS run's
+    batching — a purely local counter that tells a reader nothing (Monday's
+    ``clickup-sync-batch-0`` and Tuesday's are unrelated batches that happen
+    to share a string). ``RawRecord.external_id`` already drives ledger
+    idempotency, so every record here already carries the identity needed;
+    this just stops discarding it. ``call_digest`` never reads a non-call
+    provider's doc_name (its filter only matches ``_CALL_PROVIDERS``), so
+    this change is invisible to it.
     """
     if provider in _CALL_PROVIDERS:
         for i, rec in enumerate(fresh):
@@ -244,9 +255,35 @@ def _extraction_units(
                    _record_valid_at(rec))
     else:
         for i, batch in enumerate(_batches(fresh)):
-            yield (f"{provider}-sync-batch-{i}",
+            yield (_unit_doc_name(provider, i, batch),
                    "\n\n".join(r.render() for r in batch), batch, None, None,
                    None)
+
+
+def _unit_doc_name(provider: str, i: int, records: list[RawRecord]) -> str:
+    """A stable, per-item ``provenance["doc"]`` label for one non-call
+    extraction unit — ``<provider>/<external_id>`` for a single record, or
+    ``<provider>/<first>..<last>`` (sorted, so the SAME set of ids in a
+    batch always renders the same range regardless of fetch order) when a
+    batch holds several. One label per record would defeat char-budget
+    batching's whole cost point; naming the range is enough for
+    ``crucible.resolve`` to hand back a real pointer instead of
+    ``no_pointer`` (see ``crucible.resolve._doc_pointer`` /
+    ``_is_sync_batch_doc``, which only refuses the OLD
+    ``<provider>-sync-batch-<n>`` shape).
+
+    Falls back to the old counter shape (``i``, this unit's position) only
+    when NO record in the batch carries a non-empty ``external_id`` —
+    defensive: every real puller sets it (it drives ledger idempotency too),
+    so this should not fire on live data, but a batch with no usable
+    identity is exactly the case the old label already handled honestly.
+    """
+    ids = sorted({r.external_id for r in records if r.external_id})
+    if not ids:
+        return f"{provider}-sync-batch-{i}"
+    if len(ids) == 1:
+        return f"{provider}/{ids[0]}"
+    return f"{provider}/{ids[0]}..{ids[-1]}"
 
 
 def _batches(records: list[RawRecord]) -> Iterable[list[RawRecord]]:

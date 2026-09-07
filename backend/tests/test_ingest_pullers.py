@@ -1878,7 +1878,10 @@ def test_runner_batches_and_aggregates(isolated_settings):
     assert out["batches"] >= 2                       # char budget forces split
     assert out["signals"] == out["batches"] * 2
     assert not out["errors"]
-    assert all("clickup-sync-batch-" in d for d, *_ in seen_docs)
+    # doc_name names the item(s) actually in the batch (a real external_id),
+    # not this run's positional batch counter — see
+    # `kg_ingest.runner._unit_doc_name`.
+    assert all(d.startswith("clickup/") for d, *_ in seen_docs)
     assert all(l <= 7000 for _, l, *_ in seen_docs)
     assert all(h and "project_mgmt" in h for _, _, h, *_ in seen_docs)
     # Connector syncs stamp origin="connector" so the brief gate never treats
@@ -1891,6 +1894,63 @@ def test_runner_batches_and_aggregates(isolated_settings):
     assert all(t[5] == "clickup-extraction" for t in seen_docs)
     # A non-call provider is batched, so it carries no per-call source_ref.
     assert all(t[6] is None for t in seen_docs)
+
+
+def test_runner_doc_name_carries_real_item_identity_not_a_batch_position(isolated_settings):
+    """A batch's doc_name names the item(s) it actually holds, so it stays
+    the same across two runs that happen to batch the same records
+    differently — the property the old `<provider>-sync-batch-<n>` counter
+    did not have (its `n` is this run's position, unrelated across syncs).
+    A single-record batch collapses to `<provider>/<external_id>`; several
+    records name the sorted first..last id range."""
+    from app.graph import GraphFacade
+    from app.kg_ingest import runner
+
+    seen_docs = []
+    def fake_extract(f, eid, *, doc_name, **kw):
+        seen_docs.append(doc_name)
+        return {"signals": 1, "themes": 0, "skipped": 0}
+
+    # One small record -> one batch -> the single external_id, verbatim.
+    with patch.object(runner, "extract_document", side_effect=fake_extract):
+        runner.sync_provider(GraphFacade(), "ent-A", "github", token="t",
+                             records=[RawRecord(provider="github", kind="pr",
+                                                external_id="PR-42",
+                                                title="fix thing", text="diff")])
+    assert seen_docs == ["github/PR-42"]
+
+    # Two small records sharing a batch -> the sorted id range, not the
+    # batch's positional index.
+    seen_docs.clear()
+    with patch.object(runner, "extract_document", side_effect=fake_extract):
+        runner.sync_provider(GraphFacade(), "ent-A", "github", token="t",
+                             records=[
+                                 RawRecord(provider="github", kind="pr",
+                                          external_id="PR-9", title="a", text="x"),
+                                 RawRecord(provider="github", kind="pr",
+                                          external_id="PR-5", title="b", text="y"),
+                             ])
+    assert seen_docs == ["github/PR-5..PR-9"]
+
+
+def test_runner_doc_name_falls_back_to_batch_position_with_no_identity(isolated_settings):
+    """A record with no usable external_id (defensive — every real puller
+    sets one) keeps the old counter shape rather than inventing an identity
+    that isn't there."""
+    from app.graph import GraphFacade
+    from app.kg_ingest import runner
+
+    seen_docs = []
+    def fake_extract(f, eid, *, doc_name, **kw):
+        seen_docs.append(doc_name)
+        return {"signals": 1, "themes": 0, "skipped": 0}
+
+    with patch.object(runner, "extract_document", side_effect=fake_extract):
+        runner.sync_provider(GraphFacade(), "ent-A", "github", token="t",
+                             records=[RawRecord(provider="github", kind="pr",
+                                                external_id="", title="x",
+                                                text="body")])
+    assert seen_docs == ["github-sync-batch-0"]
 
 
 def test_runner_stamps_upload_channel_for_uploads_provider(isolated_settings):
