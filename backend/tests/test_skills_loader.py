@@ -37,14 +37,23 @@ BOUND_SKILLS = [
 
 # ---------- loader ----------
 
-def test_lists_all_vendored_skills():
-    """A CLOSED set, not a floor.
+def test_every_bound_skill_is_still_vendored():
+    """The MACHINERY half of the library, as a closed set.
 
-    This asserted `expected.issubset(ids)` over a nine-name sample of a
-    ~78-skill tree, because skills were dropped in as folders. The library is
-    the keep-list now, and equality is what makes an accidental re-vendoring
-    (or a deletion) fail loudly."""
-    assert set(list_skills()) == set(BOUND_SKILLS)
+    This used to assert equality against the whole tree, back when the library
+    WAS the keep-list. The method library has since been restored (~69 method
+    docs, reachable only by an explicit `/<slug>` — see
+    `qa_agent.is_user_invocable_builtin`), so equality would now fail on every
+    method and guard nothing.
+
+    What still has to hold is the half that equality was really protecting:
+    every id a live pipeline binds BY NAME is present. Deleting one of these
+    does not raise at import — the gateway degrades an unknown skill to a
+    method-less `+bare` run — so without this the loss would show up only as
+    quietly worse output from an engine nobody was looking at."""
+    ids = set(list_skills())
+    missing = sorted(set(BOUND_SKILLS) - ids)
+    assert not missing, f"pipeline-bound skills missing from the library: {missing}"
 
 
 @pytest.mark.parametrize("skill_id", BOUND_SKILLS)
@@ -552,7 +561,19 @@ def test_synthesis_binds_top_insights(isolated_settings, monkeypatch):
     assert "cache_control" in captured["messages"][0]["content"][0]
 
 
-def test_oncall_binding_degrades_method_less(isolated_settings, monkeypatch):
+def test_oncall_binding_gets_its_method_back(isolated_settings, monkeypatch):
+    """The INVERSE of what this asserted, and deliberately so.
+
+    `oncall/agent.py` has always bound `skill="incident-runbook"`. The library
+    trim deleted the doc without touching the binding, so the gateway degraded
+    the call to a method-less `+bare` run — collateral the trim named as such,
+    not a decision about oncall. Restoring the method library repairs it: the
+    binding now finds its doc again and the call runs WITH the method it was
+    written against.
+
+    Worth pinning in this direction because it is a live prompt change that
+    nobody asked for by name — it rides in on the restore, and a future trim
+    that took `incident-runbook` out again would silently undo it."""
     from app import llm
 
     captured: dict = {}
@@ -567,12 +588,26 @@ def test_oncall_binding_degrades_method_less(isolated_settings, monkeypatch):
     except Exception:
         pass
 
-    # The binding SURVIVES; the method does not. `incident-runbook` is not
-    # vendored any more, so the gateway runs the call method-less: no METHOD
-    # header on the prefix, and `+bare` recorded in prompt_version. The oncall
-    # agent's own system prompt is what carries the call.
-    assert "## METHOD (skill: incident-runbook" not in str(captured)
+    assert "## METHOD (skill: incident-runbook" in str(captured)
     assert captured.get("system")
+
+
+def test_an_unvendored_binding_still_degrades_method_less(isolated_settings):
+    """The bare-degradation path is still REACHABLE and still correct.
+
+    It is what keeps a binding whose doc is absent from 500ing, and two live
+    pipeline ids still rely on it — `company-research` and
+    `voice-of-customer-report` are named at their call sites and deliberately
+    were NOT re-vendored by the restore, because giving those two a method back
+    would change what production report engines emit. Asserted through the
+    gateway's own resolver rather than an agent, so it holds whatever any one
+    agent does."""
+    from app.skills.loader import UnknownSkillError, get_skill
+
+    for absent in ("company-research", "voice-of-customer-report"):
+        assert absent not in set(list_skills())
+        with pytest.raises(UnknownSkillError):
+            get_skill(absent)
 
 
 def test_market_research_binds_the_public_feedback_method(isolated_settings, monkeypatch):

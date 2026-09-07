@@ -38,8 +38,37 @@ KEEPERS = {
 }
 
 
-def test_vendored_library_is_exactly_the_keep_list():
-    assert set(list_skills()) == KEEPERS
+def test_every_keeper_is_still_vendored():
+    """The MACHINERY half of the library, still a closed set.
+
+    Equality against the whole tree was the right guard while the library WAS
+    the keep-list. The method library is back (~69 docs, reachable only by an
+    explicit `/<slug>`), so equality would fail on every method and guard
+    nothing. What still matters is that no keeper goes missing: each is bound
+    by name from its own runner, and losing one degrades that runner to a
+    method-less `+bare` call rather than raising, so the damage would be
+    invisible."""
+    missing = sorted(KEEPERS - set(list_skills()))
+    assert not missing, f"pipeline-bound skills missing from the library: {missing}"
+
+
+def test_the_library_partitions_into_machinery_and_user_invocable_methods():
+    """Every vendored skill is exactly one of two things, and nothing falls
+    between them.
+
+    That partition IS the product rule: a keeper runs when its pipeline calls
+    it and can never be typed; a method runs when — and only when — a person
+    types `/<slug>`. A skill that answered "no" to both would be dead weight
+    nothing could ever reach; one that answered "yes" to both would be a
+    machinery prompt a user could summon onto an ordinary chat turn."""
+    from app.qa_agent import is_user_invocable_builtin
+
+    for sid in sorted(list_skills()):
+        machinery = sid in KEEPERS
+        method = is_user_invocable_builtin(sid)
+        assert machinery != method, (
+            f"{sid} is {'both machinery and user-invocable' if machinery else 'neither'}"
+        )
 
 
 def test_all_installed_skills_load():

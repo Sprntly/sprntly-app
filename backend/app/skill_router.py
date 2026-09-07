@@ -2248,43 +2248,81 @@ def detect_intent(question: str) -> SkillMatch | None:
 
 
 def list_available_skills(enterprise_id: str | None = None) -> list[dict]:
-    """The company's OWN uploaded skills, for the chat composer's palette.
+    """What the composer's `/` palette offers: the company's OWN uploads FIRST,
+    then the vendored METHOD library.
 
-    This used to be the vendored built-in catalog, filtered to what the router
-    could pick. Both halves of that are gone: the library is down to nine
-    method docs bound by name from their own pipelines, and of those exactly
-    three were ever routable — so the endpoint would have advertised three
-    triggers the router can no longer select. A palette that offers a skill
-    nothing will honour is worse than an empty one, so it now offers only the
-    library the user themselves built, which IS still selectable (the LLM
-    router's per-company block, and the composer's own trigger chip).
+    ORDER IS THE PRODUCT DECISION, not presentation. A company's own skills are
+    the ones it built and the ones it wants reached first, so they head the list
+    and win any tie the reader's eye makes. The palette is also the only place
+    the built-in methods are DISCOVERABLE: they are reachable exclusively by an
+    explicit `/<slug>` (nothing auto-selects one — see
+    `qa_agent.is_user_invocable_builtin`), which without a palette would mean
+    knowing 69 slugs by heart.
 
-    Shape is unchanged — {id, label, trigger, description, category} — so the
-    composer, the Skills screen and the command palette need no new contract;
-    `category` is always "Custom" now, which is the honest grouping.
+    Both halves are the same shape — {id, label, trigger, description, category}
+    — so the composer, the Skills screen and the command palette need no new
+    contract; `category` is what tells them apart, and the palette filters on
+    the typed prefix, so the longer list costs the reader nothing.
 
-    Fails OPEN to [] on any error and on a missing tenant: this backs a picker,
-    and a picker that 500s is worse than a picker that is empty.
+    WHAT IS DELIBERATELY ABSENT is as load-bearing as what is here: the nine
+    skills a pipeline binds BY NAME, and the research pipelines. Neither is
+    something a person invokes — `/prd-author` names an engine that runs from
+    its own route with its own inputs — and offering a trigger that resolves to
+    nothing is the failure this endpoint was emptied to avoid in the first
+    place. `is_user_invocable_builtin` is the single source for that line, so
+    the palette can never advertise a trigger the router would refuse.
+
+    Fails OPEN on any error: a picker that 500s is worse than a short one. The
+    two halves fail independently, so a DB outage still leaves the built-ins
+    listed and a broken SKILL.md still leaves the uploads listed.
     """
-    if not enterprise_id:
-        return []
-    try:
-        from app.db.custom_skills import list_custom_skills
-
-        rows = list_custom_skills(enterprise_id) or []
-    except Exception:  # noqa: BLE001 — a palette must never break the app
-        logger.warning("custom-skill palette lookup failed", exc_info=True)
-        return []
     out: list[dict] = []
-    for row in rows:
-        slug = (row.get("slug") or "").strip()
-        if not slug:
-            continue
-        out.append({
-            "id": slug,
-            "label": (row.get("name") or slug).strip(),
-            "trigger": f"/{slug}",
-            "description": (row.get("description") or "").strip(),
-            "category": "Custom",
-        })
+
+    # ── The company's own uploads, first ──────────────────────────────────────
+    if enterprise_id:
+        try:
+            from app.db.custom_skills import list_custom_skills
+
+            rows = list_custom_skills(enterprise_id) or []
+        except Exception:  # noqa: BLE001 — a palette must never break the app
+            logger.warning("custom-skill palette lookup failed", exc_info=True)
+            rows = []
+        for row in rows:
+            slug = (row.get("slug") or "").strip()
+            if not slug:
+                continue
+            out.append({
+                "id": slug,
+                "label": (row.get("name") or slug).strip(),
+                "trigger": f"/{slug}",
+                "description": (row.get("description") or "").strip(),
+                "category": "Custom",
+            })
+
+    # ── Then the vendored methods a person may summon ─────────────────────────
+    # Imported lazily: `qa_agent` imports this module, so a top-level import
+    # here would close the cycle.
+    try:
+        from app.labels import humanize_label
+        from app.qa_agent import is_user_invocable_builtin
+        from app.skills.loader import get_skill, list_skills
+
+        for sid in list_skills():
+            if not is_user_invocable_builtin(sid):
+                continue
+            try:
+                description = (get_skill(sid).description or "").strip()
+            except Exception:  # noqa: BLE001 — one bad SKILL.md must not empty the palette
+                logger.warning("skill %s failed to load for the palette", sid, exc_info=True)
+                continue
+            out.append({
+                "id": sid,
+                "label": humanize_label(sid),
+                "trigger": f"/{sid}",
+                "description": description,
+                "category": "Built-in",
+            })
+    except Exception:  # noqa: BLE001 — same contract as the half above
+        logger.warning("built-in palette listing failed", exc_info=True)
+
     return out

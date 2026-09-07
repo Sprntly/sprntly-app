@@ -476,43 +476,27 @@ def test_sequence_binds_backlog_triage_skill(facade, isolated_settings):
     assert captured["purpose"] == "sequence_ideation"
 
 
-def test_ideation_prioritize_binding_survives_the_skill_being_unvendored():
-    """`ideation-prioritize` is no longer vendored, and the pipeline must still
-    RUN — method-less, not raising.
+def test_ideation_prioritize_binding_gets_its_method_back():
+    """`sequence_ideation` has always bound `skill=PRIORITIZE_SKILL`. The method
+    library trim deleted the doc without touching the binding, so the gateway
+    ran the ranking method-less — model-shaped rather than method-shaped, named
+    at the time as an accepted degradation rather than a decision about
+    ideation.
 
-    This asserted the skill loaded off disk (`get_skill(...).method` contained
-    "Ideation Prioritize"). It was one of ~78 chat-routable methods and is not
-    on the nine-skill keep-list, so its directory is gone. What it was really
-    protecting is upstream of the file: that `sequence_ideation`'s
-    `skill=PRIORITIZE_SKILL` binding resolves to something rather than blowing
-    up. `synthesis/ideation.py` still carries that binding — the test directly
-    above pins it — and `gateway._build_method_prefix` answers a missing
-    directory with an empty method block plus a `+bare` version suffix.
-
-    So the ranking is model-shaped rather than method-shaped now (the accepted
-    degradation), and the failure mode that would NOT be acceptable — a 500 on
-    every ideation sequence — is what this asserts against.
-    """
+    The restore repairs it. Pinned in this direction because it is a live prompt
+    change that rides in on the restore rather than being asked for by name."""
     from app.graph.gateway import _build_method_prefix
-    from app.skills.loader import UnknownSkillError, get_skill, list_skills
+    from app.skills.loader import get_skill, list_skills
     from app.synthesis.ideation import PRIORITIZE_SKILL
 
     assert PRIORITIZE_SKILL == "ideation-prioritize"
-    assert PRIORITIZE_SKILL not in list_skills()
-
-    # The loader still raises — that is deliberate, and scoped to the loader.
-    try:
-        get_skill(PRIORITIZE_SKILL)
-    except UnknownSkillError:
-        pass
-    else:  # pragma: no cover
-        raise AssertionError("expected UnknownSkillError from the loader")
-
-    # ...and the gateway, which is what the pipeline actually goes through,
-    # degrades instead.
+    assert PRIORITIZE_SKILL in list_skills()
+    # The loader resolves it again...
+    assert get_skill(PRIORITIZE_SKILL).method.strip()
+    # ...and so the gateway carries a real method block instead of degrading.
     block, suffix = _build_method_prefix(PRIORITIZE_SKILL, None)
-    assert block == ""
-    assert suffix == "+bare"
+    assert f"## METHOD (skill: {PRIORITIZE_SKILL}" in block
+    assert suffix != "+bare"
 
 
 # ─────────────────────── synthesis hook (resilience) ───────────────────────

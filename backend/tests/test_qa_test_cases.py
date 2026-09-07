@@ -64,24 +64,24 @@ def test_binds_test_scenario_builder_skill(monkeypatch):
     assert md == _SCENARIOS_DOC
 
 
-def test_binding_survives_the_skill_no_longer_being_vendored():
-    """`test-scenario-builder` is no longer a vendored skill, and the QA agent's
-    `skill="test-scenario-builder"` binding must DEGRADE, not raise.
+def test_binding_gets_its_method_back_with_the_restored_library():
+    """The QA agent has always bound `skill="test-scenario-builder"`; the method
+    library trim deleted the doc without touching the binding, so the gateway
+    ran it method-less (`+bare`) and the scenarios came out model-shaped rather
+    than method-shaped. That was named as an accepted degradation, not a
+    decision about QA generation.
 
-    It was one of ~78 chat-routable methods and is not on the nine-skill
-    keep-list, so its directory is gone. The binding stays at the call site —
-    it is how the decision log attributes the call — and
-    `gateway._build_method_prefix` answers a missing directory with an empty
-    method block plus a `+bare` version suffix. This is the ACCEPTED degradation
-    (the generated scenarios are now model-shaped rather than method-shaped);
-    what would not be acceptable is the 500 an intolerant lookup produced."""
+    The restore repairs it — the binding finds its doc again. Pinned in this
+    direction because it is a live prompt change that rides in on the restore
+    rather than being asked for by name, so a future trim taking this skill out
+    again should fail here rather than quietly regress the output."""
     from app.graph.gateway import _build_method_prefix
     from app.skills.loader import list_skills
 
-    assert "test-scenario-builder" not in list_skills()
+    assert "test-scenario-builder" in list_skills()
     block, suffix = _build_method_prefix("test-scenario-builder", None)
-    assert block == ""
-    assert suffix == "+bare"
+    assert "## METHOD (skill: test-scenario-builder" in block
+    assert suffix != "+bare"
 
 
 def test_build_input_frames_prd_as_spec():

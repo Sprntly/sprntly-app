@@ -683,17 +683,86 @@ def _render_history(history: Optional[list[dict]]) -> str:
     return render_history_block(history, char_budget=_HISTORY_CHAR_BUDGET)
 
 
+#: The vendored skills a PIPELINE binds BY NAME at its own call site, rather
+#: than anything a user picks. These are the nine `#1024` kept when it cut the
+#: built-in library, and they are NOT user-invocable — a person typing
+#: `/prd-author` is not asking for a method prompt, they are naming an engine
+#: that runs from `/v1/prd/generate-from-task` with its own inputs.
+#:
+#: Every entry is bound somewhere concrete:
+#:   prd-author            artifact_templates/compile_prd.py
+#:   implementation-spec   artifact_templates/compile_impl_spec.py
+#:   evidence-brief        artifact_chat_edit.py / evidence_runner
+#:   user-stories          stories/generate
+#:   top-insights          synthesis/agent.py
+#:   *-extraction (4)      kg_ingest (graph/evals.py names the contracts)
+#:
+#: This set is what keeps "the skills already there behave exactly as they did"
+#: true while the restored METHOD library becomes slash-invocable around it. A
+#: test asserts every member is still on disk, so deleting one of these skills
+#: cannot silently promote it to a user-facing trigger.
+_PIPELINE_BOUND_SKILLS: frozenset[str] = frozenset({
+    "prd-author",
+    "implementation-spec",
+    "evidence-brief",
+    "user-stories",
+    "top-insights",
+    "hubspot-extraction",
+    "jira-extraction",
+    "clickup-extraction",
+    "roadmap-extraction",
+})
+
+
+def is_user_invocable_builtin(skill_id: str) -> bool:
+    """Is this a vendored METHOD the user may summon with `/<slug>`?
+
+    THE WHOLE RULE OF THE RESTORED LIBRARY, in one predicate: a built-in method
+    runs when — and only when — the person explicitly asks for it by name.
+    Nothing that SELECTS a skill on the user's behalf may consult this. The
+    router's classifier block, its regex tier and the planner's
+    `company_skill_id` all go through `_routable`, which still refuses every
+    vendored id outright; that refusal is what makes "the planner can never
+    reach for a built-in" a property of the code rather than a prompt
+    instruction.
+
+    Derived from what is on disk rather than listed, because a 69-entry literal
+    would drift the first time anyone adds or renames a method. Two exclusions,
+    each for its own reason:
+
+      * `PIPELINE_SKILLS` — the research pipelines. They are machinery that
+        does live fetching and paid web sweeps, they are ALREADY reachable
+        (auto-picked by the planner, pinned by Slack's `/competitive`), and the
+        owner's instruction was that what already worked keeps working.
+      * `_PIPELINE_BOUND_SKILLS` — bound by name from their own runners, never
+        by a person. See that set's own note.
+    """
+    if not skill_id:
+        return False
+    if skill_id in PIPELINE_SKILLS or skill_id in _PIPELINE_BOUND_SKILLS:
+        return False
+    return skill_id in set(list_skills())
+
+
 def _routable(skill_id: str, enterprise_id: Optional[str] = None) -> bool:
-    """Can this id be invoked? NARROWED to the company's CUSTOM skills.
+    """Can this id be AUTO-SELECTED for a turn? NARROWED to the company's
+    CUSTOM skills — and it stays narrowed now that the built-in library is back.
 
     The body used to open with "if this is a vendored id, it's routable unless
-    NON_ROUTABLE". That branch is gone with the built-in skill layer: a chat
-    turn can no longer be sent to a `SKILL.md` method by naming it, so a
-    vendored id is now rejected OUTRIGHT rather than looked up. That rejection
-    is not just tidiness — `resolve_skill` is built-in-first, so a vendored id
-    always answers for the BUILT-IN no matter what the company uploaded, and
-    returning True here would promise an upload's behaviour and deliver the
-    built-in's.
+    NON_ROUTABLE". That branch is gone: a vendored id is rejected OUTRIGHT
+    rather than looked up. It stayed gone when the method library came back,
+    and that is the ENTIRE mechanism behind "the planner may never reach for a
+    built-in". Every path that picks a skill FOR the user funnels through here —
+    the LLM classifier's per-company block, the regex tier's custom pick, the
+    planner's `company_skill_id`, the interception contest — so one rejection
+    covers all of them, and no prompt has to be trusted to hold the line. The
+    only way a built-in method runs is a person naming it: see
+    `is_user_invocable_builtin`, which is deliberately NOT called from here.
+
+    The original reason for the rejection also still holds and is worth keeping
+    in view: `resolve_skill` is built-in-first, so a vendored id always answers
+    for the BUILT-IN no matter what the company uploaded, and returning True
+    here would promise an upload's behaviour and deliver the built-in's.
 
     A fresh DB check every time, so a just-uploaded skill works immediately and
     a just-deleted one stops immediately (the invocation-error ticket relies on
@@ -721,6 +790,22 @@ def _invocable(skill_id: str, enterprise_id: Optional[str] = None) -> bool:
     a pipeline ran. `_invocable` is the "is there anything that can run this"
     test used by `pinned_skill` and the router's pipeline pick.
 
+    IT DOES NOT INCLUDE THE RESTORED BUILT-IN METHODS, and that omission is
+    load-bearing rather than an oversight. Widening it to cover `pinned_skill`
+    was tried and reverted the same hour: `_invocable` is ALSO the gate on two
+    AUTO paths — `ask_planner._gate_pipeline` and the LLM router's own pipeline
+    pick — so admitting methods here let the planner return
+    `pipeline_id: "market-structure"` and have it honoured, which is precisely
+    the "the planner reached for a built-in" failure this whole change exists to
+    make impossible. `test_ask_planner.py::test_a_pipeline_id_nothing_can_run_is_rejected`
+    caught it.
+
+    Explicit invocation is therefore gated at its own two call sites — the `/`
+    fast-path in `route()` and the `pinned_skill` check in `answer()` — each
+    OR-ing in `is_user_invocable_builtin` locally. Two narrow widenings on paths
+    that are explicit by construction beat one wide widening on a predicate
+    shared with the auto paths.
+
     Pipelines are checked first: it is an in-process frozenset lookup, so a
     pipeline id never pays for a DB round-trip."""
     return (
@@ -744,26 +829,40 @@ def route(
     product does with an ordinary question."""
     q = question.strip()
 
-    # 1) Explicit slash trigger — CUSTOM SKILLS ONLY.
+    # 1) Explicit slash trigger — a CUSTOM skill, or a restored BUILT-IN METHOD.
     #
-    # The built-in half of this fast-path is gone: `/prioritize`, `/prd-author`
-    # and the other ~78 triggers no longer resolve to anything, because the
-    # methods behind them are no longer vendored and chat does not select
-    # methods any more. `_routable` rejects every vendored id outright,
-    # so this branch can only ever match a slug the customer uploaded.
+    # THIS IS THE ONLY DOOR A BUILT-IN METHOD HAS. With the vendored library
+    # back, `/working-backwards`, `/pre-mortem`, `/jobs-to-be-done` and the
+    # other 66 resolve again — but only from here, and only because the person
+    # typed the name. Every path that would choose a skill FOR them still runs
+    # through `_routable`, which refuses every vendored id, so a built-in method
+    # cannot be reached by the classifier, the regex tier, the interception
+    # contest or the planner. That asymmetry is the feature, not an oversight:
+    # a method prompt rewrites how the assistant answers, and having one applied
+    # to a question that merely resembled it is the failure the ~78-entry menu
+    # produced before it was cut ("did the prototype ship last week?" answered
+    # as a 40 KB document).
+    #
+    # `_PIPELINE_BOUND_SKILLS` is excluded on purpose, so `/prd-author` still
+    # resolves to nothing: typing it is not a request for a method prompt, it
+    # names an engine that runs from its own route with its own inputs. Those
+    # nine behave exactly as they did before the restore.
     #
     # KEPT rather than deleted because it is the wire protocol behind the
     # composer's skill chip, not a power-user affordance: picking a skill in
     # the palette re-attaches its trigger to the message text
     # (web ChatScreen `const sent = pinnedSkill ? `${trigger} ${q}` : q`), so
     # deleting this branch would silently stop a company's own uploads from
-    # being invocable at all — the one thing the bare-chat change is explicitly
-    # not allowed to break. It is also the one path that never reads the
-    # classifier block at all — a pure DB lookup by slug — so it keeps working
-    # unchanged now that the block offers every skill rather than the newest 25.
+    # being invocable at all. It is also the one path that never reads the
+    # classifier block at all — a pure DB lookup by slug.
+    #
+    # CUSTOM IS TESTED FIRST. The two can never collide today (an upload that
+    # names an existing built-in is re-slugged to `<slug>-2` on the way in), but
+    # order makes the intent legible if that ever changes: the library the
+    # customer built wins the trigger they typed.
     if q.startswith("/"):
         token = q[1:].split(None, 1)[0].lower()
-        if _routable(token, enterprise_id):
+        if _routable(token, enterprise_id) or is_user_invocable_builtin(token):
             return RouteDecision(token, 1.0, "slash", token)
 
     # The company's own library, fetched ONCE and reused by both tiers below.
@@ -3505,12 +3604,21 @@ def answer(
                 )
 
     # A pinned id is honoured only when something can actually run it: one of
-    # the four pipelines (Slack's `/competitive` command pins CIR outright), or
-    # one of this company's own uploads. A pinned BUILT-IN no longer qualifies —
-    # there is no method-injection path left for a chat turn — so it falls
-    # through to normal routing rather than 500ing or silently answering as
-    # something else.
-    if pinned_skill and _invocable(pinned_skill, enterprise_id):
+    # the pipelines (Slack's `/competitive` command pins CIR outright), one of
+    # this company's own uploads, or — since the method library came back — a
+    # vendored METHOD the user picked out of the palette.
+    #
+    # That last arm is OR-ed in here rather than folded into `_invocable`, and
+    # deliberately: `_invocable` also gates the planner's `pipeline_id` and the
+    # router's own pipeline pick, both of which choose FOR the user, and a
+    # method admitted there would be a built-in the planner could reach. This
+    # call site is explicit by construction — `pinned_skill` is set only when
+    # someone picked the skill in the composer, the same act as typing its
+    # trigger — so the widening belongs to it alone.
+    if pinned_skill and (
+        _invocable(pinned_skill, enterprise_id)
+        or is_user_invocable_builtin(pinned_skill)
+    ):
         decision = RouteDecision(pinned_skill, 1.0, "pinned", pinned_skill)
     elif _contest_memo and _contest_memo[0] is not None:
         # A company skill already won the turn against the call-digest
