@@ -149,6 +149,66 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     }
   })
 
+  it("collapsing a category by its own header leaves the header behind", () => {
+    // THE CARD USED TO GO BLANK. `reachedCategories` was sliced off
+    // `Math.max(openCat ?? -1, ...doneCats)`, and clicking an open category's
+    // header collapses it by setting `openCat` to null — so on arrival, with
+    // nothing done yet, that max fell to -1 and the slice returned nothing.
+    // Every row vanished, including the header just clicked, leaving no way
+    // back other than the footer or a reload.
+    const { container } = mountLoaded()
+    const header = container.querySelector(
+      '.conn-step[data-conn="' + SHOWN_CATEGORIES[0].key + '"] .conn-step-h',
+    ) as HTMLElement
+    fireEvent.click(header)
+
+    const steps = container.querySelectorAll(".conn-steps .conn-step")
+    expect(steps.length).toBe(1)
+    expect(steps[0].getAttribute("data-conn")).toBe(SHOWN_CATEGORIES[0].key)
+    // Collapsed, not gone.
+    expect(steps[0].classList.contains("open")).toBe(false)
+    expect(steps[0].querySelector(".conn-step-h")).not.toBeNull()
+  })
+
+  it("re-opens it on a second click, so the collapse is not a one-way door", () => {
+    const { container } = mountLoaded()
+    const header = () =>
+      container.querySelector(
+        '.conn-step[data-conn="' + SHOWN_CATEGORIES[0].key + '"] .conn-step-h',
+      ) as HTMLElement
+    fireEvent.click(header())
+    fireEvent.click(header())
+
+    const step = container.querySelector(
+      '.conn-step[data-conn="' + SHOWN_CATEGORIES[0].key + '"]',
+    ) as HTMLElement
+    expect(step.classList.contains("open")).toBe(true)
+    // Its connectors are back on screen — the actual complaint was that the
+    // options disappeared, not that a class changed.
+    for (const item of SHOWN_CATEGORIES[0].items) {
+      expect(screen.getByText(item.name)).not.toBeNull()
+    }
+  })
+
+  it("collapsing DEEPER in keeps every category the PM has reached", () => {
+    // The same arithmetic, one step along: with `doneCats` reaching only the
+    // category behind it, collapsing the open one dropped the high-water mark
+    // back by one and made that category disappear rather than close.
+    const { container } = mountLoaded()
+    fireEvent.click(footerContinue(container))
+    expect(container.querySelectorAll(".conn-steps .conn-step").length).toBe(2)
+
+    const second = container.querySelector(
+      '.conn-step[data-conn="' + SHOWN_CATEGORIES[1].key + '"] .conn-step-h',
+    ) as HTMLElement
+    fireEvent.click(second)
+
+    const steps = container.querySelectorAll(".conn-steps .conn-step")
+    expect(steps.length).toBe(2)
+    expect(steps[1].getAttribute("data-conn")).toBe(SHOWN_CATEGORIES[1].key)
+    expect(steps[1].classList.contains("open")).toBe(false)
+  })
+
   it("reveals one more category per Continue, collapsing the previous to Connected", () => {
     const { container } = mountLoaded()
     const rows = () => container.querySelectorAll(".conn-steps .conn-step")

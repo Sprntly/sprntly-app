@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactElement, SVGProps } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
@@ -221,6 +221,10 @@ export function Connectors() {
   // Accordion state: which categories are done/skipped + which is expanded.
   const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
   const [openCat, setOpenCat] = useState<number | null>(0)
+  // The high-water mark of how far down the list the PM has been. Only ever
+  // grows; see the note where it is used for why collapsing a section must not
+  // rewind it. Starts at 0 because the first category is open on arrival.
+  const furthestReachedRef = useRef(0)
   const [connected, setConnected] = useState<Set<string>>(new Set())
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [modalProvider, setModalProvider] = useState<string | null>(null)
@@ -432,12 +436,29 @@ export function Connectors() {
    * reviewed, plus the one currently open. Unreached categories are omitted
    * entirely rather than shown as locked placeholders, so the card grows
    * downward one category at a time.
+   *
+   * HOW FAR THEY GOT IS NOT THE SAME QUESTION AS WHAT IS OPEN, and conflating
+   * the two emptied the screen. This used to be
+   * `Math.max(openCat ?? -1, ...doneCats)`, so clicking the open category's own
+   * header — which collapses it, setting `openCat` to null — dropped this to -1
+   * on a fresh arrival and sliced the list to nothing. The card went blank,
+   * with no header left to click to get it back: the only ways out were the
+   * footer or a reload. Deeper in, the same arithmetic made the category you
+   * collapsed vanish rather than close, since `doneCats` only reaches the one
+   * behind it.
+   *
+   * So it LATCHES. A ref rather than state because the value is needed in the
+   * same render that opens a category — deriving it in an effect would paint
+   * one frame with the newly-opened category still missing — and writing it
+   * during render is safe here precisely because `Math.max` is idempotent:
+   * StrictMode's double invoke lands on the same number.
    */
-  const furthestReached = Math.max(
+  furthestReachedRef.current = Math.max(
+    furthestReachedRef.current,
     openCat ?? -1,
     doneCats.size ? Math.max(...doneCats) : -1,
   )
-  const reachedCategories = categories.slice(0, furthestReached + 1)
+  const reachedCategories = categories.slice(0, furthestReachedRef.current + 1)
   const anySelected = categories
     .flatMap((c) => c.items)
     .some((it) => selected.has(it.id))
