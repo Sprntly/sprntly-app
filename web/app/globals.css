@@ -26920,6 +26920,90 @@
    rendered its own generic failure. Deliberately a modal — a lapsed
    subscription is not a toast you scroll past, it is the reason the thing you
    just clicked did nothing. */
+/* ── Out of credits: the standing banner ──
+   Pinned to the bottom of the viewport rather than pushed into the document
+   flow: every screen in this app owns its own scroll container, so a banner
+   in the flow would sit at the end of whichever one happened to be tallest
+   and be invisible until scrolled to. Fixed, it is the same fact in the same
+   place on every surface.
+
+   Narrow and centred rather than full-bleed. This is not an error — nothing
+   is mid-failure — and a bar spanning the whole width reads as one. It also
+   leaves the sidebar and the right-hand panel uncovered, both of which are
+   things a reader may still want while they sort the credits out. */
+.credits-banner {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 18px;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  max-width: min(720px, calc(100vw - 32px));
+  padding: 10px 12px 10px 16px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface-2);
+  box-shadow: 0 8px 24px rgba(16, 18, 20, 0.12);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.credits-banner-text {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.45;
+}
+
+.credits-banner-text strong {
+  color: var(--ink);
+}
+
+.credits-banner-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+/* Smaller than a page button — this sits over content, not in it. */
+.credits-banner-btn {
+  padding: 7px 12px;
+  font-size: 12.5px;
+}
+
+.credits-banner-close {
+  border: none;
+  background: none;
+  color: var(--ink-3);
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.credits-banner-close:hover {
+  color: var(--ink);
+}
+
+/* Narrow screens: the two actions keep their row, the text takes its own. */
+@media (max-width: 560px) {
+  .credits-banner {
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .credits-banner-text {
+    flex-basis: 100%;
+  }
+
+  .credits-banner-actions {
+    margin-left: auto;
+  }
+}
+
+
 .pay-req-backdrop {
   position: fixed;
   inset: 0;

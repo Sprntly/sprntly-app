@@ -79,6 +79,42 @@ export function companyHasPaid(
 }
 
 /**
+ * Has this company run out of credits — with everything else in order?
+ *
+ * NARROW ON PURPOSE. This is the "you are paid up and simply spent it all"
+ * state, and nothing else:
+ *
+ *   - payments off        → no, nothing is charged and no balance means
+ *                           anything
+ *   - unknown balance     → no. A null is a row we never read, and telling
+ *                           someone they have nothing on the strength of a
+ *                           missing column is worse than saying nothing
+ *   - lapsed / cancelled  → no. That is `lockModeFor`'s job and its own
+ *                           screen; two different alarms for two different
+ *                           problems, or the reader fixes the wrong one
+ *   - legacy / enterprise → no. Neither is metered by this counter
+ *
+ * A ROUTING decision like the rest of this module: `enforce.bill` on the
+ * backend is what actually refuses the work. This only decides whether to say
+ * so before they find out by being refused.
+ */
+export function isOutOfCredits(
+  company:
+    | { plan?: string | null; subscription_status?: string | null; credit_balance?: number | null }
+    | null,
+): boolean {
+  if (!BILLING_ENABLED) return false
+  if (!company) return false
+  if (BYPASS_PLANS.has((company.plan ?? "").trim().toLowerCase())) return false
+  // Out of credits is only interesting while the subscription is otherwise
+  // live — a cancelled company has a bigger problem and its own lock.
+  if (!subscriptionGrantsAccess(company.plan, company.subscription_status)) return false
+  const balance = company.credit_balance
+  if (typeof balance !== "number") return false
+  return balance <= 0
+}
+
+/**
  * Days left in a trial, or null when the company is not trialling.
  *
  * `current_period_end` IS the trial end while Stripe reports `trialing` — a
