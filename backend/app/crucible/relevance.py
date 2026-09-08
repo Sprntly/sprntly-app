@@ -106,7 +106,7 @@ MAX_JUDGED = 240
 #: which persists this alongside whether a population line was sent so the
 #: report can tell a run judged under this prompt from one judged under an
 #: earlier one that had no population awareness at all.
-PROMPT_VERSION = "crucible-relevance-v3"
+PROMPT_VERSION = "crucible-relevance-v4"
 
 RELEVANCE_SCHEMA: dict = {
     "type": "object",
@@ -162,7 +162,14 @@ Answer `false` when the theme is not about something addressable that bears on \
 this goal. The most common cases, from real data:
 - a description of the company's OWN product or its capabilities, harvested \
 from a sales demo. "The platform supports multi-role scenario customization" \
-is the vendor talking about themselves, not a problem to solve.
+is the vendor talking about themselves, not a problem to solve. READ WHO IS \
+SPEAKING AND WHAT THEY WANT, not whether the product is named. A CUSTOMER \
+stating a requirement, a gap, an objection or a complaint is a customer \
+problem even when the sentence names the vendor's product — "their reporting \
+is not usable at board level" and "they hold SOC 2 Type I and we require Type \
+II" are customer problems, not vendor positioning. Set aside the vendor \
+describing what it offers; keep the customer describing what they need and \
+are not getting. When a theme mixes both, judge it on the customer's half.
 - routine pipeline mechanics with no problem in them — a contact agreeing to \
 meet, a demo being scheduled, a follow-up date.
 - internal administration unrelated to the metric.
@@ -270,6 +277,16 @@ def _judge_chunk(
         # and `_input` may carry `THE POPULATION THIS GOAL IS ABOUT` — a
         # different prompt should not share a version with the one that let
         # a pre-purchase theme outrank retention findings on a churn goal.
+        # BUMPED AGAIN TO v3 -> v4: the vendor-capability `false` case was
+        # reading a CUSTOMER discussing the vendor's product surface as the
+        # VENDOR describing itself. Measured on a real nine-run benchmark,
+        # that set aside `Executive / board reporting` (five customer_voice
+        # claims from an attached call transcript, carrying the reporting-gap
+        # material named in 47% of competitive losses) as "internal product
+        # positioning" on three separate runs, and `Tabletop exercise
+        # platform` with it. A set-aside finding is never in the list a
+        # reranker sorts, so no amount of reordering downstream can recover
+        # one — which is why this is a prompt fix and not a ranking fix.
         prompt_version=PROMPT_VERSION,
         # HIGH-VOLUME, closed-set, short-output — exactly the shape
         # `FAST_MODEL`'s own charter names (`app/llm.py`). Ranking eight

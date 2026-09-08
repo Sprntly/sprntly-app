@@ -15,6 +15,8 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from app.crucible import evidence, table_select as ts
 from app.crucible.recon import Table, band_label, make_table
 
@@ -210,7 +212,13 @@ def test_a_malformed_decline_is_also_rejected_not_silently_dropped():
         enterprise_id="e1", goal_text="reduce churn", schema=snap,
         lead_table=lead, call=call,
     )
-    assert selection.declined == ()
+    # THE MODEL'S DECLINE IS REJECTED. What remains are the ENGINE'S own
+    # declines — `account` (identity) and `churned` (the outcome column) are
+    # never offered for grouping, and a dimension this module refuses is
+    # recorded with its reason rather than silently absent.
+    assert [d.dimension for d in selection.declined] == ["account", "churned"]
+    assert all(d.why.startswith("not offered for grouping:")
+               for d in selection.declined)
     assert len(selection.rejected) == 1
     assert selection.rejected[0].kind == "declined"
 
@@ -281,7 +289,9 @@ def test_a_response_that_addresses_every_candidate_leaves_nothing_missed():
     snap = _snapshot([table])
     lead = _lead_name(snap, "accounts")
     candidates = ts.candidate_dimensions(next(t for t in snap.tables if t.name == lead))
-    assert set(candidates) == {"account", "plan_tier", "churned", "mrr"}
+    # `account` and `churned` are refused before the sweep is built — see
+    # `junk_dimension`. The sweep asks about what is left.
+    assert set(candidates) == {"plan_tier", "mrr"}
 
     def call(**kw):
         return {
@@ -750,3 +760,134 @@ def test_default_call_routes_through_the_existing_gateway_with_the_locked_model(
     assert captured["agent"] == "crucible"
     assert "reduce churn" in captured["input"]
     assert "plan_tier" in captured["input"] and "mrr" in captured["input"]
+
+
+# ── JUNK DIMENSIONS: four classes refused, and the good ones left alone ────
+#
+# THE ACCEPTANCE BAR FOR THESE RULES IS THE SECOND TEST, NOT THE FIRST. A rule
+# broad enough to catch a sales rep's name is easy; one that catches it without
+# deleting `active_facilitators` is the whole difficulty, and the comparison
+# names below are the real ones this stage exists to find.
+
+
+@pytest.mark.parametrize("column,kind,fragment", [
+    ("owner", "text", "names a person"),
+    ("Account Executive", "text", "names a person"),
+    ("sales_rep", "text", "names a person"),
+    ("assigned_to", "text", "names a person"),
+    ("account", "text", "identifies the customer"),
+    ("Customer Name", "text", "identifies the customer"),
+    ("month", "text", "calendar bucket"),
+    ("signup_month", "text", "calendar bucket"),
+    ("closed_at", "date", "calendar bucket"),
+    ("status", "text", "outcome column"),
+    ("stage", "text", "outcome column"),
+    ("account_status_today", "text", "outcome column"),
+    ("outcome", "text", "outcome column"),
+])
+def test_a_junk_dimension_is_named_and_refused(column, kind, fragment):
+    why = ts.junk_dimension(column, kind)
+    assert why and fragment in why, (column, why)
+
+
+@pytest.mark.parametrize("column,kind", [
+    # Every one of these is a comparison measured as correct and valuable on a
+    # real tenant. A junk rule that fires on any of them is too broad.
+    ("facilitators_licensed", "number"),
+    ("integrations_live", "number"),
+    ("segment", "text"),
+    ("customer_segment", "text"),
+    ("active_facilitators", "number"),
+    ("bot_messages", "number"),
+    ("plan_tier", "text"),
+    ("mrr", "number"),
+    ("days_since_last_login", "number"),
+    ("resolution_hours", "number"),
+    ("reporting_period_length", "number"),
+    ("average_seats", "number"),
+    # MEASURED FALSE POSITIVE, PINNED. The outcome rule first fired on this —
+    # rank #1 of a real run, a banded DURATION, caught because its name
+    # contains the word `stage`. An outcome STATE is a label, never a band.
+    ("days_in_current_stage", "number"),
+    ("days_to_renewal", "number"),
+])
+def test_a_real_dimension_is_not_refused(column, kind):
+    assert ts.junk_dimension(column, kind) is None, column
+
+
+def test_a_proposed_junk_dimension_is_rejected_with_its_reason():
+    """The model can still name a column the sweep never offered."""
+    table = _accounts_table()
+    snap = _snapshot([table])
+    lead = _lead_name(snap, "accounts")
+
+    def call(**kw):
+        return {"comparisons": [
+            {"table": lead, "dimension": "account", "outcome": "mrr",
+             "measure": "median", "why": "per-account revenue"},
+        ], "declined": []}
+
+    selection = ts.select_comparisons(
+        enterprise_id="e1", goal_text="reduce churn", schema=snap,
+        lead_table=lead, call=call,
+    )
+    assert selection.comparisons == ()
+    assert len(selection.rejected) == 1
+    assert "identifies the customer" in selection.rejected[0].reason
+
+
+def test_a_comparison_whose_groups_all_share_one_value_is_withheld():
+    """Junk class 4. Seven real findings on one benchmark run had
+    `median of expansion_acv_usd = 0` as their entire content, one at rank #4.
+    """
+    rows = [{"account": f"A{i}", "plan_tier": "Basic" if i <= 5 else "Pro",
+             "expansion_acv_usd": 0} for i in range(1, 11)]
+    table = make_table("workbook:flat", rows,
+                       columns=["account", "plan_tier", "expansion_acv_usd"])
+    snap = _snapshot([table])
+    lead = _lead_name(snap, "flat")
+
+    def call(**kw):
+        return {"comparisons": [
+            {"table": lead, "dimension": "plan_tier",
+             "outcome": "expansion_acv_usd", "measure": "median",
+             "why": "expansion by tier"},
+        ], "declined": []}
+
+    selection = ts.select_comparisons(
+        enterprise_id="e1", goal_text="grow revenue", schema=snap,
+        lead_table=lead, call=call,
+    )
+    computed = ts.compute_comparisons({table.name: table}, selection)
+    assert len(computed) == 1
+    assert computed[0].suppressed
+    assert "same value" in computed[0].suppression_reason
+
+
+def test_one_group_at_zero_beside_a_sibling_that_is_not_survives():
+    """The narrow half of the same rule, and the one that matters: a licensed-
+    facilitator band at a 0% churn rate beside bands that are not IS the
+    finding. A per-group zero rule would delete it."""
+    rows = ([{"account": f"C{i}", "plan_tier": "Basic", "churned": "Yes"}
+             for i in range(1, 6)]
+            + [{"account": f"D{i}", "plan_tier": "Pro", "churned": "No"}
+               for i in range(1, 6)])
+    table = make_table("workbook:split", rows,
+                       columns=["account", "plan_tier", "churned"])
+    snap = _snapshot([table])
+    lead = _lead_name(snap, "split")
+
+    def call(**kw):
+        return {"comparisons": [
+            {"table": lead, "dimension": "plan_tier", "outcome": "churned",
+             "measure": "rate", "level": "Yes", "why": "churn by tier"},
+        ], "declined": []}
+
+    selection = ts.select_comparisons(
+        enterprise_id="e1", goal_text="reduce churn", schema=snap,
+        lead_table=lead, call=call,
+    )
+    computed = ts.compute_comparisons({table.name: table}, selection)
+    assert not computed[0].suppressed
+    assert sorted((g.group, g.value) for g in computed[0].groups) == [
+        ("Basic", 1.0), ("Pro", 0.0)]

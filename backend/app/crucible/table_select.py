@@ -179,6 +179,138 @@ class Selection:
     missed_dimensions: tuple[str, ...]
 
 
+# ── DIMENSIONS THAT ARE JUNK BY CONSTRUCTION ────────────────────────────────
+#
+# REFUSED AT SELECTION, NOT DOWNSTREAM, AND EVERY REFUSAL IS NAMED. The
+# relevance gate half-caught these one finding at a time, at model cost, with
+# reasons like "Descriptive metric about sales rep's win/loss rate" — a
+# per-row judgement standing in for a rule. Measured on a real nine-run
+# benchmark, un-refused they reached the reader as: five sales reps' win/loss
+# rates at ranks #22-#34; five calendar months of one metric as the ENTIRE
+# written-up tier of a run that asked how to improve activation; the outcome
+# column itself as the rank-1 finding of another run; and seven findings whose
+# whole content was `median of expansion_acv_usd = 0`.
+#
+# TOKENS, NEVER SUBSTRINGS. `"rep" in "reporting_period"` and
+# `"ae" in "average_seats"` are both true, and a rule that fires on either
+# deletes a real comparison. Column names are split on separators and on
+# camelCase, and the check is membership in the resulting token set.
+#
+# AND EVERY RULE IS NARROW ON PURPOSE. The comparisons this stage exists to
+# find — churn rate by licensed-facilitator band, churn by integrations live,
+# the segment retention split, mean exercises by active-facilitator band, the
+# abandonment rate by message-volume band — must all survive these rules
+# untouched. A rule that removes one of them is too broad and is wrong.
+
+_TOKEN_SPLIT_RE = re.compile(r"[^0-9a-z]+")
+_CAMEL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _tokens(column: str) -> tuple[str, ...]:
+    """COLUMN's name as lowercase word tokens, in order. `"AccountOwner"`,
+    `"account_owner"` and `"Account Owner"` all give `("account", "owner")`."""
+    spaced = _CAMEL_BOUNDARY_RE.sub(" ", column or "")
+    return tuple(t for t in _TOKEN_SPLIT_RE.split(spaced.lower()) if t)
+
+
+#: A single token that means the column names a PERSON. A slice keyed on a
+#: named individual is a performance review, not a finding about the business,
+#: and at the group sizes this produces (n=13-16, no significance test) it is
+#: one nobody should act on.
+_PERSON_TOKENS = frozenset({
+    "owner", "rep", "reps", "salesperson", "salespeople", "assignee",
+    "csm", "ae", "aes", "sdr", "bdr", "seller", "closer",
+})
+
+#: Two ADJACENT tokens that mean the same thing. Separate from the set above
+#: because neither half is enough on its own — `account` and `executive` are
+#: both ordinary, `account executive` is a person.
+_PERSON_PAIRS = frozenset({
+    ("sales", "rep"), ("sales", "reps"), ("account", "executive"),
+    ("account", "manager"), ("account", "owner"), ("assigned", "to"),
+    ("assigned", "rep"), ("opportunity", "owner"), ("deal", "owner"),
+    ("success", "manager"), ("relationship", "manager"),
+})
+
+#: The whole column name, when it names the customer rather than a property of
+#: the customer. A SUBSET test, not an intersection: `customer_segment` and
+#: `client_tier` are exactly the dimensions this stage is for, and only a name
+#: made ENTIRELY of these words is the identity column itself.
+_ACCOUNT_NAME_TOKENS = frozenset({
+    "account", "accounts", "customer", "customers", "company", "companies",
+    "client", "clients", "name", "org", "orgs", "organisation", "organization",
+})
+
+#: Calendar buckets. A time series is a trend and needs its own treatment; it
+#: is not a segment comparison, and enumerating its buckets as findings is how
+#: five consecutive months of one metric became a deep tier.
+_PERIOD_TOKENS = frozenset({
+    "month", "months", "monthly", "week", "weeks", "weekly", "quarter",
+    "quarters", "quarterly", "year", "years", "yearly", "day", "days",
+    "date", "dates", "period", "periods", "cohort", "timestamp", "yearmonth",
+})
+
+#: The OUTCOME, used as the dimension. Conditioning on the thing you are
+#: trying to explain and then reporting a measure describes the outcome; it is
+#: not a differential toward it. `resolution`, `renewal` and `state` were
+#: CONSIDERED AND LEFT OUT: `resolution_hours` and `renewal_term_months` are
+#: legitimate banded dimensions, and `state` is a mailing address as often as
+#: it is a status.
+#:
+#: `active` AND `inactive` WERE IN THIS SET AND ARE DELIBERATELY OUT.
+#: `active_facilitators` — banded, against mean exercises run — is one of the
+#: comparisons this stage exists to find, and it became the top recommendation
+#: on two real runs. A token that deletes it is not a junk rule, it is a
+#: regression, and it is exactly the over-broad shape the acceptance bar for
+#: these rules is written to catch.
+_OUTCOME_TOKENS = frozenset({
+    "status", "stage", "outcome", "outcomes", "disposition", "result",
+    "results", "churn", "churned", "won", "lost", "closed", "renewed",
+    "retained", "converted", "success", "failed", "failure",
+    "cancelled", "canceled",
+})
+
+
+def junk_dimension(column: str, kind: str) -> Optional[str]:
+    """Why COLUMN must never be grouped by, or `None` when it is fine.
+
+    The reason is a sentence, because it is shown: an excluded candidate is
+    recorded as a `Declined` the reader can see, and a proposed comparison on
+    one is a `RejectedComparison` carrying this string. A dimension that
+    vanished with no reason is the failure this whole module is shaped to
+    avoid.
+    """
+    toks = _tokens(column)
+    if not toks:
+        return None
+    tokset = frozenset(toks)
+    bigrams = frozenset(zip(toks, toks[1:]))
+
+    if tokset & _PERSON_TOKENS or bigrams & _PERSON_PAIRS:
+        return ("names a person rather than a property of the business — a "
+                "slice per individual is a performance review, not a finding")
+    if tokset <= _ACCOUNT_NAME_TOKENS:
+        return ("identifies the customer rather than describing them — "
+                "grouping by the account name gives one group per account")
+    if kind == "date" or (kind != "number" and tokset & _PERIOD_TOKENS) \
+            or (kind == "number" and tokset <= _PERIOD_TOKENS):
+        return ("is a calendar bucket — a time series is a trend, which needs "
+                "its own treatment, and not a comparison between segments")
+    # NON-NUMERIC ONLY, AND THE MEASUREMENT IS WHY. Run against the real
+    # nine-run output this rule first also removed
+    # `days_in_current_stage = [0, 30): 'Closed Lost' rate of stage = 55%` —
+    # rank #1 of that run, a banded DURATION and a perfectly good leading
+    # indicator, caught because its name contains the word `stage`. An outcome
+    # STATE is a label, never a band: `stage = Closed Lost`,
+    # `outcome = Completed` and `status = Active` — the three shapes measured —
+    # are all text. A numeric dimension arrives with explicit band edges and is
+    # a quantity, so it is left alone.
+    if kind != "number" and tokset & _OUTCOME_TOKENS:
+        return ("is an outcome column — grouping by the thing being explained "
+                "and then measuring is circular, not a differential")
+    return None
+
+
 def candidate_dimensions(table: TableSchema) -> tuple[str, ...]:
     """Every column on TABLE worth asking the selector about as a dimension —
     the coverage sweep's own input. Free text is excluded (nothing groups
@@ -188,8 +320,30 @@ def candidate_dimensions(table: TableSchema) -> tuple[str, ...]:
     columns a selector would not have thought to ask about on its own.
     """
     return tuple(
-        c.name for c in table.columns if not c.is_freetext and c.kind != "empty"
+        c.name for c in table.columns
+        if not c.is_freetext and c.kind != "empty"
+        and junk_dimension(c.name, c.kind) is None
     )
+
+
+def excluded_dimensions(table: TableSchema) -> tuple[tuple[str, str], ...]:
+    """`(column, why)` for every column `candidate_dimensions` refused to
+    offer — the same list, inverted, so the exclusion is a fact the caller can
+    show rather than an absence the reader has to notice.
+
+    Only columns that were otherwise CANDIDATES: a free-text paragraph or a
+    wholly empty column is not "refused as junk", it was never groupable, and
+    saying so would print eleven lines of noise about a column nobody was
+    going to compare.
+    """
+    out = []
+    for c in table.columns:
+        if c.is_freetext or c.kind == "empty":
+            continue
+        why = junk_dimension(c.name, c.kind)
+        if why:
+            out.append((c.name, why))
+    return tuple(out)
 
 
 # ── THE MODEL CALL — one call, injectable, routed through the existing
@@ -358,6 +512,15 @@ def _validate_comparison(
         return RejectedComparison(
             raw=dict(raw),
             reason="missing orientation: dimension and outcome are the same column")
+    # THE MODEL MAY STILL PROPOSE ONE. `candidate_dimensions` stops these
+    # being OFFERED on the lead table's coverage sweep; it does not stop a
+    # selector naming a column on another attached table, or naming one it was
+    # never shown. Refused here, visibly, rather than filtered downstream one
+    # finding at a time at model cost.
+    junk = junk_dimension(dimension, cols[dimension].kind)
+    if junk:
+        return RejectedComparison(
+            raw=dict(raw), reason=f"dimension {dimension!r} {junk}")
     if measure not in MEASURES:
         return RejectedComparison(raw=dict(raw), reason=f"unrecognised measure {measure!r}")
     if measure == "rate" and not level:
@@ -433,6 +596,22 @@ def _parse(
     covered |= {c.outcome for c in comparisons if c.table == lead_table}
     covered |= {d.dimension for d in declined if d.table == lead_table}
     missed = tuple(name for name in candidates if name not in covered)
+
+    # THE ENGINE'S OWN DECLINES, BESIDE THE MODEL'S. A dimension this module
+    # refused to offer is exactly as much a decision the reader is owed as one
+    # the selector considered and passed on, and `Declined` is already the
+    # shape that carries a decision plus its reason. Recorded only for columns
+    # the selector did not itself address, so a column it declined for its own
+    # reason keeps that reason rather than being overwritten by ours.
+    lead = tables_by_name.get(lead_table)
+    if lead is not None:
+        spoken_for = covered | {d.dimension for d in declined}
+        for column, why in excluded_dimensions(lead):
+            if column in spoken_for:
+                continue
+            declined.append(Declined(
+                table=lead_table, dimension=column,
+                why=f"not offered for grouping: {why}"))
 
     return Selection(lead_table=lead_table, comparisons=tuple(comparisons),
                       declined=tuple(declined), rejected=tuple(rejected),
@@ -709,6 +888,14 @@ def _account_column(table: Table) -> tuple[Optional[str], str]:
     return candidates[0], ""
 
 
+def _fmt_degenerate(c: Comparison, value: Optional[float]) -> str:
+    """A suppression reason has to name the number it suppressed on, and a
+    rate reads as a percentage everywhere else in this engine."""
+    if value is None:
+        return "no value"
+    return f"{value:.0%}" if c.measure == "rate" else f"{value:,.3g}"
+
+
 def _blank(v: Any) -> bool:
     return v is None or (isinstance(v, str) and not v.strip())
 
@@ -828,6 +1015,25 @@ def _compute_one(
         else:
             groups.append(GroupValue(group=key, value=values[key], n=n,
                                       suppressed=False, accounts=group_accounts))
+
+    # DEGENERATE VALUES — the fourth junk class, and the only one that cannot
+    # be decided at selection time, because it is a property of the numbers
+    # rather than of the column names. A comparison every one of whose
+    # showable groups carries the SAME value states no difference: seven real
+    # findings on one benchmark run had `median of expansion_acv_usd = 0` as
+    # their entire content, one of them at rank #4.
+    #
+    # WHOLE-COMPARISON, NEVER PER GROUP. One group at zero beside siblings
+    # that are not is the strongest thing this stage produces — a licensed-
+    # facilitator band at a 0% churn rate is a real answer — so a per-group
+    # zero rule would delete exactly the findings worth keeping.
+    shown = [g for g in groups if not g.suppressed and g.value is not None]
+    if len(shown) > 1 and len({g.value for g in shown}) == 1:
+        return _withheld(
+            c, as_of=table.as_of, today=today,
+            reason=(f"every one of the {len(shown)} groups big enough to show "
+                    f"has the same value ({_fmt_degenerate(c, shown[0].value)}), "
+                    f"so there is no difference between them to report"))
 
     return ComputedComparison(
         table=c.table, dimension=c.dimension, outcome=c.outcome, measure=c.measure,

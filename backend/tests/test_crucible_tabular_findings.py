@@ -186,12 +186,22 @@ def test_every_row_in_a_group_carries_a_distinct_artifact_id():
                     call=_select_facilitator_churn)
     docs = [r["provenance"]["doc"] for r in ev.rows]
     assert len(docs) == len(set(docs)) == 12
+    # AND THE COLLAPSE DOES NOT TOUCH THEM. Every row of the comparison is now
+    # in ONE cluster, so the count that `_refute`'s echo rule sees is the
+    # count across the whole comparison — 12, not one group's 6. Collapsing
+    # findings can only ever raise this number.
+    assert len({tm[0] for tm in ev.theme_map.values()}) == 1
 
 
 # ── AC2 / property 3: subject_cluster_id via the theme map, never ungroupable
 
 
-def test_theme_map_clusters_one_group_and_separates_the_other():
+def test_every_group_of_one_comparison_shares_one_theme_entity():
+    """THE COLLAPSE, AS A PROPERTY. A distinct entity id per group is a
+    distinct cluster and therefore a distinct top-level finding — the defect
+    that turned 89 comparisons into 372 findings and shredded one segment
+    split across seven non-adjacent ranks. Every row of every group of one
+    comparison must now share ONE entity id."""
     ev = tf.produce(tables=[_churn_table()], enterprise_id="e1",
                     goal_text="reduce churn", now=NOW,
                     call=_select_facilitator_churn)
@@ -199,16 +209,82 @@ def test_theme_map_clusters_one_group_and_separates_the_other():
                 if r["properties"]["account"].startswith("Solo")}
     team_ids = {r["id"] for r in ev.rows
                 if r["properties"]["account"].startswith("Team")}
-    solo_entities = {ev.theme_map[i][0] for i in solo_ids}
-    team_entities = {ev.theme_map[i][0] for i in team_ids}
-    assert len(solo_entities) == 1          # one group, one entity id
-    assert len(team_entities) == 1
-    assert solo_entities != team_entities   # two groups never merge
+    assert solo_ids and team_ids
+    entities = {ev.theme_map[i][0] for i in solo_ids | team_ids}
+    assert len(entities) == 1
     for entity_id, label, relation in ev.theme_map.values():
         assert not entity_id.startswith(UNGROUPABLE_PREFIX)
         assert entity_id.startswith(tf.ENTITY_ID_PREFIX)
         assert label
         assert relation is None
+
+
+def test_two_comparisons_never_merge_into_one_theme_entity():
+    """The other half of the same property: collapsing GROUPS must not
+    collapse COMPARISONS. Two comparisons over the same table keep their own
+    entity ids, so they stay two findings."""
+    def call(**kw):
+        return {"comparisons": [
+            {"table": kw["lead_table"], "dimension": "facilitator_type",
+             "outcome": "status", "measure": "rate", "level": "Churned",
+             "why": "churn by facilitator type"},
+            {"table": kw["lead_table"], "dimension": "facilitator_type",
+             "outcome": "status", "measure": "rate", "level": "Active",
+             "why": "the same split read the other way"},
+        ], "declined": []}
+
+    ev = tf.produce(tables=[_churn_table()], enterprise_id="e1",
+                    goal_text="reduce churn", now=NOW, call=call)
+    assert len({tm[0] for tm in ev.theme_map.values()}) == 2
+
+
+def test_the_label_states_the_whole_comparison_not_one_group():
+    """The theme label — which becomes the finding's heading — must carry the
+    dimension, the statistic and EVERY group with its value and its count, so
+    the reader sees a split as a split."""
+    ev = tf.produce(tables=[_churn_table()], enterprise_id="e1",
+                    goal_text="reduce churn", now=NOW,
+                    call=_select_facilitator_churn)
+    labels = {tm[1] for tm in ev.theme_map.values()}
+    assert len(labels) == 1
+    label = labels.pop()
+    assert "facilitator_type" in label
+    assert "'Churned' rate of status" in label
+    assert "across 2 groups" in label
+    # 4 of 6 solo churned, 1 of 6 team.
+    assert "solo 67% (n=6)" in label
+    assert "team 17% (n=6)" in label
+
+
+def test_one_row_per_account_even_when_an_account_is_in_two_groups():
+    """A per-EVENT table (tickets, sessions) does not partition its accounts
+    across a dimension's groups. Under a per-comparison entity id, two rows
+    for one account would carry the SAME id and double-count reach."""
+    rows = []
+    for i in range(1, 7):
+        # Each account files one P1 ticket and one P3 ticket.
+        rows.append({"account": f"Co {i}", "priority": "P1",
+                     "resolved": "yes" if i <= 3 else "no"})
+        rows.append({"account": f"Co {i}", "priority": "P3",
+                     "resolved": "yes" if i <= 5 else "no"})
+    table = make_table("workbook:tickets.xlsx:Sheet1", rows,
+                       columns=["account", "priority", "resolved"])
+
+    def call(**kw):
+        return {"comparisons": [{
+            "table": kw["lead_table"], "dimension": "priority",
+            "outcome": "resolved", "measure": "rate", "level": "yes",
+            "why": "resolution by priority",
+        }], "declined": []}
+
+    ev = tf.produce(tables=[table], enterprise_id="e1", goal_text="x",
+                    now=NOW, call=call)
+    ids = [r["id"] for r in ev.rows]
+    accounts = [r["properties"]["account"] for r in ev.rows]
+    assert len(ids) == len(set(ids)) == 6
+    assert sorted(accounts) == sorted(f"Co {i}" for i in range(1, 7))
+    # And the content says so rather than pretending a partition exists.
+    assert "filing rows under 2 of the priority values" in ev.rows[0]["content"]
 
 
 # ── AC6 / totality ───────────────────────────────────────────────────────
@@ -345,8 +421,10 @@ def test_a_computed_comparison_group_is_not_refuted():
     assert out.stats["dropped"]["no_authority"] == 0
     assert out.stats["dropped"]["ungroupable"] == 0
     assert out.stats["dropped"]["anecdote"] == 0
-    # Both groups survive as their own findings.
-    assert len(out.findings) == 2
+    # ONE FINDING FOR THE WHOLE COMPARISON, sized by the UNION of its groups'
+    # accounts — 12, not the 6 of either group.
+    assert len(out.findings) == 1
+    assert out.impacts[0].affected_population == 12.0
 
 
 def test_a_computed_differential_outranks_a_bigger_stated_blocker():
@@ -364,7 +442,7 @@ def test_a_computed_differential_outranks_a_bigger_stated_blocker():
 
     out = build_findings(computed + blockers, currency="accounts", now=NOW)
     assert out.rejected == ()
-    assert len(out.findings) == 3   # 2 computed groups + 1 blocker theme
+    assert len(out.findings) == 2   # 1 computed comparison + 1 blocker theme
     assert out.findings[0].confidence_inputs.claim_types[0] == "computed_differential"
     top_reach = out.impacts[0].affected_population
     blocker_reach = next(
