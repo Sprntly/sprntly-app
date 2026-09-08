@@ -3325,3 +3325,109 @@ def test_the_chain_summary_finds_ruled_out_from_the_ledger_alone():
     )
     assert "Considered and set aside" in chain
     assert "nothing was ruled out on this run" not in chain
+
+
+# ─── A document that was READ is not a document that was MISSING ──────────
+
+#: THE HEADINGS, AS MARKUP. The bare phrase also appears in the chain map
+#: ("...where anything was missing, 'What was missing from it.'"), which is
+#: rendered unconditionally and already hedges for the empty case — so a
+#: substring check on the phrase would pass against the map rather than the
+#: section, in both directions.
+MISSING_H = "<h4>What was missing from it</h4>"
+READ_H = "<h4>What was read for this run only</h4>"
+
+
+def test_a_document_that_was_read_is_not_listed_as_missing():
+    """`_prose_notes` emits "X was read for this run only" — a real thing the
+    reader needs, because it says the document did not enter the knowledge
+    graph and will not answer a later question. It is not a degradation, and
+    it rendered under "What was missing from it" beside the genuine ones. A
+    reader who attached three files and had all three read successfully was
+    shown a missing-list naming those same three files."""
+    html = render_report_html(_run(coverage_notes=[
+        {"kind": "read", "reason": "q3-calls.txt was read for this run only",
+         "actual": "q3-calls.txt was split into 10 conversations"},
+        {"reason": "undated evidence",
+         "actual": "40 of 1200 signals carried no usable date"},
+    ]), [_finding()])
+    assert MISSING_H in html
+    assert READ_H in html
+    # The read note sits under its OWN heading, not the missing one.
+    i_missing = html.index(MISSING_H)
+    i_read = html.index(READ_H)
+    i_file = html.index("q3-calls.txt was read for this run only")
+    i_undated = html.index("40 of 1200 signals")
+    assert i_read < i_file, "the read note is not under the read heading"
+    assert i_missing < i_undated < i_read, (
+        "the genuine degradation is no longer under the missing heading")
+
+
+def test_a_run_with_only_read_notes_shows_no_missing_heading_at_all():
+    """The defect at its purest: nothing was missing, and the document said
+    something was."""
+    html = render_report_html(_run(coverage_notes=[
+        {"kind": "read", "reason": "q3-calls.txt was read for this run only",
+         "actual": "q3-calls.txt was split into 10 conversations"},
+    ]), [_finding()])
+    assert MISSING_H not in html, (
+        "a run that was missing nothing still headed a list 'What was missing'")
+    assert READ_H in html
+
+
+def test_a_note_without_a_kind_still_reads_as_missing():
+    """EVERY STORED RUN PREDATES THIS KEY. Defaulting an absent `kind` to
+    "missing" is what keeps them rendering exactly as they always did — and
+    the default is the safe direction, since a degradation shown under the
+    wrong heading is recoverable and one silently dropped is not."""
+    html = render_report_html(_run(), [_finding()])
+    assert MISSING_H in html
+    assert "40 of 1200 signals" in html
+    assert READ_H not in html
+
+
+def test_the_kind_is_carried_not_sniffed_out_of_the_wording():
+    """A renderer matching on the `reason` text would re-break the moment
+    either sentence is edited — the same class of defect as the guard that
+    scanned for a literal. The split must key on `kind` alone."""
+    html = render_report_html(_run(coverage_notes=[
+        # Says "was read for this run only" but is NOT tagged: it must be
+        # treated as missing, because the tag is the contract.
+        {"reason": "sneaky.txt was read for this run only",
+         "actual": "wording alone must not move a note"},
+    ]), [_finding()])
+    assert MISSING_H in html
+    assert READ_H not in html
+
+
+# ─── Claim ids joined inside a single bracket ─────────────────────────────
+
+
+def test_several_claim_ids_in_one_bracket_are_stripped_like_one():
+    """THE FORM THAT LEAKED. The pattern matched a bracket holding exactly one
+    id, so the model writing `[id], [id]` was cleaned (two matches) while
+    `[id, id]` was not touched at all — the raw pair rendered into prose a
+    client reads."""
+    from app.crucible.report import strip_claim_refs
+
+    a = "11111111-2222-3333-4444-555555555555"
+    b = "66666666-7777-8888-9999-000000000000"
+    c = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    assert strip_claim_refs(f"stop the bleed [{a}, {b}].") == "stop the bleed."
+    assert strip_claim_refs(f"stop the bleed [{a}; {b}] now.") == (
+        "stop the bleed now.")
+    assert strip_claim_refs(f"three [{a}, {b}, {c}] here.") == "three here."
+    # The single-id and separate-bracket forms keep working.
+    assert strip_claim_refs(f"stop the bleed [{a}].") == "stop the bleed."
+    assert strip_claim_refs(f"x ([{a}], [{b}]) y") == "x y"
+
+
+def test_a_bracket_that_is_not_a_claim_id_survives_the_strip():
+    """The expression is widened, not loosened. Ordinary bracketed prose is
+    not the model's scratchpad and must reach the reader."""
+    from app.crucible.report import strip_claim_refs
+
+    assert strip_claim_refs("a real [bracket] survives.") == (
+        "a real [bracket] survives.")
+    assert strip_claim_refs("[not-a-uuid, also-not] stays.") == (
+        "[not-a-uuid, also-not] stays.")

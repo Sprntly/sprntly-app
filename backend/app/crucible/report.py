@@ -537,11 +537,29 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
     # should be read, and a degradation discovered after the conclusion has
     # already done its damage.
     notes = [n for n in _as_list(run.get("coverage_notes")) if isinstance(n, dict)]
-    if notes:
+    # A NOTE THAT SOMETHING WAS READ IS NOT A NOTE THAT SOMETHING IS MISSING.
+    # `_prose_notes` emits "X was read for this run only" — a real thing the
+    # reader needs (it says the document did NOT enter the knowledge graph),
+    # but a successful read. It rendered under "What was missing from it"
+    # alongside genuine degradations, so a run that read everything it was
+    # given still showed the reader a missing-list naming those same files.
+    #
+    # SPLIT ON THE NOTE'S OWN `kind`, NEVER ON ITS WORDING. Defaulting to
+    # "missing" is what keeps every stored run — none of which carries the
+    # key — rendering exactly as before.
+    missing = [n for n in notes if (n.get("kind") or "missing") != "read"]
+    read_only = [n for n in notes if (n.get("kind") or "missing") == "read"]
+    if missing:
         out.append("<h4>What was missing from it</h4>")
         out.append(_ul(
             f"<strong>{_esc(n.get('reason'))}</strong> — {_esc(n.get('actual'))}"
-            for n in notes
+            for n in missing
+        ))
+    if read_only:
+        out.append("<h4>What was read for this run only</h4>")
+        out.append(_ul(
+            f"<strong>{_esc(n.get('reason'))}</strong> — {_esc(n.get('actual'))}"
+            for n in read_only
         ))
     return "".join(out)
 
@@ -1382,9 +1400,18 @@ ACCOUNT_NAMING_DISCLOSURE = (
 #: own assertion text beside it (`_SOURCE_LEAD_IN`), which is the provenance a
 #: reader can actually use. The inline brackets are leakage from the model's
 #: scratchpad, not a second, better citation.
+#: SEVERAL IDS IN ONE BRACKET, WHICH IS THE FORM THAT LEAKED. This matched a
+#: bracket holding exactly one id, so `[id], [id]` was stripped (two matches)
+#: but `[id, id]` was not stripped at all — the whole raw pair rendered into a
+#: sentence a client reads. Extended here rather than by adding a second
+#: stripper: two expressions over the same text is how one of them ends up
+#: not being applied at a new render site.
+_CLAIM_UUID = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
 _CLAIM_REF = re.compile(
-    r"\s*\[[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
-    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\]"
+    r"\s*\[" + _CLAIM_UUID + r"(?:\s*[,;]\s*" + _CLAIM_UUID + r")*\]"
 )
 
 #: THE PUNCTUATION THE MODEL WRAPPED AROUND THE IDS, which removing the ids

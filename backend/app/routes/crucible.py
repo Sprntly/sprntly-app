@@ -3060,12 +3060,23 @@ def _prose_notes(prose_evidence) -> list[dict]:
 
     A `reason`/`actual` pair, the same shape every other coverage note takes —
     a second note shape would be a second thing for the renderer to learn.
+
+    ONE OF THESE IS NOT A DEGRADATION, AND THE RENDERER USED TO FILE IT AS
+    ONE. Every note here landed under the heading "What was missing from it",
+    including "X was read for this run only" — so a document that WAS read,
+    successfully, was listed to the reader as missing. `kind` separates them.
+    It is carried on the note rather than inferred from the `reason` text
+    downstream: a renderer matching on wording would re-break the moment
+    either sentence is edited, which is exactly the class of defect this
+    change exists to remove. Absent `kind` means "missing", so every note
+    written before this — and every stored run — reads as it always did.
     """
     if prose_evidence is None:
         return []
     notes: list[dict] = []
     for name, how in getattr(prose_evidence, "read", ()) or ():
         notes.append({
+            "kind": "read",
             "reason": f"{name} was read for this run only",
             "actual": (f"{name} was {how}. What it says was counted as "
                        f"evidence here and was not added to your knowledge "
