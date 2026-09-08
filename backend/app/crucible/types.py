@@ -431,6 +431,17 @@ class Claim:
     #: summed, ranged, or refused — is a fixed table in `pipeline`, not
     #: anything the classifier returns.
     figure_class: Optional[str] = None
+    #: WHY a `constraint`-type claim blocks — one of
+    #: `app.crucible.blocker_reason.BLOCKER_REASON_KEYS`, or `None` when
+    #: nothing classified it (the model was not run, was not a constraint
+    #: claim, or did not answer for this one). `None` never means "generic":
+    #: `pipeline._cluster` falls back to `subject`/`type` for anything
+    #: unclassified, which is today's behaviour — a checklist theme, not a
+    #: reason. Same shape as `figure_class` above and the same rule applies:
+    #: A CATEGORY, NEVER A DECISION. What a reason is worth is decided by
+    #: deterministic code (`pipeline._cluster`, `_label`), never by the
+    #: classifier itself.
+    blocker_reason: Optional[str] = None
     #: THE VERB THE GRAPH ALREADY PUT ON THIS CLAIM'S EDGE TO ITS THEME — one
     #: of `SUPPORTS` / `REQUESTS` / `AFFECTS` / `PRESSURES` / `BLOCKED_BY`, or
     #: `None` when the graph did not theme this claim at all.

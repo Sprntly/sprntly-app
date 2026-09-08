@@ -773,6 +773,16 @@ def _stored_figure_class(props: Mapping[str, Any]) -> Optional[str]:
     return value if value in FIGURE_CLASSES else None
 
 
+def _stored_blocker_reason(props: Mapping[str, Any]) -> Optional[str]:
+    """The blocker reason a previous run drew for this row, if any and if
+    valid. See `_stored_figure_class` — same read-back-never-redraw shape."""
+    from app.crucible.blocker_reason import BLOCKER_REASON_KEYS
+    from app.crucible.blocker_reason import PROPERTY_KEY as REASON_KEY
+
+    value = props.get(REASON_KEY)
+    return value if value in BLOCKER_REASON_KEYS else None
+
+
 def project_signal(
     signal: Mapping[str, Any],
     sides: Mapping[str, str],
@@ -864,6 +874,7 @@ def project_signal(
         # against the closed vocabulary here rather than trusted, so a
         # hand-edited or legacy value cannot reach the consequence table.
         figure_class=_stored_figure_class(props),
+        blocker_reason=_stored_blocker_reason(props),
         direction="neutral",
         raw=dict(signal.get("properties") or {}),
     )

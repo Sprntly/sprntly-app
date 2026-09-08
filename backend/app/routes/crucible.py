@@ -39,6 +39,11 @@ from app.crucible.figure_class import (
     classify_figures,
     persist_classes,
 )
+from app.crucible.blocker_reason import (
+    apply_reasons,
+    classify_blocker_reasons,
+    persist_reasons,
+)
 from app.crucible.pipeline import ACCOUNT_VALUE_UNIT, build_findings
 from app.crucible.plan import build_plan
 from app.crucible.types import GoalDefinition
@@ -1889,6 +1894,28 @@ def execute_run(
                     company_id,
                 )
         claims = apply_classes(claims, newly_classified)
+
+        # WHY EACH `constraint` CLAIM BLOCKS — same stage, same reasoning as
+        # the figure classification immediately above: deliberately BEFORE
+        # `pipeline`, so `pipeline` keeps making zero LLM calls of its own.
+        # Degrades rather than fails: any claim the classifier does not
+        # answer for keeps `blocker_reason=None`, and `pipeline._cluster`
+        # groups it exactly as it does today, on its checklist theme.
+        # Rows already carrying a stored reason are not re-sent.
+        newly_classified_reasons = classify_blocker_reasons(
+            claims, enterprise_id=company_id,
+        )
+        if newly_classified_reasons:
+            # PERSISTED BEFORE USE — same ordering, same reasoning as
+            # `persist_classes` above.
+            try:
+                persist_reasons(newly_classified_reasons, company_id=company_id)
+            except Exception:  # noqa: BLE001 — analysis outlives a write
+                logger.exception(
+                    "crucible: could not persist blocker reasons for %s",
+                    company_id,
+                )
+        claims = apply_reasons(claims, newly_classified_reasons)
 
         runs_db.update(run_id, company_id, claim_count=len(claims))
         # EXACT COUNTS ONLY. `themed`/`unthemed` are measured; the number of
