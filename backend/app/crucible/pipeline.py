@@ -1859,6 +1859,106 @@ def _stopped(text: str) -> str:
     return t if (not t or t[-1] in ".!?…") else t + "."
 
 
+#: The source types whose words are THE CUSTOMER SPEAKING, for the purpose of
+#: choosing which claim's sentence stands for a group.
+#:
+#: `plan._SOURCE_WITNESSES` is the canonical statement of what each source can
+#: witness, and `customer_voice` is the only entry there that witnesses "what
+#: customers asked for and reported". Named as a set rather than a literal so
+#: adding a second customer-side source is one edit in one place.
+EXAMPLE_CUSTOMER_SOURCES: frozenset[str] = frozenset({"customer_voice"})
+
+
+def _example_claim(claims: Sequence[Claim]) -> Optional[Claim]:
+    """Whose words stand for this group.
+
+    THE OLD RULE WAS `max(claims, key=strength_score)` AND IT SYSTEMATICALLY
+    CHOSE THE COMPANY OVER ITS CUSTOMERS. `STRENGTH_SCORE` is an EVIDENCE
+    ladder — `measured` (0.90) over `reported` (0.25) — and
+    `claims.DEFAULT_STRENGTH` puts every customer channel at `reported` by
+    construction, because a person on a call is reporting rather than
+    measuring. So on any theme mixing a customer's words with an internal
+    analysis, the internal analysis won the sentence, whatever either said.
+
+    Measured on a real corpus, on the theme carrying a named customer's
+    explicit "if I cannot take the report to the board, I will not fund it":
+    the group held five `customer_voice` claims including that blocker, and
+    the sentence chosen to stand for it was the company's own competitive
+    matrix — "Automated executive / compliance reporting is offered by
+    <vendor>; confirmed absent from <competitor>…". That sentence is then the
+    ONLY text besides the label that `relevance.judge_relevance` is shown, and
+    the gate set the theme aside as vendor positioning — correctly, on the
+    input it was given. The customer's words were in the group and never
+    reached the prompt.
+
+    AND ON THAT CORPUS THE OLD RULE WAS NOT EVEN CHOOSING ON STRENGTH.
+    `claims.project_signal` caps every attachment-derived claim at `reported`,
+    so all of them tie and `max` returns whichever came first in list order.
+    The company's sentence won by position.
+
+    SO: THE CUSTOMER'S WORDS FIRST, THEN THE ENGINE'S OWN EXISTING ORDERINGS.
+    No new scale is invented here. Within the preferred class the tie-break is
+    `moscow.type_bucket` — the same ordering that decides the finding's MoSCoW
+    bucket, so a stated blocker beats a stated preference beats a description
+    — and then `strength_score`, exactly as before. THE LAST TIE BREAKS TOWARD
+    THE CLAIM SEEN EARLIEST, which is exactly what `max` already did when every
+    key tied, and on an upload-only corpus every key DOES tie. Keeping that
+    incumbent means this function changes the sentence only where it has a
+    reason to, never merely because it was rewritten. It is the same stability
+    `_label` relies on one function over ("ties break toward the subject seen
+    earliest").
+
+    THIS IS NOT A RELEVANCE JUDGEMENT AND IT MOVES NO RANK. It changes which
+    claim is QUOTED, nothing about which claims are in the group, how it is
+    sized, or where it sorts. `_rank` never reads `example`.
+    """
+    ordered = _example_candidates(claims)
+    return ordered[0] if ordered else None
+
+
+#: How many claims deep `_statement_parts` will look for a quotable sentence.
+#:
+#: BOUNDED BECAUSE A GROUP CAN BE ENORMOUS. A computed comparison carries one
+#: claim per account — 1,400 of them on a real run — and they are all the same
+#: shape, so a scan that walked the whole group to find a lintable sentence
+#: would pay that cost on every finding to learn what the first candidate
+#: already said. Five is past the point where a different claim is likely to
+#: differ in whether it lints, and it is a bound rather than a budget: the
+#: loop stops at the first sentence that passes.
+MAX_EXAMPLE_CANDIDATES = 5
+
+
+def _example_candidates(claims: Sequence[Claim]) -> tuple[Claim, ...]:
+    """Every claim, best sentence first — see `_example_claim` for the key.
+
+    A LIST RATHER THAN A WINNER, because the winner can be unquotable. The
+    candidate sentence is assembled and then linted, and a claim whose own
+    words carry a causal connective ("... if the tool still results in only
+    two exercises a year") fails I5 and takes the whole example with it —
+    the finding falls back to its bare label. That was survivable when the
+    example was chosen by evidence strength and a failure meant losing an
+    arbitrary sentence; it is not survivable now, because the claim this
+    prefers is the customer stating their problem, and a customer stating a
+    problem is exactly the sentence most likely to contain a connective.
+    Measured: the clearest statement in a real theme — a named buyer saying
+    they would not justify the purchase — was dropped this way, leaving the
+    relevance gate nothing but a label to judge.
+
+    So the caller walks this list and takes the first sentence that lints,
+    rather than taking one and giving up.
+    """
+    return tuple(c for _, c in sorted(
+        enumerate(claims),
+        key=lambda pair: (
+            1 if pair[1].source_id in EXAMPLE_CUSTOMER_SOURCES else 0,
+            -type_bucket([pair[1].type]),
+            pair[1].strength_score,
+            -pair[0],
+        ),
+        reverse=True,
+    ))
+
+
 def _statement(
     label: str, claims: Sequence[Claim], accounts: Sequence[str],
     relations: Optional[Sequence[GraphRelation]] = None,
@@ -1944,28 +2044,36 @@ def _statement_parts(
     # failure falls back to `plain` rather than dropping the finding — the
     # caller treats an unlintable statement as a DROP, so a clumsy example
     # would have silently deleted findings, which is far worse than a dull one.
-    strongest = max(claims, key=lambda c: c.strength_score, default=None)
-    said = (getattr(strongest, "assertion", "") or "").strip()
+    ordered = _example_candidates(claims)
+    strongest = ordered[0] if ordered else None
+    # THE FIRST QUOTABLE SENTENCE, NOT THE FIRST SENTENCE. See
+    # `_example_candidates` on why this walks rather than picks: the preferred
+    # claim is the customer stating their problem, and that is the sentence
+    # most likely to carry a causal connective and fail the lint below.
     # `label_for("")` returns the literal string "unlabelled", so an empty
     # assertion rendered `for example, "unlabelled"` — the engine's own filler
     # presented as something a source said, which is worse than no example at
     # all.
     # `example_for`, not `label_for`: same causal cut, its own length budget,
     # and it ends where a reader can tell it ended.
-    example = example_for(said) if said else ""
-    if (
-        strongest is not None
-        and example
-        and example.lower() != topic.lower()
-        # An example that only repeats the label teaches nothing, costs a line.
-        and example.lower() not in topic.lower()
-    ):
+    for candidate_claim in ordered[:MAX_EXAMPLE_CANDIDATES]:
+        said = (getattr(candidate_claim, "assertion", "") or "").strip()
+        example = example_for(said) if said else ""
+        if (
+            not example
+            or example.lower() == topic.lower()
+            # An example that only repeats the label teaches nothing, costs a
+            # line.
+            or example.lower() in topic.lower()
+        ):
+            continue
         candidate = (
             f"{n} {claims_word}{where} {concern} {THEME_LEAD_IN} {topic} "
             f"{EXAMPLE_LEAD_IN} {_stopped(example)}"
         )
-        if lint_claim(candidate, strongest.strength).ok:
-            return _with_relations(candidate, strongest, relations), example
+        if lint_claim(candidate, candidate_claim.strength).ok:
+            return (_with_relations(candidate, candidate_claim, relations),
+                    example)
 
     # THE CLAUSE STILL APPLIES WHEN THERE IS NO EXAMPLE. A group whose quote
     # was unusable \u2014 or identical to its own label \u2014 is exactly the

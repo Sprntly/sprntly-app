@@ -1850,3 +1850,128 @@ def test_reach_is_taken_over_every_named_account_not_the_customer_side():
         "reach dropped an account the evidence names, on the strength of a "
         "customer/prospect split nothing records"
     )
+
+
+# ── WHOSE WORDS STAND FOR THE GROUP ───────────────────────────────────────
+#
+# The example is not decoration: it is the ONLY text besides the label that
+# `relevance.judge_relevance` is shown, so whichever claim wins here decides
+# what the gate believes the theme is about.
+
+
+def test_the_customers_words_beat_the_companys_on_a_mixed_theme():
+    """MEASURED FAILURE, PINNED. On a real corpus a theme held five customer
+    claims — including a named buyer saying they would not fund the product —
+    and the sentence chosen to stand for it was the company's own competitive
+    matrix, because `STRENGTH_SCORE` ranks an internal analysis above anything
+    a person said on a call. The gate was then shown vendor positioning and
+    correctly set the theme aside; the customer's words never reached it."""
+    claims = [
+        claim("c1", source="pm_manual", ctype="existence", strength="reported",
+              assertion="Automated executive reporting is offered by us and "
+                        "absent from two competitors"),
+        claim("c2", source="customer_voice", ctype="constraint",
+              accounts=("Initech",),
+              assertion="Initech will not fund it if the report cannot be taken "
+                        "to the board"),
+        claim("c3", source="customer_voice", ctype="mechanism", days_ago=40,
+              accounts=("Vandelay",),
+              assertion="The report tries to serve two audiences and serves "
+                        "neither"),
+    ]
+    said = run(claims).findings[0].statement
+    assert "will not fund it if the report cannot be taken to the board" in said
+    assert "Automated executive reporting is offered by us" not in said
+
+
+def test_a_stated_blocker_beats_a_bare_description_within_the_customers_voice():
+    """No new scale is invented for this: the tie-break inside the customer's
+    own claims is `moscow.type_bucket`, the same ordering that decides the
+    finding's bucket. A positive aside must not stand for a theme that also
+    holds a blocker."""
+    claims = [
+        claim("c1", source="customer_voice", ctype="mechanism",
+              assertion="One reviewer found the detail level exactly right"),
+        claim("c2", source="customer_voice", ctype="constraint", days_ago=40,
+              accounts=("Initech",),
+              assertion="Initech cannot present the report at board level"),
+        claim("c3", source="customer_voice", ctype="preference", days_ago=80,
+              accounts=("Initech",),
+              assertion="Initech asked for a one-page executive summary"),
+    ]
+    said = run(claims).findings[0].statement
+    assert "cannot present the report at board level" in said
+
+
+def test_a_theme_with_no_customer_voice_is_unchanged():
+    """The rule only ever PREFERS; with nothing to prefer it must fall through
+    to the ordering that was there before, so a corpus with no customer channel
+    reads exactly as it did."""
+    claims = [
+        claim("c1", source="analytics", ctype="magnitude", strength="measured",
+              assertion="Exercise runs rose 267 percent year on year"),
+        claim("c2", source="pm_manual", ctype="mechanism", days_ago=40,
+              accounts=("Initech",), assertion="Reporting scope is narrow"),
+        claim("c3", source="pm_manual", ctype="mechanism", days_ago=80,
+              accounts=("Vandelay",), assertion="Templating only this year"),
+    ]
+    said = run(claims).findings[0].statement
+    assert "Exercise runs rose 267 percent year on year" in said
+
+
+def test_a_full_tie_still_picks_the_claim_seen_earliest():
+    """The incumbent behaviour, kept deliberately. Every attachment-derived
+    claim is capped at `reported`, so on an upload-only corpus every key ties
+    and the choice falls through to position — where it was before."""
+    claims = [
+        claim("c1", assertion="The first thing anyone said"),
+        claim("c2", days_ago=40, accounts=("Initech",)),
+        claim("c3", days_ago=80, accounts=("Vandelay",)),
+    ]
+    said = run(claims).findings[0].statement
+    assert "The first thing anyone said" in said
+
+
+def test_the_customer_is_preferred_even_over_the_companys_own_stated_blocker():
+    """THE KEY THAT IS ACTUALLY LOAD-BEARING, ISOLATED. Claim type alone would
+    have fixed the measured case by luck — the company's sentences there
+    happened to be descriptions. But `plan._SOURCE_WITNESSES` says `pm_manual`
+    witnesses "the company's stated constraints and goals", and
+    `claims.AUTHORITATIVE_FOR` grants it authority over `constraint`, so the
+    company CAN state a blocker. Ordering on claim type first would then let
+    the company's own blocker stand for a theme its customers are speaking on,
+    which is the same defect wearing a stronger claim type."""
+    claims = [
+        claim("c1", source="pm_manual", ctype="constraint", strength="measured",
+              assertion="Reporting scope is frozen for the year by planning"),
+        claim("c2", source="customer_voice", ctype="mechanism", days_ago=40,
+              accounts=("Initech",),
+              assertion="Initech reads the report as two documents in one"),
+        claim("c3", days_ago=80, accounts=("Initech",)),
+    ]
+    said = run(claims).findings[0].statement
+    assert "Initech reads the report as two documents in one" in said
+    assert "Reporting scope is frozen for the year" not in said
+
+
+def test_an_unlintable_preferred_sentence_falls_through_to_the_next_one():
+    """MEASURED FAILURE, PINNED. The claim this now prefers is a customer
+    stating a problem, and that is exactly the sentence most likely to carry a
+    causal connective — "will not justify it if the tool still results in only
+    two exercises a year" trips I5. Taking one candidate and giving up dropped
+    the example entirely, leaving the relevance gate a bare label to judge on a
+    theme full of customer pain. The walk finds the next quotable one."""
+    claims = [
+        claim("c1", source="customer_voice", ctype="constraint",
+              assertion="They will not renew if the tool still results in "
+                        "only two exercises a year"),
+        claim("c2", source="customer_voice", ctype="constraint", days_ago=40,
+              accounts=("Vandelay",),
+              assertion="Vandelay runs only two exercises a year and "
+                        "cannot staff a third"),
+        claim("c3", days_ago=80, accounts=("Initech",)),
+    ]
+    out = run(claims).findings[0]
+    assert "results in" not in out.statement          # I5 still holds
+    assert "cannot staff a third" in out.statement    # and an example survives
+    assert out.example
