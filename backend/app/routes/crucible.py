@@ -46,6 +46,7 @@ from app import attachments_storage
 from app.billing import enforce
 from app.db import crucible_runs as runs_db
 from app.entitlements import require_crucible_module
+from app.graph.extractor import _CHECKLIST_CATEGORIES
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,24 @@ _PAGE = 400
 #: ~19KB of JSON. Measured against a real 2,777-signal tenant: 250 alongside
 #: the other columns timed out outright, and 100 on its own still lost a page.
 _EMBED_PAGE = 50
+
+#: THE CHECKLIST LABELS THE GRAPH THEME MAP MUST NOT GROUP ON.
+#:
+#: `extractor._CHECKLIST_CATEGORIES` writes one of 13 constant labels onto
+#: every checklist answer regardless of subject — "deal blockers" holds
+#: security review, absent budget, incumbent tooling and a wrong stakeholder
+#: as one theme. Reading the same tuple the extractor writes from, rather
+#: than re-typing the strings here, is deliberate: a label added or renamed
+#: there stays correct here for free, and a hand-copied list would silently
+#: drift the day it does not.
+#:
+#: `stakeholders` (`mint_signal=False`) never becomes a Signal — see
+#: `_CHECKLIST_CATEGORIES`'s own docstring — so it never reaches
+#: `load_theme_map` and is excluded here on the same condition, not by
+#: omission.
+_CHECKLIST_THEME_LABELS: frozenset[str] = frozenset(
+    row[3].strip().casefold() for row in _CHECKLIST_CATEGORIES if row[6]
+)
 
 #: asyncio holds only a WEAK reference to a task, so a bare create_task can be
 #: garbage-collected mid-run.
@@ -1838,6 +1857,25 @@ def execute_run(
         # billing theme the connectors already built rather than starting a
         # private one beside it.
         theme_map = {**theme_map, **_prose_theme_map(prose_evidence, theme_map)}
+
+        # CHECKLIST CATEGORIES ARE NOT TOPICS — a constant label written on
+        # every checklist answer regardless of subject, so grouping on it
+        # verbatim (as the branch above does for the graph's own themes)
+        # merges everything the checklist ever surfaced under one heading.
+        # Dropped from the map here, BEFORE `assign_themes`, so those signals
+        # fall out through the exact same "graph did not theme this claim"
+        # door every other unthemed claim already uses — no new branch, no
+        # new cluster call, just a smaller map. They then get REAL subject
+        # clusters from the embedding pass below, same as any other
+        # unthemed claim.
+        #
+        # A tenant with no checklist-labelled themes filters nothing: this is
+        # a no-op, not a new code path, on every run this was already true
+        # for.
+        theme_map = {
+            sid: v for sid, v in theme_map.items()
+            if (v[1] or "").strip().casefold() not in _CHECKLIST_THEME_LABELS
+        }
         claims, unthemed_idx, cluster_stats = assign_themes(claims, theme_map)
         logger.info(
             "crucible: graph themed %s of %s claims for %s",
