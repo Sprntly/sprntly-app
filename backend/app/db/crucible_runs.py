@@ -55,6 +55,13 @@ def create(
     #: every later stage (`confirm`, `approve`) reads it back off the row
     #: rather than being resupplied it.
     asked_text: Optional[str] = None,
+    #: THE RUN-LEVEL SCOPE SWITCH. `"workspace"` (the default) reads the
+    #: connected corpus exactly as every run always has; `"attachments"`
+    #: restricts it to the documents attached to this run. Stored here, same
+    #: as `asked_text`, because this is the only place in a run's life this
+    #: value is ever supplied by the caller — `confirm`/`approve` read it
+    #: back off the row rather than being resupplied it.
+    source_scope: Optional[str] = None,
 ) -> dict:
     """Create the row FIRST, before any work. Returns it immediately."""
     row = {
@@ -65,6 +72,7 @@ def create(
         "status": "resolving_goal",
         "heartbeat_at": datetime.now(timezone.utc).isoformat(),
     }
+    meta: dict = {}
     stripped = (asked_text or "").strip()
     if stripped:
         # RIDES IN `prioritisation`, same as the plan and the progress
@@ -72,7 +80,14 @@ def create(
         # only when non-blank, so a caller with nothing to add (the direct
         # API, an older client) leaves the row byte-for-byte what it was
         # before this field existed.
-        row["prioritisation"] = {"asked_text": stripped}
+        meta["asked_text"] = stripped
+    if source_scope and source_scope != "workspace":
+        # SAME REASONING, SAME PLACE. `"workspace"` is today's behaviour, so
+        # a caller that never heard of this field — every run before it
+        # existed — writes nothing here and stays byte-for-byte what it was.
+        meta["source_scope"] = source_scope
+    if meta:
+        row["prioritisation"] = meta
     res = require_client().table(TABLE).insert(row).execute()
     return (res.data or [{}])[0]
 

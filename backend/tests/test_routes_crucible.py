@@ -1648,6 +1648,132 @@ def test_the_approved_plan_records_what_the_user_decided(ctx):
     assert plan["total_signals"] == sum(s["signal_count"] for s in plan["sources"])
 
 
+# ─── Source scope — additive, opt-in, disclosed ──────────────────────────────
+
+def test_a_run_with_no_source_scope_behaves_exactly_as_before(ctx):
+    """AC1. A caller that never heard of `source_scope` — every run before it
+    existed — gets exactly what it always got: the whole connected corpus,
+    counted the same way, with no mention of attachments anywhere on the
+    plan."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": [], "hypotheses": []})
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["source_scope"] == "workspace"
+    assert plan["total_signals"] == sum(s["signal_count"] for s in plan["sources"])
+    assert plan["sources"], "the default scope must still read the workspace"
+    assert "source_scope_note" not in plan
+    assert "workspace_signals_set_aside" not in plan
+
+
+def test_attachments_scope_is_disclosed_at_the_gate_before_approval(ctx):
+    """AC3, the plan-gate half. The reader decides whether to approve BEFORE
+    the run reads anything, so the disclosure has to exist at
+    `awaiting_approval` — not only after `/approve` reconciles the plan."""
+    for i in range(4):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx, source_scope="attachments").json()["id"]
+    _confirm(ctx, run_id)
+
+    offered = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    assert offered["status"] == "awaiting_approval"
+    plan = offered["prioritisation"]["plan"]
+    assert plan["source_scope"] == "attachments"
+    assert plan["sources"] == []
+    assert plan["workspace_signals_set_aside"] == 4
+    assert plan["workspace_sources_set_aside"] == 1
+    assert "connected workspace was not read" in plan["source_scope_note"]
+    assert "4" in plan["source_scope_note"]
+
+
+def test_attachments_scope_reads_only_the_attached_document(ctx, monkeypatch, tmp_path):
+    """AC2 (the mechanism) + AC4 (the round-trip). One attachment, real bytes,
+    read for real by reconnaissance (deterministic — no model call, per
+    `read_prose`'s own docstring) so the gate's counts are the genuine
+    attachment figure and not a fabrication of this test. `_prose_evidence`
+    is stubbed only for the FINAL extraction pass (Stage 4), which is the one
+    step that legitimately costs a model call — the boundary this ticket's
+    own dispatch calls out as the one honest place to stub.
+
+    Per the spec this ticket implements: a run scoped to attachments alone is
+    EXPECTED to produce few or zero findings when nothing groupable survives.
+    This test proves the corpus was narrowed and disclosed — not a finding
+    count, which the spec explicitly says not to engineer around."""
+    import app.routes.crucible as mod
+    from app import attachments_storage
+    from app.crucible import prose as prose_mod
+    from app.db.workspaces import ensure_default_workspace
+
+    monkeypatch.setattr(attachments_storage, "_bucket_name", lambda: None)
+    monkeypatch.setattr(attachments_storage.settings, "storage_dir",
+                        str(tmp_path))
+
+    for i in range(5):
+        _signal(ctx.company_id, i)
+
+    workspace_id = ensure_default_workspace(ctx.company_id)["id"]
+    key = f"chat-attachments/{workspace_id}/notes.txt"
+    text = ("Northwind said the onboarding flow confused their team. " * 8)
+    assert len(text) >= 200
+    attachments_storage._stage_filesystem_sync(key, text.encode("utf-8"))
+
+    # STUBBED AT THE ONE STEP THAT COSTS A MODEL CALL, not at the boundary
+    # this run's own reconnaissance already crossed for real above.
+    canned_row = {
+        "id": "prose-0001", "enterprise_id": ctx.company_id, "kind": "finding",
+        "source_type": "customer_voice", "content": "onboarding confused them",
+        "properties": {"customer": "Northwind Logistics"},
+        "provenance": {"doc": "notes.txt"},
+        "valid_at": "2026-03-01T00:00:00+00:00",
+        "created_at": "2026-08-19T00:00:00+00:00",
+        "transaction_at": "2026-08-19T00:00:00+00:00",
+    }
+    monkeypatch.setattr(
+        mod, "_prose_evidence",
+        lambda *a, **k: prose_mod.ProseEvidence(
+            rows=(canned_row,), read=(("notes", "read whole as one conversation"),),
+            conversations=1,
+        ),
+    )
+
+    run_id = _start(
+        ctx, source_scope="attachments",
+        attachments=[{"key": key, "name": "notes.txt"}],
+    ).json()["id"]
+    _confirm(ctx, run_id)
+
+    before_approve = ctx.client.get(f"/v1/crucible/{run_id}").json()
+    gate_plan = before_approve["prioritisation"]["plan"]
+    # THE ATTACHMENT FIGURE, NOT THE WORKSPACE ONE — this is the real recon
+    # count off the staged .txt (one document, segmented as one conversation),
+    # not a number this test invented.
+    assert gate_plan["total_signals"] == 1
+    assert gate_plan["workspace_signals_set_aside"] == 5
+
+    approved = ctx.client.post(
+        f"/v1/crucible/{run_id}/approve",
+        json={"excluded_sources": [], "hypotheses": []},
+    ).json()
+    assert approved["status"] in ("ready", "failed"), approved.get("error_code")
+    assert approved["status"] == "ready", approved.get("error_code")
+
+    # AC4 — persisted, and read back the same on re-render.
+    for _ in range(2):
+        row = ctx.client.get(f"/v1/crucible/{run_id}").json()
+        plan = row["prioritisation"]["plan"]
+        assert plan["source_scope"] == "attachments"
+        assert plan["sources"] == []
+        assert plan["total_signals"] == 1, (
+            "the header must still name the attachment corpus after the run "
+            "finished, not the workspace figure `_load_signals` actually read"
+        )
+
 
 def test_the_plan_does_not_promise_a_number_the_engine_cannot_produce(ctx):
     """The plan step exists to stop a user discovering a limit at the bottom of
