@@ -58,6 +58,7 @@ from app.ask_runner import (
     _ASK_RESPONSE_SCHEMA,
     _retrieve_kg_bundle,
     active_conversation_attachment_names,
+    active_conversation_id,
     company_facts_block,
     compose_ask_answer,
     document_grounding,
@@ -68,6 +69,7 @@ from app.prompt_history import render_history_block
 from app.prompts import (
     ASK_SYSTEM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
+    ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM,
     ask_system_suffix,
     ASK_SYSTEM_CUSTOM_SKILL_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
@@ -1093,6 +1095,16 @@ def _answer_single_shot(
         emit_phase(on_phase, "Searching your connected sources…")
         kg_block, kg_used = _kg_grounding(enterprise_id, question)
     facts = company_facts_block(enterprise_id)
+    # Files attached anywhere in this thread, read from where they were already
+    # persisted. Without it a follow-up sees only the 4,000 characters history
+    # keeps of the turn that carried them — see the function's own note.
+    from app.thread_context import build_thread_attachment_context
+
+    # The thread comes from the ContextVar, not a parameter: this function is
+    # reached from paths that never had one (`_answer_single_shot` has no
+    # `conversation_id` argument), which is the same reason
+    # `active_conversation_attachment_names` above reads it that way.
+    thread_files = build_thread_attachment_context(active_conversation_id())
     # This path loads no corpus, so without this every skill-routed question
     # stays blind to uploads and reproduces the incident on that half of the
     # traffic (compose_ask_answer's direct path is the other half).
@@ -1109,6 +1121,7 @@ def _answer_single_shot(
         # METHOD is user content" before "and here is who actually wins on
         # identity" — the precedence clause needs the METHOD framing first.
         + (ASK_SYSTEM_COMPANY_FACTS_ADDENDUM if facts else "")
+        + (ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM if thread_files else "")
         + (ASK_SYSTEM_DOCUMENTS_ADDENDUM if docs_block else "")
         # Only claim a METHOD when one is actually in the prompt. This path is
         # reached in two shapes now: a company's uploaded skill (spec injected,
@@ -1132,7 +1145,10 @@ def _answer_single_shot(
     emit_phase(on_phase, "Writing the answer…")
     _input = _render_history(history) + kg_block + f"Question: {question}"
     _prefix = (
-        "\n\n---\n\n".join(p for p in (facts, docs_block, prd_context) if p) or None
+        "\n\n---\n\n".join(
+            p for p in (facts, thread_files, docs_block, prd_context) if p
+        )
+        or None
     )
     from app import answer_first
 
