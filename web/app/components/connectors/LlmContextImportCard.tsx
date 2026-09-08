@@ -177,24 +177,13 @@ export function LlmContextImportCard() {
           {busy ? "Reading…" : "Upload .md"}
         </button>
       </span>
-      {/* Same lead-in as the onboarding step, and for the same reason: the
-          card title doesn't tell you the prompt is for the assistant you
-          already use daily. The closing clause differs — onboarding sells a
-          shorter setup, which means nothing to someone already set up, so this
-          one names where the context lands instead. */}
-      <div className="ctx-import-lead">
-        <span className="ctx-import-lead-copy">
-          <strong className="ctx-import-lead-title">
-            Already use Claude or ChatGPT for work?
-          </strong>
-          <span className="ctx-import-lead-text">
-            Copy the prompt below and paste it into Claude or ChatGPT. It will
-            extract the context it already has about your business into a file
-            you can download and upload here — bringing that context into
-            Sprntly, where it feeds your knowledge graph.
-          </span>
-        </span>
-      </div>
+      {/* NO LEAD-IN PARAGRAPH (owner decision 2026-09-08). It carried an
+          "Already use Claude or ChatGPT for work?" heading and four lines
+          walking through copy-the-prompt → paste → download → upload. It was
+          written when this card had to sell the idea cold, in a flow nobody
+          had asked for; the card's own title says what it does, the two
+          buttons say how, and the prompt panel opens with its own
+          instructions — which is where someone about to use it is looking. */}
       <span className="set-conn-llm-show">
         {/* Reveal-then-copy: show the prompt so the user sees (and can edit)
             what they're about to paste into their AI tool before taking it. */}
