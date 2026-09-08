@@ -20,6 +20,10 @@ const artifactsMock = vi.fn()
 const memorySummaryMock = vi.fn()
 const memoryInsightMock = vi.fn()
 const openModalMock = vi.fn()
+// The global side panel's controls. `closeContentPanel` is what leaving a
+// project has to call — see the cleanup in ProjectDetailScreen.
+const openContentPanelMock = vi.fn()
+const closeContentPanelMock = vi.fn()
 const removeMemberMock = vi.fn()
 const ledgerCountsMock = vi.fn()
 const ledgerMock = vi.fn()
@@ -102,7 +106,13 @@ vi.mock("../../AppLayout", () => ({
     React.createElement("div", { "data-testid": "app-layout" }, children),
 }))
 vi.mock("../../../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ openModal: openModalMock }),
+  useNavigation: () => ({
+    openModal: openModalMock,
+    openContentPanel: openContentPanelMock,
+    closeContentPanel: closeContentPanelMock,
+    showToast: vi.fn(),
+    contentPanelTab: null,
+  }),
 }))
 // The container mounts `<ArtifactsModal>`, whose redesign reads `useRouter` for
 // its legacy deep-link fallback. Stub it — no Next app-router provider exists in
@@ -615,6 +625,72 @@ describe("ProjectDetailScreen source — never imports ChatScreen.tsx", () => {
     const src = readFileSync(join(__dirname, "../ProjectDetailScreen.tsx"), "utf8")
     expect(src).not.toMatch(/from\s+["'][^"']*ChatScreen["']/)
     expect(src).not.toMatch(/import\s*\{[^}]*\bChatScreen\b[^}]*\}\s*from/)
+  })
+})
+
+// ── ProjectDetailScreen — the global panel does not outlive the project ──
+describe("ProjectDetailScreen — leaving closes the side panel", () => {
+  async function mountDetail(projectId = "101") {
+    getMock.mockResolvedValue(PROJECT)
+    artifactsMock.mockResolvedValue([])
+    memorySummaryMock.mockResolvedValue(MEMORY)
+    memoryInsightMock.mockResolvedValue(null)
+    let out!: ReturnType<typeof renderWithContent>
+    await act(async () => {
+      out = renderWithContent(React.createElement(ProjectDetailScreen, { projectId }))
+    })
+    // testing-library's afterEach cleanup unmounts the PREVIOUS test's screen,
+    // which fires this very cleanup — so the counter starts dirty. Reset it
+    // here, after mounting, so each test measures only its own teardown.
+    closeContentPanelMock.mockClear()
+    return out
+  }
+
+  it("closes it on unmount — a document opened here must not sit over the projects list", async () => {
+    // The panel is GLOBAL (mounted once in AppShell, state in
+    // NavigationContext), so nothing about walking away used to close it: an
+    // invoice opened in a project stayed open on top of the projects LIST,
+    // where nothing explains what it is.
+    const { unmount } = await mountDetail()
+    expect(closeContentPanelMock).not.toHaveBeenCalled()
+    unmount()
+    expect(closeContentPanelMock).toHaveBeenCalled()
+  })
+
+  it("closes it when switching straight to another project", async () => {
+    // The route renders this component with no `key`, so an `?id` change
+    // REUSES the instance rather than remounting — without projectId in the
+    // cleanup's deps, project A's document would carry into project B.
+    const { rerender } = await mountDetail("101")
+    expect(closeContentPanelMock).not.toHaveBeenCalled()
+    await act(async () => {
+      // Same wrapper as the mount. Re-rendering a BARE screen would swap the
+      // whole tree, unmounting it — which fires the cleanup under test and
+      // would pass no matter what the deps said.
+      rerender(
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(ProjectDetailScreen, { projectId: "202" }),
+        ),
+      )
+    })
+    expect(closeContentPanelMock).toHaveBeenCalled()
+  })
+
+  it("does not close it just for staying put", async () => {
+    // Re-rendering with the SAME id must not slam the panel shut mid-read.
+    const { rerender } = await mountDetail("101")
+    await act(async () => {
+      rerender(
+        React.createElement(
+          ContentProvider,
+          null,
+          React.createElement(ProjectDetailScreen, { projectId: "101" }),
+        ),
+      )
+    })
+    expect(closeContentPanelMock).not.toHaveBeenCalled()
   })
 })
 

@@ -520,7 +520,7 @@ export function ProjectDetailScreen({
   // `null` = drawer closed. Driven purely by local state, never the URL.
   // The SAME global content store + side-panel main uses (mounted via AppShell).
   const { content, setContent } = useContent()
-  const { openContentPanel, contentPanelTab, showToast } = useNavigation()
+  const { openContentPanel, closeContentPanel, contentPanelTab, showToast } = useNavigation()
   // The PRD open in that panel — parity with main chat's open-tab `prd_id`,
   // threaded to both chat surfaces as the edit target. `null` when no PRD is open.
   const openPrdId =
@@ -928,6 +928,31 @@ export function ProjectDetailScreen({
         // useArtifactUrlSync's own 404 handling).
       })
   }, [state.status, openPrdInPanelById, content.prd, openContentPanel])
+
+  /**
+   * LEAVING THE PROJECT CLOSES ITS PANEL.
+   *
+   * The side panel is GLOBAL — mounted once in AppShell, its open/closed state
+   * living in NavigationContext — so nothing about walking away from this
+   * screen closed it. A document opened here stayed open on top of the
+   * projects LIST, and every other surface after that, showing one project's
+   * invoice over an unrelated page until someone thought to dismiss it by
+   * hand. Nothing on the list has a panel, so there was no context left to
+   * explain what it was.
+   *
+   * Cleanup keyed on `projectId`, which covers both ways out: unmounting (the
+   * `?id` param dropped, or any other route) AND switching straight from one
+   * project to another. The route renders this component without a `key`, so
+   * an id change REUSES the instance — without `projectId` in the deps,
+   * project A's document would carry into project B.
+   *
+   * Deliberately not a route-level rule. Main chat drives this same panel from
+   * its own tab state and has to keep it across `?prd=` navigations that never
+   * change the pathname; a global "close on navigate" would fight that.
+   */
+  useEffect(() => {
+    return () => closeContentPanel()
+  }, [projectId, closeContentPanel])
 
   // Open a chat artifact in the SAME global side-panel main uses — exactly main's
   // panel behaviour (tabs, streaming, open/close, resize handle) for free. PRD,

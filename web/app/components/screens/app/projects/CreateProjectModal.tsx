@@ -35,19 +35,39 @@
 // user invite is a fast-follow, out of scope) never blocks project
 // creation or navigation.
 //
+// FILES AT CREATION (2026-09-08): the manual tab also takes documents. They
+// upload AFTER the project row exists — `POST /v1/projects/{id}/documents`
+// needs an id — so this is the same create-then-follow-up shape the artifact
+// tab and the invite rows already use. Each file becomes a `custom_artifact`
+// the project agent can READ, which is the point: a project created with its
+// brief already attached can answer questions on the first turn, where one
+// created empty needs a second trip through Add artifact first.
+//
+// DELIBERATELY NO FILE-COUNT CAP here (owner decision 2026-09-08). The server
+// caps each file at 25 MB and refuses what it cannot read; a count limit on
+// top would be an invention with no rule behind it. The chat composer is a
+// different question and is not touched by this.
+//
 // On create (AC2/AC3/AD-P14): `projectsApi.create` then navigate to the
 // FLAT `/projects?id=<new_id>` route — never `/projects/<new_id>`.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useCompany } from "../../../../context/CompanyContext"
+import { useNavigation } from "../../../../context/NavigationContext"
 import { projectPath } from "../../../../lib/routes"
 import { artifactsApi, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import type { InviteRole } from "../../../../lib/teamApi"
-import { IconClose } from "../../../shared/app-icons"
+import { IconClose, IconDocument } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./CreateProjectModal.module.css"
 
 export type CreateTab = "manual" | "artifact" | "auto"
+
+/** A MIRROR of `_MAX_DOCUMENT_BYTES` in backend/app/routes/projects.py, which
+ *  is the authority — it 413s past this whatever the client believes. Copied
+ *  so the picker can refuse a file before the reader waits through an upload
+ *  that was never going to land. */
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
 
 export type InviteRowState = { email: string; role: InviteRole }
 
@@ -107,6 +127,12 @@ export type CreateProjectModalViewProps = {
   onSelectArtifact: (a: ArtifactItem) => void
   selectedPrd: ArtifactItem | null
   onSelectPrd: (a: ArtifactItem) => void
+  /** Files staged for upload after the project is created. */
+  files: File[]
+  /** Set only when a pick was refused for size — otherwise nothing is said. */
+  oversized: string | null
+  onAddFiles: (picked: FileList | null) => void
+  onRemoveFile: (i: number) => void
   creating: boolean
   error: string | null
   onCancel: () => void
@@ -132,6 +158,10 @@ export function CreateProjectModalView({
   onSelectArtifact,
   selectedPrd,
   onSelectPrd,
+  files,
+  oversized,
+  onAddFiles,
+  onRemoveFile,
   creating,
   error,
   onCancel,
@@ -286,6 +316,82 @@ export function CreateProjectModalView({
                   onChange={(e) => onWhyChange(e.target.value)}
                   data-testid="create-project-why-input"
                 />
+              </div>
+
+              {/* Documents, before the invite rows: what the project is made
+                  of belongs nearer its name than who else can see it. */}
+              <div className={styles.field}>
+                {/* A DIV, not a <label htmlFor>. The picker below is itself a
+                    label wrapping the input, so a second one pointing at the
+                    same id would make the control's accessible name the two
+                    concatenated ("Add documents (optional) Choose files").
+                    The heading stays visible; the wrapper carries the name. */}
+                <div className="field-label">
+                  Add documents <span className={styles.hint}>(optional)</span>
+                </div>
+                {/* A LABEL WRAPPING A HIDDEN INPUT, which is how the rest of
+                    the app takes files (`.set-conn-upload`, Settings →
+                    Connectors). A bare `<input type="file">` renders the
+                    browser's own control — a grey "Choose files / No file
+                    chosen" that ignores every token on the page and looks
+                    different in each browser. The label is a real control for
+                    keyboard and screen readers (clicking it opens the picker,
+                    the input keeps the id and the accessible name), so nothing
+                    is traded for the styling.
+
+                    Styled here rather than reusing `.set-conn-upload` itself:
+                    that class carries the connectors surface's hardcoded green
+                    hover, which would arrive in this dialog as a colour from
+                    nowhere. */}
+                <label className={styles.filePick} data-testid="create-project-files-pick">
+                  <IconDocument size={16} />
+                  <span className={styles.filePickText}>
+                    {files.length === 0
+                      ? "Choose files"
+                      : `${files.length} file${files.length === 1 ? "" : "s"} ready — add more`}
+                  </span>
+                  <input
+                    id="create-project-files"
+                    type="file"
+                    multiple
+                    className={styles.fileInput}
+                    onChange={(e) => {
+                      onAddFiles(e.target.files)
+                      // Clear the control so picking the SAME file again after
+                      // removing it still fires a change event.
+                      e.target.value = ""
+                    }}
+                    data-testid="create-project-files-input"
+                  />
+                </label>
+                {files.length > 0 ? (
+                  <ul className={styles.fileList} data-testid="create-project-file-list">
+                    {files.map((f, i) => (
+                      <li key={`${f.name}-${i}`} className={styles.fileRow}>
+                        <span className={styles.fileName}>{f.name}</span>
+                        <button
+                          type="button"
+                          className="invite-remove-btn"
+                          onClick={() => onRemoveFile(i)}
+                          aria-label={`Remove ${f.name}`}
+                          data-testid={`create-project-file-remove-${i}`}
+                        >
+                          <IconClose size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                {/* NO STANDING HINT HERE. It explained the 25 MB limit and
+                    what we do with the files to everyone, on every visit,
+                    including the vast majority who upload two small documents
+                    and never come near either concern. The limit is worth
+                    saying exactly once — to the person who just hit it. */}
+                {oversized ? (
+                  <p className={styles.fieldError} data-testid="create-project-files-error">
+                    {oversized}
+                  </p>
+                ) : null}
               </div>
 
               <div className={styles.field}>
@@ -493,6 +599,7 @@ export function CreateProjectModalView({
 export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const router = useRouter()
   const { activeCompany } = useCompany()
+  const { showToast } = useNavigation()
 
   const [tab, setTab] = useState<CreateTab>("manual")
   const [name, setName] = useState("")
@@ -502,6 +609,8 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactItem | null>(null)
   const [selectedPrd, setSelectedPrd] = useState<ArtifactItem | null>(null)
+  const [files, setFiles] = useState<File[]>([])
+  const [oversized, setOversized] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -516,6 +625,8 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setRows([{ email: "", role: "member" }])
     setSelectedArtifact(null)
     setSelectedPrd(null)
+    setFiles([])
+    setOversized(null)
     setCreating(false)
     setError(null)
     setArtifactsStatus("loading")
@@ -548,6 +659,36 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setRows((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev))
   }, [])
 
+  /**
+   * APPEND, never replace. A picker fires once per visit, so someone adding
+   * three files in three visits must end up with three — assigning would leave
+   * them with the last one and no sign the others were dropped.
+   *
+   * OVERSIZE FILES ARE REFUSED HERE, mirroring the server's own 25 MB cap
+   * (`_MAX_DOCUMENT_BYTES`, routes/projects.py). Catching it at the picker
+   * means the reader is told before they wait through an upload that ends in a
+   * 413 — and it is the only place the limit is mentioned at all, since the
+   * standing hint that used to announce it to everyone is gone.
+   */
+  const onAddFiles = useCallback((picked: FileList | null) => {
+    if (!picked || picked.length === 0) return
+    const all = Array.from(picked)
+    const tooBig = all.filter((f) => f.size > MAX_DOCUMENT_BYTES)
+    const ok = all.filter((f) => f.size <= MAX_DOCUMENT_BYTES)
+    // Whatever DID fit is still staged — refusing the whole pick because one
+    // file was oversized would make the reader select the rest again.
+    if (ok.length > 0) setFiles((prev) => [...prev, ...ok])
+    setOversized(
+      tooBig.length === 0
+        ? null
+        : `${tooBig.map((f) => f.name).join(", ")} ${tooBig.length === 1 ? "is" : "are"} over the 25 MB limit and ${tooBig.length === 1 ? "wasn't" : "weren't"} added.`,
+    )
+  }, [])
+
+  const onRemoveFile = useCallback((i: number) => {
+    setFiles((prev) => prev.filter((_, idx) => idx !== i))
+  }, [])
+
   const onCreate = useCallback(() => {
     if (creating) return
     setError(null)
@@ -573,6 +714,62 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
           ).then(() => project)
         })
         .then((project) => {
+          // Uploads run AFTER creation because the endpoint is keyed on the
+          // project id, and they are AWAITED before navigating so the reader
+          // lands on a project whose documents are already there rather than
+          // watching them appear.
+          //
+          // Best-effort, exactly like the member-add above: the server refuses
+          // a file it cannot read (a scanned PDF is a 422) and one bad file
+          // must not cost someone the project and everything else in it. What
+          // failed is named on arrival — a document silently missing from a
+          // project is worse than a sentence saying which one.
+          if (files.length === 0) return { project, unreadable: [], broken: [] }
+          return Promise.allSettled(
+            files.map((f) => projectsApi.uploadDocument(project.id, f)),
+          ).then((results) => {
+            // SPLIT BY WHY, because the two have different answers. A 422 is
+            // the server saying it found no text — a screen-capture PDF, a
+            // photo of a page — and no retry fixes that. Anything else (a
+            // dropped connection, a 5xx) is worth trying again. Reporting both
+            // as "couldn't be read" would send someone hunting for a problem
+            // with a file that was fine.
+            //
+            // The status is read off the error rather than through
+            // `instanceof ApiError`: this is a message string, not a control
+            // decision, and a defensive read cannot throw on an error shape
+            // that is not the one expected.
+            const unreadable: string[] = []
+            const broken: string[] = []
+            results.forEach((r, i) => {
+              if (r.status !== "rejected") return
+              const code = (r.reason as { status?: number } | null)?.status
+              ;(code === 422 ? unreadable : broken).push(files[i]!.name)
+            })
+            return { project, unreadable, broken }
+          })
+        })
+        .then(({ project, unreadable, broken }) => {
+          // SAY WHICH FILE DIDN'T TAKE, AND WHY. The project is created and we
+          // are about to navigate into it, so an error inside the modal would
+          // vanish with the modal — the toast is the only surface that survives
+          // the navigation. A document silently missing from a project is the
+          // failure worth avoiding: nobody re-checks an upload they were not
+          // told about.
+          if (unreadable.length > 0) {
+            showToast(
+              unreadable.length === 1
+                ? "No text in one file"
+                : `No text in ${unreadable.length} files`,
+              `${unreadable.join(", ")} — a PDF made of images (a screenshot or a scan) has no text to read, so there was nothing to attach. Export it as text, or paste the content into the project chat.`,
+            )
+          }
+          if (broken.length > 0) {
+            showToast(
+              broken.length === 1 ? "One file didn't upload" : `${broken.length} files didn't upload`,
+              `${broken.join(", ")} — the project was created without ${broken.length === 1 ? "it" : "them"}. Try again from Add artifact.`,
+            )
+          }
           router.push(projectPath(project.id))
           onClose()
         })
@@ -663,7 +860,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
         .catch(() => setError("Couldn't create the project. Try again."))
         .finally(() => setCreating(false))
     }
-  }, [creating, tab, name, whyText, rows, selectedArtifact, selectedPrd, router, onClose])
+  }, [creating, tab, name, whyText, rows, files, selectedArtifact, selectedPrd, router, onClose, showToast])
 
   return (
     <CreateProjectModalView
@@ -685,6 +882,10 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       onSelectArtifact={setSelectedArtifact}
       selectedPrd={selectedPrd}
       onSelectPrd={setSelectedPrd}
+      files={files}
+      oversized={oversized}
+      onAddFiles={onAddFiles}
+      onRemoveFile={onRemoveFile}
       creating={creating}
       error={error}
       onCancel={onClose}
