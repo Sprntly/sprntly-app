@@ -76,6 +76,7 @@
  * and not inside the document.
  */
 import { useCallback, useState } from "react"
+import { DisclosureNotes } from "./DisclosureNotes"
 import { HtmlReportView } from "./HtmlReportView"
 import { goalAnalysisApi, type ClaimSource, type GoalRunDetail } from "../../lib/api"
 
@@ -245,6 +246,18 @@ export function GoalAnalysisReport({
           </div>
         ) : null}
       </header>
+
+      {/* THE DISCLOSURE CHANNEL, OUTSIDE THE SANDBOXED DOCUMENT. `notes`
+          rides on the run's own PLAN, which — per its own field comment —
+          survives into `ready` as the record of what was read; this is the
+          same array the plan gate showed before the run started, read back
+          here rather than recomputed. See `DisclosureNotes` for why every
+          note renders regardless of `kind`. */}
+      <DisclosureNotes
+        notes={run.prioritisation?.plan?.notes}
+        className="ga-doc-note"
+        testIdPrefix="goal-report-note"
+      />
 
       {html ? (
         <HtmlReportView html={html} title="Goal analysis" fitPanel />

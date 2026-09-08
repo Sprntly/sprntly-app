@@ -1669,6 +1669,8 @@ def test_a_run_with_no_source_scope_behaves_exactly_as_before(ctx):
     assert plan["sources"], "the default scope must still read the workspace"
     assert "source_scope_note" not in plan
     assert "workspace_signals_set_aside" not in plan
+    # The disclosure channel: nothing to disclose, nothing on the plan.
+    assert "notes" not in plan
 
 
 def test_attachments_scope_is_disclosed_at_the_gate_before_approval(ctx):
@@ -1690,6 +1692,44 @@ def test_attachments_scope_is_disclosed_at_the_gate_before_approval(ctx):
     assert plan["workspace_sources_set_aside"] == 1
     assert "connected workspace was not read" in plan["source_scope_note"]
     assert "4" in plan["source_scope_note"]
+
+
+def test_source_scope_is_disclosed_on_the_uniform_notes_channel(ctx):
+    """`source_scope` is the notes channel's first producer. The frontend
+    renders every entry in `notes` by its `text`, with no case on `kind`
+    (`DisclosureNotes.tsx`), so proving the channel carries this note with
+    the right `kind` and the same wording `source_scope_note` already carries
+    is what makes it actually reach a reader rather than sitting on the API
+    response unread — the failure this run's disclosure shipped as the first
+    time."""
+    for i in range(4):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx, source_scope="attachments").json()["id"]
+    _confirm(ctx, run_id)
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert plan["notes"] == [
+        {"kind": "source_scope", "text": plan["source_scope_note"]},
+    ]
+
+
+def test_a_run_with_no_source_scope_carries_no_notes_after_approval(ctx):
+    """The channel's negative half, past `/approve` too (the gate-only case
+    is covered by `test_a_run_with_no_source_scope_behaves_exactly_as_
+    before`): a workspace-scope run's stored plan carries nothing on `notes`
+    once the run has actually gone through, not only while it is still
+    waiting to be approved."""
+    for i in range(3):
+        _signal(ctx.company_id, i)
+
+    run_id = _start(ctx).json()["id"]
+    _confirm(ctx, run_id)
+    ctx.client.post(f"/v1/crucible/{run_id}/approve",
+                    json={"excluded_sources": [], "hypotheses": []})
+
+    plan = ctx.client.get(f"/v1/crucible/{run_id}").json()["prioritisation"]["plan"]
+    assert "notes" not in plan
 
 
 def test_attachments_scope_reads_only_the_attached_document(ctx, monkeypatch, tmp_path):
