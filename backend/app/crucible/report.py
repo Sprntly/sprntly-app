@@ -526,6 +526,22 @@ def _what_was_read_section(run: dict, plan: dict) -> str:
                 + ", ".join(_human_source(e) for e in excluded)
                 + " before this ran, so nothing below rests on it."
             ))
+        # SOURCE SCOPE, DISCLOSED IN THE SAME REGISTER AS THE EXCLUSION
+        # SENTENCE ABOVE. `total`/`sources` already print the narrowed
+        # attachment-only corpus (`routes.crucible._apply_attachments_scope`
+        # rewrote them before this run was even approved) — this sentence is
+        # what says WHY they are narrow, so a reader does not mistake a scope
+        # setting for a connected workspace that came up empty.
+        if plan.get("source_scope") == "attachments":
+            aside = int(plan.get("workspace_signals_set_aside") or 0)
+            aside_sources = int(plan.get("workspace_sources_set_aside") or 0)
+            out.append(_p(
+                "This run is scoped to attachments only. The connected "
+                "workspace was not read; "
+                f"{aside:,} signal{'' if aside == 1 else 's'} across "
+                f"{aside_sources:,} source{'' if aside_sources == 1 else 's'} "
+                "were set aside."
+            ))
     else:
         out.append(_p(
             "This run kept no record of which sources it read, so what is "

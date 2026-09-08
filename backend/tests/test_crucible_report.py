@@ -594,6 +594,33 @@ def test_a_source_the_user_dropped_is_named_in_the_readers_language():
     assert "project_mgmt" not in html
 
 
+def test_attachments_scope_discloses_the_workspace_was_not_read():
+    """AC3 — the report's own half of the disclosure. `source_scope` and the
+    set-aside counts arrive pre-computed on the plan (`routes.crucible`'s
+    `_apply_attachments_scope` writes them before a reader ever approves), so
+    this only has to prove the renderer turns them into a sentence a reader
+    actually meets — never that the workspace was silently narrower."""
+    html = render_report_html(_run(prioritisation={"plan": _plan(
+        source_scope="attachments",
+        sources=[],
+        total_signals=1,
+        workspace_signals_set_aside=300,
+        workspace_sources_set_aside=1,
+        excluded_sources=[],
+    )}), [_finding()])
+    plain = _plain(html)
+    assert "connected workspace was not read" in plain
+    assert "300" in plain and "1 source" in plain
+
+
+def test_a_plan_with_the_default_scope_never_mentions_attachments():
+    """AC1 — a run that never set `source_scope` (every run before this
+    existed, and every default-scope run since) must not print a sentence
+    about attachments at all. The absence is the proof of "unchanged"."""
+    html = render_report_html(_run(), [_finding()])
+    assert "connected workspace was not read" not in _plain(html)
+
+
 # ─── 2. It has to survive the sanitizer ─────────────────────────────────────
 
 def test_the_rendered_report_survives_the_artifact_sanitizer_intact():

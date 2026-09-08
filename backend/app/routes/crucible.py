@@ -24,7 +24,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from functools import partial
-from typing import Annotated, Optional
+from typing import Annotated, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, StringConstraints
@@ -124,6 +124,15 @@ class StartRun(BaseModel):
     #: it and every downstream reader falls back to `goal_text`, exactly as
     #: before this field existed.
     asked_text: Optional[str] = Field(default=None, max_length=2000)
+    #: THE RUN'S CORPUS, ADDITIVE AND OPT-IN. `"workspace"` (the default) is
+    #: today's behaviour exactly — the connected corpus, unchanged. Set to
+    #: `"attachments"` and a run reads ONLY the documents attached to it: the
+    #: connected workspace is not read at all, and the run says so, with a
+    #: count, at the gate and in the report — the same disclosure discipline
+    #: `excluded_sources` already holds a reader to when THEY narrow the
+    #: corpus. A caller that never sends this field gets exactly what every
+    #: run got before it existed.
+    source_scope: Literal["workspace", "attachments"] = "workspace"
 
 
 class ConfirmGoal(BaseModel):
@@ -192,11 +201,13 @@ async def start(
         conversation_id=body.conversation_id,
         created_by=company.user_id,
         asked_text=body.asked_text,
+        source_scope=body.source_scope,
     )
 
     kwargs = dict(run_id=row["id"], company_id=company.company_id,
                   goal_text=body.goal_text, asked_text=body.asked_text,
-                  workspace_id=company.workspace_id, uploads=uploads)
+                  workspace_id=company.workspace_id, uploads=uploads,
+                  source_scope=body.source_scope)
     if "pytest" in sys.modules:
         # The TestClient does not keep the loop alive between requests, so a
         # fire-and-forget task would never run and a polling test would spin
@@ -349,7 +360,10 @@ async def confirm(
                   # `create()` is the only place `asked_text` is ever
                   # written, and this endpoint's own request shape
                   # (`ConfirmGoal`) never carried it.
-                  asked_text=_row_meta(claimed).get("asked_text"))
+                  asked_text=_row_meta(claimed).get("asked_text"),
+                  # SAME REASON. `source_scope` is a `/start`-only field too.
+                  source_scope=_row_meta(claimed).get("source_scope")
+                  or "workspace")
     if "pytest" in sys.modules:
         await asyncio.to_thread(execute_run, **kwargs)
     else:
@@ -969,6 +983,7 @@ async def approve(
         hypotheses=tuple(body.hypotheses),
         # READ BACK OFF THE ROW — see the `/confirm` handler's own comment.
         asked_text=_row_meta(claimed).get("asked_text"),
+        source_scope=_row_meta(claimed).get("source_scope") or "workspace",
         # THE FILES THE PLAN WAS BUILT OVER, RE-AUTHORISED HERE.
         #
         # `/start` checked every key against the caller's workspace before the
@@ -1067,6 +1082,50 @@ def _complete_plan_steps(
                          "the deterministic one stands", run_id)
 
 
+def _apply_attachments_scope(plan_json: dict) -> dict:
+    """Rewrite a freshly built plan so `source_scope="attachments"` is true
+    the moment the reader sees it — before they have approved anything.
+
+    `sources`/`total_signals` are what `_what_was_read_section` and the stat
+    header print VERBATIM (`report._stat_strip`, `report._what_was_read_section`).
+    Leaving them at the workspace figure while this run will read none of it
+    is exactly the undisclosed-narrower-corpus failure `excluded_sources`'s
+    post-query placement exists to prevent — just arrived at from the
+    opposite direction, before rather than after the reader's own choice.
+
+    THE REPLACEMENT TOTAL IS NOT A GUESS. `uploads` and `prose_uploads` are
+    already the attachment-only counts reconnaissance just produced
+    (`plan.uploads_from_report`/`prose_from_report`) — the same numbers the
+    gate is about to print as "what was read" for each attached file.
+    """
+    sources = [s for s in (plan_json.get("sources") or []) if isinstance(s, dict)]
+    workspace_signals = sum(int(s.get("signal_count") or 0) for s in sources)
+    workspace_sources = len(sources)
+    attachment_signals = sum(
+        int(u.get("records") or 0)
+        for u in (plan_json.get("uploads") or []) if isinstance(u, dict)
+    ) + sum(
+        int(p.get("conversations") or 0)
+        for p in (plan_json.get("prose_uploads") or []) if isinstance(p, dict)
+    )
+    plan_json = dict(plan_json)
+    plan_json["sources"] = []
+    plan_json["total_signals"] = attachment_signals
+    # NAMED SEPARATELY FROM `excluded_sources`. That field means "the reader
+    # unticked these at the gate"; nothing here was unticked, so reusing it
+    # would attribute a scope SETTING to a reader ACT that never happened.
+    plan_json["workspace_signals_set_aside"] = workspace_signals
+    plan_json["workspace_sources_set_aside"] = workspace_sources
+    plan_json["source_scope_note"] = (
+        "Source scope is set to attachments: only the documents attached to "
+        "this run are read. The connected workspace was not read; "
+        f"{workspace_signals:,} signal{'' if workspace_signals == 1 else 's'} "
+        f"across {workspace_sources:,} "
+        f"source{'' if workspace_sources == 1 else 's'} were set aside."
+    )
+    return plan_json
+
+
 def execute_run(
     *,
     run_id: int,
@@ -1095,6 +1154,12 @@ def execute_run(
     #: prefix is what authorises the read, and a company id cannot stand in
     #: for it. Empty means "no uploads", which is the normal case.
     workspace_id: str = "",
+    #: THE CORPUS SWITCH — see `StartRun.source_scope`. `"workspace"` is
+    #: every run before this existed. `"attachments"` is honoured at Stage 4,
+    #: after `_load_signals` and the `excluded_sources` filter, for the same
+    #: reason that filter is honoured post-query rather than pre-query: the
+    #: run still needs the workspace count to say how much it set aside.
+    source_scope: str = "workspace",
 ) -> None:
     """The whole deterministic pipeline. TOTAL — never raises to its caller.
 
@@ -1221,6 +1286,13 @@ def execute_run(
                         # so `/confirm`'s own re-read of the row still finds
                         # it.
                         "asked_text": asked_text or "",
+                        # SAME REASON, SAME FIX. A wholesale replace, not a
+                        # merge — `create()` may already have written this
+                        # for a caller who opted into `attachments` scope,
+                        # and dropping it here would have `/confirm`'s
+                        # re-read find nothing and silently fall back to
+                        # `workspace`.
+                        "source_scope": source_scope,
                         # Carried, never resolved: two authoritative systems
                         # disagreeing about what a metric means is worth more than
                         # either answer, and picking one silently is the failure.
@@ -1298,7 +1370,18 @@ def execute_run(
                 compose=False,
             )
             meta = dict(_meta_of(run_id, company_id))
-            meta["plan"] = plan.to_json()
+            plan_json = plan.to_json()
+            plan_json["source_scope"] = source_scope
+            if source_scope == "attachments":
+                # DISCLOSED AT THE GATE, NOT ONLY AT APPROVE. The reader
+                # decides whether to approve BEFORE the run reads anything,
+                # so the plan they see here already has to say the connected
+                # workspace will not be read — an undisclosed narrower corpus
+                # is the exact failure `excluded_sources`' own post-query
+                # placement exists to prevent, and that reasoning applies
+                # just as much to a corpus narrowed by this switch.
+                plan_json = _apply_attachments_scope(plan_json)
+            meta["plan"] = plan_json
             if uploads:
                 # THE REFERENCES, NOT THE CONTENT, AND FOR ONE REASON.
                 # Approving a plan is a second request: it arrives with a run
@@ -1381,9 +1464,18 @@ def execute_run(
                     if src.get("source_type") not in excluded_sources
                 ]
                 plan_json["sources"] = kept
-                plan_json["total_signals"] = sum(
-                    src.get("signal_count") or 0 for src in kept
-                )
+                if plan_json.get("source_scope") != "attachments":
+                    # In attachments scope `sources` is already `[]` — set at
+                    # the plan-build stage above by `_apply_attachments_scope`
+                    # — and `total_signals` already names the ATTACHMENT
+                    # corpus, not the workspace one. Recomputing it from
+                    # `kept` here would silently overwrite that with zero,
+                    # which is the undisclosed-narrower-corpus failure this
+                    # whole mechanism exists to prevent, just arrived at from
+                    # the opposite direction.
+                    plan_json["total_signals"] = sum(
+                        src.get("signal_count") or 0 for src in kept
+                    )
                 plan_json["excluded_sources"] = list(excluded_sources)
                 plan_json["hypotheses"] = list(hypotheses)
                 # AND THE GAPS AND PROMISES, which are DERIVED from the kept
@@ -1637,6 +1729,19 @@ def execute_run(
                        if r.get("source_type") not in excluded_sources]
             logger.info("crucible: user excluded %d signals from %s",
                         len(dropped), ", ".join(sorted(excluded_sources)))
+        if source_scope == "attachments":
+            # THE SCOPE SWITCH, HONOURED HERE FOR THE SAME REASON
+            # `excluded_sources` IS. The connected corpus was already read
+            # above by `_load_signals` — this is not a narrower query, it is
+            # this run choosing not to use what it read, which is exactly the
+            # distinction that lets `_apply_attachments_scope` disclose a real
+            # count rather than a query the run never ran. Nothing here
+            # widens or narrows what a query selects; it changes only what
+            # this run does with what it already has.
+            logger.info("crucible: source_scope=attachments; setting aside "
+                        "%d workspace signal(s) for %s",
+                        len(signals), company_id)
+            signals = []
         # ── THE SECOND CLAIM SOURCE: PROSE THE READER ATTACHED. ────────────
         #
         # AFTER THE EXCLUSION FILTER, AND THAT IS NOT AN OVERSIGHT.
