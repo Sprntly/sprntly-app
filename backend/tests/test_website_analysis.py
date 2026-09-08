@@ -63,6 +63,27 @@ _FULL_OUTPUT = {
     "provenance": "name + url given; industry/business_type/metrics inferred from site.",
 }
 
+# v2 (2026-09-08): everything the Settings panes render and the scrape used to
+# leave for a person to type — identity, how they sell, the segment, the
+# surfaces they ship on.
+_FULL_OUTPUT_V2 = {
+    "legal_name": "Acme Field Systems Ltd",
+    "one_liner": "Field-service software for HVAC contractors.",
+    "company_size": "40+ people",
+    "hq_geography": "Manchester, UK",
+    "markets_served": "UK and Ireland",
+    "revenue_model": "Subscriptions",
+    "pricing_model": "Per seat, three tiers",
+    "who_pays": "Operations director",
+    "who_uses": "Dispatchers and field technicians",
+    "primary_segment": "Mid-market HVAC contractors",
+    "platforms": ["web", "mobile"],
+    "key_features": "Scheduling, dispatch, invoicing",
+    "category": "Field-service management",
+    "positioning_angle": "Built for the van, not the desk",
+}
+
+
 # The same fixture, plus the five fields cut from the onboarding steps
 # (2026-09-03) that are now scraped instead of typed.
 _FULL_OUTPUT_WITH_ONBOARDING_FIELDS = {
@@ -592,3 +613,172 @@ def test_route_get_foreign_job_returns_404(company_client, monkeypatch, isolated
     ).eq("id", start["job_id"]).execute()
     r = company_client.get(f"/v1/onboarding/analyze-website/{start['job_id']}")
     assert r.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# v2 — the fields the panes render and the scrape used to leave blank
+# --------------------------------------------------------------------------- #
+def _run_v2(monkeypatch, extra=None):
+    """Run an analysis whose model output carries the v2 fields."""
+    out = {
+        **_FULL_OUTPUT_WITH_ONBOARDING_FIELDS,
+        **_FULL_OUTPUT_V2,
+        **(extra or {}),
+    }
+    _patch_fetch(monkeypatch, {"acme.com": "Acme — field service software."})
+    with patch.object(wa, "llm_call", return_value=_llm_result(out)):
+        return wa.analyze_website(_COMPANY_ID, "https://acme.com")
+
+
+def test_v2_fields_land_on_the_business_context_doc(seeded_company, monkeypatch):
+    """Each of these had a slot in the doc and a row in Settings that rendered
+    blank, because nothing wrote them. The scrape inferred four leaves and left
+    eleven for a person to type."""
+    from app.business_context import load_business_context
+
+    _run_v2(monkeypatch)
+    doc = load_business_context(_COMPANY_ID)
+
+    assert doc.identity.one_liner.value == "Field-service software for HVAC contractors."
+    assert doc.identity.company_size.value == "40+ people"
+    assert doc.identity.hq_geography.value == "Manchester, UK"
+    assert doc.identity.markets_served.value == "UK and Ireland"
+    assert doc.business_model.revenue_model.value == "Subscriptions"
+    assert doc.business_model.pricing_model.value == "Per seat, three tiers"
+    assert doc.business_model.who_pays.value == "Operations director"
+    assert doc.business_model.who_uses.value == "Dispatchers and field technicians"
+    assert doc.users_segments.primary_segment.value == "Mid-market HVAC contractors"
+    assert doc.product_value.key_features.value == "Scheduling, dispatch, invoicing"
+    assert doc.market_competition.category.value == "Field-service management"
+    assert doc.market_competition.positioning_angle.value == "Built for the van, not the desk"
+    # Web-derived, so every one is `inferred` and carries the URL as evidence —
+    # never presented as something the team stated.
+    assert doc.identity.company_size.src == "inferred"
+    assert doc.identity.company_size.evidence == "https://acme.com"
+
+
+def test_legal_name_is_taken_from_the_site_when_stated(seeded_company, monkeypatch):
+    from app.business_context import load_business_context
+
+    _run_v2(monkeypatch)
+    doc = load_business_context(_COMPANY_ID)
+
+    assert doc.identity.legal_name.value == "Acme Field Systems Ltd"
+    # Evidenced by the site, so it is not the low-confidence fallback below.
+    assert doc.identity.legal_name.conf == "med"
+
+
+def test_legal_name_falls_back_to_the_company_name(seeded_company, monkeypatch):
+    """Owner decision 2026-09-08. Most sites never state a registered entity,
+    and the field sat empty on every workspace as a result — the company's own
+    name is what a reader would put there anyway. Filled at LOW confidence to
+    say plainly that this is the name we were GIVEN, not one the site
+    evidenced."""
+    from app.business_context import load_business_context
+
+    _run_v2(monkeypatch, {"legal_name": None})
+    doc = load_business_context(_COMPANY_ID)
+
+    assert doc.identity.legal_name.value == "Acme"
+    assert doc.identity.legal_name.conf == "low"
+
+
+def test_surfaces_and_positioning_land_on_the_product_row(seeded_company, monkeypatch):
+    """The doc is what chat reads; Product & Category reads the product row.
+    A scrape that filled only the doc leaves the pane blank for anyone who
+    opens it."""
+    _seed_product(seeded_company, _COMPANY_ID)
+    _run_v2(monkeypatch)
+    row = (
+        seeded_company.table("products").select("*").eq("company_id", _COMPANY_ID)
+        .execute().data[0]
+    )
+
+    assert row["surfaces"] == ["web", "mobile"]
+    assert row["positioning"] == "Built for the van, not the desk"
+
+
+def test_icp_is_merged_key_by_key_not_replaced(seeded_company, monkeypatch):
+    """The three ICP fields share one jsonb blob. A workspace that typed a
+    buyer persona and nothing else must keep it while the scrape fills the two
+    beside it — a wholesale replace would erase the typed one."""
+    seeded_company.table("companies").update(
+        {"icp": {"buyer_persona": "Someone we already described"}}
+    ).eq("id", _COMPANY_ID).execute()
+
+    _run_v2(monkeypatch)
+    row = seeded_company.table("companies").select("icp").eq("id", _COMPANY_ID).execute().data[0]
+
+    assert row["icp"]["buyer_persona"] == "Someone we already described"
+    assert row["icp"]["segment"] == "Mid-market HVAC contractors"
+    assert row["icp"]["buyer"] == "Operations director"
+
+
+def test_a_surface_the_frontend_cannot_render_is_dropped(seeded_company, monkeypatch):
+    """Same guard as monetization: a value that slipped through the schema
+    would fill the column and then never appear as a chip — a write nobody can
+    see and nobody can clear."""
+    _seed_product(seeded_company, _COMPANY_ID)
+    _run_v2(monkeypatch, {"platforms": ["web", "smartwatch", "MOBILE"]})
+    row = (
+        seeded_company.table("products").select("surfaces").eq("company_id", _COMPANY_ID)
+        .execute().data[0]
+    )
+
+    assert row["surfaces"] == ["web", "mobile"]
+
+
+def test_typed_surfaces_and_icp_are_never_overwritten(seeded_company, monkeypatch):
+    """The whole gap-only rule, on the new fields. Someone who answered in
+    Settings before the scrape landed keeps their answer."""
+    _seed_product(seeded_company, _COMPANY_ID)
+    seeded_company.table("products").update(
+        {"surfaces": ["api"], "positioning": "Ours, typed by hand"}
+    ).eq("company_id", _COMPANY_ID).execute()
+    seeded_company.table("companies").update(
+        {"icp": {"segment": "Typed segment", "buyer": "Typed buyer",
+                 "buyer_persona": "Typed persona"}}
+    ).eq("id", _COMPANY_ID).execute()
+
+    _run_v2(monkeypatch)
+
+    product = (
+        seeded_company.table("products").select("*").eq("company_id", _COMPANY_ID)
+        .execute().data[0]
+    )
+    company = (
+        seeded_company.table("companies").select("icp").eq("id", _COMPANY_ID)
+        .execute().data[0]
+    )
+    assert product["surfaces"] == ["api"]
+    assert product["positioning"] == "Ours, typed by hand"
+    assert company["icp"] == {
+        "segment": "Typed segment", "buyer": "Typed buyer",
+        "buyer_persona": "Typed persona",
+    }
+
+
+def test_a_site_that_says_none_of_it_writes_none_of_it(seeded_company, monkeypatch):
+    """NEVER FABRICATE, on the new fields too. A brochure site that states no
+    headcount, no pricing structure and no segment must leave those blank
+    rather than have them guessed — an inferred wrong answer is worse than an
+    empty field, because nobody goes back to check a filled one."""
+    from app.business_context import load_business_context
+
+    _seed_product(seeded_company, _COMPANY_ID)
+    nulls = {k: None for k in _FULL_OUTPUT_V2 if k != "platforms"}
+    nulls["platforms"] = []
+    _run_v2(monkeypatch, nulls)
+
+    doc = load_business_context(_COMPANY_ID)
+    assert not doc.identity.company_size.is_known
+    assert not doc.business_model.pricing_model.is_known
+    assert not doc.users_segments.primary_segment.is_known
+    product = (
+        seeded_company.table("products").select("surfaces").eq("company_id", _COMPANY_ID)
+        .execute().data[0]
+    )
+    assert not product["surfaces"]
+    # …except the legal-name fallback, which is a name we were GIVEN rather
+    # than one inferred from the site.
+    assert doc.identity.legal_name.value == "Acme"

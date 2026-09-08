@@ -1023,6 +1023,21 @@ export type GoalPlanCoverage = {
 /** What the run will do, said BEFORE it does it. This is what the user
  *  approves, and it stays on the run afterwards as the record of what was
  *  read. */
+/** ONE ENTRY ON THE UNIFORM DISCLOSURE CHANNEL (`GoalRunPlan["notes"]`).
+ *
+ *  `kind` is a stable machine identifier for whatever computed this note
+ *  (`"source_scope"` today); `text` is the whole sentence, written by the
+ *  backend. Nothing that renders a `GoalDisclosureNote` may branch on `kind`
+ *  to decide WHETHER to show `text` — every note in the array renders,
+ *  including a `kind` this client has never heard of. That is the entire
+ *  point of the channel: a disclosure computed tomorrow reaches a reader the
+ *  day it ships, with no matching frontend change required. See
+ *  `DisclosureNotes` (`components/shared/DisclosureNotes.tsx`). */
+export type GoalDisclosureNote = {
+  kind: string
+  text: string
+}
+
 export type GoalRunPlan = {
   goal_text: string
   /** THE READER'S OWN SENTENCE, when the run has one distinct from
@@ -1063,6 +1078,14 @@ export type GoalRunPlan = {
   will_produce: string[]
   /** Source types the user dropped at the plan step. */
   excluded_sources?: string[]
+  /** THE UNIFORM DISCLOSURE CHANNEL. Absent on a plan with nothing to
+   *  disclose (every run before this existed, and every run since with no
+   *  reason to say anything extra) — that renders as no notes at all, same
+   *  as an empty array. `excluded_sources` and the other disclosures above
+   *  are NOT migrated onto this yet; they keep their own dedicated fields
+   *  and rendering. `source_scope` is the channel's first, and so far only,
+   *  producer. */
+  notes?: GoalDisclosureNote[]
   /** The user's own hypotheses, carried into the run. */
   hypotheses?: string[]
   /** Where the proposed definition came from, in words fit to render. Empty

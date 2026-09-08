@@ -1123,6 +1123,17 @@ def _apply_attachments_scope(plan_json: dict) -> dict:
         f"across {workspace_sources:,} "
         f"source{'' if workspace_sources == 1 else 's'} were set aside."
     )
+    # THE FIRST ENTRY ON THE UNIFORM DISCLOSURE CHANNEL. `notes` is a plain
+    # `{kind, text}` list: the frontend renders every entry it finds by its
+    # `text`, with no switch on `kind`, so a note reaches a reader the moment
+    # it is emitted here rather than staying invisible until someone also
+    # remembers to teach a component about it — the failure this run's own
+    # `source_scope_note` shipped as (computed here, consumed nowhere) before
+    # the channel existed. `source_scope_note` stays too: `report.py` still
+    # reads it by name, and this is additive, not a replacement.
+    plan_json["notes"] = [
+        {"kind": "source_scope", "text": plan_json["source_scope_note"]},
+    ]
     return plan_json
 
 

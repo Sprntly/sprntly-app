@@ -36,9 +36,10 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
+from statistics import median
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
 logger = logging.getLogger(__name__)
@@ -694,6 +695,124 @@ def aggregate_by_group(
             continue
         out[key] = out.get(key, 0.0) + v
     return out
+
+
+def band_label(
+    value: Optional[float], edges: Sequence[float],
+) -> Optional[str]:
+    """Which of ascending EDGES' bands VALUE falls into, as `"[lo, hi)"` —
+    or `"[lo, hi]"` for the last band, so its own upper bound is never
+    orphaned. `None` for a non-number, an edge list under two points, or a
+    value outside `[edges[0], edges[-1]]`.
+
+    A NAME, not a group. Grouping a banded numeric column is `aggregate_by_group`
+    (or `median_by_group`, `rate_by_group`) run against a table where this has
+    already relabelled the column — see `with_banded_column` — so a numeric
+    dimension is grouped by exactly the same accumulator a coded one is,
+    and neither of those functions needs to know banding exists.
+    """
+    if value is None or len(edges) < 2:
+        return None
+    lo0, hiN = edges[0], edges[-1]
+    if value < lo0 or value > hiN:
+        return None
+    last = len(edges) - 2
+    for i in range(len(edges) - 1):
+        lo, hi = edges[i], edges[i + 1]
+        if i == last:
+            if lo <= value <= hi:
+                return f"[{lo:g}, {hi:g}]"
+        elif lo <= value < hi:
+            return f"[{lo:g}, {hi:g})"
+    return None
+
+
+def with_banded_column(
+    table: Table, field: str, edges: Sequence[float], *, as_field: str,
+) -> Table:
+    """TABLE, plus a new column AS_FIELD holding `field`'s `band_label`.
+
+    The row-shape adapter that lets a numeric dimension be grouped the same
+    way a coded one already is — REUSE, not a parallel engine. Nothing about
+    `field` itself changes; a row whose value bands to `None` (blank, wrong
+    type, or outside the edges) simply carries `None` in the new column, which
+    `aggregate_by_group`'s own `_is_blank` check then excludes exactly as it
+    excludes any other blank group key.
+    """
+    rows = tuple({**r, as_field: band_label(_as_number(r.get(field)), edges)}
+                 for r in table.rows)
+    columns = table.columns if as_field in table.columns \
+        else table.columns + (as_field,)
+    return replace(table, rows=rows, columns=columns)
+
+
+def median_by_group(
+    table: Table, group_field: str, measure_field: str,
+) -> dict[str, float]:
+    """Median `measure_field` per group. Sibling to `aggregate_by_group`,
+    which totals: a median needs each group's whole list of values rather
+    than a running sum, so it cannot share that function's accumulator, but
+    it shares its blank-handling and its `str(v).strip()` group key.
+    """
+    buckets: dict[str, list[float]] = {}
+    for r in table.rows:
+        g = r.get(group_field)
+        if _is_blank(g):
+            continue
+        v = _as_number(r.get(measure_field))
+        if v is None:
+            continue
+        buckets.setdefault(str(g).strip(), []).append(v)
+    return {k: median(vs) for k, vs in buckets.items()}
+
+
+def count_present_by_group(
+    table: Table, group_field: str, measure_field: str,
+) -> dict[str, int]:
+    """Rows per group where `measure_field` is a present NUMBER — exactly the
+    denominator `median_by_group`'s own buckets are, and the denominator a
+    mean built from `aggregate_by_group`'s sum divides by. A small accessor so
+    a caller can ask "how many rows actually fed this number" without either
+    of those functions needing to return anything but the number itself.
+    """
+    out: dict[str, int] = {}
+    for r in table.rows:
+        g = r.get(group_field)
+        if _is_blank(g):
+            continue
+        if _as_number(r.get(measure_field)) is None:
+            continue
+        key = str(g).strip()
+        out[key] = out.get(key, 0) + 1
+    return out
+
+
+def rate_by_group(
+    table: Table, group_field: str, outcome_field: str, level: Any,
+) -> dict[str, float]:
+    """Share of each group's rows where `outcome_field` equals LEVEL — "what
+    fraction of this group churned", not a total and not a mean.
+
+    The DENOMINATOR is every row with a present group key, whether or not
+    `outcome_field` is present on it — a blank outcome is a row that did not
+    reach `level` and counts against the group the same way any other
+    non-matching row does. Compared as a trimmed string, the same equality a
+    coded field's own values are compared by, so `level="Yes"` matches a cell
+    read as `" Yes "` the way a person reading the sheet would.
+    """
+    counted: dict[str, float] = {}
+    matched: dict[str, float] = {}
+    level_key = str(level).strip()
+    for r in table.rows:
+        g = r.get(group_field)
+        if _is_blank(g):
+            continue
+        key = str(g).strip()
+        counted[key] = counted.get(key, 0.0) + 1.0
+        v = r.get(outcome_field)
+        if not _is_blank(v) and str(v).strip() == level_key:
+            matched[key] = matched.get(key, 0.0) + 1.0
+    return {k: matched.get(k, 0.0) / n for k, n in counted.items()}
 
 
 @dataclass(frozen=True)

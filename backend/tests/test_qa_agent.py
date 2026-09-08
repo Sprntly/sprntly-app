@@ -1080,12 +1080,20 @@ def test_answer_single_shot_sets_cacheable_prefix_to_company_facts_without_prd(
     monkeypatch, isolated_settings
 ):
     """No prd_context, tenant with workspace configuration → the cacheable
-    prefix IS the config block (not None, the pre-fix value). (AC8)"""
+    prefix carries the config block (not None, the pre-fix value). (AC8)
+
+    It carries the BILLING block alongside it since 2026-09-08 — same wave,
+    same per-tenant stability, so both ride the cached prefix rather than the
+    volatile suffix. The assertion composes them the way the answer path does
+    rather than naming one, so adding a third stable block is a one-line
+    change here instead of a mystery diff."""
     from app.qa_agent import RouteDecision, _answer_single_shot
-    from app.ask_runner import company_facts_block
+    from app.ask_runner import billing_facts_block, company_facts_block
 
     _seed_company_with_config(isolated_settings, "co-1")
     facts = company_facts_block("co-1")
+    billing = billing_facts_block("co-1")
+    expected_prefix = "\n\n---\n\n".join(p for p in (facts, billing) if p)
     captured = {}
     monkeypatch.setattr(qa, "llm_call", lambda **k: captured.update(k) or _answer_out())
     monkeypatch.setattr(qa, "_retrieve_kg_bundle", lambda eid, q: None)
@@ -1093,7 +1101,7 @@ def test_answer_single_shot_sets_cacheable_prefix_to_company_facts_without_prd(
     decision = RouteDecision(skill_id=CUSTOM_SKILL, confidence=1.0, source="slash")
     _answer_single_shot(decision, "co-1", "what should we build next?", [])
 
-    assert captured["user_cacheable_prefix"] == facts
+    assert captured["user_cacheable_prefix"] == expected_prefix
 
 
 def test_answer_single_shot_prefix_is_none_when_no_facts_and_no_prd(monkeypatch):

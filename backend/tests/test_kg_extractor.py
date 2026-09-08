@@ -813,6 +813,79 @@ def test_system_prompt_teaches_account_side_explicitly():
     assert "unknown" in system
 
 
+# ── outcome_measured: making the ninth source_type writable ─────────────────
+#
+# `outcome_measured` was already a valid value in `SIGNAL_SOURCE_TYPES` (the DB
+# CHECK constraint, `Signal.__post_init__`) and already the ONLY source_type
+# `claims.AUTHORITATIVE_FOR` trusts for `mechanism` — but the extraction
+# schema's `source_type` description never listed it, so no writer (production
+# or test) could ever produce one. This section makes the path possible; it
+# does not touch claims.py, scoring.py or any authority table, and it does not
+# backfill existing signals.
+def test_extract_schema_teaches_outcome_measured_as_the_strict_exception():
+    """Content-property test (same discipline as the account_side test above):
+    outcome_measured is the single strongest-authority source_type — the only
+    one `claims.AUTHORITATIVE_FOR` trusts for `mechanism` — so an over-eager
+    model relabelling ordinary analytics as outcome_measured would let plain
+    metrics masquerade as authoritative proof of WHY something works. The
+    description must name both required ingredients (a named change, a
+    measured after-effect) and explicitly rule out the common wrong answers."""
+    signal_props = (
+        ex._EXTRACT_SCHEMA["properties"]["signals"]["items"]["properties"])
+    desc = signal_props["source_type"]["description"]
+    assert "outcome_measured" in desc
+    assert "intervention" in desc.lower() or "change that already happened" in desc.lower()
+    for excluded in ("metric", "trend", "prediction"):
+        assert excluded in desc.lower(), f"description never excludes {excluded!r}"
+    # the worked contrast pair the ticket specifies, so the common wrong
+    # answer ("a metric is a result") is obviously wrong on the page.
+    assert "34%" in desc
+    assert "12%" in desc
+    assert len(desc) > 400, "description too thin to carry a strict exclusion"
+
+
+def test_outcome_measured_round_trips_and_is_authoritative_for_mechanism(facade):
+    """AC3: written (via the same extractor path every other source_type
+    uses), stored, and read back through `facade.get_signals` — the real
+    write/read path, not a mock of it. The read-back row is then handed to
+    `claims.project_signal` unchanged: `AUTHORITATIVE_FOR` already lists
+    outcome_measured for magnitude/direction/mechanism (untouched by this
+    change) — this proves the previously-unreachable path is now reachable,
+    it does not re-test claims.py's table itself."""
+    import uuid as uuid_mod
+
+    from app.crucible.claims import AUTHORITATIVE_FOR, project_signal
+
+    content = "activation rose 12% after we shipped in-app onboarding templates"
+    item = {"kind": "finding", "content": content, "source_type": "outcome_measured",
+             "theme": "Onboarding", "relationship": "SUPPORTS", "confidence": 0.9}
+    with patch.object(ex, "llm_call", return_value=_llm_result([item])), \
+         patch.object(ex, "embed_texts",
+                      side_effect=lambda texts, **k: [[0.0] * 4 for _ in texts]):
+        ex.extract_document(facade, "ent-outcome", doc_name="update.md",
+                            text="doc body")
+
+    sig_id = str(uuid_mod.uuid5(ex._NS, f"ent-outcome|{content}"))
+    stored = facade.get_signals("ent-outcome", [sig_id])
+    assert sig_id in stored, "outcome_measured signal was not written/stored"
+    signal = stored[sig_id]
+    assert signal.source_type == "outcome_measured"
+
+    row = {
+        "id": signal.id, "kind": signal.kind, "source_type": signal.source_type,
+        "content": signal.content, "properties": signal.properties,
+        "valid_at": signal.valid_at.isoformat(), "source_id": signal.source_id,
+    }
+    claim = project_signal(row, {})
+    assert claim is not None
+    assert claim.authoritative, (
+        f"outcome_measured should be authoritative for kind={signal.kind!r} "
+        f"(claim type {claim.type!r}); "
+        f"AUTHORITATIVE_FOR['outcome_measured']={AUTHORITATIVE_FOR.get('outcome_measured')}"
+    )
+    assert claim.type == "mechanism"
+
+
 # A REAL-LLM eval: it exercises the actual broadened prompt + schema against
 # Anthropic and asserts the vendor-side + owner-attributed signals are minted.
 # Skipped by default because it spends a real API call; run it with a live key:
@@ -987,6 +1060,78 @@ def test_account_side_is_returned_by_the_open_pass_real_llm():
             assert grounded == raw_side
         else:
             assert grounded is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_ordinary_analytics_is_never_labelled_outcome_measured_real_llm():
+    """AC2 (negative case) — the acceptance criterion this ticket cares about
+    most. outcome_measured is the ONLY source_type `claims.AUTHORITATIVE_FOR`
+    trusts for `mechanism`, so an over-eager model relabelling plain metrics
+    as outcome_measured would let ordinary analytics masquerade as
+    authoritative proof of WHY something works — precisely the overclaiming
+    this engine exists to prevent. Proven against the real model, not a
+    stubbed response, because the risk under test is the model's judgment,
+    not the plumbing."""
+    from app.graph.gateway import llm_call
+
+    update = (
+        "Weekly product update: activation is currently at 34%. MAU grew 12% "
+        "year on year. Retention held steady around 61% this quarter. No "
+        "features shipped this week; the team is heads-down on the Q3 "
+        "roadmap."
+    )
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='update.md'>\n{update}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    print(f"REAL MODEL DRAW (ordinary analytics, negative case) — "
+          f"signals={signals}")
+    labelled_outcome = [s for s in signals if s.get("source_type") == "outcome_measured"]
+    assert not labelled_outcome, (
+        f"ordinary analytics (a snapshot + a trend, no named intervention) "
+        f"was wrongly labelled outcome_measured: {labelled_outcome}")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    os.getenv("RUN_KG_EXTRACTOR_LLM") != "1",
+    reason="real-LLM eval; set RUN_KG_EXTRACTOR_LLM=1 with a live ANTHROPIC key",
+)
+def test_post_intervention_result_is_labelled_outcome_measured_real_llm():
+    """AC2 (positive case) — the same schema description must not swing so
+    exclusionary the model never applies the label at all. A named change
+    (shipped templates) with a measured after-effect (activation rose) is
+    exactly what outcome_measured exists for."""
+    from app.graph.gateway import llm_call
+
+    update = (
+        "Weekly product update: we shipped the new onboarding templates last "
+        "Tuesday. Since the templates went live, activation rose from 22% to "
+        "34% over the following two weeks."
+    )
+    result = llm_call(
+        enterprise_id="ent-eval", agent="test:extractor-eval",
+        purpose="extract_document", prompt_version=ex.PROMPT_VERSION,
+        system=ex._SYSTEM,
+        input=f"<document name='update.md'>\n{update}\n</document>",
+        json_schema=ex._EXTRACT_SCHEMA, log=False,
+    )
+    signals = result.output.get("signals", [])
+    print(f"REAL MODEL DRAW (post-intervention, positive case) — "
+          f"signals={signals}")
+    labelled_outcome = [s for s in signals if s.get("source_type") == "outcome_measured"]
+    assert labelled_outcome, (
+        f"a named intervention (shipped templates) with a measured "
+        f"after-effect (activation rose) was never labelled outcome_measured: "
+        f"{signals}")
 
 
 # ── source_call_id / per-call traceability (source_ref) ──────────────────────

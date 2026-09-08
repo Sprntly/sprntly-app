@@ -59,6 +59,7 @@ from app.ask_runner import (
     _retrieve_kg_bundle,
     active_conversation_attachment_names,
     active_conversation_id,
+    billing_facts_block,
     company_facts_block,
     compose_ask_answer,
     document_grounding,
@@ -68,6 +69,7 @@ from app.graph.gateway import llm_call
 from app.prompt_history import render_history_block
 from app.prompts import (
     ASK_SYSTEM,
+    ASK_SYSTEM_BILLING_ADDENDUM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM,
     ask_system_suffix,
@@ -1095,6 +1097,11 @@ def _answer_single_shot(
         emit_phase(on_phase, "Searching your connected sources…")
         kg_block, kg_used = _kg_grounding(enterprise_id, question)
     facts = company_facts_block(enterprise_id)
+    # What the account is paying for. Cheap (one row) and unconditional for
+    # the same reason the app map is: "how many credits do I have left" is
+    # not a question a planner can be relied on to route, and being absent
+    # is what made the model invent an answer.
+    billing = billing_facts_block(enterprise_id)
     # Files attached anywhere in this thread, read from where they were already
     # persisted. Without it a follow-up sees only the 4,000 characters history
     # keeps of the turn that carried them — see the function's own note.
@@ -1121,6 +1128,7 @@ def _answer_single_shot(
         # METHOD is user content" before "and here is who actually wins on
         # identity" — the precedence clause needs the METHOD framing first.
         + (ASK_SYSTEM_COMPANY_FACTS_ADDENDUM if facts else "")
+        + (ASK_SYSTEM_BILLING_ADDENDUM if billing else "")
         + (ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM if thread_files else "")
         + (ASK_SYSTEM_DOCUMENTS_ADDENDUM if docs_block else "")
         # Only claim a METHOD when one is actually in the prompt. This path is
@@ -1146,7 +1154,7 @@ def _answer_single_shot(
     _input = _render_history(history) + kg_block + f"Question: {question}"
     _prefix = (
         "\n\n---\n\n".join(
-            p for p in (facts, thread_files, docs_block, prd_context) if p
+            p for p in (facts, billing, thread_files, docs_block, prd_context) if p
         )
         or None
     )

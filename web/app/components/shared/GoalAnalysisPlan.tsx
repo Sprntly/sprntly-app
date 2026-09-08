@@ -49,6 +49,7 @@ import * as React from "react"
 import { useMemo, useState } from "react"
 import { planNarrative } from "../../lib/goalPlanNarrative"
 import type { GoalPlanQuestion, GoalPlanStep, GoalRunPlan } from "../../lib/api"
+import { DisclosureNotes } from "./DisclosureNotes"
 import s from "./GoalAnalysisPlan.module.css"
 
 /** The three questions asked before `plan.questions` existed, used only as a
@@ -847,6 +848,13 @@ function PlanBody({
           form and should not be handed checkboxes while they do it. */}
       <section className="ga-plan-section" data-testid="goal-plan-sources">
         <h2 className={s.sectionLabel}>What I will read</h2>
+        {/* THE DISCLOSURE CHANNEL, BEFORE THE LIST BELOW IS READ. An
+            attachments-scope run arrives here with `plan.sources` already
+            emptied server-side (`routes.crucible._apply_attachments_scope`),
+            so without this a reader sees an empty connected-source section
+            and has to infer why. See `DisclosureNotes` for why every note
+            renders regardless of `kind`. */}
+        <DisclosureNotes notes={plan.notes} className={s.roleNote} testIdPrefix="goal-plan-note" />
         {plan.sources.length ? (
           <>
             {/* GROUPED BY WHAT EACH ONE IS FOR, which is what turns an
