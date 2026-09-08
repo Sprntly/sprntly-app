@@ -997,3 +997,43 @@ def test_a_domain_that_carries_no_name_resolves_to_nothing():
     source, never produce a junk key."""
     for junk in ("", "localhost", None, 7, "https://", "   "):
         assert domain_stem(junk) is None, junk
+
+
+# ── `app.crucible.tabular_findings`'s two deterministic strings ─────────────
+#
+# See that module's docstring §1: `computed_comparison` is a fixed Python
+# string it stamps on every row, never returned by a model call. These tests
+# prove the two table entries that make a computed-differential row survive
+# Stage 4 with real authority, exactly as any other claim does.
+
+def test_computed_comparison_kind_maps_to_the_computed_differential_type():
+    assert KIND_TO_CLAIM_TYPE["computed_comparison"] == "computed_differential"
+
+
+def test_computed_source_is_authoritative_for_computed_differential_only():
+    assert AUTHORITATIVE_FOR["computed"] == frozenset({"computed_differential"})
+
+
+def test_a_computed_comparison_row_projects_as_authoritative():
+    """The shape `tabular_findings.rows_for_computed` builds: `kind`,
+    `source_type` and a real `valid_at`, nothing else load-bearing."""
+    claim = project_signal(
+        sig(kind="computed_comparison", source_type="computed",
+            properties={"account": "Northwind"}), {})
+    assert claim is not None
+    assert claim.type == "computed_differential"
+    assert claim.authoritative is True
+    # Not ceilinged: `computed` is not in the attachment-channel path unless
+    # `provenance.channel` says so, and this row did not set one.
+    assert claim.strength == "reported"
+
+
+def test_a_computed_comparison_row_from_an_attachment_is_still_ceilinged():
+    """`came_from_an_attachment` reads `provenance.channel` regardless of
+    source type — the same ceiling every other attached-workbook row gets."""
+    claim = project_signal(
+        sig(kind="computed_comparison", source_type="computed",
+            properties={"account": "Northwind"},
+            provenance={"channel": "chat_attachment"}), {})
+    assert claim is not None
+    assert claim.strength == "reported"

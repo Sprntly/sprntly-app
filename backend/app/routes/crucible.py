@@ -1782,13 +1782,26 @@ def execute_run(
             logger.info("crucible: %s prose claim rows from %s attached "
                         "document(s) for %s", len(prose_evidence.rows),
                         len(prose_evidence.read), company_id)
+        # ── THE THIRD CLAIM SOURCE: COMPUTED COMPARISONS OVER AN ATTACHED
+        # TABLE. Same placement and the same reasoning as prose immediately
+        # above — this is the only place the model call
+        # (`table_select.select_comparisons`) can live, and it is gated on
+        # having at least one attached, groupable table so a run with none
+        # makes it and pays for it. `tabular_evidence.rows` is empty (and
+        # nothing else runs) for the ordinary case of no attachment.
+        tabular_evidence = _tabular_evidence(
+            uploads, workspace_id, company_id, now, goal_text)
+        if tabular_evidence.rows:
+            logger.info("crucible: %s computed-comparison claim row(s) from "
+                        "%s comparison(s) for %s", len(tabular_evidence.rows),
+                        len(tabular_evidence.computed), company_id)
         # ONE CORPUS, ONE PROJECTION. Appended to the same list rather than
         # projected separately, because `project_signals` settles two
         # corpus-wide facts before it reads a single row — which spelling of
         # an account is the one to render, and which side of the funnel that
         # account is on — and projecting the two sets apart would decide both
         # questions twice and hand the two answers to one collapsed account.
-        signals = signals + list(prose_evidence.rows)
+        signals = signals + list(prose_evidence.rows) + list(tabular_evidence.rows)
         # RESOLVED ONCE AND KEPT. The keys drive the exclusion; the names and
         # their sources drive the coverage note that says what the exclusion
         # did. Re-resolving for the note would let the two disagree, which is
@@ -1842,7 +1855,16 @@ def execute_run(
         # repo's own label rules — so an attached call about billing joins the
         # billing theme the connectors already built rather than starting a
         # private one beside it.
-        theme_map = {**theme_map, **_prose_theme_map(prose_evidence, theme_map)}
+        theme_map = {
+            **theme_map,
+            **_prose_theme_map(prose_evidence, theme_map),
+            # SAME REASON AS PROSE, ONE LINE UP: a computed-comparison
+            # claim's id is not in `kg_signal` either, so without an entry
+            # here it lands in `assign_clusters` with no embedding and is
+            # marked `cluster.UNGROUPABLE_PREFIX` — see
+            # `tabular_findings`'s module docstring §3.
+            **tabular_evidence.theme_map,
+        }
         claims, unthemed_idx, cluster_stats = assign_themes(claims, theme_map)
         logger.info(
             "crucible: graph themed %s of %s claims for %s",
@@ -2216,6 +2238,40 @@ def _prose_evidence(
         logger.exception("crucible: could not read attached prose for %s",
                          company_id)
         return ProseEvidence()
+
+
+def _tabular_evidence(
+    uploads: tuple[tuple[str, str], ...], workspace_id: str,
+    company_id: str, now: datetime, goal_text: str,
+):
+    """Computed-comparison claims from the tables attached to this run.
+    TOTAL — never raises. Mirrors `_prose_evidence` immediately above; see
+    `app.crucible.tabular_findings`'s module docstring for the rows this
+    builds and why they are safe to rank the way `moscow.type_bucket` does.
+
+    GATED ON HAVING A TABLE, NOT ON HAVING AN UPLOAD. An upload that read
+    only as prose (a PDF transcript, say) has nothing for this stage to
+    group — `_read_uploads` already sorts that out, and
+    `tabular_findings.produce` itself no-ops on an empty table list, so this
+    costs nothing beyond the read already paid for by reconnaissance.
+    """
+    from app.crucible import tabular_findings
+
+    if not uploads or not workspace_id:
+        return tabular_findings.TabularEvidence()
+    try:
+        tables, _unread, _prose = _read_uploads(uploads, workspace_id)
+        if not tables:
+            return tabular_findings.TabularEvidence()
+        return tabular_findings.produce(
+            tables=tables, enterprise_id=company_id, goal_text=goal_text,
+            now=now,
+        )
+    except Exception:  # noqa: BLE001 — see the docstring
+        logger.exception(
+            "crucible: could not compute tabular findings for %s",
+            company_id)
+        return tabular_findings.TabularEvidence()
 
 
 def _prose_theme_map(prose_evidence, graph_theme_map: dict) -> dict:

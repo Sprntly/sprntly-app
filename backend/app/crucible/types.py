@@ -113,6 +113,13 @@ ClaimType = Literal[
     # anyone believes about users. See SPEC §4.5.
     "existence",   # exists in the product today
     "attempt",     # was tried / committed / abandoned / reverted
+    # A DETERMINISTIC COMPARISON over the customer's own operational
+    # records, never a model's judgement — see
+    # `app.crucible.tabular_findings`'s module docstring §1. This is the
+    # ONLY claim type a model may never emit: `tabular_findings` is the sole
+    # producer, and that property is what makes `moscow.type_bucket` ranking
+    # it above `constraint` safe rather than aggressive.
+    "computed_differential",
 ]
 CLAIM_TYPES: frozenset[str] = frozenset(ClaimType.__args__)
 
@@ -135,6 +142,11 @@ DECAY_HALFLIFE_DAYS: Mapping[str, float] = MappingProxyType({
     "magnitude": 180.0, "mechanism": 540.0, "preference": 270.0,
     "constraint": 120.0, "direction": 90.0,
     "existence": math.inf, "attempt": math.inf,
+    # SAME RATE AS `magnitude`: a computed differential is a measured number
+    # over a snapshot in time (the workbook's own `as_of`), not a
+    # re-readable fact like `existence`/`attempt` — it rots the same way a
+    # stated figure does.
+    "computed_differential": 180.0,
 })
 
 SelectionBias = Literal["none", "self_selected", "sampled", "census"]

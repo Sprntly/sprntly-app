@@ -82,14 +82,23 @@ def has_call_count(surfaced_by: Sequence[str]) -> bool:
 #: deal.
 _MUST_TYPES = frozenset({"constraint"})
 _SHOULD_TYPES = frozenset({"preference"})
+#: A DETERMINISTIC COMPARISON over the customer's own operational records —
+#: `app.crucible.tabular_findings` is the SOLE producer of this claim type,
+#: and only because the type can never be assigned by a model does ranking it
+#: above a stated blocker stay a safe decision rather than an aggressive one.
+#: See that module's docstring §1 and `type_bucket`'s own docstring below for
+#: the measured reason this bucket sits where it does.
+_COMPUTED_TYPES = frozenset({"computed_differential"})
 
-#: The claim-type buckets as an ORDER, smallest first: a stated blocker
-#: outranks a stated preference outranks neither. `bucket_for` below names the
-#: bucket and `pipeline._rank` sorts on it, and both read `type_bucket` so the
-#: name a reader sees and the position it was given cannot drift apart.
-TYPE_BUCKET_BLOCKER = 0
-TYPE_BUCKET_PREFERENCE = 1
-TYPE_BUCKET_NEITHER = 2
+#: The claim-type buckets as an ORDER, smallest first: a computed
+#: differential outranks a stated blocker outranks a stated preference
+#: outranks neither. `bucket_for` below names the bucket and `pipeline._rank`
+#: sorts on it, and both read `type_bucket` so the name a reader sees and the
+#: position it was given cannot drift apart.
+TYPE_BUCKET_COMPUTED = 0
+TYPE_BUCKET_BLOCKER = 1
+TYPE_BUCKET_PREFERENCE = 2
+TYPE_BUCKET_NEITHER = 3
 
 #: Below this many independent source documents, a MUST is real but thin —
 #: said plainly with `?` rather than silently ranked as though it were as
@@ -116,6 +125,23 @@ def type_bucket(claim_types: Sequence[str]) -> int:
     second copy of the mapping. One definition; a change to what counts as a
     blocker moves the name and the position together.
 
+    A COMPUTED DIFFERENTIAL OUTRANKS A STATED BLOCKER, and this is the one
+    bucket boundary in this table that is a product judgement rather than a
+    reading of the corpus's own taxonomy. Measured on a real churn goal: the
+    kept findings after the reason classifier ranked
+    stakeholder-alignment (47 accounts), product-gap (36), compliance-review
+    (34) and competitor-preferred (14) — all `constraint` — ahead of a
+    correctly-computed, 15-account churn answer from the customer's own
+    workbook, which landed fourth and was never written up
+    (`MAX_WRITTEN_UP_FINDINGS = 2`). Worse, the finding that beat it was wrong
+    for the goal: `stakeholder alignment` is pre-sale material on a retention
+    question. The client's own specification ranks "something the customer
+    already did" above "something they say blocks them" — and this bucket is
+    the one place in the engine that distinction is allowed to move a finding
+    ahead of a stated blocker, because it is the ONE claim type a model can
+    never assign (`app.crucible.tabular_findings`'s module docstring §1). No
+    other claim type may ever join `_COMPUTED_TYPES` on that basis alone.
+
     THE `?` FLAG IS DELIBERATELY NOT PART OF THIS, and must never be added.
     `MUST` vs `MUST?` is decided by `document_count(surfaced_by)`, and
     `surfaced_by` is in `types.CORROBORATION_FIELDS` — ordering on it would
@@ -127,6 +153,8 @@ def type_bucket(claim_types: Sequence[str]) -> int:
     tail of the key, via confidence. The `?` stays a display flag.
     """
     kinds = set(claim_types)
+    if kinds & _COMPUTED_TYPES:
+        return TYPE_BUCKET_COMPUTED
     if kinds & _MUST_TYPES:
         return TYPE_BUCKET_BLOCKER
     if kinds & _SHOULD_TYPES:
