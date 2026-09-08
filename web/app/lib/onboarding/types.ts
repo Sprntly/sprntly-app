@@ -111,6 +111,11 @@ export type WorkspaceCompany = {
   /** While `subscription_status` is "trialing" this IS the trial end — the
    *  date of the first charge. See lib/billingAccess's trialDaysLeft. */
   current_period_end: string | null
+  /** Credits left this period. Comes free with the `companies` select the
+   *  workspace already makes, so the out-of-credits banner costs no request —
+   *  see lib/billingAccess's `isOutOfCredits`. Null on a row predating
+   *  billing, which reads as "unknown", never as "empty". */
+  credit_balance: number | null
   /** @deprecated Use `product` — kept for rows not yet migrated to products table */
   product_description: string | null
   product: WorkspaceProduct | null
