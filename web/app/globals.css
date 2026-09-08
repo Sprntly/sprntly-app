@@ -14103,6 +14103,23 @@
     border-color: var(--ink);
   }
 
+  /* WITHOUT THIS, A PRIMARY BUTTON VANISHES UNDER THE CURSOR.
+     The generic `.btn:hover:not(:disabled)` scores (0,3,0) — three
+     pseudo-classes, since `:not()` inherits its argument's weight — against
+     this pair's (0,2,0), so it wins the BACKGROUND and repaints it
+     `--surface-2` (#FFFFFF) while the white `--nav-text-hover` set above
+     stays. White on white. Dark mode fails the same way with the palette
+     inverted, so pinning both ends fixes both.
+     Restated at (0,4,0) and lightening the ink rather than reaching for the
+     surface — the same hover the other dark buttons use (`.od-rail-newbtn`).
+     Reported on the onboarding plan step's Continue; it was every
+     `.btn primary` in the app. */
+  .btn.primary:hover:not(:disabled) {
+    background: var(--ink-2);
+    border-color: var(--ink-2);
+    color: var(--nav-text-hover);
+  }
+
   .btn.primary:disabled {
     opacity: 0.5;
     cursor: not-allowed;
