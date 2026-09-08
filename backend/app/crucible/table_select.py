@@ -78,12 +78,14 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from app.crucible.evidence import SchemaSnapshot, TableSchema
 from app.crucible.recon import (
+    ACCOUNT_HINTS,
     Table,
     aggregate_by_group,
     count_present_by_group,
@@ -580,12 +582,18 @@ def select_comparisons(
 class GroupValue:
     """One group's number, or the reason it is withheld. `value` is `None`
     exactly when `suppressed` is true — a suppressed group is never given a
-    number that then has to be ignored by whoever reads it."""
+    number that then has to be ignored by whoever reads it.
+
+    `accounts` is the raw account names, in sheet order, of the rows that
+    counted toward `n` — see `ComputedComparison.account_column` for when
+    this is populated at all. Empty whenever no account column could be
+    told for this comparison's table, never a guess."""
     group: str
     value: Optional[float]
     n: int
     suppressed: bool
     suppression_reason: str = ""
+    accounts: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -593,7 +601,13 @@ class ComputedComparison:
     """One comparison's real numbers, or the reason the whole thing is
     withheld. `as_of`/`today` travel with EVERY computed comparison — see the
     module docstring on why that fact is passed through rather than reasoned
-    about later."""
+    about later.
+
+    `account_column` names the column on the source table that identifies the
+    customer, or is `None` when this rule could not tell — either nothing on
+    the table looked like one, or more than one candidate did and guessing
+    between them was refused. `account_note` carries why, and is empty
+    exactly when `account_column` is not `None`. See `_account_column`."""
     table: str
     dimension: str
     outcome: str
@@ -606,6 +620,8 @@ class ComputedComparison:
     suppression_reason: str
     as_of: Optional[datetime]
     today: datetime
+    account_column: Optional[str] = None
+    account_note: str = ""
 
     def orientation(self) -> str:
         inner = f"{self.measure}({self.outcome})"
@@ -622,6 +638,130 @@ def _withheld(
         level=c.level, edges=c.edges, why=c.why, groups=(), suppressed=True,
         suppression_reason=reason, as_of=as_of, today=today,
     )
+
+
+# ── ACCOUNT IDENTITY — carried out of the rows, per group, never invented ───
+#
+# `ComputedComparison` used to carry no account identity at all: `git grep
+# account` over this file returned nothing. Reach reads
+# `population.segments["accounts"]`, filled from a row's `account` key one
+# name at a time — so a computed comparison could not be sized even if
+# everything downstream of it existed. This carries the raw names out of
+# `Table.rows`, PER GROUP — "which accounts are in the solo-facilitator
+# group" is the question that has to be answerable — without normalising,
+# canonicalising or deduping across rows: `claims.account_key` and
+# `canonical_account_names` already own that judgement, and duplicating it
+# here is exactly how the two would drift apart.
+
+#: The `_ID_TOKEN_RE` suffix check below excludes an id/key column even when
+#: its name also contains one of these hints (`account_id`, `Customer ID`) —
+#: an id is not a name a reader recognises, and this rule only ever carries
+#: names.
+_ID_TOKEN_RE = re.compile(r"(?:^|[_\s-])id$", re.IGNORECASE)
+
+
+def _is_id_like(column: str) -> bool:
+    """`True` for a column name ending in an "id" token — `account_id`,
+    `Account ID`, `account-id` — on any separator. A column spelled with no
+    separator at all (`AccountID`) is not matched; on real exports that
+    spelling is rare enough that missing it costs less than excluding a
+    genuine "Valid ID"-style name elsewhere would."""
+    return bool(_ID_TOKEN_RE.search(column.strip()))
+
+
+def _looks_like_account_column(column: str, kind: str) -> bool:
+    """A TEXT column (never a number — an id or a code is not a name a
+    reader recognises) whose name contains one of `recon.ACCOUNT_HINTS` and
+    is not itself an id/key column. The same vocabulary `recon` already uses
+    for the identical judgement one module over (`_looks_like_account`,
+    there used to find a per-account VALUE column) — read from
+    `ACCOUNT_HINTS`, not retyped, so the two decisions can never disagree
+    about what counts as "account-ish" in a column name."""
+    if kind != "text":
+        return False
+    c = column.lower()
+    return any(h in c for h in ACCOUNT_HINTS) and not _is_id_like(column)
+
+
+def _account_column(table: Table) -> tuple[Optional[str], str]:
+    """The single column on TABLE that names the customer, or `None` plus why
+    it could not be told.
+
+    EXACTLY ONE CANDIDATE IS REQUIRED. Zero means nothing on this table looks
+    like it names a customer — a real, ordinary case (an internal ops sheet
+    with no customer-facing field). More than one means this rule cannot tell
+    WHICH does, and guessing between two plausible columns is worse than
+    naming neither: a wrong account attribution would silently mis-size a
+    finding, where an absent one merely leaves it unsized. Both cases return
+    `None`, never a guess — see the module's out-of-scope note on
+    normalisation for why this stops at "which column", not "which spelling".
+    """
+    profs = {c: profile(table, c) for c in table.columns}
+    candidates = [c for c in table.columns
+                  if _looks_like_account_column(c, profs[c].kind)]
+    if not candidates:
+        return None, "no column name suggests it identifies the customer"
+    if len(candidates) > 1:
+        return None, (
+            "ambiguous — more than one column name suggests it identifies "
+            "the customer: " + ", ".join(candidates)
+        )
+    return candidates[0], ""
+
+
+def _blank(v: Any) -> bool:
+    return v is None or (isinstance(v, str) and not v.strip())
+
+
+def _numberish(v: Any) -> Optional[float]:
+    if isinstance(v, bool) or _blank(v):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    return None
+
+
+def _accounts_by_group(
+    source: Table, group_field: str, account_column: Optional[str], *,
+    outcome_field: str, measure: str,
+) -> dict[str, tuple[str, ...]]:
+    """Raw account names per group KEY, in sheet order — pulled from exactly
+    the rows that already count toward that group's `n`, and no others:
+    every row with a present GROUP_FIELD for `"rate"` (the same denominator
+    `aggregate_by_group` counts with no measure field), and only rows where
+    OUTCOME_FIELD is a present number for `"median"`/`"mean"` (the same rows
+    `count_present_by_group` counts). A row that counts toward `n` but whose
+    own account cell is blank simply names no one — it is not dropped from
+    `n`, it contributes nothing here.
+
+    DEDUPED ONLY ON AN EXACT REPEATED SPELLING WITHIN THE SAME GROUP, never
+    across groups, never fuzzy. One account can file several rows in one
+    group (several support tickets from the same customer in one segment);
+    naming it once per group rather than once per row is what leaves "one
+    row per account" to the later producer, rather than re-implementing that
+    producer's own job here.
+    """
+    if account_column is None:
+        return {}
+    out: dict[str, list[str]] = {}
+    seen: dict[str, set] = {}
+    for r in source.rows:
+        g = r.get(group_field)
+        if _blank(g):
+            continue
+        if measure != "rate" and _numberish(r.get(outcome_field)) is None:
+            continue
+        key = str(g).strip()
+        raw = r.get(account_column)
+        if _blank(raw):
+            continue
+        name = str(raw).strip()
+        bucket = seen.setdefault(key, set())
+        if name in bucket:
+            continue
+        bucket.add(name)
+        out.setdefault(key, []).append(name)
+    return {k: tuple(v) for k, v in out.items()}
 
 
 def _compute_one(
@@ -668,24 +808,32 @@ def _compute_one(
             reason=(f"{len(values)} groups exceeds the ceiling of "
                     f"{MAX_GROUP_COUNT}"))
 
+    account_column, account_note = _account_column(table)
+    accounts_by_group = _accounts_by_group(
+        source, group_field, account_column,
+        outcome_field=c.outcome, measure=c.measure)
+
     groups = []
     for key in sorted(values):
         n = int(counts.get(key, 0))
+        group_accounts = accounts_by_group.get(key, ())
         # MINIMUM-N PER GROUP — the group still appears, with its count, so a
         # reader sees "n=2, too few to show" rather than a group that just
         # is not there.
         if n < MIN_GROUP_N:
             groups.append(GroupValue(
                 group=key, value=None, n=n, suppressed=True,
-                suppression_reason=f"n={n} is below the minimum of {MIN_GROUP_N}"))
+                suppression_reason=f"n={n} is below the minimum of {MIN_GROUP_N}",
+                accounts=group_accounts))
         else:
             groups.append(GroupValue(group=key, value=values[key], n=n,
-                                      suppressed=False))
+                                      suppressed=False, accounts=group_accounts))
 
     return ComputedComparison(
         table=c.table, dimension=c.dimension, outcome=c.outcome, measure=c.measure,
         level=c.level, edges=c.edges, why=c.why, groups=tuple(groups),
         suppressed=False, suppression_reason="", as_of=table.as_of, today=today,
+        account_column=account_column, account_note=account_note,
     )
 
 
