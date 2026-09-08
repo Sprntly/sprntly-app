@@ -192,6 +192,36 @@ def billing_facts_block(enterprise_id: str | None) -> str:
         )
         return ""
 
+    # A COMPANY THAT HAS NEVER TOUCHED BILLING GETS NOTHING.
+    #
+    # `companies.plan` defaults to 'starter' and `resolve_plan` fail-closes to
+    # the launch default, so EVERY row — including one belonging to a tenant
+    # that has never seen a checkout — answers the question "what plan is
+    # this". Rendering on that alone put a plan name and a credit count in
+    # front of every ask in the product, for workspaces where both were an
+    # artefact of a column default rather than anything anyone agreed to.
+    #
+    # So the block needs a real footprint: a Stripe customer or subscription, a
+    # status, a first payment, or credits that have actually moved. Any one of
+    # those means billing is a thing that has happened here and the numbers
+    # describe something. None of them means the honest answer is the one the
+    # app map already gives — Settings > Billing — rather than a tier this
+    # workspace never chose.
+    #
+    # It also restores a property several prompt tests pin and the cache
+    # depends on: a workspace that has told us nothing contributes no cacheable
+    # prefix at all.
+    if not any(
+        (
+            row.get("stripe_customer_id"),
+            row.get("stripe_subscription_id"),
+            (row.get("subscription_status") or "").strip(),
+            row.get("first_paid_at"),
+            int(row.get("credit_balance") or 0) != 0,
+        )
+    ):
+        return ""
+
     plan = plans.resolve_plan(row.get("plan"))
     status = (row.get("subscription_status") or "").strip()
     allowance = plans.monthly_credits(plan)

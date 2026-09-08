@@ -134,11 +134,51 @@ def test_a_failed_read_answers_without_billing_rather_than_raising(monkeypatch, 
     assert ask_runner.billing_facts_block(company.company_id) == ""
 
 
-def test_a_company_with_no_billing_row_still_renders_its_default_plan(company):
-    """`resolve_plan` is fail-CLOSED — an unknown/missing plan resolves to the
-    launch default rather than to a paid tier — so a row-less company gets the
-    truth about where it stands rather than an empty block."""
+def test_a_company_that_has_never_touched_billing_gets_NOTHING(company):
+    """The block needs a real footprint, not a column default.
+
+    `companies.plan` defaults to 'starter' and `resolve_plan` fail-closes to
+    the launch default, so every row on earth answers "what plan is this" —
+    including one belonging to a workspace that has never seen a checkout.
+    Rendering on that alone put a plan name and a credit count in front of
+    every ask in the product, describing a tier nobody chose.
+
+    It also broke a property the prompt cache and a dozen existing tests rely
+    on: a workspace that has told us nothing contributes no cacheable prefix.
+    """
+    block = ask_runner.billing_facts_block(company.company_id)
+
+    assert block == ""
+
+
+@pytest.mark.parametrize(
+    "footprint",
+    [
+        {"stripe_customer_id": "cus_123"},
+        {"stripe_subscription_id": "sub_123"},
+        {"subscription_status": "active"},
+        {"first_paid_at": "2026-01-01T00:00:00Z"},
+    ],
+)
+def test_any_real_billing_signal_is_enough_to_render(company, footprint):
+    """Each of these means billing has HAPPENED here, so the numbers describe
+    something. Parametrised because a single `or` chain is exactly the kind of
+    thing that loses a branch in a later edit and fails silently — the block
+    simply stops appearing for whichever customers had only that one."""
+    _set_billing(company.company_id, plan=plans.STARTER, **footprint)
+
     block = ask_runner.billing_facts_block(company.company_id)
 
     assert ask_runner.BILLING_HEADER in block
-    assert plans.plan_label(plans.LAUNCH_DEFAULT_PLAN) in block
+    assert plans.plan_label(plans.STARTER) in block
+
+
+def test_credits_that_have_moved_also_count_as_a_footprint(company):
+    """A company granted credits without a Stripe subscription — a legacy
+    tenant, a staff adjustment — has a balance worth telling them about."""
+    _set_billing(company.company_id, plan=plans.STARTER, credit_balance=25)
+
+    block = ask_runner.billing_facts_block(company.company_id)
+
+    assert ask_runner.BILLING_HEADER in block
+    assert "25" in block
