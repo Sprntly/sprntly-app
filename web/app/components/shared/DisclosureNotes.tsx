@@ -15,6 +15,21 @@
  *
  * `text` is rendered verbatim. The backend owns the wording; nothing here
  * reconstructs or reformats a sentence from structured fields.
+ *
+ * ONLY THE PLAN GATE USES THIS. `GoalAnalysisReport` (the finished report
+ * panel) deliberately does NOT — it renders `run.report_html` verbatim
+ * through a sandboxed iframe (`backend/app/crucible/report.py` produces the
+ * whole document, byte for byte), so any backend-composed sentence, this
+ * channel's or not, already reaches that panel the moment `report.py` writes
+ * it. It never had the drift problem this component exists to fix. The plan
+ * gate is different: it renders ~44 individually named TYPED fields off the
+ * plan object (`GoalRunPlan` in `lib/api.ts`), so a new disclosure there
+ * stays invisible until a component is taught its field name — which is
+ * exactly what happened to `source_scope_note` before this channel existed.
+ * Adding a second `DisclosureNotes` call to the report panel would render
+ * every note TWICE for a reader in `report_html`'s remit — once inside the
+ * iframe, once outside it — for no gain, since nothing there was ever
+ * missing. Don't reintroduce that.
  */
 import * as React from "react"
 
@@ -26,9 +41,8 @@ export function DisclosureNotes({
   testIdPrefix = "goal-disclosure-note",
 }: {
   notes: GoalDisclosureNote[] | undefined
-  /** The caller's own register — a plan gate and a report panel are styled
-   *  differently, and this component has no opinion of its own about which
-   *  is right. Passed straight to each rendered `<p>`. */
+  /** The plan gate's own register, passed straight to each rendered `<p>`.
+   *  This component has no styling opinion of its own. */
   className?: string
   testIdPrefix?: string
 }) {
