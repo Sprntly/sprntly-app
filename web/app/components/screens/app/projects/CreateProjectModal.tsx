@@ -63,6 +63,12 @@ import styles from "./CreateProjectModal.module.css"
 
 export type CreateTab = "manual" | "artifact" | "auto"
 
+/** A MIRROR of `_MAX_DOCUMENT_BYTES` in backend/app/routes/projects.py, which
+ *  is the authority — it 413s past this whatever the client believes. Copied
+ *  so the picker can refuse a file before the reader waits through an upload
+ *  that was never going to land. */
+const MAX_DOCUMENT_BYTES = 25 * 1024 * 1024
+
 export type InviteRowState = { email: string; role: InviteRole }
 
 export type ArtifactsLoadState = "loading" | "ready" | "error"
@@ -123,6 +129,8 @@ export type CreateProjectModalViewProps = {
   onSelectPrd: (a: ArtifactItem) => void
   /** Files staged for upload after the project is created. */
   files: File[]
+  /** Set only when a pick was refused for size — otherwise nothing is said. */
+  oversized: string | null
   onAddFiles: (picked: FileList | null) => void
   onRemoveFile: (i: number) => void
   creating: boolean
@@ -151,6 +159,7 @@ export function CreateProjectModalView({
   selectedPrd,
   onSelectPrd,
   files,
+  oversized,
   onAddFiles,
   onRemoveFile,
   creating,
@@ -346,11 +355,16 @@ export function CreateProjectModalView({
                     ))}
                   </ul>
                 ) : null}
-                <p className={styles.hint} data-testid="create-project-files-hint">
-                  We read the text and attach each one to the project, so the
-                  project chat can use them from the first question. Up to 25 MB
-                  a file.
-                </p>
+                {/* NO STANDING HINT HERE. It explained the 25 MB limit and
+                    what we do with the files to everyone, on every visit,
+                    including the vast majority who upload two small documents
+                    and never come near either concern. The limit is worth
+                    saying exactly once — to the person who just hit it. */}
+                {oversized ? (
+                  <p className={styles.fieldError} data-testid="create-project-files-error">
+                    {oversized}
+                  </p>
+                ) : null}
               </div>
 
               <div className={styles.field}>
@@ -569,6 +583,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactItem | null>(null)
   const [selectedPrd, setSelectedPrd] = useState<ArtifactItem | null>(null)
   const [files, setFiles] = useState<File[]>([])
+  const [oversized, setOversized] = useState<string | null>(null)
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -584,6 +599,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setSelectedArtifact(null)
     setSelectedPrd(null)
     setFiles([])
+    setOversized(null)
     setCreating(false)
     setError(null)
     setArtifactsStatus("loading")
@@ -616,12 +632,30 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setRows((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev))
   }, [])
 
-  /** APPEND, never replace. A picker fires once per visit, so someone adding
-   *  three files in three visits must end up with three — assigning would
-   *  leave them with the last one and no sign the others were dropped. */
+  /**
+   * APPEND, never replace. A picker fires once per visit, so someone adding
+   * three files in three visits must end up with three — assigning would leave
+   * them with the last one and no sign the others were dropped.
+   *
+   * OVERSIZE FILES ARE REFUSED HERE, mirroring the server's own 25 MB cap
+   * (`_MAX_DOCUMENT_BYTES`, routes/projects.py). Catching it at the picker
+   * means the reader is told before they wait through an upload that ends in a
+   * 413 — and it is the only place the limit is mentioned at all, since the
+   * standing hint that used to announce it to everyone is gone.
+   */
   const onAddFiles = useCallback((picked: FileList | null) => {
     if (!picked || picked.length === 0) return
-    setFiles((prev) => [...prev, ...Array.from(picked)])
+    const all = Array.from(picked)
+    const tooBig = all.filter((f) => f.size > MAX_DOCUMENT_BYTES)
+    const ok = all.filter((f) => f.size <= MAX_DOCUMENT_BYTES)
+    // Whatever DID fit is still staged — refusing the whole pick because one
+    // file was oversized would make the reader select the rest again.
+    if (ok.length > 0) setFiles((prev) => [...prev, ...ok])
+    setOversized(
+      tooBig.length === 0
+        ? null
+        : `${tooBig.map((f) => f.name).join(", ")} ${tooBig.length === 1 ? "is" : "are"} over the 25 MB limit and ${tooBig.length === 1 ? "wasn't" : "weren't"} added.`,
+    )
   }, [])
 
   const onRemoveFile = useCallback((i: number) => {
@@ -799,6 +833,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       selectedPrd={selectedPrd}
       onSelectPrd={setSelectedPrd}
       files={files}
+      oversized={oversized}
       onAddFiles={onAddFiles}
       onRemoveFile={onRemoveFile}
       creating={creating}

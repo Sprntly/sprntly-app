@@ -113,6 +113,7 @@ function viewProps(overrides: Partial<CreateProjectModalViewProps> = {}): Create
     selectedPrd: null,
     onSelectPrd: noop,
     files: [],
+    oversized: null,
     onAddFiles: noop,
     onRemoveFile: noop,
     creating: false,
@@ -763,9 +764,16 @@ describe("CreateProjectModal — documents attached at creation", () => {
   // needs a second trip through Add artifact. Uploads necessarily run AFTER
   // creation — `POST /v1/projects/{id}/documents` is keyed on the id — so this
   // is the same create-then-follow-up shape the invite rows already use.
-  function pickFiles(names: string[]) {
+  /** `sizes` lets a test stage a file the size gate should refuse — jsdom
+   *  reports File.size from the blob parts, which are tiny, so it is set
+   *  explicitly rather than allocating 25 MB of string. */
+  function pickFiles(names: string[], sizes: Record<string, number> = {}) {
     const input = screen.getByTestId("create-project-files-input") as HTMLInputElement
-    const files = names.map((n) => new File(["hello"], n, { type: "text/plain" }))
+    const files = names.map((n) => {
+      const f = new File(["hello"], n, { type: "text/plain" })
+      if (sizes[n] != null) Object.defineProperty(f, "size", { value: sizes[n] })
+      return f
+    })
     Object.defineProperty(input, "files", { value: files, configurable: true })
     fireEvent.change(input)
     return files
@@ -892,6 +900,56 @@ describe("CreateProjectModal — documents attached at creation", () => {
 
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=905"))
     expect(uploadDocumentMock).not.toHaveBeenCalled()
+  })
+
+  it("says NOTHING about the limit until someone actually hits it", async () => {
+    // The field used to carry a standing hint explaining the 25 MB cap and
+    // what we do with the files — to everyone, every visit, including the
+    // majority who attach two small documents and never come near either
+    // concern. The limit is worth saying exactly once, to the person who just
+    // ran into it.
+    createMock.mockResolvedValue({ id: 906, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+    expect(screen.queryByTestId("create-project-files-hint")).toBeNull()
+    expect(screen.queryByTestId("create-project-files-error")).toBeNull()
+
+    pickFiles(["small.md"])
+    expect(screen.queryByTestId("create-project-files-error")).toBeNull()
+  })
+
+  it("refuses an oversized file at the picker, and names it", async () => {
+    // Mirrors the server's own 25 MB cap, so the reader is told before waiting
+    // through an upload that ends in a 413.
+    await openModal()
+    pickFiles(["huge.pdf"], { "huge.pdf": 26 * 1024 * 1024 })
+
+    const err = screen.getByTestId("create-project-files-error")
+    expect(err.textContent).toContain("huge.pdf")
+    expect(err.textContent).toMatch(/25 MB/)
+    // Refused, so it is not staged and cannot be uploaded.
+    expect(screen.queryByTestId("create-project-file-list")).toBeNull()
+  })
+
+  it("keeps the files that DID fit when one in the pick is too big", async () => {
+    // Refusing the whole pick over one bad file would make the reader select
+    // the rest again.
+    createMock.mockResolvedValue({ id: 907, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["ok.md", "huge.pdf"], { "huge.pdf": 26 * 1024 * 1024 })
+    expect(screen.getByTestId("create-project-files-error").textContent).toContain("huge.pdf")
+    expect(
+      within(screen.getByTestId("create-project-file-list")).getAllByRole("listitem"),
+    ).toHaveLength(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(1))
+    expect((uploadDocumentMock.mock.calls[0][1] as File).name).toBe("ok.md")
   })
 
   it("offers the picker on the manual tab only", () => {
