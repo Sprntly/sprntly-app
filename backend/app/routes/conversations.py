@@ -82,11 +82,41 @@ def _get_owned_conversation(
     return resp.data[0] if resp.data else None
 
 
+def _has_own_content(row: dict[str, Any]) -> bool:
+    """True when the conversation ROW itself carries what was said.
+
+    Older threads were written straight onto the conversation — `POST
+    /v1/conversations` still accepts `title`/`query`/`reply` — before
+    `conversation_turns` existed as the durable store. They have no turn rows
+    and never will, so a turns-only emptiness test would erase real history
+    from every long-standing account the moment it shipped.
+    """
+    return any(str(row.get(f) or "").strip() for f in ("title", "query", "reply"))
+
+
 @router.get("")
 def list_conversations(
     company: WorkspaceContext = Depends(require_workspace),
 ):
-    """List the CALLER'S conversations in the ACTIVE WORKSPACE, newest first."""
+    """List the CALLER'S conversations in the ACTIVE WORKSPACE, newest first.
+
+    EMPTY CONVERSATIONS ARE NOT RETURNED (owner rule, 2026-09-08: a
+    conversation with nothing said in it must not reach the frontend
+    anywhere). They exist because some surfaces mint a durable row when a chat
+    is OPENED rather than when it is used — a project's individual chat is
+    created by `POST /v1/projects/{id}/individual` on mount, precisely so the
+    turns it may later produce have somewhere to go. Those rows carry the
+    caller's `user_id` and the active workspace, so they matched this query and
+    surfaced in Chat history as untitled "ASK" entries: rows a reader cannot
+    open into anything, cannot recognise, and did not create.
+
+    Filtered on READ rather than by not creating the rows, because the row is
+    load-bearing where it is made: the individual-chat memory hook only fires
+    for a turn that already has a `conversation_id`, so minting it late would
+    break threading to save a list entry. One guard on the one read path fixes
+    every caller — the nav's recent list and the Chat history screen both come
+    through here.
+    """
     c = require_client()
     resp = (
         c.table("conversations")
@@ -98,7 +128,27 @@ def list_conversations(
         .limit(100)
         .execute()
     )
-    return {"conversations": resp.data or []}
+    rows = resp.data or []
+    if not rows:
+        return {"conversations": []}
+
+    # One extra read, bounded by the limit above, rather than a per-row count.
+    ids = [r["id"] for r in rows if r.get("id") is not None]
+    spoken: set[Any] = set()
+    if ids:
+        turns = (
+            c.table("conversation_turns")
+            .select("conversation_id")
+            .in_("conversation_id", ids)
+            .execute()
+        )
+        spoken = {t["conversation_id"] for t in (turns.data or [])}
+
+    return {
+        "conversations": [
+            r for r in rows if r.get("id") in spoken or _has_own_content(r)
+        ]
+    }
 
 
 @router.post("")

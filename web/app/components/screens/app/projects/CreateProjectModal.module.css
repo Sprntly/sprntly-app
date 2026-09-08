@@ -73,6 +73,102 @@
   margin: 8px 0 0;
 }
 
+/* ── The file picker ──
+   A label standing in for the browser's own file control, which is a grey
+   "Choose files / No file chosen" that ignores every token on the page and
+   renders differently per browser. The input is visually hidden, NOT
+   `display: none` — it keeps its id, its accessible name and its place in the
+   tab order, so the control still works from the keyboard. */
+
+.filePick {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 11px 12px;
+  border: 1px dashed var(--line-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 12.5px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: border-color 0.12s, background 0.12s, color 0.12s;
+}
+
+.filePick:hover {
+  border-color: var(--ink-3);
+  color: var(--ink);
+}
+
+/* Keyboard parity: the hidden input takes focus, so the ring has to be drawn
+   on the label the reader can actually see. */
+.filePick:focus-within {
+  border-color: var(--ink);
+  border-style: solid;
+  color: var(--ink);
+}
+
+.filePickText {
+  flex: 1;
+  min-width: 0;
+}
+
+.fileInput {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Staged documents (manual tab) ──
+   The list of files picked but not yet uploaded — they upload after the
+   project row exists, so this is the only place they are visible until then.
+   Rows reuse the invite row's remove button (`invite-remove-btn`, globals)
+   rather than growing a second one. */
+
+.fileList {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+/* Long filenames truncate rather than pushing the remove button off the row
+   or wrapping the dialog wider. */
+.fileName {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Said only to the person who just hit the limit — see onAddFiles. */
+.fieldError {
+  font-size: 11.5px;
+  color: var(--danger-ink);
+  line-height: 1.5;
+  margin: 8px 0 0;
+}
+
 .errorBanner {
   font-size: 12.5px;
   color: var(--danger-ink);

@@ -74,7 +74,15 @@ vi.mock("../../AppLayout", () => ({
     React.createElement("div", { "data-testid": "app-layout" }, children),
 }))
 vi.mock("../../../../../context/NavigationContext", () => ({
-  useNavigation: () => ({ openModal: openModalMock }),
+  useNavigation: () => ({
+    openModal: openModalMock,
+    openContentPanel: vi.fn(),
+    // The screen closes the global panel on its way out — see the cleanup in
+    // ProjectDetailScreen. A mock without this throws on unmount.
+    closeContentPanel: vi.fn(),
+    contentPanelTab: null,
+    showToast: vi.fn(),
+  }),
 }))
 vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),

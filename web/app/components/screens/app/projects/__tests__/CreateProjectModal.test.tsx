@@ -19,18 +19,26 @@ import { afterEach, describe, expect, it, vi } from "vitest"
 const createMock = vi.fn()
 const addMemberMock = vi.fn()
 const addArtifactMock = vi.fn()
+const uploadDocumentMock = vi.fn()
 const artifactsListMock = vi.fn()
 const pushMock = vi.fn()
+const showToastMock = vi.fn()
 
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: pushMock }) }))
 vi.mock("../../../../../context/CompanyContext", () => ({
   useCompany: () => ({ activeCompany: "acme", setActiveCompany: vi.fn(), activeCompanyDisplayName: "Acme" }),
+}))
+// A failed upload is reported AFTER the modal closes and the router moves, so
+// the toast is the only surface that survives to carry it.
+vi.mock("../../../../../context/NavigationContext", () => ({
+  useNavigation: () => ({ showToast: showToastMock }),
 }))
 vi.mock("../../../../../lib/api", () => ({
   projectsApi: {
     create: (...a: unknown[]) => createMock(...a),
     addMember: (...a: unknown[]) => addMemberMock(...a),
     addArtifact: (...a: unknown[]) => addArtifactMock(...a),
+    uploadDocument: (...a: unknown[]) => uploadDocumentMock(...a),
   },
   artifactsApi: {
     list: (...a: unknown[]) => artifactsListMock(...a),
@@ -104,6 +112,10 @@ function viewProps(overrides: Partial<CreateProjectModalViewProps> = {}): Create
     onSelectArtifact: noop,
     selectedPrd: null,
     onSelectPrd: noop,
+    files: [],
+    oversized: null,
+    onAddFiles: noop,
+    onRemoveFile: noop,
     creating: false,
     error: null,
     onCancel: noop,
@@ -117,6 +129,8 @@ afterEach(() => {
   createMock.mockReset()
   addMemberMock.mockReset()
   addArtifactMock.mockReset()
+  uploadDocumentMock.mockReset()
+  showToastMock.mockReset()
   artifactsListMock.mockReset()
   pushMock.mockReset()
 })
@@ -741,6 +755,324 @@ describe("CreateProjectModal — prd_auto never carries seed_text (AC5)", () => 
     )
     const payload = createMock.mock.calls[0][0] as { seed_text?: string }
     expect(payload.seed_text).toBeUndefined()
+  })
+})
+
+describe("CreateProjectModal — documents attached at creation", () => {
+  // The point of taking files here at all: a project created with its brief
+  // already attached can answer on the first turn, where one created empty
+  // needs a second trip through Add artifact. Uploads necessarily run AFTER
+  // creation — `POST /v1/projects/{id}/documents` is keyed on the id — so this
+  // is the same create-then-follow-up shape the invite rows already use.
+  /** `sizes` lets a test stage a file the size gate should refuse — jsdom
+   *  reports File.size from the blob parts, which are tiny, so it is set
+   *  explicitly rather than allocating 25 MB of string. */
+  function pickFiles(names: string[], sizes: Record<string, number> = {}) {
+    const input = screen.getByTestId("create-project-files-input") as HTMLInputElement
+    const files = names.map((n) => {
+      const f = new File(["hello"], n, { type: "text/plain" })
+      if (sizes[n] != null) Object.defineProperty(f, "size", { value: sizes[n] })
+      return f
+    })
+    Object.defineProperty(input, "files", { value: files, configurable: true })
+    fireEvent.change(input)
+    return files
+  }
+
+  async function openModal() {
+    artifactsListMock.mockResolvedValue([])
+    await act(async () => {
+      render(React.createElement(CreateProjectModal, { open: true, onClose: noop }))
+    })
+    await waitFor(() => expect(screen.getByTestId("create-project-name-input")).toBeTruthy())
+  }
+
+  it("uploads every picked file to the new project, then navigates", async () => {
+    createMock.mockResolvedValue({ id: 900, name: "Instant-quote flow", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), {
+      target: { value: "Instant-quote flow" },
+    })
+    pickFiles(["brief.pdf", "notes.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(2))
+    expect(uploadDocumentMock.mock.calls.map((c) => (c[1] as File).name)).toEqual([
+      "brief.pdf",
+      "notes.md",
+    ])
+    expect(uploadDocumentMock.mock.calls.every((c) => c[0] === 900)).toBe(true)
+    // Awaited before navigating, so the reader lands on a project whose
+    // documents are already there rather than watching them appear.
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=900"))
+  })
+
+  it("APPENDS across separate picks rather than replacing", async () => {
+    // A picker fires once per visit. Assigning would leave someone who added
+    // three files in three visits holding only the last, with no sign the
+    // others were dropped.
+    createMock.mockResolvedValue({ id: 901, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["one.md"])
+    pickFiles(["two.md"])
+    expect(within(screen.getByTestId("create-project-file-list")).getAllByRole("listitem")).toHaveLength(2)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(2))
+  })
+
+  it("lets a staged file be removed before it is ever uploaded", async () => {
+    createMock.mockResolvedValue({ id: 902, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["keep.md", "drop.md"])
+    fireEvent.click(screen.getByTestId("create-project-file-remove-1"))
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(1))
+    expect((uploadDocumentMock.mock.calls[0][1] as File).name).toBe("keep.md")
+  })
+
+  it("A FAILED FILE DOES NOT COST THE PROJECT, and is named on the way out", async () => {
+    // The server 422s a file it cannot read (a scanned PDF). Best-effort like
+    // the member-add beside it: one bad file must not take the project and
+    // everything else in it. But a document silently missing from a project is
+    // the failure worth avoiding — nobody re-checks an upload they were never
+    // told about — so the toast names it.
+    createMock.mockResolvedValue({ id: 903, name: "P", origin: "manual" })
+    uploadDocumentMock
+      .mockResolvedValueOnce({ type: "custom_artifact", id: 1 })
+      .mockRejectedValueOnce(Object.assign(new Error("unreadable"), { status: 422 }))
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["good.md", "scanned.pdf"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    // Created and navigated regardless.
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=903"))
+    await waitFor(() => expect(showToastMock).toHaveBeenCalled())
+    const [title, body] = showToastMock.mock.calls[0]
+    expect(String(title)).toMatch(/no text/i)
+    expect(String(body)).toContain("scanned.pdf")
+    // The one that worked is not reported as a failure.
+    expect(String(body)).not.toContain("good.md")
+  })
+
+  it("tells a 422 apart from anything else — one is hopeless, the other is worth retrying", async () => {
+    // A 422 is the server saying it found no text: a screen-capture PDF, a
+    // photo of a page. No retry fixes that, and telling someone to try again
+    // sends them hunting for a problem that isn't in the file. A dropped
+    // connection or a 5xx IS worth retrying, and must not be described as
+    // unreadable.
+    createMock.mockResolvedValue({ id: 908, name: "P", origin: "manual" })
+    uploadDocumentMock
+      .mockRejectedValueOnce(Object.assign(new Error("unreadable"), { status: 422 }))
+      .mockRejectedValueOnce(Object.assign(new Error("boom"), { status: 500 }))
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["screencapture.pdf", "flaky.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledTimes(2))
+    const bodies = showToastMock.mock.calls.map((c) => `${c[0]} ${c[1]}`)
+    const noText = bodies.find((b) => /no text/i.test(b))!
+    const didntUpload = bodies.find((b) => /didn.t upload/i.test(b))!
+    expect(noText).toContain("screencapture.pdf")
+    expect(noText).not.toContain("flaky.md")
+    // The retryable one is not blamed on the file's contents.
+    expect(didntUpload).toContain("flaky.md")
+    expect(didntUpload).not.toMatch(/no text/i)
+  })
+
+  it("treats an error with no status as retryable, not unreadable", async () => {
+    // A network failure rejects with a plain Error — no `status` at all. It
+    // must fall to "didn't upload", never to a claim about the file's
+    // contents that nothing established.
+    createMock.mockResolvedValue({ id: 909, name: "P", origin: "manual" })
+    uploadDocumentMock.mockRejectedValue(new Error("network down"))
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["notes.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledTimes(1))
+    expect(String(showToastMock.mock.calls[0][0])).toMatch(/didn.t upload/i)
+  })
+
+  it("says nothing when every file lands", async () => {
+    createMock.mockResolvedValue({ id: 904, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["good.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=904"))
+    expect(showToastMock).not.toHaveBeenCalled()
+  })
+
+  it("creates with no upload call at all when nothing was picked", async () => {
+    createMock.mockResolvedValue({ id: 905, name: "P", origin: "manual" })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=905"))
+    expect(uploadDocumentMock).not.toHaveBeenCalled()
+  })
+
+  it("says NOTHING about the limit until someone actually hits it", async () => {
+    // The field used to carry a standing hint explaining the 25 MB cap and
+    // what we do with the files — to everyone, every visit, including the
+    // majority who attach two small documents and never come near either
+    // concern. The limit is worth saying exactly once, to the person who just
+    // ran into it.
+    createMock.mockResolvedValue({ id: 906, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+    expect(screen.queryByTestId("create-project-files-hint")).toBeNull()
+    expect(screen.queryByTestId("create-project-files-error")).toBeNull()
+
+    pickFiles(["small.md"])
+    expect(screen.queryByTestId("create-project-files-error")).toBeNull()
+  })
+
+  it("refuses an oversized file at the picker, and names it", async () => {
+    // Mirrors the server's own 25 MB cap, so the reader is told before waiting
+    // through an upload that ends in a 413.
+    await openModal()
+    pickFiles(["huge.pdf"], { "huge.pdf": 26 * 1024 * 1024 })
+
+    const err = screen.getByTestId("create-project-files-error")
+    expect(err.textContent).toContain("huge.pdf")
+    expect(err.textContent).toMatch(/25 MB/)
+    // Refused, so it is not staged and cannot be uploaded.
+    expect(screen.queryByTestId("create-project-file-list")).toBeNull()
+  })
+
+  it("keeps the files that DID fit when one in the pick is too big", async () => {
+    // Refusing the whole pick over one bad file would make the reader select
+    // the rest again.
+    createMock.mockResolvedValue({ id: 907, name: "P", origin: "manual" })
+    uploadDocumentMock.mockResolvedValue({ type: "custom_artifact", id: 1 })
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["ok.md", "huge.pdf"], { "huge.pdf": 26 * 1024 * 1024 })
+    expect(screen.getByTestId("create-project-files-error").textContent).toContain("huge.pdf")
+    expect(
+      within(screen.getByTestId("create-project-file-list")).getAllByRole("listitem"),
+    ).toHaveLength(1)
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+    await waitFor(() => expect(uploadDocumentMock).toHaveBeenCalledTimes(1))
+    expect((uploadDocumentMock.mock.calls[0][1] as File).name).toBe("ok.md")
+  })
+
+  it("does not render the browser's own file control", () => {
+    // A bare <input type="file"> paints the platform's grey "Choose files /
+    // No file chosen", which ignores every token on the page and looks
+    // different in each browser. The input is still THERE — visually hidden,
+    // not display:none — so it keeps its id, its accessible name and its place
+    // in the tab order, and the label is a real control for keyboard and
+    // screen-reader users.
+    render(React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })))
+    const input = screen.getByTestId("create-project-files-input") as HTMLInputElement
+    const pick = screen.getByTestId("create-project-files-pick")
+
+    expect(pick.tagName).toBe("LABEL")
+    expect(pick.contains(input)).toBe(true)
+    expect(input.className).not.toContain("input")
+    // Exactly ONE label owns the control: the heading above is a div, so the
+    // accessible name is not the two concatenated.
+    expect(document.querySelectorAll('label[for="create-project-files"]')).toHaveLength(0)
+  })
+
+  it("the picker says how many files are ready once some are", () => {
+    const { rerender } = render(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })),
+    )
+    expect(screen.getByTestId("create-project-files-pick").textContent).toMatch(/Choose files/)
+
+    rerender(
+      React.createElement(
+        CreateProjectModalView,
+        viewProps({ files: [new File(["x"], "a.md"), new File(["x"], "b.md")] }),
+      ),
+    )
+    // Plural, and it still invites more rather than reading as finished.
+    expect(screen.getByTestId("create-project-files-pick").textContent).toMatch(
+      /2 files ready — add more/,
+    )
+  })
+
+  it("offers the picker on the manual tab only", () => {
+    // The other two tabs are "pick something that already exists" flows; a
+    // second way to bring content in there muddies what they are for.
+    const { rerender } = render(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })),
+    )
+    expect(screen.getByTestId("create-project-files-input")).toBeTruthy()
+
+    rerender(React.createElement(CreateProjectModalView, viewProps({ tab: "artifact" })))
+    expect(screen.queryByTestId("create-project-files-input")).toBeNull()
+
+    rerender(React.createElement(CreateProjectModalView, viewProps({ tab: "auto" })))
+    expect(screen.queryByTestId("create-project-files-input")).toBeNull()
+  })
+
+  it("accepts several files at once and caps none of them by count", () => {
+    // Owner decision 2026-09-08: no file-count limit here. The server caps
+    // each file at 25 MB and refuses what it cannot read; a count limit on top
+    // would be an invention with no rule behind it.
+    render(
+      React.createElement(
+        CreateProjectModalView,
+        viewProps({
+          // Named, so the submit's enabled state is answering "do 12 files
+          // block creating?" and not "is the name empty?".
+          name: "Instant-quote flow",
+          files: Array.from({ length: 12 }, (_, i) => new File(["x"], `f${i}.md`)),
+        }),
+      ),
+    )
+    const input = screen.getByTestId("create-project-files-input") as HTMLInputElement
+    expect(input.multiple).toBe(true)
+    expect(
+      within(screen.getByTestId("create-project-file-list")).getAllByRole("listitem"),
+    ).toHaveLength(12)
+    // Nothing disabled, nothing warned about.
+    expect(screen.getByTestId("create-project-submit").hasAttribute("disabled")).toBe(false)
   })
 })
 
