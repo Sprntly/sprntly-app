@@ -42,6 +42,7 @@ and a claim must never go missing, because this classifier did.
 """
 from __future__ import annotations
 
+import functools
 import logging
 import sys
 from dataclasses import replace
@@ -115,6 +116,51 @@ BLOCKER_REASON_LABELS: dict[str, str] = {r[0]: r[2] for r in BLOCKER_REASONS}
 CLUSTERABLE_REASONS: frozenset[str] = frozenset(
     k for k in BLOCKER_REASON_KEYS if k != "other"
 )
+
+
+@functools.lru_cache(maxsize=1)
+def constant_checklist_theme_labels() -> frozenset[str]:
+    """The theme labels `app.graph.extractor._CHECKLIST_CATEGORIES` mints,
+    lowercased — the ONLY subjects a classified reason may override.
+
+    WHY THIS EXISTS AND WHY IT IS SCOPED THIS NARROWLY. `pipeline._cluster`
+    keys on `subject_cluster_id` before anything else, and by the time
+    `build_findings` runs, `subject_cluster_id` is set on every claim the
+    graph could theme (`kg_themes.assign_themes`) or cluster by embedding
+    (`cluster.assign_clusters`) — `execute_run` runs both, unconditionally,
+    before `build_findings`. So `reason` is unreachable UNLESS something
+    overrides `subject_cluster_id` outright for the claims it should apply
+    to. It must not do that for every claim with a reason: 38 `constraint`
+    claims measured on a real tenant are `business_context`-sourced and
+    already sit on real, specific graph themes ("Budget & procurement",
+    8 accounts; "FedRAMP / compliance", 2 accounts; …) — letting a reason
+    override those pulls them OUT of a good, specific theme and INTO a
+    generic reason bucket, destroying findings that were never the defect.
+    Scoping the override to claims whose `subject` IS one of the twelve
+    constant checklist labels is what keeps those 38 alone: only a claim
+    still carrying the checklist pass's own constant label (never rewritten
+    to anything more specific) is a claim the constant-label defect actually
+    describes.
+
+    A LOCAL HELPER, NOT AN IMPORT of a shared constant: `extractor.py`
+    exposes no public checklist-label list on `main` — reading it straight
+    off `_CHECKLIST_CATEGORIES`'s own theme-label column (index 3),
+    filtered to the categories that actually mint a signal (index 6;
+    'stakeholders' does not — see that module's own comment), guarantees
+    this can never drift from what the extractor actually writes. Imported
+    lazily, inside the function, the same convention `_classify_chunk` uses
+    for `app.graph.gateway`/`app.llm` — `app.graph.extractor` pulls in the
+    embeddings/facade/gateway chain, and this module (like `figure_class`)
+    keeps that out of its own top-level import graph. Cached because the
+    checklist's own category table is a fixed constant for the life of the
+    process, not something worth re-deriving on every `_cluster` call.
+    """
+    from app.graph.extractor import _CHECKLIST_CATEGORIES
+
+    return frozenset(
+        row[3].strip().lower() for row in _CHECKLIST_CATEGORIES if row[6]
+    )
+
 
 CLASSIFY_SCHEMA: dict = {
     "type": "object",

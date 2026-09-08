@@ -21,18 +21,50 @@ from app.crucible.blocker_reason import (
     PROPERTY_KEY,
     apply_reasons,
     classify_blocker_reasons,
+    constant_checklist_theme_labels,
     estimate_cost,
 )
 from app.crucible.pipeline import _cluster, _label
 
 from tests.test_crucible_pipeline import claim as _claim
 
+#: The checklist's own constant theme label for the 'objection' category
+#: (`app.graph.extractor._CHECKLIST_CATEGORIES`, row 3 of the "objection"
+#: entry) — what `assign_themes` actually writes to `subject` for every
+#: checklist blocker claim, NOT the raw `kind` fallback ("deal_blocker")
+#: a claim only ever carries before the graph has themed it.
+CHECKLIST_THEME_SUBJECT = "deal blockers"
 
-def a_claim(text, *, cid="c1", blocker_reason=None, accounts=("Northwind",)):
+#: The graph theme entity id every checklist blocker claim shares in
+#: production — `assign_themes` themes every 'objection' claim onto the
+#: SAME entity, because there is only one "deal blockers" theme node. A
+#: fixed, shared id here (rather than a fresh one per claim) is what makes
+#: `a_claim`'s default the real shape: many claims, one cluster id.
+CHECKLIST_THEME_SUBJECT_CLUSTER_ID = "kg:deal-blockers-theme-entity"
+
+
+def a_claim(
+    text, *, cid="c1", blocker_reason=None, accounts=("Northwind",),
+    subject=CHECKLIST_THEME_SUBJECT,
+    subject_cluster_id=CHECKLIST_THEME_SUBJECT_CLUSTER_ID,
+):
     """One `constraint`-typed (deal-blocker) claim, optionally already
-    classified."""
-    base = _claim(cid, assertion=text, ctype="constraint", subject="deal_blocker",
+    classified.
+
+    DEFAULTS MIRROR WHAT PRODUCTION ACTUALLY PRODUCES, not a pre-theming
+    state. `execute_run` always runs `kg_themes.assign_themes` before
+    `build_findings` — measured on a real 11,567-claim tenant: 0 claims with
+    a falsy `subject_cluster_id`. For a checklist 'objection' claim,
+    `assign_themes` overwrites BOTH `subject` (to the theme's own constant
+    label, "deal blockers" — not the raw `kind` fallback) AND
+    `subject_cluster_id` (to the graph's theme entity id, shared by every
+    claim themed onto that one entity). A fixture built without either is a
+    state the run path cannot reach, and testing only that state is how a
+    change with zero production effect shipped green.
+    """
+    base = _claim(cid, assertion=text, ctype="constraint", subject=subject,
                   source="customer_voice", accounts=accounts)
+    base = replace(base, subject_cluster_id=subject_cluster_id)
     return replace(base, blocker_reason=blocker_reason)
 
 
@@ -328,12 +360,25 @@ def test_the_estimate_chunks_the_way_the_run_does():
 
 
 # ── The defect this module fixes: `_cluster`/`_label` on a real shape ──────
-# ── (a fake, mixed corpus mirroring the real one's dominating structure) ───
+# ── (fixtures now carry the `subject_cluster_id` production always sets —  ─
+# ── see `a_claim`'s own docstring for why an id-less fixture is dishonest) ─
+
+def test_every_checklist_blocker_claim_shares_one_real_cluster_id_by_default():
+    """The premise the rest of this section depends on, asserted rather than
+    assumed: in production every 'objection' claim themes onto the SAME
+    graph entity, so they all arrive at `_cluster` with an IDENTICAL,
+    already-set `subject_cluster_id` — never `None`."""
+    a, b = a_claim("x", cid="a"), a_claim("y", cid="b")
+    assert a.subject_cluster_id == b.subject_cluster_id == CHECKLIST_THEME_SUBJECT_CLUSTER_ID
+    assert a.subject == CHECKLIST_THEME_SUBJECT
+
 
 def test_a_single_constant_theme_splits_into_reason_clusters():
-    """THE DEFECT, reproduced and fixed. Without a classified reason every
-    one of these claims keys to the same cluster (`subject="deal_blocker"`,
-    the checklist's constant fallback); with one, they split by why."""
+    """THE DEFECT, reproduced with the shape production actually produces —
+    every claim already carrying the SAME real `subject_cluster_id` — and
+    fixed: a claim with a clusterable reason keys on the reason instead,
+    because it is still sitting on the checklist's own constant theme
+    (`subject == "deal blockers"`)."""
     claims = (
         [a_claim(f"no budget approved, account {i}", cid=f"b{i}",
                  blocker_reason="budget", accounts=(f"Acct{i}",))
@@ -346,12 +391,13 @@ def test_a_single_constant_theme_splits_into_reason_clusters():
                    accounts=("AcctX",))]
     )
     clusters = _cluster(claims)
-    assert set(clusters) >= {"budget", "legal_security_compliance", "deal_blocker"}
+    fallback_key = CHECKLIST_THEME_SUBJECT_CLUSTER_ID.lower()
+    assert set(clusters) >= {"budget", "legal_security_compliance", fallback_key}
     assert len(clusters["budget"]) == 4
     assert len(clusters["legal_security_compliance"]) == 3
-    # The unclassified claim still lands on the constant fallback — degrade,
-    # never lose the claim.
-    assert clusters["deal_blocker"] == [claims[-1]]
+    # The unclassified claim still lands on the checklist theme's own real
+    # cluster id — degrade, never lose the claim.
+    assert clusters[fallback_key] == [claims[-1]]
 
 
 def test_other_and_unclassified_share_the_same_fallback_cluster():
@@ -360,30 +406,69 @@ def test_other_and_unclassified_share_the_same_fallback_cluster():
         a_claim("no reason drawn", cid="none1", blocker_reason=None),
     ]
     clusters = _cluster(claims)
-    assert set(clusters) == {"deal_blocker"}
-    assert len(clusters["deal_blocker"]) == 2
+    fallback_key = CHECKLIST_THEME_SUBJECT_CLUSTER_ID.lower()
+    assert set(clusters) == {fallback_key}
+    assert len(clusters[fallback_key]) == 2
 
 
-def test_a_graph_supplied_cluster_id_still_wins_over_a_classified_reason():
-    """`subject_cluster_id` is the graph's own, more specific answer and must
-    keep outranking a reason classification — same precedence order as the
-    pre-existing `subject_cluster_id or subject` chain."""
-    a = replace(a_claim("x", cid="a", blocker_reason="budget"),
-                subject_cluster_id="graph-cluster-9")
-    b = replace(a_claim("y", cid="b", blocker_reason="budget"),
-                subject_cluster_id="graph-cluster-9")
+def test_a_classified_reason_overrides_the_checklist_themes_own_cluster_id():
+    """THE FIX, and the reason it has to be a fix rather than a reorder.
+    `assign_themes` sets `subject_cluster_id` on EVERY checklist claim it
+    themes, to the one shared entity for that constant label — measured on
+    a real 11,567-claim tenant: 0 claims arrive at `_cluster` with a falsy
+    `subject_cluster_id`. Ranking the reason BELOW `subject_cluster_id` (the
+    original shape) is therefore unreachable on every tenant, always: this
+    is the inversion of `test_a_graph_supplied_cluster_id_still_wins_over_a_
+    classified_reason`, which pinned exactly that unreachable precedence."""
+    a = a_claim("no budget approved", cid="a", blocker_reason="budget")
+    b = a_claim("still no budget", cid="b", blocker_reason="budget")
+    assert a.subject_cluster_id == b.subject_cluster_id, (
+        "both must start from the SAME real theme entity — the production shape"
+    )
     clusters = _cluster([a, b])
-    assert set(clusters) == {"graph-cluster-9"}
+    assert set(clusters) == {"budget"}
+
+
+def test_a_graph_supplied_cluster_id_still_wins_when_not_on_a_checklist_theme():
+    """The case the override must NOT touch: a `constraint` claim already
+    sitting on a real, SPECIFIC graph theme rather than the checklist's
+    constant one — the 38 `business_context`-sourced claims measured on a
+    real tenant ("Budget & procurement", 8 accounts; "FedRAMP / compliance",
+    2 accounts; …), never rewritten to the checklist's constant label. A
+    reason must not pull these into a generic bucket: the unconditional
+    version of this change was measured to destroy 5 real findings carrying
+    >=2 accounts this exact way, including this one's own shape."""
+    a = a_claim("a specific, already-themed business constraint", cid="a",
+                blocker_reason="budget", subject="Budget & procurement",
+                subject_cluster_id="kg:budget-procurement-entity")
+    b = a_claim("another one, same real theme", cid="b", blocker_reason="budget",
+                subject="Budget & procurement",
+                subject_cluster_id="kg:budget-procurement-entity")
+    clusters = _cluster([a, b])
+    assert set(clusters) == {"kg:budget-procurement-entity"}
 
 
 def test_the_label_of_a_reason_cluster_is_the_human_readable_display_label():
-    """Without this, every reason cluster would still display "deal_blocker"
-    — every claim in it shares that constant `subject` — defeating the split
-    at the one place a reader actually sees it."""
+    """Without this, every reason cluster would still display "deal
+    blockers" — every claim in it shares that constant `subject` — defeating
+    the split at the one place a reader actually sees it."""
     claims = [a_claim(f"no budget, {i}", cid=f"b{i}", blocker_reason="budget")
               for i in range(3)]
     assert _label(claims, "budget") == BLOCKER_REASON_LABELS["budget"]
-    assert _label(claims, "budget") != "deal_blocker"
+    assert _label(claims, "budget") != CHECKLIST_THEME_SUBJECT
+
+
+def test_the_checklist_themes_own_residual_still_labels_as_the_theme():
+    """The `other`/unclassified residual keeps the checklist theme's own
+    cluster id as its key, and `_label` falls through to its ordinary
+    most-common-subject behaviour for it — which, for these claims, IS the
+    constant label, matching what a real run renders for the residual
+    (measured: a 30-account finding still labelled `deal blockers` at
+    rank #6)."""
+    claims = [a_claim("does not fit any category", cid="o1", blocker_reason="other"),
+              a_claim("no reason drawn", cid="n1", blocker_reason=None)]
+    fallback_key = CHECKLIST_THEME_SUBJECT_CLUSTER_ID.lower()
+    assert _label(claims, fallback_key) == CHECKLIST_THEME_SUBJECT
 
 
 def test_an_ordinary_subject_cluster_label_is_unaffected():
@@ -395,3 +480,20 @@ def test_an_ordinary_subject_cluster_label_is_unaffected():
         _claim("c2", subject="export latency"),
     ]
     assert _label(claims, "export latency") == "export latency"
+
+
+# ── The vocabulary of constant checklist theme labels itself ───────────────
+
+def test_constant_checklist_theme_labels_includes_deal_blockers_and_is_small():
+    labels = constant_checklist_theme_labels()
+    assert CHECKLIST_THEME_SUBJECT in labels
+    # Eleven "mint_signal" categories mint a Signal onto a theme
+    # ("stakeholders" does not — see `_CHECKLIST_CATEGORIES`'s own comment).
+    assert 3 <= len(labels) <= 12
+
+
+def test_constant_checklist_theme_labels_is_cached():
+    """Computed once — the checklist's own category table does not change
+    during a process lifetime, so re-deriving it on every `_cluster` call
+    would be pure waste."""
+    assert constant_checklist_theme_labels() is constant_checklist_theme_labels()

@@ -27,7 +27,11 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from typing import Iterable, Mapping, NamedTuple, Optional, Sequence
 
-from app.crucible.blocker_reason import BLOCKER_REASON_LABELS, CLUSTERABLE_REASONS
+from app.crucible.blocker_reason import (
+    BLOCKER_REASON_LABELS,
+    CLUSTERABLE_REASONS,
+    constant_checklist_theme_labels,
+)
 from app.crucible.figure_class import RANGE_CLASS, SUMMABLE_CLASS
 from app.crucible.cluster import UNGROUPABLE_PREFIX, example_for, label_for
 from app.crucible.lint import lint_claim
@@ -712,32 +716,55 @@ class PipelineResult:
 def _cluster(claims: Sequence[Claim]) -> dict[str, list[Claim]]:
     """Group claims that are about the same thing.
 
-    By `subject_cluster_id` when the graph gave us one, else by a classified
-    blocker reason when the claim has one, else by subject. NOT by wording:
-    the spec's "deduplicate by mechanism, not by wording" exists because the
-    Phase 0 corpus carried four labels for one theme, splitting its accounts
-    four ways so each looked smaller than it was.
+    By `subject_cluster_id` when the graph gave us one, else by subject, else
+    by type — EXCEPT for a claim still sitting on a constant checklist theme
+    with a clusterable reason, which keys on the reason instead. NOT by
+    wording: the spec's "deduplicate by mechanism, not by wording" exists
+    because the Phase 0 corpus carried four labels for one theme, splitting
+    its accounts four ways so each looked smaller than it was.
 
-    THE BLOCKER-REASON STEP EXISTS BECAUSE `subject` IS A CONSTANT FOR THESE
-    CLAIMS. The checklist pass never writes `properties.subject` for its
-    'objection' category, so `claims.project_signal` falls back to `kind`
-    ("deal_blocker") for every one of them — several hundred claims from
-    several hundred documents, all keying to the same cluster regardless of
-    what actually blocked the deal. `blocker_reason` (`app.crucible.
-    blocker_reason`) is a per-claim classification of WHY, drawn once and
-    read back; grouping on it instead of on the constant is what turns one
-    opaque mega-cluster into several sizeable, actually-named ones.
+    WHY THE REASON HAS TO OUTRANK `subject_cluster_id`, NOT FOLLOW IT.
+    `execute_run` runs `kg_themes.assign_themes` (graph theming) and
+    `cluster.assign_clusters` (embedding fallback) on EVERY claim, always,
+    before `build_findings` — so by the time `_cluster` runs, every claim's
+    `subject_cluster_id` is already set (measured on a real 11,567-claim
+    tenant: zero falsy). A reason ranked below `subject_cluster_id` can
+    therefore never be read; it is not a rare case, it is unreachable on
+    every tenant, on every claim, always. The fix is not "try the reason
+    first, unconditionally" either: `assign_themes` also stamps
+    `subject_cluster_id` on `constraint` claims that were never part of the
+    checklist's constant-label problem — 38 measured on a real tenant,
+    `business_context`-sourced, already sitting on real, specific graph
+    themes ("Budget & procurement", 8 accounts) — and pulling those into a
+    generic reason bucket would destroy findings that were never broken (a
+    naive unconditional reorder measured 5 findings with >=2 accounts lost).
 
-    ONLY `CLUSTERABLE_REASONS` OVERRIDE THE KEY. `other` and an unclassified
-    claim (`blocker_reason is None`) both fall through to `subject`/`type` —
-    exactly today's behaviour — rather than forming a second catch-all
-    bucket under a new name.
+    SCOPED TO THE TWELVE CONSTANT CHECKLIST LABELS, THEREFORE, NOT TO EVERY
+    REASON-BEARING CLAIM. `assign_themes` overwrites BOTH `subject_cluster_id`
+    AND `subject` to the graph theme entity's own label — and for a checklist
+    'objection' claim that label IS one of the twelve constants
+    (`blocker_reason.constant_checklist_theme_labels()`, built off
+    `extractor._CHECKLIST_CATEGORIES`), because every one of them was themed
+    onto the SAME entity. A claim whose `subject` is still one of those
+    twelve, after theming, is exactly and only a claim the constant-label
+    defect describes; a `business_context` claim on a real, specific theme
+    never matches, so its `subject_cluster_id` is left untouched.
+
+    ONLY `CLUSTERABLE_REASONS` MAY WIN. `other` and an unclassified claim
+    (`blocker_reason is None`) fall through to `subject_cluster_id`/`subject`
+    /`type` — the checklist theme's own graph entity, today's behaviour —
+    rather than forming a second catch-all bucket under a new name.
     """
+    checklist_labels = constant_checklist_theme_labels()
     out: dict[str, list[Claim]] = defaultdict(list)
     for c in claims:
         reason = c.blocker_reason if c.blocker_reason in CLUSTERABLE_REASONS else None
-        key = (c.subject_cluster_id or reason or c.subject or c.type).strip().lower()
-        out[key].append(c)
+        on_checklist_theme = (c.subject or "").strip().lower() in checklist_labels
+        if reason and on_checklist_theme:
+            key = reason
+        else:
+            key = c.subject_cluster_id or c.subject or c.type
+        out[key.strip().lower()].append(c)
     return dict(out)
 
 
