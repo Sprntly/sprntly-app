@@ -18257,18 +18257,15 @@
     color: #5b655e;
   }
 
-  /* The lead-in takes the description's slot: its own full-width row under the
-     title, so the Upload button stays pinned to the title line. Its own
-     bottom margin is dropped here — "Show prompt" below supplies the gap. */
-  .set-conn-llm-context .ctx-import-lead {
-    flex-basis: 100%;
-    width: 100%;
-    margin: 4px 0 0;
-  }
+  /* `.ctx-import-lead*` REMOVED 2026-09-08 with the paragraph it styled — the
+     "Already use Claude or ChatGPT for work?" lead-in on the business-context
+     import card. Deleted rather than left behind: a rule with no markup is a
+     class the next reader has to prove is dead before touching anything near
+     it. See LlmContextImportCard for why the copy went. */
 
-  /* "Show prompt" sits on its own row directly under the description — a
-     left-aligned trigger, so it wraps full-width but the button keeps its
-     natural size. */
+  /* "Show prompt" sits on its own row under the title (it was under the
+     lead-in until that came off) — a left-aligned trigger, so it wraps
+     full-width but the button keeps its natural size. */
   .set-conn-llm-context .set-conn-llm-show {
     flex-basis: 100%;
     width: 100%;
@@ -20180,43 +20177,10 @@
      context), hence the surface-neutral name. An accent tint plus a solid left
      rule reads as a highlight without becoming a filled slab that would fight
      the card's own is-recommended border directly beneath it. */
-  .ctx-import-lead {
-    display: flex;
-    align-items: flex-start;
-    gap: 10px;
-    padding: 14px 16px;
-    margin-bottom: 12px;
-    border: 1px solid var(--accent-alpha-28);
-    border-left: 3px solid var(--accent);
-    border-radius: var(--radius-sm);
-    background: var(--accent-alpha-08);
-  }
 
-  .ctx-import-lead > i {
-    flex-shrink: 0;
-    margin-top: 1px;
-    font-size: 16px;
-    color: var(--accent-ink);
-  }
 
-  .ctx-import-lead-copy {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-  }
 
-  .ctx-import-lead-title {
-    font-size: 14px;
-    font-weight: 600;
-    color: var(--accent-ink);
-  }
 
-  .ctx-import-lead-text {
-    font-size: 12.5px;
-    line-height: 1.55;
-    color: var(--ink-2);
-  }
 
   .onb-import-card {
     display: flex;
