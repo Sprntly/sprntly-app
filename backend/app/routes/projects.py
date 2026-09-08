@@ -956,11 +956,15 @@ async def upload_project_document(
     # documents inside it. People zip things precisely because they have
     # several; refusing that is refusing the normal case.
     #
-    # Members are expanded through `app.zip_safe`, which owns the traversal /
-    # bomb / count guards, and each one then walks the SAME path a directly
-    # uploaded file walks — same converter, same unreadable check, same
-    # sanitizer, same size ceiling. A zip is a delivery mechanism here and
-    # earns no shortcut past any of it.
+    # Members are expanded through `datasets.expand_zip_members` — the SAME
+    # helper the document-source upload route uses, which already owns the
+    # traversal / bomb / nested-archive / count guards. Reused rather than
+    # rewritten: those guards existed in three places before this and a fourth
+    # copy is a fourth thing to drift, in the one nobody re-reads.
+    #
+    # Each member then walks the SAME path a directly uploaded file walks —
+    # same converter, same unreadable check, same sanitizer, same size ceiling.
+    # A zip is a delivery mechanism here and earns no shortcut past any of it.
     if _looks_like_zip(filename, data):
         return await _upload_zip_members(project_id, filename, data, ctx)
 
@@ -994,22 +998,23 @@ async def _upload_zip_members(
     fix the scan anyway. If NOTHING in it could be read, that is worth a 422:
     the upload genuinely achieved nothing and silence would look like success.
     """
-    from app import zip_safe
+    from app.datasets import DatasetError, expand_zip_members
 
     try:
-        members = await asyncio.to_thread(zip_safe.read_members, data)
-    except zip_safe.NotAZip:
-        raise HTTPException(400, f"{filename!r} is not a readable ZIP archive.")
-    except zip_safe.ZipTooLarge as exc:
-        raise HTTPException(413, str(exc))
+        members, member_errors = await asyncio.to_thread(
+            expand_zip_members, filename, data,
+            per_member_max_bytes=_MAX_DOCUMENT_BYTES,
+        )
+    except DatasetError as exc:
+        raise HTTPException(400, str(exc))
 
     if not members:
-        raise HTTPException(422, "That archive is empty.")
+        raise HTTPException(422, "That archive contained no usable files.")
 
     created: list[dict] = []
-    skipped: list[str] = []
+    skipped: list[str] = [e.get("filename", "?") for e in member_errors]
     for name, raw in members:
-        if not raw or len(raw) > _MAX_DOCUMENT_BYTES:
+        if not raw:
             skipped.append(name)
             continue
         try:

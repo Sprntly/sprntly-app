@@ -322,9 +322,11 @@ def test_zip_imports_every_readable_member(docs_env, monkeypatch):
     assert len(_project_artifact_refs(project["id"])) == 3
 
 
-def test_zip_unwraps_a_single_top_level_folder(docs_env, monkeypatch):
-    """`docs.zip → docs/Brief.md` is what a person means by "the file called
-    Brief.md" — the folder is packaging, not structure."""
+def test_zip_members_land_under_their_own_names(docs_env, monkeypatch):
+    """`docs.zip → docs/Brief.md` becomes the document "Brief". The shared
+    expander takes basenames, which is both what a person means by "the file
+    called Brief.md" and what makes traversal impossible by construction
+    rather than by a check someone could later forget."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
@@ -388,22 +390,44 @@ def test_macos_junk_is_ignored(docs_env, monkeypatch):
     assert [d["title"] for d in r.json()] == ["Brief"]
 
 
-def test_a_traversal_member_is_never_imported(docs_env, monkeypatch):
-    """`../../etc/passwd` never reaches a title or a storage key. Dropped
-    rather than sanitised — a name that tried is not a name to keep."""
+def test_a_traversal_path_never_survives_as_a_path(docs_env, monkeypatch):
+    """`../../escape.md` cannot reach a title or a storage key AS A PATH.
+
+    The shared expander keeps the basename only, so the member lands as the
+    ordinary document "escape" — the dots are gone, and nothing downstream ever
+    sees a relative path it might join onto something."""
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
 
     r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
         "Brief.md": b"# Brief\n\nShip it.\n",
-        "../../escape.md": b"# Escape\n\nShould never land.\n",
+        "../../escape.md": b"# Escape\n\nHarmless once renamed.\n",
     }))
 
     assert r.status_code == 200, r.text
-    titles = [d["title"] for d in r.json()]
-    assert titles == ["Brief"]
-    assert not any("escape" in (row["title"] or "").lower()
-                   for row in _custom_artifact_rows(ctx.company_id))
+    assert sorted(d["title"] for d in r.json()) == ["Brief", "escape"]
+    # No stored title carries a traversal fragment or a separator.
+    for row in _custom_artifact_rows(ctx.company_id):
+        assert ".." not in (row["title"] or "")
+        assert "/" not in (row["title"] or "")
+
+
+def test_a_nested_archive_is_skipped_not_recursed(docs_env, monkeypatch):
+    """A zip inside a zip is not expanded — unbounded recursion is the oldest
+    archive attack there is. A guard this route gained for free by reusing the
+    shared expander rather than writing its own. The outer members still
+    import."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    inner = _zip_bytes({"Deep.md": b"# Deep"})
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "Brief.md": b"# Brief",
+        "inner.zip": inner,
+    }))
+
+    assert r.status_code == 200, r.text
+    assert [d["title"] for d in r.json()] == ["Brief"]
 
 
 def test_a_renamed_non_archive_is_not_treated_as_one(docs_env, monkeypatch):

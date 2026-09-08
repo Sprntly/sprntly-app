@@ -241,7 +241,12 @@ function isOpenable(a: ArtifactItem): boolean {
  *  document types (`backend/app/ingest.py::_SUFFIX_TO_CONVERTER`), minus the
  *  data/markup types the drawer's "document" affordance doesn't advertise. A
  *  hint only: the server re-validates and 422s an unreadable file regardless. */
-const UPLOAD_ACCEPT = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md"
+// `.zip` is here because the endpoint expands one into a document per member
+// (routes/projects.py). Without it the OS picker GREYS OUT archives — the
+// reported symptom: "the folder does not show zip files". An `accept` list is
+// a hint, not a gate, so the cost of omitting a type the server handles is
+// that nobody can choose it.
+const UPLOAD_ACCEPT = ".pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.zip"
 
 /** DOC badge for a transient upload row — the SAME palette entry a finished
  *  custom_artifact row uses (`ARTIFACT_BADGE.custom_artifact`), so a processing
