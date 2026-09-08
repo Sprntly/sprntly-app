@@ -22,7 +22,10 @@ import {
 
 type Step = "name" | "upload" | "generate" | "ready"
 
-const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".pdf", ".txt", ".md"]
+// `.zip` because `/v1/datasets/{slug}/files` already expands one and ingests
+// each member (`datasets.ingest_zip`). Leaving it out only greyed archives out
+// in the picker for a server that handled them fine.
+const SUPPORTED_EXT = [".doc", ".docx", ".xlsx", ".pdf", ".txt", ".md", ".zip"]
 
 export default function OnboardPage() {
   const auth = useAuth()

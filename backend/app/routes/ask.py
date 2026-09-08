@@ -626,33 +626,122 @@ def get_skills(company: CompanyContext = Depends(require_company)):
 _MAX_EXTRACT_BYTES = 25 * 1024 * 1024  # 25 MB
 
 
+# One wording for "we could not read this", shared by the single-file path and
+# every member of an archive — the reader gets the same explanation wherever
+# the file came from.
+_EXTRACT_UNREADABLE = (
+    "Could not extract any text from the file. Scanned/image-only PDFs "
+    "and legacy .ppt are not supported — export to PDF or .pptx."
+)
+
+
 @router.post("/extract-file")
 async def extract_file(
     file: UploadFile = File(...),
     # Attachment extraction only feeds the chat composer → Agents module.
     company: CompanyContext = Depends(require_agents_module),  # noqa: ARG001 — auth gate only
 ):
-    """Parse a chat attachment (pptx/pdf/docx/…) to markdown for ask context.
+    """Parse a chat attachment (pptx/pdf/docx/zip/…) to markdown for ask context.
 
     The composer can inline plain-text attachments itself, but binary document
     formats need server-side parsing (`app.ingest.convert` — no LLM). Returns
     `{name, markdown}`; the composer appends it to the question as an
     `[Attached files]` block, so a deck attached to a plain question actually
     reaches the agent instead of being silently dropped.
+
+    A .ZIP IS EXPANDED rather than converted. `convert` has no idea what an
+    archive is — it returns the unparsed stub, which this route turned into
+    "could not extract any text": true of the container, useless about the six
+    documents inside it. Members are read through the SAME
+    `datasets.expand_zip_members` the document-source and project uploads use,
+    then converted individually and concatenated under their own filenames, so
+    the model can tell which passage came from which file. The response shape
+    is unchanged — one attachment in, one `{name, markdown}` out, named for the
+    archive — which is what keeps the composer untouched.
     """
     data = await file.read()
     if not data:
         raise HTTPException(400, "Uploaded file is empty.")
     if len(data) > _MAX_EXTRACT_BYTES:
         raise HTTPException(413, "File too large (max 25 MB).")
-    markdown = await asyncio.to_thread(convert, file.filename or "upload", data)
+
+    filename = file.filename or "upload"
+    if _is_zip_upload(filename, data):
+        return {"name": filename, "markdown": await _markdown_from_zip(filename, data)}
+
+    markdown = await _convert_or_422(filename, data)
+    return {"name": filename, "markdown": markdown}
+
+
+def _is_zip_upload(filename: str, data: bytes) -> bool:
+    """Extension AND magic bytes.
+
+    The extension decides — DOCX, XLSX and PPTX are all zip containers, and
+    expanding one into its XML parts would turn a readable document into a pile
+    of fragments. The magic check only stops a renamed non-archive reaching the
+    zip reader and failing confusingly.
+    """
+    if not filename.lower().endswith(".zip"):
+        return False
+    return data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+async def _convert_or_422(filename: str, data: bytes) -> str:
+    """Convert one file, or refuse it in the words the reader can act on."""
+    try:
+        markdown = await asyncio.to_thread(convert, filename, data)
+    except Exception as exc:  # noqa: BLE001 — an unreadable file, not a bug
+        # `convert` RAISES on a corrupt container (pypdf on a truncated PDF, a
+        # KeyError on a DOCX missing its content-types part) rather than
+        # returning the stub it gives for a merely unsupported type. Both mean
+        # the same thing to the person who attached it, so both get the same
+        # 422 instead of a 500.
+        logger.info("extract_file unreadable file=%s err=%s", filename, exc)
+        raise HTTPException(422, _EXTRACT_UNREADABLE)
     if not markdown.strip():
+        raise HTTPException(422, _EXTRACT_UNREADABLE)
+    return markdown
+
+
+async def _markdown_from_zip(filename: str, data: bytes) -> str:
+    """Every readable member, under its own heading.
+
+    One unreadable member does not cost the reader the rest — an archive of ten
+    where one is a scan should attach nine. If NOTHING in it can be read, that
+    is a 422: the attachment carried no context and silence would look like it
+    worked.
+    """
+    from app.datasets import DatasetError, expand_zip_members
+
+    try:
+        members, _errors = await asyncio.to_thread(
+            expand_zip_members, filename, data,
+            per_member_max_bytes=_MAX_EXTRACT_BYTES,
+        )
+    except DatasetError as exc:
+        raise HTTPException(400, str(exc))
+
+    parts: list[str] = []
+    for name, raw in members:
+        if not raw:
+            continue
+        try:
+            text = await asyncio.to_thread(convert, name, raw)
+        except Exception:  # noqa: BLE001 — skip this member, keep the rest
+            continue
+        if not text.strip():
+            continue
+        # The filename heading is what lets the model attribute a passage. A
+        # concatenation without it reads as one undifferentiated document.
+        parts.append(f"## {name}\n\n{text.strip()}")
+
+    if not parts:
         raise HTTPException(
             422,
-            "Could not extract any text from the file. Scanned/image-only PDFs "
-            "and legacy .ppt are not supported — export to PDF or .pptx.",
+            "Could not read anything in that archive. Scanned/image-only PDFs "
+            "have no text to extract.",
         )
-    return {"name": file.filename or "upload", "markdown": markdown}
+    return "\n\n".join(parts)
 
 
 @router.post("/{ask_id}/cancel")
