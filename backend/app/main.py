@@ -14,9 +14,10 @@ from pathlib import Path
 # google_auth_oauthlib transitively), so it sits at the very top of startup.
 os.environ.setdefault("OAUTHLIB_RELAX_TOKEN_SCOPE", "1")
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
 
 from app import auth, db, datasets as datasets_service
 from app.config import settings
@@ -427,6 +428,82 @@ app.add_middleware(CompanyLLMKeyMiddleware)
 from app.middleware_timing import RequestTimingMiddleware  # noqa: E402
 
 app.add_middleware(RequestTimingMiddleware)
+
+# ─── Global error envelope (Workstreet WS-06) ────────────────────────────────
+#
+# The assessment found GET /v1/design-agent/by-token/token/bundle/asset_path
+# returning a bare text/plain 500. The route itself is careful — every deny
+# path raises 404 so a share token cannot be probed — but it never ran:
+# prototypes.share_token is a `uuid` column, so a non-UUID probe value reaches
+# PostgREST as ?share_token=eq.token, Postgres rejects it with SQLSTATE 22P02
+# (invalid input syntax for type uuid), and supabase-py raises APIError out of
+# find_prototype_by_share_token before the route's own logic gets a turn.
+# Starlette then rendered its default bare-string 500.
+#
+# Handled here rather than in that route because the shape is not specific to
+# it: every route that puts an unvalidated path parameter into a `.eq()`
+# against a uuid or integer column has the same hole. One handler closes all of
+# them; a per-route format check would have to be repeated forever and would
+# rot the first time someone adds a route without remembering it.
+#
+# 22P02 maps to 404, not 400, deliberately. A malformed identifier and an
+# unknown one must be indistinguishable or the difference is an enumeration
+# oracle — precisely the property the by-token deny path is written to protect
+# (routes/design_agent_bundle.py), and the same reasoning behind this
+# codebase's rule that a tenancy mismatch raises 404 rather than 403.
+#
+# The typed-code-then-text-fallback shape mirrors graph/facade.py's
+# _is_statement_timeout: a `.code` check first (the supabase-py APIError
+# shape), a message check second so the same failure is still recognised when
+# it arrives without a typed code.
+from postgrest.exceptions import APIError  # noqa: E402
+
+_PG_INVALID_TEXT_REPRESENTATION = "22P02"
+
+
+def _is_invalid_identifier(exc: Exception) -> bool:
+    """True iff `exc` is Postgres 22P02 — a value that cannot be cast to its
+    column's type, which for a path parameter means a malformed identifier."""
+    if getattr(exc, "code", None) == _PG_INVALID_TEXT_REPRESENTATION:
+        return True
+    text = str(getattr(exc, "message", "") or exc).lower()
+    # `.lower()` on the constant too: the SQLSTATE has a letter, so comparing it
+    # against the already-lowercased message would never match.
+    return _PG_INVALID_TEXT_REPRESENTATION.lower() in text or "invalid input syntax" in text
+
+
+@app.exception_handler(APIError)
+async def postgrest_error_handler(request: Request, exc: APIError) -> JSONResponse:
+    """PostgREST errors that no db/ module caught. A malformed identifier is a
+    404; anything else is a logged, structured 500."""
+    if _is_invalid_identifier(exc):
+        # info, not error: a malformed id in a URL is a client mistake or a
+        # scanner, not a server fault. The path is logged, the value is not.
+        logger.info("db_invalid_identifier path=%s -> 404", request.url.path)
+        return JSONResponse(status_code=404, content={"detail": "Not found"})
+    logger.error(
+        "Unhandled PostgREST error on %s", request.url.path, exc_info=exc
+    )
+    return JSONResponse(
+        status_code=500, content={"detail": "Internal Server Error"}
+    )
+
+
+@app.exception_handler(Exception)
+async def unhandled_error_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Structured JSON for anything else that escapes a route, replacing
+    Starlette's bare text/plain body.
+
+    The detail is a constant on purpose: the real exception goes to the log
+    (and to Sentry, when a DSN is set), never to the client. Starlette's
+    ServerErrorMiddleware re-raises after this response is sent, so Sentry's
+    ASGI integration still sees the exception and TestClient still surfaces it
+    unless a test passes raise_server_exceptions=False."""
+    logger.error("Unhandled exception on %s", request.url.path, exc_info=exc)
+    return JSONResponse(
+        status_code=500, content={"detail": "Internal Server Error"}
+    )
+
 
 app.include_router(health.router)
 app.include_router(auth.router)
