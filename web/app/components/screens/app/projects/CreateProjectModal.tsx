@@ -57,7 +57,7 @@ import { useNavigation } from "../../../../context/NavigationContext"
 import { projectPath } from "../../../../lib/routes"
 import { artifactsApi, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import type { InviteRole } from "../../../../lib/teamApi"
-import { IconClose } from "../../../shared/app-icons"
+import { IconClose, IconDocument } from "../../../shared/app-icons"
 import { useEscapeToClose } from "./useEscapeToClose"
 import styles from "./CreateProjectModal.module.css"
 
@@ -321,22 +321,49 @@ export function CreateProjectModalView({
               {/* Documents, before the invite rows: what the project is made
                   of belongs nearer its name than who else can see it. */}
               <div className={styles.field}>
-                <label className="field-label" htmlFor="create-project-files">
+                {/* A DIV, not a <label htmlFor>. The picker below is itself a
+                    label wrapping the input, so a second one pointing at the
+                    same id would make the control's accessible name the two
+                    concatenated ("Add documents (optional) Choose files").
+                    The heading stays visible; the wrapper carries the name. */}
+                <div className="field-label">
                   Add documents <span className={styles.hint}>(optional)</span>
+                </div>
+                {/* A LABEL WRAPPING A HIDDEN INPUT, which is how the rest of
+                    the app takes files (`.set-conn-upload`, Settings →
+                    Connectors). A bare `<input type="file">` renders the
+                    browser's own control — a grey "Choose files / No file
+                    chosen" that ignores every token on the page and looks
+                    different in each browser. The label is a real control for
+                    keyboard and screen readers (clicking it opens the picker,
+                    the input keeps the id and the accessible name), so nothing
+                    is traded for the styling.
+
+                    Styled here rather than reusing `.set-conn-upload` itself:
+                    that class carries the connectors surface's hardcoded green
+                    hover, which would arrive in this dialog as a colour from
+                    nowhere. */}
+                <label className={styles.filePick} data-testid="create-project-files-pick">
+                  <IconDocument size={16} />
+                  <span className={styles.filePickText}>
+                    {files.length === 0
+                      ? "Choose files"
+                      : `${files.length} file${files.length === 1 ? "" : "s"} ready — add more`}
+                  </span>
+                  <input
+                    id="create-project-files"
+                    type="file"
+                    multiple
+                    className={styles.fileInput}
+                    onChange={(e) => {
+                      onAddFiles(e.target.files)
+                      // Clear the control so picking the SAME file again after
+                      // removing it still fires a change event.
+                      e.target.value = ""
+                    }}
+                    data-testid="create-project-files-input"
+                  />
                 </label>
-                <input
-                  id="create-project-files"
-                  className="input"
-                  type="file"
-                  multiple
-                  onChange={(e) => {
-                    onAddFiles(e.target.files)
-                    // Clear the control so picking the SAME file again after
-                    // removing it still fires a change event.
-                    e.target.value = ""
-                  }}
-                  data-testid="create-project-files-input"
-                />
                 {files.length > 0 ? (
                   <ul className={styles.fileList} data-testid="create-project-file-list">
                     {files.map((f, i) => (

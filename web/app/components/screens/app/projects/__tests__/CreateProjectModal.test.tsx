@@ -952,6 +952,43 @@ describe("CreateProjectModal — documents attached at creation", () => {
     expect((uploadDocumentMock.mock.calls[0][1] as File).name).toBe("ok.md")
   })
 
+  it("does not render the browser's own file control", () => {
+    // A bare <input type="file"> paints the platform's grey "Choose files /
+    // No file chosen", which ignores every token on the page and looks
+    // different in each browser. The input is still THERE — visually hidden,
+    // not display:none — so it keeps its id, its accessible name and its place
+    // in the tab order, and the label is a real control for keyboard and
+    // screen-reader users.
+    render(React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })))
+    const input = screen.getByTestId("create-project-files-input") as HTMLInputElement
+    const pick = screen.getByTestId("create-project-files-pick")
+
+    expect(pick.tagName).toBe("LABEL")
+    expect(pick.contains(input)).toBe(true)
+    expect(input.className).not.toContain("input")
+    // Exactly ONE label owns the control: the heading above is a div, so the
+    // accessible name is not the two concatenated.
+    expect(document.querySelectorAll('label[for="create-project-files"]')).toHaveLength(0)
+  })
+
+  it("the picker says how many files are ready once some are", () => {
+    const { rerender } = render(
+      React.createElement(CreateProjectModalView, viewProps({ tab: "manual" })),
+    )
+    expect(screen.getByTestId("create-project-files-pick").textContent).toMatch(/Choose files/)
+
+    rerender(
+      React.createElement(
+        CreateProjectModalView,
+        viewProps({ files: [new File(["x"], "a.md"), new File(["x"], "b.md")] }),
+      ),
+    )
+    // Plural, and it still invites more rather than reading as finished.
+    expect(screen.getByTestId("create-project-files-pick").textContent).toMatch(
+      /2 files ready — add more/,
+    )
+  })
+
   it("offers the picker on the manual tab only", () => {
     // The other two tabs are "pick something that already exists" flows; a
     // second way to bring content in there muddies what they are for.
