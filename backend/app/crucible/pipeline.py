@@ -747,17 +747,22 @@ def _adjudicate(claims: Sequence[Claim]) -> Adjudication:
 #:
 #: `accounts` is every account a claim names; `customer_side` is that list
 #: with anything `claims.infer_account_sides` placed on the prospect side
-#: removed. TODAY THEY ARE THE SAME SET — `PROSPECT_KEYS` is read in four
-#: places and written in none, so nothing this engine can ingest records which
-#: side of the sale an account is on and every name resolves to `customer`.
-#: The plan says so out loud, in `derive_gaps_and_promises`.
+#: removed. THEY ARE NO LONGER THE SAME SET, and this comment used to say
+#: they were — on the grounds that `PROSPECT_KEYS` was "read in four places
+#: and written in none". `graph.extractor` now asks for the side on every
+#: named account and persists it, so any corpus ingested since carries
+#: recorded prospects and the two lists genuinely differ.
 #:
-#: So this is a no-op change of segment, made for what it does on the day it
-#: stops being one. Reading `customer_side` here would mean the first
-#: connector to land a prospect field silently shrinks every reach count in
-#: the product and silently falsifies that disclosure — with no code change,
-#: no test failure and nothing for a reader to notice. Reading `accounts`
-#: makes that day a no-op instead.
+#: WHAT DID NOT CHANGE IS THAT THIS SITE READS `accounts`, which is why that
+#: staleness cost nothing. `customer_side` is written by `claims._population`
+#: and read NOWHERE in `app/`. Reading it here would mean the arrival of a
+#: prospect field silently shrinks every reach count in the product — with no
+#: code change, no test failure and nothing for a reader to notice. Reading
+#: `accounts` makes that a no-op instead, and the plan's disclosure in
+#: `derive_gaps_and_promises` rests on exactly this: not that no source
+#: records a side, but that nothing consumes one. `test_crucible_plan.py`
+#: pins this constant for that reason — change it and that sentence must
+#: change with it.
 #:
 #: IT IS ALSO NOT THE FILTER IT LOOKS LIKE. Dropping prospects is right for a
 #: retention question and wrong for an acquisition one, and this site has no

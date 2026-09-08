@@ -929,12 +929,31 @@ def derive_gaps_and_promises(
     # was made on every run, correctly documented at the site that makes it,
     # and invisible to the only person it affects.
     #
-    # UNCONDITIONAL, BECAUSE THE ABSENCE IS UNCONDITIONAL. It is not a fact
-    # about this tenant's corpus but about the connectors: `PROSPECT_KEYS` is
-    # read in four places and written in none, so no source this engine can
-    # ingest records which side of the sale an account sits on. A gap phrased
-    # against the kept inventory would come and go with a tick-box and imply
-    # that connecting something closes it.
+    # UNCONDITIONAL, BUT NOT FOR THE REASON THIS COMMENT USED TO GIVE. It said
+    # the absence was unconditional — "`PROSPECT_KEYS` is read in four places
+    # and written in none, so no source this engine can ingest records which
+    # side of the sale an account sits on". THAT IS NO LONGER TRUE, and it was
+    # a claim about a CAPABILITY, which is the kind that goes stale silently:
+    # `graph.extractor` now asks for the side on every named account and
+    # persists it (`ACCOUNT_SIDE_PROPERTY_KEY`), and
+    # `claims.infer_account_sides` reads it back and returns `prospect`.
+    #
+    # THE TRUE PREMISE IS THAT NOTHING CONSUMES IT. `claims._population`
+    # writes a `customer_side` segment and NOTHING IN `app/` READS IT — every
+    # other mention is a comment. Reach is counted over `accounts`
+    # (`pipeline._REACH_SEGMENT`), the one filter that would narrow it takes
+    # `build_findings(goal_accounts=...)` and no caller passes it. So a
+    # recorded prospect is counted exactly like a customer, in every number in
+    # the document.
+    #
+    # WHICH IS WHY IT IS STILL UNCONDITIONAL, AND NOW HONESTLY SO. The
+    # sentence no longer asserts anything about what the sources carry — only
+    # about what this reading does with it, which is nothing. That claim is
+    # true whether the corpus records a side or not, so it cannot rot the way
+    # its predecessor did, and it does not imply that attaching something
+    # closes the gap. The one thing that WOULD close it is a change to the
+    # engine, and the remedy says so rather than sending the reader off to
+    # annotate a CRM that nothing will read.
     #
     # AND IT SAYS ONLY THAT THE DISTINCTION IS NOT MADE. The obvious second
     # sentence — that a prospect would score zero against a retention goal —
@@ -945,11 +964,12 @@ def derive_gaps_and_promises(
     gaps.append(Gap(
         question="Which of these accounts are customers, and which are "
                 "prospects?",
-        because="no connected source records which side of the sale an "
-                "account is on, so every named account is counted as a "
-                "customer",
-        remedy="record the distinction on the accounts themselves — until "
-               "something carries it, this reading cannot tell them apart",
+        because="nothing in this reading acts on which side of the sale an "
+                "account is on — where a source does record one it is not "
+                "read, so every named account is counted as a customer",
+        remedy="nothing you can attach changes this today — the side would "
+               "have to be read where reach is counted, which is a change to "
+               "the engine rather than to your sources",
     ))
 
     produce = [
