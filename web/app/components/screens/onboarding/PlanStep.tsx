@@ -19,6 +19,7 @@ import {
   finishOnboardingAndEnterApp,
 } from "../../../lib/onboarding/finishOnboarding"
 import { SprntlyLockup } from "../../shared/SprntlyMark"
+import { ArrowLeft } from "../../auth/icons"
 import {
   ONBOARDING_PLAN_PATH,
   SALES_CONTACT,
@@ -104,9 +105,40 @@ export function PlanStep() {
   const [phase, setPhase] = useState<Phase>({ kind: "choosing" })
   const [error, setError] = useState<string | null>(null)
   const [slow, setSlow] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const checkout = params.get("checkout")
   const cancelled = checkout === "cancelled"
+
+  /**
+   * BACK, because this is a step now and every other one has it.
+   *
+   * The screen predates being numbered: it was an unnumbered gate you were
+   * redirected to, so it rendered its own shell with no footer, and moving it
+   * to the end of the flow left it the one step with no way out but forwards.
+   *
+   * It goes to `personalize`, the numbered step before it, for someone who
+   * arrived through the define-metrics sub-flow too — that sub-flow is reached
+   * FROM personalize, so this lands them one screen further back rather than
+   * somewhere they never chose to be.
+   *
+   * Rendered in the choosing phases ONLY. Once Stripe has taken the money there
+   * is nothing to go back to, and offering it while the subscription is being
+   * confirmed invites someone to walk away mid-write.
+   */
+  const back = (
+    <div className="onb-footer">
+      <div className="meta" />
+      <button
+        type="button"
+        className="btn btn-ghost"
+        data-testid="plan-back"
+        onClick={() => router.push("/onboarding/personalize")}
+      >
+        <ArrowLeft style={{ width: 13, height: 13 }} aria-hidden /> Back
+      </button>
+    </div>
+  )
 
   // PAID — so onboarding is done. This runs the shared closer (register the
   // dataset, kick the first brief when a real data source is connected, stamp
@@ -238,6 +270,43 @@ export function PlanStep() {
     }
   }, [checkout, refreshOnboarding, refreshWorkspace, advance])
 
+  /**
+   * CUSTOM IS A PLAN CARD NOW, not a footnote (owner decision 2026-09-08).
+   *
+   * Team and Enterprise carry no self-serve price — `plans.SELF_SERVE_PLANS`
+   * on the backend is the authority on what may be bought, and a checkout
+   * naming either is refused rather than quietly downgraded — so they used to
+   * be a line of text under the grid: "offering a plan nobody can buy here is
+   * worse than saying who to talk to". That reasoning held while payment was
+   * step two of a flow nobody had committed to. At the END of onboarding, a
+   * team that has just built a workspace and needs invoicing or SSO reads two
+   * priced cards and concludes we are not for them, having skimmed past the
+   * sentence that said otherwise.
+   *
+   * So it is the third card, and it is selectable — but it never reaches
+   * Stripe. This id is not in SELF_SERVE_PLANS; selecting it replaces the
+   * Continue button with the sales panel rather than relabelling it, because a
+   * Continue that cannot continue is worse than no Continue. The backend would
+   * refuse the id anyway if a stale client ever posted it.
+   */
+  const CUSTOM_PLAN_ID = "custom"
+
+  /**
+   * Copy the sales address. A CONVENIENCE, never the only way to get it — the
+   * address is rendered as plain selectable text beside this, so a refused or
+   * missing clipboard (insecure context, an older browser, a permission
+   * prompt someone dismisses) costs the reader nothing but a manual select.
+   */
+  async function copySalesEmail() {
+    try {
+      await navigator.clipboard.writeText(SALES_CONTACT)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2_000)
+    } catch {
+      /* the address is on screen regardless */
+    }
+  }
+
   async function startCheckout() {
     setError(null)
     setPhase({ kind: "redirecting" })
@@ -281,6 +350,7 @@ export function PlanStep() {
             Settings → Account, and you'll pick up right where you left off.
           </div>
         </div>
+        {back}
       </div>
     )
   }
@@ -414,29 +484,83 @@ export function PlanStep() {
               </button>
             )
           })}
+
+          {/* The one card with no price. It carries the reassurance the old
+              footnote did — that picking a priced plan today is not a wrong
+              turn — because that is what stops someone stalling here waiting
+              for a reply. */}
+          <button
+            type="button"
+            className={`onb-plan-card${plan === CUSTOM_PLAN_ID ? " active" : ""}`}
+            aria-pressed={plan === CUSTOM_PLAN_ID}
+            data-testid={`plan-${CUSTOM_PLAN_ID}`}
+            onClick={() => setPlan(CUSTOM_PLAN_ID)}
+          >
+            <span className="onb-plan-name">Custom</span>
+            <span className="onb-plan-price">Let&apos;s talk</span>
+            <span className="onb-plan-credits">Team &amp; Enterprise</span>
+            <span className="onb-plan-blurb">
+              Invoiced, with the seats and credits your team actually needs.
+              Start on a plan above meanwhile and we&apos;ll move you across —
+              no double billing.
+            </span>
+          </button>
         </div>
 
-        <button
-          type="button"
-          className="btn primary onb-plan-continue"
-          disabled={phase.kind === "redirecting"}
-          data-testid="plan-continue"
-          onClick={startCheckout}
-        >
-          {phase.kind === "redirecting" ? "Opening checkout…" : "Continue"}
-        </button>
+        {/* PICKING CUSTOM SHOWS THE ADDRESS, it does not fire a `mailto:`.
+            A mailto is silent when it fails, and it fails often — a browser
+            with no default mail client registered (a webmail user on a fresh
+            Windows box is the common case) swallows the click entirely, so the
+            reader clicks the one button on the screen and nothing whatsoever
+            happens. Printing the address means the answer is always on screen
+            and copying it is a convenience rather than the only route.
 
-        {/* Team and Enterprise carry no self-serve price — a checkout naming
-            either is refused by the backend rather than quietly downgraded. So
-            they are a conversation, not a card. Deliberately a link and not a
-            fourth card: offering a plan nobody can buy here is worse than
-            saying who to talk to. */}
-        <p className="onb-plan-sales">
-          Need Team or Enterprise?{" "}
-          <a href={`mailto:${SALES_CONTACT}`}>Talk to us</a> — start on a plan
-          above and we'll move you across, no double billing.
-        </p>
+            It also says what to put IN the mail, and when to expect a reply.
+            "Talk to sales" with no brief makes the reader compose the first
+            message of a negotiation from nothing, which is how a warm lead
+            turns into a tab they close. Deliberately no list of examples —
+            naming seats, SSO and the rest reads as a menu to pick from, and
+            a reader who wants none of them concludes the question is not for
+            them. */}
+        {plan === CUSTOM_PLAN_ID ? (
+          <div className="onb-plan-custom" data-testid="plan-custom-panel">
+            <div className="onb-plan-custom-h">Email us and we'll size it with you</div>
+            <div className="onb-plan-custom-mail">
+              {/* Selectable text FIRST, button second: the address is the
+                  content, the copy is the shortcut. */}
+              <span className="onb-plan-custom-addr">{SALES_CONTACT}</span>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="plan-custom-copy"
+                onClick={() => void copySalesEmail()}
+              >
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <p className="onb-plan-custom-body">
+              Tell us your team size and what you need us to cover. We answer
+              within one business day.
+            </p>
+            <p className="onb-plan-custom-body">
+              <strong>You don't have to wait to get started.</strong> Pick
+              Starter or Product Builder above and we'll move you across when we
+              talk — no double billing, and nothing you set up today is lost.
+            </p>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn primary onb-plan-continue"
+            disabled={phase.kind === "redirecting"}
+            data-testid="plan-continue"
+            onClick={() => void startCheckout()}
+          >
+            {phase.kind === "redirecting" ? "Opening checkout…" : "Continue"}
+          </button>
+        )}
       </div>
+      {back}
     </div>
   )
 }

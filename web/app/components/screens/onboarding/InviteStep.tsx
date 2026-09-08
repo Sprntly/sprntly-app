@@ -27,7 +27,9 @@ function emptyRow(): InviteRow {
 }
 
 /**
- * Onboarding step 03 — "Invite your team." Skippable.
+ * Onboarding step 03 — "Invite your team." Nothing here is required: Next on
+ * an empty form sends nothing and moves on, which is why the Skip that used to
+ * sit beside it came off (2026-09-08).
  *
  * REINSTATED 2026-09-07. Cut from the flow on 2026-09-03 along with six other
  * steps that were all questions ABOUT the product — OKRs, success metrics, a
@@ -197,23 +199,13 @@ export function InviteStep() {
     }
   }
 
-  /**
-   * Leave without sending anything. Derived from `stepForSlug`, not a
-   * literal — a hardcoded step number here is exactly what silently drifted
-   * wrong across the flow's last two renumberings and went uncaught.
-   */
-  async function skip() {
-    if (!workspace) return
-    setSaving(true)
-    try {
-      const updated = await advanceOnboardingStep(workspace.id, stepForSlug("review") ?? 4)
-      setWorkspace({ ...updated, product: workspace.product })
-      clearDraft(DRAFT_KEY)
-      router.push("/onboarding/review")
-    } finally {
-      setSaving(false)
-    }
-  }
+  /* THE SKIP BUTTON IS GONE, and with it the separate `skip()` path it
+     called. It sat beside Next and did the same thing: `go()` filters to rows
+     carrying a valid email, so pressing Next on an empty form sends nothing
+     and advances — which is what skipping is. Two buttons for one outcome
+     asks the reader to work out a difference that was never there. Leaving
+     the step empty is still supported and still costs one click; it is just
+     the same click as everyone else's. */
 
   if (loading || !workspace) return <div className="onb-shell">Loading…</div>
 
@@ -226,10 +218,8 @@ export function InviteStep() {
           Invite your <em>team.</em>
         </>
       }
-      subtitle="Add teammates by email, role and permission. Skip for now if you'd rather do it later."
-      footerMeta="Invite team"
+      subtitle="Add teammates by email, role and permission. Leave it empty if you'd rather do this later — you can invite anyone from Settings → Team."
       onBack={() => router.push("/onboarding/connectors")}
-      onSkip={() => void skip()}
       onContinue={() => void go(stepForSlug("review") ?? 4, "/onboarding/review")}
       continueLabel="Next"
       continueDisabled={saving}
