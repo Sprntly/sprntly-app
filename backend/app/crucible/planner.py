@@ -101,20 +101,39 @@ MAX_REGENERATIONS = 1
 #: Numbers a plan may state that come from the ENGINE rather than the
 #: evidence. These are facts about how this pipeline is configured, they are
 #: as checkable as an observation (they are constants in this repo), and
-#: without them a step saying "only the five that get a full write-up" would
-#: be dropped for citing an untraceable figure. Read from the modules that own
-#: them so the plan cannot quote a cap the engine no longer applies.
+#: without them the step stating the write-up cut-off would be dropped for
+#: citing an untraceable figure. Read from the modules that own them so the
+#: plan cannot quote a cap the engine no longer applies.
+#:
+#: THE CUT-OFFS A READER CAN SEE ARE REGISTERED HERE BECAUSE THE PLAN STATES
+#: THEM, and P5 is only satisfiable if it can. `deep_cap` was the only one of
+#: this family registered and it is NOT reader-visible — it caps the stored
+#: `tier`, not what the document writes up. So the gate happily passed a plan
+#: promising five full write-ups (5 was a known figure) while the TRUE cap of
+#: two would have been dropped as untraceable. The four below are the ones
+#: that decide what reaches the page.
 def _engine_figures() -> dict[str, float]:
     from app.crucible.pipeline import (
         DEFAULT_DEEP_CAP, MAX_LISTED_REJECTIONS, MIN_CLAIMS_PER_FINDING,
     )
+    from app.crucible.recommend import (
+        DEFAULT_RECOMMENDATION_COUNT, MAX_DEEP_RECOMMENDED, MAX_RECOMMENDED,
+    )
     from app.crucible.recon import DEFAULT_TOP_N
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
 
     return {
         "deep_cap": float(DEFAULT_DEEP_CAP),
         "min_claims": float(MIN_CLAIMS_PER_FINDING),
         "listed_rejections": float(MAX_LISTED_REJECTIONS),
         "top_n": float(DEFAULT_TOP_N),
+        #: What the reader sees: written up in full, given a full
+        #: recommendation by default, the ceiling on that when they name a
+        #: count, and how many carry a plain suggestion.
+        "written_up": float(MAX_WRITTEN_UP_FINDINGS),
+        "recommended_default": float(DEFAULT_RECOMMENDATION_COUNT),
+        "recommended_max": float(MAX_DEEP_RECOMMENDED),
+        "flat_recommended": float(MAX_RECOMMENDED),
     }
 
 
@@ -1224,10 +1243,28 @@ def compose_deterministic(
         "Blockers first, because what stops an account outranks what an "
         "account only asks for. Then size, then how sure we are.",
     ))
+    # THE CUT-OFF, STATED IN NUMBERS BECAUSE "THE FEW" IS NOT OBJECTABLE.
+    # P5 asks that the ranking rule and cut-off be stated BEFORE the work
+    # runs, so the reader can argue with the method at the approval step —
+    # and "only the few that get a full treatment", which is what stood here,
+    # gives them nothing to argue with. All four numbers are read through
+    # `_engine_figures` from the constants that enforce them, so this sentence
+    # cannot drift from the caps the run actually applies.
+    #
+    # A RULE, NOT AN OUTCOME. How many get a full recommendation depends on
+    # what the reader asked for — `recommend.resolve_recommendation_count`
+    # honours a count they name, sums to a target they name, and otherwise
+    # uses the default — and only the first and last are knowable at plan
+    # time, because a target is summed against impacts this run has not
+    # produced yet. So the branch is stated rather than a number that would
+    # be a guess for anyone who named one.
     steps.append(_plain(
         "select_top_n",
-        "Write up only the few that get a full treatment",
-        "Twenty-five equally weighted options is not a decision aid.",
+        "Write up at most 2 findings in full",
+        "Twenty-five equally weighted options is not a decision aid. The top "
+        "2 get a full recommendation — more if you name a count, capped at 5 "
+        "— up to 8 carry a plain suggestion, and everything else is listed "
+        "with the reason it was cut.",
     ))
     steps.append(_plain(
         "list_cut_candidates",
