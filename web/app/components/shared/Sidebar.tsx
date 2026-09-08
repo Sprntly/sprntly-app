@@ -562,11 +562,25 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
   const { chats, loaded } = useChatsList(key)
   const rows = recentChats(chats)
 
-  // Nothing yet, and nothing to say about it: a nav section announcing "no
-  // chats" to someone who has not had one is noise in the one place that has
-  // to stay scannable. The section simply is not there until there is a thread
-  // in it. `loaded` keeps the header from flashing in before the list lands.
-  if (!loaded || rows.length === 0) return null
+  // THE HEADER STAYS EVEN WITH NO CHATS (owner decision 2026-09-08). The whole
+  // section used to disappear until a first thread existed, on the reasoning
+  // that a nav row announcing "no chats" is noise. That reasoning covered the
+  // wrong thing: the header is not an announcement, it is the door to Chat
+  // history — and hiding it means the one surface that gets you to your
+  // threads is missing precisely while you have none to reassure you it
+  // exists. A new user never learns the nav has a chats section at all until
+  // they happen to create one.
+  //
+  // What is still not shown is an EMPTY-STATE MESSAGE. "No chats yet" under a
+  // header that already says Chats explains nothing the reader cannot see, in
+  // the one place that has to stay scannable. Header, then rows when there
+  // are rows.
+  //
+  // `loaded` still gates everything, and does double duty: it is false while
+  // the list is in flight (so the header does not flash in ahead of the rows)
+  // AND forever when signed out, since a null cache key means no request is
+  // ever made — see useChatsList.
+  if (!loaded) return null
 
   return (
     <div className="sb-chats" data-testid="sidebar-recent-chats">
@@ -593,29 +607,31 @@ function RecentChats({ activeCompany }: { activeCompany: string | null }) {
           <IconArrowUpRight size={13} stroke={2} aria-hidden />
         </button>
       </div>
-      <div className="sb-chats-list">
-        {rows.map((chat) => (
-          <button
-            key={chat.id}
-            type="button"
-            className="sb-chat-item"
-            // The full title, for the row that truncates to one line.
-            title={chat.title}
-            data-testid={`sidebar-chat-${chat.id}`}
-            onClick={() => resumeConversation(chat, () => goTo("chat"))}
-          >
-            {/* A marker per row. Twenty left-aligned strings of different
-                lengths read as a wall; a fixed dot gives every title the same
-                starting line and the list a rhythm. */}
-            <span className="sb-chat-dot" aria-hidden />
-            <span className="sb-chat-title">{chat.title}</span>
-            {/* When it was asked. A title is the first message verbatim, so
-                the same question asked twice gives two identical rows — this
-                is what tells them apart. */}
-            <span className="sb-chat-when">{chatStamp(chat.created_at)}</span>
-          </button>
-        ))}
-      </div>
+      {rows.length > 0 ? (
+        <div className="sb-chats-list">
+          {rows.map((chat) => (
+            <button
+              key={chat.id}
+              type="button"
+              className="sb-chat-item"
+              // The full title, for the row that truncates to one line.
+              title={chat.title}
+              data-testid={`sidebar-chat-${chat.id}`}
+              onClick={() => resumeConversation(chat, () => goTo("chat"))}
+            >
+              {/* A marker per row. Twenty left-aligned strings of different
+                  lengths read as a wall; a fixed dot gives every title the same
+                  starting line and the list a rhythm. */}
+              <span className="sb-chat-dot" aria-hidden />
+              <span className="sb-chat-title">{chat.title}</span>
+              {/* When it was asked. A title is the first message verbatim, so
+                  the same question asked twice gives two identical rows — this
+                  is what tells them apart. */}
+              <span className="sb-chat-when">{chatStamp(chat.created_at)}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
     </div>
   )
 }

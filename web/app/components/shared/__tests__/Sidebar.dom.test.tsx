@@ -11,7 +11,7 @@
 // These tests mount the REAL Sidebar, mocking only the context boundaries it
 // reads, and assert the click→nav wiring (not a re-implementation).
 import * as React from "react"
-import { cleanup, fireEvent, render, screen } from "@testing-library/react"
+import { cleanup, fireEvent, render, screen, within } from "@testing-library/react"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest"
 
 ;(globalThis as typeof globalThis & { React?: typeof React }).React = React
@@ -558,14 +558,36 @@ describe("Sidebar — the threads themselves are in the nav", () => {
     expect(arrow!.getAttribute("aria-hidden")).toBe("true")
   })
 
-  it("says nothing at all when there are no threads", async () => {
-    // A nav section announcing "no chats" to someone who has not had one is
-    // noise in the one place that has to stay scannable.
+  it("KEEPS the header when there are no threads — that is the door to history", async () => {
+    // The whole section used to vanish until a first thread existed, on the
+    // reasoning that "no chats" is noise. It hid the wrong thing: the header
+    // is not an announcement, it is the way to Chat history — so it went
+    // missing precisely while someone had no threads to reassure them the
+    // section exists at all (owner decision 2026-09-08).
     conversations = []
     sidebarCollapsed = false
     render(<Sidebar activeCompany="acme" />)
     await screen.findByLabelText("Top Insights")
-    expect(screen.queryByTestId("sidebar-recent-chats")).toBeNull()
+
+    const section = await screen.findByTestId("sidebar-recent-chats")
+    expect(within(section).getByText("Chats")).toBeTruthy()
+    expect(within(section).getByTestId("sidebar-view-all-chats")).toBeTruthy()
+    // No rows, and no empty-state message either: "No chats yet" under a
+    // header already saying Chats explains nothing the reader cannot see.
+    expect(section.querySelectorAll('[data-testid^="sidebar-chat-"]')).toHaveLength(0)
+    expect(section.querySelector(".sb-chats-list")).toBeNull()
+    expect(section.textContent).not.toMatch(/no chats/i)
+  })
+
+  it("the empty header still opens Chat history", async () => {
+    // The whole point of keeping it: with zero threads it is the only route
+    // to the history screen from the nav.
+    conversations = []
+    sidebarCollapsed = false
+    render(<Sidebar activeCompany="acme" />)
+    const section = await screen.findByTestId("sidebar-recent-chats")
+    fireEvent.click(within(section).getByTestId("sidebar-view-all-chats"))
+    expect(goTo).toHaveBeenCalledWith("chats")
   })
 
   it("is not rendered while the sidebar is a 42px icon rail", async () => {
