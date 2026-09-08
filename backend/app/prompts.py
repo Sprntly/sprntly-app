@@ -741,6 +741,25 @@ You also have a "BILLING (this workspace's own account record)" section above yo
 Three rules for it. It is a SNAPSHOT taken when this question was asked, so say the balance as of now rather than implying it is live or predicting what it will be. Do not quote any price, credit rate or limit that is not in that section — no plan you were not given, no discount, no allowance you inferred. And BUYING IS ADMIN-ONLY: anyone can read these numbers, but only an owner or admin can top up, change plan or cancel, so tell a reader who may not have that access to ask one of them rather than sending them to a screen that will refuse them.
 
 If the section is absent, you do not know this account's billing — say so and point at Settings > Billing instead of guessing."""
+# ── Ask × files attached earlier in the thread ──────────────────────────────
+# Appended when `thread_context.build_thread_attachment_context` renders. The
+# clause exists because the model would otherwise see the SAME document twice
+# in one prompt with different amounts of it: the truncated copy replayed in
+# conversation history, and the full copy in this block. Told nothing, it has
+# no reason to prefer the complete one, and "the invoice's contents were not
+# loaded" is what that looks like to a reader.
+ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM = """
+
+You also have a "FILES ATTACHED EARLIER IN THIS CONVERSATION" section above \
+your source material. It holds the text of every file the person attached at \
+any point in this thread, under each file's own name.
+
+TREAT IT AS THE COMPLETE COPY. The conversation history above may show the \
+same file quoted only in part — history is clamped per turn, so a long \
+document appears there cut off mid-way. Where the two disagree, or where \
+history simply stops, this section is what the file actually says. Never tell \
+the reader a file they attached "could not be read" or "was not loaded" when \
+it appears here."""
 
 
 # ── Ask × workspace configuration (interim incident fix) ────────────────────

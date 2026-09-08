@@ -37,6 +37,7 @@ import { askApi, attachmentsApi, type SkillInfo } from "../../lib/api"
 import { SlashSkillMenu } from "./SlashSkillMenu"
 import { AssistantWaitState } from "./AssistantWaitState"
 import { DRAFT_MIN_CHARS, type PinnedSkill } from "./ChatComposer"
+import { isClientReadableText } from "../../lib/attachmentText"
 import type {
   AgentRunStatus,
   AttachmentRef,
@@ -255,11 +256,22 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
     askApi.skills().then((r) => setSkills(r.skills)).catch(() => setSkills([]))
   }, [skillsEnabled])
 
+  // TEXT IS THE ALLOW-LIST, not binaries the deny-list. This branch used to
+  // name four document types and read EVERYTHING ELSE with `readAsText` —
+  // which decoded archives and spreadsheets into mojibake, and because
+  // mojibake is a non-empty string it landed in `content` as though extraction
+  // had worked, so `resolveAttachmentRefs` never called the server parser at
+  // all. A .zip attached to a chat produced an answer about "the ZIP local
+  // file header (PK signature)": the model reading raw container bytes.
+  // See lib/attachmentText for the full account.
   const onFileSelect = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
     Array.from(files).forEach((file) => {
-      if (/\.(pdf|pptx|docx|doc)$/i.test(file.name)) {
+      if (!isClientReadableText(file.name)) {
+        // Keep the real File and an empty `content` — that empty is precisely
+        // what routes it to `askApi.extractFile`, where a .zip is expanded
+        // into its members.
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
         return
       }

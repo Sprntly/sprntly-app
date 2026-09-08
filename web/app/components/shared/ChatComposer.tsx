@@ -364,7 +364,12 @@ export function ChatComposer({
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx,.xlsx,.xls"
+            // `.zip` included because /v1/ask/extract-file expands one and
+            // returns its members' text under their own headings. An `accept`
+            // list is a hint, not a gate, so leaving out a type the server
+            // handles only stops anyone choosing it — the OS dialog greys it
+            // out with no explanation.
+            accept=".txt,.md,.csv,.json,.pdf,.doc,.docx,.pptx,.xlsx,.xls,.zip"
             style={{ display: "none" }}
             onChange={onFileSelect}
           />

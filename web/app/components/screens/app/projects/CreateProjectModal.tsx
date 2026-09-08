@@ -347,7 +347,7 @@ export function CreateProjectModalView({
                   <IconDocument size={16} />
                   <span className={styles.filePickText}>
                     {files.length === 0
-                      ? "Choose files"
+                      ? "Choose files or a .zip"
                       : `${files.length} file${files.length === 1 ? "" : "s"} ready — add more`}
                   </span>
                   <input

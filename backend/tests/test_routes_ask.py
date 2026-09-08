@@ -549,6 +549,110 @@ def _tiny_pptx(*, slides: bool = True) -> bytes:
     return buf.getvalue()
 
 
+def _zip_of(members: dict[str, bytes]) -> bytes:
+    """An in-memory, deflated archive."""
+    import io as _io
+    import zipfile
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, raw in members.items():
+            zf.writestr(name, raw)
+    return buf.getvalue()
+
+
+def test_extract_file_expands_a_zip_into_its_members(tenant_client):
+    """A .zip attached to a chat used to come back "could not extract any text"
+    — true of the container and useless about the documents inside it, since
+    `convert` has no idea what an archive is and returns the unparsed stub.
+
+    The response shape is unchanged: one attachment in, one {name, markdown}
+    out, named for the archive. Members are concatenated under their own
+    filenames so the model can attribute a passage to a file."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("docs.zip", _zip_of({
+            "churn.md": b"# Churn\n\nChurn is up 20%.",
+            "pricing.txt": b"Enterprise starts at 40k.",
+        }), "application/zip")},
+    )
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["name"] == "docs.zip"
+    assert "Churn is up 20%" in body["markdown"]
+    assert "Enterprise starts at 40k" in body["markdown"]
+    # Each member is headed by its own name — without that the model reads one
+    # undifferentiated blob and cannot say which file said what.
+    assert "## churn.md" in body["markdown"]
+    assert "## pricing.txt" in body["markdown"]
+
+
+def test_extract_file_zip_skips_an_unreadable_member(tenant_client):
+    """Ten documents where one is a scan should attach nine. Failing the whole
+    attachment would cost the reader the other nine, and they cannot fix the
+    scan."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("docs.zip", _zip_of({
+            "good.md": b"# Good\n\nReadable.",
+            "scan.pdf": b"%PDF-1.4 not really a pdf",
+        }), "application/zip")},
+    )
+
+    assert resp.status_code == 200, resp.text
+    assert "Readable." in resp.json()["markdown"]
+
+
+def test_extract_file_zip_with_nothing_readable_is_422(tenant_client):
+    """Silence would look like it worked. An attachment that carried no
+    context has to say so."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("scans.zip", _zip_of({
+            "a.pdf": b"%PDF-1.4 binary",
+            "b.pdf": b"%PDF-1.4 binary too",
+        }), "application/zip")},
+    )
+
+    assert resp.status_code == 422, resp.text
+    assert "archive" in resp.json()["detail"].lower()
+
+
+def test_extract_file_a_docx_is_never_expanded(tenant_client):
+    """DOCX/XLSX/PPTX are zip containers. Expanding one into its XML parts
+    would turn a readable document into a pile of fragments, which is why the
+    EXTENSION decides and the magic bytes only veto a renamed file."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("report.docx", _zip_of({"word/document.xml": b"<w:document/>"}),
+                        "application/vnd.openxmlformats-officedocument.wordprocessingml.document")},
+    )
+
+    # Whatever `convert` makes of it, it is never expanded into members — so
+    # the body never carries a `## word/document.xml` heading.
+    assert resp.status_code in (200, 422), resp.text
+    if resp.status_code == 200:
+        assert "## word/" not in resp.json()["markdown"]
+
+
+def test_extract_file_corrupt_container_is_422_not_500(tenant_client):
+    """`convert` RAISES on a truncated PDF rather than returning its stub. The
+    route never caught that, so a corrupt attachment was a 500 — the reader saw
+    a crash for a file they could have simply re-exported."""
+    t = tenant_client.make(slug="acme")
+    resp = t.client.post(
+        "/v1/ask/extract-file",
+        files={"file": ("broken.pdf", b"%PDF-1.4 truncated", "application/pdf")},
+    )
+
+    assert resp.status_code == 422, resp.text
+
+
 def test_extract_file_without_session_returns_401(unauth_client):
     resp = unauth_client.post(
         "/v1/ask/extract-file", files={"file": ("a.txt", b"hello", "text/plain")}

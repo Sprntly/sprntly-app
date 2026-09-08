@@ -7335,6 +7335,9 @@ export const projectsApi = {
    *  a user message. Multipart via the shared helper's FormData branch (the
    *  runtime sets the boundary; no manual Content-Type), same shape as
    *  `designAgentApi.uploadScreenshot`. */
+  /** Returns a LIST, always — a .zip yields one document per readable member,
+   *  and a single file yields a list of one. Naming only the first would leave
+   *  a caller showing one of five until a reload. */
   uploadDocument: (id: number | string, file: File | Blob) => {
     const form = new FormData()
     form.append(
@@ -7342,7 +7345,7 @@ export const projectsApi = {
       file,
       typeof File !== "undefined" && file instanceof File ? file.name : "upload",
     )
-    return api.post<ArtifactItem>(
+    return api.post<ArtifactItem[]>(
       `/v1/projects/${encodeURIComponent(String(id))}/documents`,
       form,
     )

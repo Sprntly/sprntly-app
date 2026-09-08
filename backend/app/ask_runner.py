@@ -37,12 +37,14 @@ from app.document_catalog import (
 from app.document_sources import DocumentFileRef, get_file_text, list_company_files
 from app.llm import DEFAULT_MODEL, LONG_REQUEST_TIMEOUT_S, call_json
 from app.prompt_history import render_history_block
+from app.thread_context import build_thread_attachment_context
 from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
     ASK_SYSTEM_BILLING_ADDENDUM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
+    ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
     ASK_SYSTEM_LIBRARY_ADDENDUM,
@@ -2372,6 +2374,13 @@ def compose_ask_answer(
         # so it rides the cacheable prefix with `facts` rather than the
         # volatile suffix.
         "billing": lambda: billing_facts_block(enterprise_id),
+        # The files attached anywhere in this thread. One read, keyed on
+        # the conversation, so it belongs in the wave that needs nothing
+        # else — and it is per-THREAD rather than per-question, so it
+        # rides the cacheable prefix with `facts` too.
+        "thread_files": lambda: build_thread_attachment_context(
+            _active_conversation_id.get()
+        ),
     }
     if live_context_fn is not None:
         wave1["live"] = live_context_fn
@@ -2423,6 +2432,7 @@ def compose_ask_answer(
 
     facts = gathered.get("facts") or ""
     billing = gathered.get("billing") or ""
+    thread_files = gathered.get("thread_files") or ""
     # A caller that pre-computed the block still wins; `live_context_fn` is the
     # concurrent route and only qa_agent's planned path uses it.
     live_context = live_context or (gathered.get("live") or "")
@@ -2586,7 +2596,7 @@ def compose_ask_answer(
     # first (the old order) invalidated the cache on every ask.
     cacheable = (
         "\n\n---\n\n".join(
-            p for p in (facts, billing, cacheable, docs_block) if p
+            p for p in (facts, billing, thread_files, cacheable, docs_block) if p
         )
         or None
     )
@@ -2594,6 +2604,8 @@ def compose_ask_answer(
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
     if billing:
         system += ASK_SYSTEM_BILLING_ADDENDUM
+    if thread_files:
+        system += ASK_SYSTEM_THREAD_ATTACHMENTS_ADDENDUM
     if docs_block:
         system += ASK_SYSTEM_DOCUMENTS_ADDENDUM
 

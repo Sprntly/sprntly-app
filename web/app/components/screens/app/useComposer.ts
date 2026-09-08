@@ -22,6 +22,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { DRAFT_MAX_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
 import { useSpeechInput } from "../../../lib/useSpeechInput"
 import type { SkillInfo } from "../../../lib/api"
+import { isClientReadableText } from "../../../lib/attachmentText"
 
 // Auto-clear delay for the transient composer hint (was a ChatScreen module
 // const; moved here with the hint state it belongs to).
@@ -149,18 +150,24 @@ export function useComposer({ showToast }: UseComposerDeps) {
   // Attach: documents keep the real File (for the PRD-import command); plain-text
   // formats are read as text and inlined into the next ask as context.
   //
-  // SPREADSHEETS ARE BINARY, AND THAT IS THE WHOLE POINT OF THIS BRANCH. An
-  // .xlsx is a ZIP; `readAsText` on one yields mojibake, and because the
-  // result is a non-empty string it lands in `content` as if extraction had
-  // SUCCEEDED — so the server-side parser, which is only consulted when
+  // BINARY BYTES MUST SURVIVE TO THE SERVER, and that is the whole point of
+  // this branch. An .xlsx is a ZIP; `readAsText` on one yields mojibake, and
+  // because the result is a non-empty string it lands in `content` as if
+  // extraction had SUCCEEDED — so the server-side parser, only consulted when
   // `content` is empty, is never called and the workbook is silently reduced
-  // to noise. Anything whose bytes have to survive to the server belongs here
-  // with the documents, keeping the real `File` and an empty `content`.
+  // to noise.
+  //
+  // This was once a deny-list naming the formats known to be binary, which
+  // meant every format nobody had thought of yet failed this way: a .zip
+  // attached to a chat came back as an answer about "the ZIP local file header
+  // (PK signature)". It is now an allow-list of TEXT (lib/attachmentText),
+  // shared with the other composer — the two lists had already drifted, and
+  // the one missing `.xlsx` was corrupting workbooks.
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
     Array.from(files).forEach((file) => {
-      if (/\.(pdf|pptx|docx|doc|xlsx|xls)$/i.test(file.name)) {
+      if (!isClientReadableText(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
         return
       }

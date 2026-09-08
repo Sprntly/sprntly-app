@@ -161,6 +161,101 @@ def _thread_rows(company_id: str, conversation_id: int) -> list[tuple[str, dict]
     return rows
 
 
+#: What one attachment may contribute to the block below. `TurnAttachment`
+#: already caps its stored `content` at 60k; this is the PROMPT-side ceiling,
+#: so a single 60k document cannot crowd out the four attached beside it.
+ATTACHMENT_CHARS = 20_000
+
+#: Total across every attachment in the thread. Generous, because this is the
+#: material the person deliberately handed over — but bounded, because a
+#: sixteen-file send is a supported thing and sixteen unbounded documents is
+#: not a prompt.
+ATTACHMENTS_TOTAL_CHARS = 60_000
+
+THREAD_ATTACHMENTS_HEADER = "FILES ATTACHED EARLIER IN THIS CONVERSATION"
+
+
+def build_thread_attachment_context(conversation_id: Optional[int]) -> str:
+    """The text of every file attached anywhere in this thread.
+
+    WHY THIS EXISTS. An attachment's text is inlined into the question as an
+    `[Attached files]` block on the turn it is sent, and that turn answers
+    perfectly. On the NEXT question the same message comes back as conversation
+    history, where `prompt_history.clamp_turn_text` caps every turn at 4,000
+    characters — so a 17-page report keeps its first page and everything after
+    it is gone. Observed exactly: a zip of a security report and an invoice
+    answered "2 files" on turn one and, on turn two, "the invoice's contents
+    were not loaded", having been cut at the boundary.
+
+    The clamp is not the thing to change. Its own docstring records the
+    incident it exists for — an HTML report carrying base64 charts replayed
+    into history 400'd every later turn in the thread, non-retryably. Raising
+    it trades this bug for that one.
+
+    So attachments stop depending on history replay. Their text is ALREADY
+    persisted per turn (`conversation_turns.attachments[].content`, capped at
+    60k by TurnAttachment) — it was simply never read back. This reads it and
+    grounds every ask in the thread on it directly, which is how documents and
+    reports already work here.
+
+    Never raises: grounding must not break an answer.
+    """
+    if not conversation_id:
+        return ""
+    try:
+        from app.db.client import require_client
+
+        rows = (
+            require_client()
+            .table("conversation_turns")
+            .select("attachments, created_at")
+            .eq("conversation_id", conversation_id)
+            .order("created_at", desc=False)
+            .limit(200)
+            .execute()
+            .data
+            or []
+        )
+    except Exception:  # noqa: BLE001 — one source failing is not the answer failing
+        logger.exception(
+            "thread attachments unavailable conversation=%s", conversation_id
+        )
+        return ""
+
+    parts: list[str] = []
+    seen: set[str] = set()
+    total = 0
+    for row in rows:
+        for att in row.get("attachments") or []:
+            if not isinstance(att, dict):
+                continue
+            name = str(att.get("name") or "").strip() or "attachment"
+            content = str(att.get("content") or "").strip()
+            # A name-only chip — the "generate a PRD from this file" command
+            # persists one, where the file BECAME the PRD and never had in-chat
+            # text. Nothing to ground on.
+            if not content:
+                continue
+            # The same file attached twice in a thread is one document to the
+            # reader, and two copies is only a bigger prompt.
+            fingerprint = f"{name}:{len(content)}"
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+
+            body = _cap(content, ATTACHMENT_CHARS)
+            if total + len(body) > ATTACHMENTS_TOTAL_CHARS:
+                break
+            total += len(body)
+            parts.append(f"### {name}\n\n{body}")
+        if total >= ATTACHMENTS_TOTAL_CHARS:
+            break
+
+    if not parts:
+        return ""
+    return f"{THREAD_ATTACHMENTS_HEADER}\n\n" + "\n\n".join(parts)
+
+
 def build_thread_artifact_context(
     company_id: Optional[str],
     conversation_id: Optional[int],
