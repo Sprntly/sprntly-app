@@ -62,6 +62,9 @@ vi.mock("../../../../../context/NavigationContext", () => ({
   useNavigation: () => ({
     openModal: vi.fn(),
     openContentPanel: (...a: unknown[]) => openContentPanelMock(...a),
+    // The screen closes the global panel on its way out — see the cleanup in
+    // ProjectDetailScreen. A mock without this throws on unmount.
+    closeContentPanel: vi.fn(),
     contentPanelTab: null,
     showToast: (...a: unknown[]) => showToastMock(...a),
   }),

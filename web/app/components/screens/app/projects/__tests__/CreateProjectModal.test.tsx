@@ -855,7 +855,7 @@ describe("CreateProjectModal — documents attached at creation", () => {
     createMock.mockResolvedValue({ id: 903, name: "P", origin: "manual" })
     uploadDocumentMock
       .mockResolvedValueOnce({ type: "custom_artifact", id: 1 })
-      .mockRejectedValueOnce(new Error("422 unreadable"))
+      .mockRejectedValueOnce(Object.assign(new Error("unreadable"), { status: 422 }))
     await openModal()
 
     fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
@@ -868,10 +868,57 @@ describe("CreateProjectModal — documents attached at creation", () => {
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/projects?id=903"))
     await waitFor(() => expect(showToastMock).toHaveBeenCalled())
     const [title, body] = showToastMock.mock.calls[0]
-    expect(String(title)).toMatch(/couldn.t be read/i)
+    expect(String(title)).toMatch(/no text/i)
     expect(String(body)).toContain("scanned.pdf")
     // The one that worked is not reported as a failure.
     expect(String(body)).not.toContain("good.md")
+  })
+
+  it("tells a 422 apart from anything else — one is hopeless, the other is worth retrying", async () => {
+    // A 422 is the server saying it found no text: a screen-capture PDF, a
+    // photo of a page. No retry fixes that, and telling someone to try again
+    // sends them hunting for a problem that isn't in the file. A dropped
+    // connection or a 5xx IS worth retrying, and must not be described as
+    // unreadable.
+    createMock.mockResolvedValue({ id: 908, name: "P", origin: "manual" })
+    uploadDocumentMock
+      .mockRejectedValueOnce(Object.assign(new Error("unreadable"), { status: 422 }))
+      .mockRejectedValueOnce(Object.assign(new Error("boom"), { status: 500 }))
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["screencapture.pdf", "flaky.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledTimes(2))
+    const bodies = showToastMock.mock.calls.map((c) => `${c[0]} ${c[1]}`)
+    const noText = bodies.find((b) => /no text/i.test(b))!
+    const didntUpload = bodies.find((b) => /didn.t upload/i.test(b))!
+    expect(noText).toContain("screencapture.pdf")
+    expect(noText).not.toContain("flaky.md")
+    // The retryable one is not blamed on the file's contents.
+    expect(didntUpload).toContain("flaky.md")
+    expect(didntUpload).not.toMatch(/no text/i)
+  })
+
+  it("treats an error with no status as retryable, not unreadable", async () => {
+    // A network failure rejects with a plain Error — no `status` at all. It
+    // must fall to "didn't upload", never to a claim about the file's
+    // contents that nothing established.
+    createMock.mockResolvedValue({ id: 909, name: "P", origin: "manual" })
+    uploadDocumentMock.mockRejectedValue(new Error("network down"))
+    await openModal()
+
+    fireEvent.change(screen.getByTestId("create-project-name-input"), { target: { value: "P" } })
+    pickFiles(["notes.md"])
+    await act(async () => {
+      fireEvent.click(screen.getByTestId("create-project-submit"))
+    })
+
+    await waitFor(() => expect(showToastMock).toHaveBeenCalledTimes(1))
+    expect(String(showToastMock.mock.calls[0][0])).toMatch(/didn.t upload/i)
   })
 
   it("says nothing when every file lands", async () => {

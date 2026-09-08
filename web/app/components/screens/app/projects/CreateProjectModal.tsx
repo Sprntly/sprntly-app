@@ -724,27 +724,50 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
           // must not cost someone the project and everything else in it. What
           // failed is named on arrival — a document silently missing from a
           // project is worse than a sentence saying which one.
-          if (files.length === 0) return { project, failed: [] as string[] }
+          if (files.length === 0) return { project, unreadable: [], broken: [] }
           return Promise.allSettled(
             files.map((f) => projectsApi.uploadDocument(project.id, f)),
-          ).then((results) => ({
-            project,
-            failed: files
-              .filter((_, i) => results[i]?.status === "rejected")
-              .map((f) => f.name),
-          }))
+          ).then((results) => {
+            // SPLIT BY WHY, because the two have different answers. A 422 is
+            // the server saying it found no text — a screen-capture PDF, a
+            // photo of a page — and no retry fixes that. Anything else (a
+            // dropped connection, a 5xx) is worth trying again. Reporting both
+            // as "couldn't be read" would send someone hunting for a problem
+            // with a file that was fine.
+            //
+            // The status is read off the error rather than through
+            // `instanceof ApiError`: this is a message string, not a control
+            // decision, and a defensive read cannot throw on an error shape
+            // that is not the one expected.
+            const unreadable: string[] = []
+            const broken: string[] = []
+            results.forEach((r, i) => {
+              if (r.status !== "rejected") return
+              const code = (r.reason as { status?: number } | null)?.status
+              ;(code === 422 ? unreadable : broken).push(files[i]!.name)
+            })
+            return { project, unreadable, broken }
+          })
         })
-        .then(({ project, failed }) => {
-          // SAY WHICH FILE DIDN'T TAKE. The project is created and we are about
-          // to navigate into it, so an error inside the modal would vanish with
-          // the modal — the toast is the only surface that survives the
-          // navigation. A document silently missing from a project is the
+        .then(({ project, unreadable, broken }) => {
+          // SAY WHICH FILE DIDN'T TAKE, AND WHY. The project is created and we
+          // are about to navigate into it, so an error inside the modal would
+          // vanish with the modal — the toast is the only surface that survives
+          // the navigation. A document silently missing from a project is the
           // failure worth avoiding: nobody re-checks an upload they were not
           // told about.
-          if (failed.length > 0) {
+          if (unreadable.length > 0) {
             showToast(
-              failed.length === 1 ? "One file couldn't be read" : `${failed.length} files couldn't be read`,
-              `${failed.join(", ")} — the project was created without ${failed.length === 1 ? "it" : "them"}. Scanned PDFs and images aren't readable yet; try again from Add artifact.`,
+              unreadable.length === 1
+                ? "No text in one file"
+                : `No text in ${unreadable.length} files`,
+              `${unreadable.join(", ")} — a PDF made of images (a screenshot or a scan) has no text to read, so there was nothing to attach. Export it as text, or paste the content into the project chat.`,
+            )
+          }
+          if (broken.length > 0) {
+            showToast(
+              broken.length === 1 ? "One file didn't upload" : `${broken.length} files didn't upload`,
+              `${broken.join(", ")} — the project was created without ${broken.length === 1 ? "it" : "them"}. Try again from Add artifact.`,
             )
           }
           router.push(projectPath(project.id))
