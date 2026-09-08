@@ -2,7 +2,15 @@
 independent source documents rather than raw claim count (the echo trap the
 reasoning spike measured — a dozen restatements of one sentence from one
 document is one witness, not twelve)."""
-from app.crucible.moscow import bucket_for, moscow_for
+from app.crucible.moscow import (
+    TYPE_BUCKET_BLOCKER,
+    TYPE_BUCKET_COMPUTED,
+    TYPE_BUCKET_NEITHER,
+    TYPE_BUCKET_PREFERENCE,
+    bucket_for,
+    moscow_for,
+    type_bucket,
+)
 
 
 def test_a_constraint_is_a_must_when_well_corroborated():
@@ -88,3 +96,38 @@ def test_the_overflow_summary_entry_expands_back_to_its_real_count():
                      "+3 more documents"],
     )
     assert row.doc_count == 7   # 4 named + 3 summarised, not 5
+
+
+# ── The computed-differential bucket — SPEC-2b's load-bearing decision ──────
+#
+# `app.crucible.tabular_findings` is the ONLY producer of this claim type
+# (see that module's docstring §1), which is what makes ranking it above a
+# stated blocker safe rather than aggressive: nothing a model returns can
+# ever land a finding in this bucket.
+
+def test_a_computed_differential_outranks_a_stated_blocker():
+    order = [
+        type_bucket(["computed_differential"]),
+        type_bucket(["constraint"]),
+        type_bucket(["preference"]),
+        type_bucket(["mechanism"]),
+    ]
+    assert order == sorted(order)
+    assert order[0] == TYPE_BUCKET_COMPUTED
+    assert order == [TYPE_BUCKET_COMPUTED, TYPE_BUCKET_BLOCKER,
+                     TYPE_BUCKET_PREFERENCE, TYPE_BUCKET_NEITHER]
+
+
+def test_a_computed_differential_wins_even_mixed_with_a_blocker():
+    """Strongest type decides — the same rule that lets one blocked deal
+    among ten preferences still earn MUST."""
+    assert type_bucket(["constraint", "computed_differential"]) == TYPE_BUCKET_COMPUTED
+
+
+def test_ordinary_buckets_are_unmoved_by_the_new_top_bucket():
+    """The regression this whole change must not cause: a corpus with no
+    computed-comparison claims ranks exactly as it did before this bucket
+    existed — same relative order for blocker/preference/neither."""
+    assert type_bucket(["constraint"]) == TYPE_BUCKET_BLOCKER
+    assert type_bucket(["preference"]) == TYPE_BUCKET_PREFERENCE
+    assert type_bucket(["mechanism", "existence"]) == TYPE_BUCKET_NEITHER

@@ -195,12 +195,17 @@ def test_the_flip_is_on_size_rank_and_not_on_confidence():
 def test_the_bucket_is_held_constant_so_the_change_is_attributable():
     """`type_bucket` is `_rank`'s key ABOVE size. A fixture that moved it
     would produce a ranking change weighting had nothing to do with."""
-    from app.crucible.moscow import type_bucket
+    from app.crucible.moscow import TYPE_BUCKET_PREFERENCE, type_bucket
 
     out = _run()
     buckets = {type_bucket(f.confidence_inputs.claim_types)
                for f in out.findings}
-    assert buckets == {1}
+    # NAMED, NOT A LITERAL. `type_bucket`'s numeric positions shift when a
+    # bucket is inserted above an existing one (see
+    # `app.crucible.tabular_findings`'s `computed_differential` bucket) — the
+    # invariant this test protects is "one shared bucket", not any specific
+    # integer.
+    assert buckets == {TYPE_BUCKET_PREFERENCE}
 
 
 def test_the_sums_are_the_accounts_own_contracted_value():

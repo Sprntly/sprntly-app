@@ -85,6 +85,17 @@ def test_volatile_facts_decay_faster_than_structural_ones():
     assert DECAY_HALFLIFE_DAYS["magnitude"] < DECAY_HALFLIFE_DAYS["mechanism"]
 
 
+def test_computed_differential_is_a_real_claim_type_with_a_half_life():
+    """`app.crucible.tabular_findings` is the sole producer of this type —
+    see that module's docstring §1. It still needs to exist in the ordinary
+    vocabulary tables (`test_every_claim_type_has_a_half_life` above already
+    enforces the decay table is complete) so a computed-comparison claim
+    scores and decays like any other, rather than raising in
+    `invariants.decay_factor`."""
+    assert "computed_differential" in CLAIM_TYPES
+    assert DECAY_HALFLIFE_DAYS["computed_differential"] == DECAY_HALFLIFE_DAYS["magnitude"]
+
+
 # ── Constructor refusals ─────────────────────────────────────────────────────
 
 def test_claim_rejects_an_unknown_type():

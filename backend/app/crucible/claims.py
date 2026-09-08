@@ -72,6 +72,12 @@ KIND_TO_CLAIM_TYPE: Mapping[str, ClaimType] = {
     # nothing could ever produce one.
     "constraint": "constraint",
     "good_outcome": "preference",
+    # `app.crucible.tabular_findings` is the ONLY writer of this kind — a
+    # fixed Python string it stamps on every row it builds, never chosen by
+    # a model. See that module's docstring §1 for why this mapping being
+    # deterministic is the entire safety argument for
+    # `moscow.type_bucket` ranking the claim type above `constraint`.
+    "computed_comparison": "computed_differential",
 }
 DEFAULT_CLAIM_TYPE: ClaimType = "mechanism"
 
@@ -222,6 +228,11 @@ AUTHORITATIVE_FOR: Mapping[str, frozenset[str]] = {
     # self-report, and an agent inference is our own guess read back to us.
     "verbal_claim":     frozenset(),
     "agent_inferred":   frozenset(),
+    # `app.crucible.tabular_findings` — a deterministic comparison over an
+    # attached workbook's own rows, never a connector's standing feed and
+    # never a model's judgement about which type to assign. Authoritative
+    # for the one claim type only that source ever produces.
+    "computed":         frozenset({"computed_differential"}),
 }
 
 
