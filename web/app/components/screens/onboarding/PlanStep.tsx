@@ -19,6 +19,7 @@ import {
   finishOnboardingAndEnterApp,
 } from "../../../lib/onboarding/finishOnboarding"
 import { SprntlyLockup } from "../../shared/SprntlyMark"
+import { ArrowLeft } from "../../auth/icons"
 import {
   ONBOARDING_PLAN_PATH,
   SALES_CONTACT,
@@ -107,6 +108,36 @@ export function PlanStep() {
 
   const checkout = params.get("checkout")
   const cancelled = checkout === "cancelled"
+
+  /**
+   * BACK, because this is a step now and every other one has it.
+   *
+   * The screen predates being numbered: it was an unnumbered gate you were
+   * redirected to, so it rendered its own shell with no footer, and moving it
+   * to the end of the flow left it the one step with no way out but forwards.
+   *
+   * It goes to `personalize`, the numbered step before it, for someone who
+   * arrived through the define-metrics sub-flow too — that sub-flow is reached
+   * FROM personalize, so this lands them one screen further back rather than
+   * somewhere they never chose to be.
+   *
+   * Rendered in the choosing phases ONLY. Once Stripe has taken the money there
+   * is nothing to go back to, and offering it while the subscription is being
+   * confirmed invites someone to walk away mid-write.
+   */
+  const back = (
+    <div className="onb-footer">
+      <div className="meta" />
+      <button
+        type="button"
+        className="btn btn-ghost"
+        data-testid="plan-back"
+        onClick={() => router.push("/onboarding/personalize")}
+      >
+        <ArrowLeft style={{ width: 13, height: 13 }} aria-hidden /> Back
+      </button>
+    </div>
+  )
 
   // PAID — so onboarding is done. This runs the shared closer (register the
   // dataset, kick the first brief when a real data source is connected, stamp
@@ -281,6 +312,7 @@ export function PlanStep() {
             Settings → Account, and you'll pick up right where you left off.
           </div>
         </div>
+        {back}
       </div>
     )
   }
@@ -437,6 +469,7 @@ export function PlanStep() {
           above and we'll move you across, no double billing.
         </p>
       </div>
+      {back}
     </div>
   )
 }

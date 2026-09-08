@@ -196,6 +196,37 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
   })
 })
 
+describe.skipIf(!BILLING_ENABLED)("going back", () => {
+  // The screen predates being a step: it was an unnumbered gate you were
+  // redirected to, so it rendered its own shell with no footer. Moving it to
+  // the end of the flow left it the only step with no way out but forwards.
+  it("offers Back to the step before it", () => {
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-back"))
+    expect(push).toHaveBeenCalledWith("/onboarding/personalize")
+  })
+
+  it("offers it to a member who cannot buy — they are the most stuck of all", () => {
+    // They cannot act on this screen at all, so leaving them here with no exit
+    // is worse than for anyone else.
+    orgRole = "member"
+    render(<PlanStep />)
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+    expect(screen.getByTestId("plan-back")).toBeTruthy()
+  })
+
+  it("withdraws it once the money has moved", async () => {
+    // Back while the subscription is being confirmed invites someone to walk
+    // away mid-write, and there is nothing behind them to go back TO — they
+    // have paid.
+    search = "checkout=success"
+    summary.mockResolvedValue({ plan: "starter", subscription_status: null })
+    render(<PlanStep />)
+    expect(screen.getByRole("status")).toBeTruthy()
+    expect(screen.queryByTestId("plan-back")).toBeNull()
+  })
+})
+
 describe.skipIf(!BILLING_ENABLED)("a company that already pays", () => {
   it("is finished through rather than asked to buy again", async () => {
     // This is the last step, so "forwarded" now means completed and let into
