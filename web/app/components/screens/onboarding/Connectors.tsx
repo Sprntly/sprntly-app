@@ -37,8 +37,10 @@ import {
  * they're on, expanded. Categories they haven't reached yet are NOT rendered
  * at all (no locked placeholder rows): the list grows downward as they go.
  *
- * The FOOTER drives it: Skip / Continue complete the open category, collapse
- * it, and reveal the next. Once none are left Continue leaves the step,
+ * The FOOTER drives it: ONE button — Continue — completes the open category,
+ * collapses it, and reveals the next. (A Skip sat beside it until 2026-09-08
+ * calling the same handler; see onFooterAdvance.) Once none are left it leaves
+ * the step,
  * relabelled "See what we learned" — the review step's own headline, since
  * the api-key step this used to name is gone. A progress bar + "N of M
  * reviewed" counter track position within the step.
@@ -317,7 +319,7 @@ export function Connectors() {
     setOpenCat((cur) => (cur === i ? null : i))
   }
 
-  /** Skip / Continue: mark done, collapse, open the next incomplete one. */
+  /** Mark done, collapse, open the next incomplete one. */
   function completeCategory(i: number) {
     const nextDone = markCategoryDone(doneCats, i)
     setDoneCats(nextDone)
@@ -475,17 +477,28 @@ export function Connectors() {
   const leavesStep = firstIncompleteCategory(doneAfterOpen, total) === null
 
   /**
-   * Footer Skip/Continue. Within the accordion they complete the open category
-   * and expand the next incomplete one; once none are left they leave the step.
-   * `skipped` only records intent when they leave having wired nothing at all.
+   * The footer's one button. It completes the open category and expands the
+   * next incomplete one; once none are left it leaves the step.
+   *
+   * THERE WAS A SKIP BESIDE IT, and it did the same thing. Both called this
+   * with a flag that changed nothing until the very last category, where Skip
+   * alone recorded that connectors had been passed over. So for seven of eight
+   * categories the two buttons were identical, and the reader had to decide
+   * between them anyway.
+   *
+   * The record survives the button. `skipped` is now derived from what
+   * actually happened — nothing selected and nothing uploaded — rather than
+   * from which button was pressed, which is strictly more accurate: someone
+   * who wired nothing and clicked Continue was skipping connectors too, and
+   * used to go unrecorded.
    */
-  function onFooterAdvance(isSkip: boolean) {
+  function onFooterAdvance() {
     const nextOpen = firstIncompleteCategory(doneAfterOpen, total)
     setDoneCats(doneAfterOpen)
     setUploadNotice(null)
     setOpenCat(nextOpen)
     if (nextOpen === null) {
-      void go(isSkip && !anySelected && uploadedCats.size === 0)
+      void go(!anySelected && uploadedCats.size === 0)
     }
   }
 
@@ -498,7 +511,7 @@ export function Connectors() {
           Connect your <em>tools.</em>
         </>
       }
-      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
+      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Leave anything you'll wire later."
       footerMeta={
         <>
           <strong>
@@ -508,8 +521,7 @@ export function Connectors() {
         </>
       }
       onBack={() => router.push("/onboarding/company")}
-      onSkip={() => onFooterAdvance(true)}
-      onContinue={() => onFooterAdvance(false)}
+      onContinue={() => onFooterAdvance()}
       // NAMES THE NEXT SCREEN, and that screen has changed twice underneath
       // this label. Leaving here now goes to `/onboarding/invite`, whose own
       // heading is "Invite your team." So the button says that — a Continue

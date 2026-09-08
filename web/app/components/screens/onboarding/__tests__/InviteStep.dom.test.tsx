@@ -10,7 +10,8 @@
 // viewer), an "Add teammate" appender, and a CSV import + bulk paste behind
 // the "Add multiple people at once" disclosure. Invites send best-effort on
 // Continue via teamApi.invite(email, permission, [], jobRole), then the step
-// advances to `review` and routes there; Skip advances without inviting.
+// advances to `review` and routes there. There is no Skip: Next on an empty
+// form sends nothing and advances, which is what skipping was.
 //
 // Matchers: native DOM only.
 import * as React from "react"
@@ -88,10 +89,12 @@ function continueBtn(): HTMLButtonElement {
   ) as HTMLButtonElement
 }
 
-function skipBtn(): HTMLButtonElement {
-  return Array.from(document.querySelectorAll("button")).find(
-    (b) => (b.textContent ?? "").trim() === "Skip",
-  ) as HTMLButtonElement
+/** Asserts the footer carries no Skip — it was removed 2026-09-08. */
+function expectNoSkip() {
+  const labels = Array.from(document.querySelectorAll(".onb-footer button")).map(
+    (b) => (b.textContent ?? "").trim(),
+  )
+  expect(labels).not.toContain("Skip")
 }
 
 function addTeammateBtn(): HTMLButtonElement {
@@ -204,21 +207,45 @@ describe("InviteStep (onboarding step 3 — email + job role + permission rows)"
     expect(screen.getByText(/Couldn't invite teammate@acme\.com/)).not.toBeNull()
   })
 
-  it("Skip advances to review and routes there WITHOUT sending invites", async () => {
+  it("has no Skip beside Next — Next on an empty form already is the skip", async () => {
+    // The two sat side by side and, on an empty form, did the same thing:
+    // `go()` filters to rows carrying a valid email, so pressing Next with
+    // none sends nothing and advances. Two buttons, one outcome, and a reader
+    // left to work out a difference that was not there.
     advanceStepMock.mockResolvedValue(
       makeWorkspace({ onboarding_step: stepForSlug("review") ?? 4 }),
     )
     mount()
+    expectNoSkip()
 
-    fireEvent.change(emailInput(), { target: { value: "teammate@acme.com" } })
     await act(async () => {
-      skipBtn().click()
+      continueBtn().click()
     })
 
     await waitFor(() => {
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
     })
     expect(advanceStepMock).toHaveBeenCalledWith("ws-1", stepForSlug("review"))
+    expect(inviteMock).not.toHaveBeenCalled()
+  })
+
+  it("a half-typed address is not an invite, and does not block leaving", async () => {
+    // The invariant the removed Skip used to carry on its own: nothing that
+    // fails EMAIL_RE is ever sent, so an abandoned row cannot strand the PM
+    // on this step.
+    advanceStepMock.mockResolvedValue(
+      makeWorkspace({ onboarding_step: stepForSlug("review") ?? 4 }),
+    )
+    mount()
+
+    fireEvent.change(emailInput(), { target: { value: "teammate@" } })
+    await act(async () => {
+      continueBtn().click()
+    })
+
+    await waitFor(() => {
+      expect(routerMock.push).toHaveBeenCalledWith("/onboarding/review")
+    })
     expect(inviteMock).not.toHaveBeenCalled()
   })
 

@@ -129,7 +129,6 @@ export function ReviewStep() {
         </>
       }
       subtitle="Based on everything you shared — plus research across your website, reviews and connected data — here's the business context every agent will reason through. Read it, edit anything, and accept."
-      footerMeta="Review business context"
       onBack={() => router.push("/onboarding/invite")}
       onContinue={() => void accept()}
       continueLabel="Next · personalize"

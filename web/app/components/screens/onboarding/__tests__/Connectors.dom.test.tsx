@@ -102,13 +102,13 @@ function footerContinue(container: HTMLElement): HTMLButtonElement {
   return btn
 }
 
-/** The footer's Skip button. */
-function footerSkip(container: HTMLElement): HTMLButtonElement {
-  const btn = container.querySelector(
-    ".onb-footer .btn-secondary",
-  ) as HTMLButtonElement
-  expect(btn).not.toBeNull()
-  return btn
+/** Asserts the footer carries no Skip — it was removed 2026-09-08. */
+function expectNoFooterSkip(container: HTMLElement) {
+  expect(container.querySelector(".onb-footer .btn-secondary")).toBeNull()
+  const labels = Array.from(
+    container.querySelectorAll(".onb-footer button"),
+  ).map((b) => (b.textContent ?? "").trim())
+  expect(labels).not.toContain("Skip")
 }
 
 /**
@@ -237,7 +237,9 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect((h.querySelector("em") as HTMLElement).textContent).toBe("tools.")
     const sub = container.querySelector(".onb-card .onb-sub") as HTMLElement
     expect(sub.textContent).toBe(
-      "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later.",
+      // "Skip" was the button's name; with the button gone the sentence has to
+      // stop naming it, or it points at a control that is not there.
+      "The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Leave anything you'll wire later.",
     )
     // The chrome marks step 2 of the 4 numbered steps (`stepForSlug`, not a
     // literal — a hardcoded number here is exactly what silently drifted
@@ -317,7 +319,7 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     // Categories remain → the footer just advances the accordion.
     expect(footerContinue(container).textContent).toMatch(/^Continue/)
     expect(footerContinue(container).textContent).not.toMatch(/workspace/)
-    expect(footerSkip(container).textContent?.trim()).toBe("Skip")
+    expectNoFooterSkip(container)
     // On the last one, completing it leaves nothing incomplete → it leaves.
     advanceToLastCategory(container)
     // The step this leaves for is `/onboarding/invite`, and the label says so
@@ -347,9 +349,9 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
 
   it("a reviewed category always reads Connected — there is no Skipped state", () => {
     const { container } = mountLoaded()
-    // Reviewed via Skip, with nothing selected: still collapses to Connected.
-    // The row marks progress through the list, not connection state.
-    fireEvent.click(footerSkip(container))
+    // Reviewed with nothing selected: still collapses to Connected. The row
+    // marks progress through the list, not connection state.
+    fireEvent.click(footerContinue(container))
     const state = container.querySelector(
       '.conn-step[data-conn="' + SHOWN_CATEGORIES[0].key + '"] .conn-step-state',
     ) as HTMLElement
@@ -694,9 +696,14 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     expect(at(SHOWN_CATEGORIES[2].key)).toBeNull()
   })
 
-  it("footer Skip also completes a category and opens the next one", () => {
+  it("has ONE footer button to advance, not a Skip beside a Continue", () => {
+    // They called the same handler. The flag they passed changed nothing until
+    // the very last category, so for every category but one the two buttons
+    // were identical and the reader had to choose between them anyway.
     const { container } = mountLoaded()
-    fireEvent.click(footerSkip(container))
+    expectNoFooterSkip(container)
+
+    fireEvent.click(footerContinue(container))
     const steps = container.querySelectorAll(".conn-step")
     expect(steps[0].classList.contains("done")).toBe(true)
     expect(steps[1].classList.contains("open")).toBe(true)
@@ -791,14 +798,15 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
       expect(routerMock.push).toHaveBeenCalledWith("/onboarding/invite")
     })
-    // Continue (not Skip) doesn't stamp the field as skipped, even at zero.
-    expect(markSkippedMock).not.toHaveBeenCalled()
   })
 
-  it("Skipping out of the LAST category with nothing wired records the skipped field", async () => {
+  it("records the skipped field from what happened, not from which button", async () => {
+    // It used to take a Skip press. Someone who wired nothing and pressed
+    // Continue had skipped connectors just as squarely and went unrecorded —
+    // so losing the button made this MORE accurate, not less.
     const { container } = mountLoaded([])
     advanceToLastCategory(container)
-    fireEvent.click(footerSkip(container))
+    fireEvent.click(footerContinue(container))
     await waitFor(() => {
       expect(markSkippedMock).toHaveBeenCalledWith("u-1", ["connectors"])
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
@@ -806,11 +814,11 @@ describe("Connectors (container) — v6 step 05 accordion", () => {
     })
   })
 
-  it("Skipping out does NOT record skipped_fields when something is wired", async () => {
+  it("does NOT record skipped_fields when something is wired", async () => {
     const { container } = mountLoaded([{ provider: "mixpanel", status: "active" }])
     await screen.findByText("Live")
     advanceToLastCategory(container)
-    fireEvent.click(footerSkip(container))
+    fireEvent.click(footerContinue(container))
     await waitFor(() => {
       expect(advanceStepMock).toHaveBeenCalledWith("ws-1", 3)
     })
