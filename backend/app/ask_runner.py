@@ -41,6 +41,7 @@ from app.usage_context import Feature, usage_scope
 from app.prompts import (
     ASK_CACHE_VERSION,
     ASK_SYSTEM,
+    ASK_SYSTEM_BILLING_ADDENDUM,
     ASK_SYSTEM_COMPANY_FACTS_ADDENDUM,
     ASK_SYSTEM_DOCUMENTS_ADDENDUM,
     ASK_SYSTEM_KG_ADDENDUM,
@@ -131,6 +132,125 @@ def _should_skip_website(url: str) -> bool:
     if parsed.path not in ("", "/"):
         return True
     return False
+
+
+# The header of the billing block. Named for what it is — the account's own
+# subscription record — so the model never reads it as something the customer
+# typed, the way WORKSPACE CONFIGURATION above deliberately is.
+BILLING_HEADER = "BILLING (this workspace's own account record)"
+
+
+def _credits_line(balance: int, allowance: int) -> str:
+    """"742 of 1,316 this period" — or the uncapped form."""
+    from app.billing import plans
+
+    if allowance == plans.UNLIMITED:
+        return "Credits: unlimited on this plan"
+    return f"Credits left: {balance:,} of {allowance:,} this period"
+
+
+def billing_facts_block(enterprise_id: str | None) -> str:
+    """What this workspace is paying for, for the answer prompt.
+
+    "What plan are we on", "how many credits are left", "how do I buy more" are
+    questions about the product the customer is holding, and the answer path had
+    nothing to answer them from — every other block grounds the model in the
+    customer's DATA. Asked anyway, a model with the app map in its prompt knows
+    a Billing screen exists and will happily invent what is on it.
+
+    READABLE BY EVERY MEMBER (owner decision 2026-09-08), which is wider than
+    `/v1/billing/summary`, whose `_require_admin` 403s anyone below admin. The
+    trade was made deliberately: credits gate everyone's work, and a member
+    whose generation is refused for a balance they cannot see has no way to
+    understand why. What stays admin-only is ACTING — buying, upgrading,
+    cancelling — and the block says so, so a member is pointed at a person
+    rather than at a screen that will refuse them.
+
+    Returns "" for every degradation path — no tenant, billing switched off, no
+    row, any read failure — so chat behaves exactly as before wherever this
+    cannot be answered truthfully. Never raises: grounding must not break an
+    answer.
+    """
+    if not enterprise_id:
+        return ""
+    try:
+        from app.billing import plans
+
+        # Payments hidden ⇒ nothing is charged and no balance means anything.
+        # Stating a plan and a credit count in that state would be fiction with
+        # a number in it.
+        if not plans.BILLING_ENABLED:
+            return ""
+
+        from app.db import billing as billing_db
+
+        row = billing_db.get_billing(enterprise_id) or {}
+    except Exception:  # noqa: BLE001 — grounding must never break an answer
+        logger.warning(
+            "billing record unavailable for %s; answering without it",
+            enterprise_id, exc_info=True,
+        )
+        return ""
+
+    # A COMPANY THAT HAS NEVER TOUCHED BILLING GETS NOTHING.
+    #
+    # `companies.plan` defaults to 'starter' and `resolve_plan` fail-closes to
+    # the launch default, so EVERY row — including one belonging to a tenant
+    # that has never seen a checkout — answers the question "what plan is
+    # this". Rendering on that alone put a plan name and a credit count in
+    # front of every ask in the product, for workspaces where both were an
+    # artefact of a column default rather than anything anyone agreed to.
+    #
+    # So the block needs a real footprint: a Stripe customer or subscription, a
+    # status, a first payment, or credits that have actually moved. Any one of
+    # those means billing is a thing that has happened here and the numbers
+    # describe something. None of them means the honest answer is the one the
+    # app map already gives — Settings > Billing — rather than a tier this
+    # workspace never chose.
+    #
+    # It also restores a property several prompt tests pin and the cache
+    # depends on: a workspace that has told us nothing contributes no cacheable
+    # prefix at all.
+    if not any(
+        (
+            row.get("stripe_customer_id"),
+            row.get("stripe_subscription_id"),
+            (row.get("subscription_status") or "").strip(),
+            row.get("first_paid_at"),
+            int(row.get("credit_balance") or 0) != 0,
+        )
+    ):
+        return ""
+
+    plan = plans.resolve_plan(row.get("plan"))
+    status = (row.get("subscription_status") or "").strip()
+    allowance = plans.monthly_credits(plan)
+
+    lines: list[str] = [f"Plan: {plans.plan_label(plan)}"]
+    if status:
+        # Stripe's own vocabulary, rendered as-is rather than translated: the
+        # customer sees these words on the Billing screen and in Stripe's
+        # emails, so a friendlier synonym here would describe a state they
+        # cannot match to anything.
+        lines.append(f"Subscription status: {status}")
+    lines.append(_credits_line(int(row.get("credit_balance") or 0), allowance))
+
+    period_end = _clean_text(str(row.get("current_period_end") or ""))
+    if period_end:
+        # What the date MEANS depends on the status, and getting that wrong is
+        # the difference between "your trial ends" and "you renew".
+        label = "Trial ends" if status == "trialing" else "Current period ends"
+        lines.append(f"{label}: {period_end}")
+
+    lines.append(
+        f"Buying more: top-ups are bought in Settings > Billing, from "
+        f"${plans.TOPUP_MIN_USD} to ${plans.TOPUP_MAX_USD:,} "
+        f"(presets ${', $'.join(str(v) for v in plans.TOPUP_PRESET_USD)}), at "
+        f"{plans.CREDITS_PER_TOPUP_USD} credits per dollar. Only an owner or "
+        f"admin can buy, change plan or cancel."
+    )
+
+    return f"{BILLING_HEADER}\n" + "\n".join(lines)
 
 
 def company_facts_block(enterprise_id: str | None) -> str:
@@ -2246,7 +2366,13 @@ def compose_ask_answer(
     # memoises the vector it computes back into a ContextVar, and a write inside
     # a copied context would be lost (see `_gather`). Running it here keeps that
     # memoisation real AND still overlaps it with the pool's work.
-    wave1: dict = {"facts": lambda: company_facts_block(enterprise_id)}
+    wave1: dict = {
+        "facts": lambda: company_facts_block(enterprise_id),
+        # One row, and stable per tenant for the life of a billing period,
+        # so it rides the cacheable prefix with `facts` rather than the
+        # volatile suffix.
+        "billing": lambda: billing_facts_block(enterprise_id),
+    }
     if live_context_fn is not None:
         wave1["live"] = live_context_fn
     if library_context_fn is not None:
@@ -2296,6 +2422,7 @@ def compose_ask_answer(
         pool.shutdown(wait=False, cancel_futures=True)
 
     facts = gathered.get("facts") or ""
+    billing = gathered.get("billing") or ""
     # A caller that pre-computed the block still wins; `live_context_fn` is the
     # concurrent route and only qa_agent's planned path uses it.
     live_context = live_context or (gathered.get("live") or "")
@@ -2458,10 +2585,15 @@ def compose_ask_answer(
     # matches across two different questions in the same dataset; putting it
     # first (the old order) invalidated the cache on every ask.
     cacheable = (
-        "\n\n---\n\n".join(p for p in (facts, cacheable, docs_block) if p) or None
+        "\n\n---\n\n".join(
+            p for p in (facts, billing, cacheable, docs_block) if p
+        )
+        or None
     )
     if facts:
         system += ASK_SYSTEM_COMPANY_FACTS_ADDENDUM
+    if billing:
+        system += ASK_SYSTEM_BILLING_ADDENDUM
     if docs_block:
         system += ASK_SYSTEM_DOCUMENTS_ADDENDUM
 
