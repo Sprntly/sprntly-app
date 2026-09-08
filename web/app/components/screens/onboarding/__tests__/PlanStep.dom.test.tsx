@@ -149,10 +149,40 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
     expect(screen.queryByTestId("plan-enterprise")).toBeNull()
   })
 
-  it("points Team and Enterprise at a conversation instead of a dead button", () => {
+  it("offers Custom as a third card, priceless and unbuyable", () => {
+    // Team and Enterprise carry no self-serve price. They used to be a line of
+    // text under the grid; at the end of onboarding that reads as "we do not
+    // do what you need", so they are a card (owner decision 2026-09-08).
     render(<PlanStep />)
-    const link = screen.getByText("Talk to us").closest("a")!
-    expect(link.getAttribute("href")).toBe("mailto:sales@sprntly.ai")
+    const custom = screen.getByTestId("plan-custom")
+    expect(custom).toBeTruthy()
+    expect(custom.textContent).toMatch(/Let.s talk/)
+    // No price on it, and it is still not a plan the backend sells.
+    expect(custom.textContent).not.toMatch(/\$\d/)
+    expect(screen.queryByTestId("plan-team")).toBeNull()
+    expect(screen.queryByTestId("plan-enterprise")).toBeNull()
+  })
+
+  it("turns Continue into Talk to sales when Custom is picked, and never opens checkout", () => {
+    // THE LINE THAT MATTERS. `custom` is not in plans.SELF_SERVE_PLANS, so a
+    // checkout naming it is refused by the backend — this stops the client
+    // asking in the first place.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+
+    const cta = screen.getByTestId("plan-continue")
+    expect(cta.textContent).toMatch(/Talk to sales/)
+    fireEvent.click(cta)
+    expect(checkout).not.toHaveBeenCalled()
+  })
+
+  it("goes back to buying when a priced plan is picked again", () => {
+    // Custom must not be a trap: selecting it and changing your mind has to
+    // restore a Continue that actually buys something.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+    fireEvent.click(screen.getByTestId("plan-starter"))
+    expect(screen.getByTestId("plan-continue").textContent).toMatch(/Continue/)
   })
 
   it("promises no trial, because the backend grants none", () => {

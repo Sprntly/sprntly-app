@@ -269,6 +269,35 @@ export function PlanStep() {
     }
   }, [checkout, refreshOnboarding, refreshWorkspace, advance])
 
+  /**
+   * CUSTOM IS A PLAN CARD NOW, not a footnote (owner decision 2026-09-08).
+   *
+   * Team and Enterprise carry no self-serve price — `plans.SELF_SERVE_PLANS`
+   * on the backend is the authority on what may be bought, and a checkout
+   * naming either is refused rather than quietly downgraded — so they used to
+   * be a line of text under the grid: "offering a plan nobody can buy here is
+   * worse than saying who to talk to". That reasoning held while payment was
+   * step two of a flow nobody had committed to. At the END of onboarding, a
+   * team that has just built a workspace and needs invoicing or SSO reads two
+   * priced cards and concludes we are not for them, having skimmed past the
+   * sentence that said otherwise.
+   *
+   * So it is the third card, and it is selectable — but it never reaches
+   * Stripe. This id is not in SELF_SERVE_PLANS, `chooseAndContinue` sends it to
+   * sales instead of to checkout, and the backend would refuse it anyway if a
+   * stale client ever posted it.
+   */
+  const CUSTOM_PLAN_ID = "custom"
+
+  /** Continue's one job, whichever card is selected. */
+  function chooseAndContinue() {
+    if (plan === CUSTOM_PLAN_ID) {
+      window.location.href = `mailto:${SALES_CONTACT}`
+      return
+    }
+    void startCheckout()
+  }
+
   async function startCheckout() {
     setError(null)
     setPhase({ kind: "redirecting" })
@@ -446,6 +475,27 @@ export function PlanStep() {
               </button>
             )
           })}
+
+          {/* The one card with no price. It carries the reassurance the old
+              footnote did — that picking a priced plan today is not a wrong
+              turn — because that is what stops someone stalling here waiting
+              for a reply. */}
+          <button
+            type="button"
+            className={`onb-plan-card${plan === CUSTOM_PLAN_ID ? " active" : ""}`}
+            aria-pressed={plan === CUSTOM_PLAN_ID}
+            data-testid={`plan-${CUSTOM_PLAN_ID}`}
+            onClick={() => setPlan(CUSTOM_PLAN_ID)}
+          >
+            <span className="onb-plan-name">Custom</span>
+            <span className="onb-plan-price">Let&apos;s talk</span>
+            <span className="onb-plan-credits">Team &amp; Enterprise</span>
+            <span className="onb-plan-blurb">
+              Invoiced, with the seats and credits your team actually needs.
+              Start on a plan above meanwhile and we&apos;ll move you across —
+              no double billing.
+            </span>
+          </button>
         </div>
 
         <button
@@ -453,21 +503,14 @@ export function PlanStep() {
           className="btn primary onb-plan-continue"
           disabled={phase.kind === "redirecting"}
           data-testid="plan-continue"
-          onClick={startCheckout}
+          onClick={chooseAndContinue}
         >
-          {phase.kind === "redirecting" ? "Opening checkout…" : "Continue"}
+          {phase.kind === "redirecting"
+            ? "Opening checkout…"
+            : plan === CUSTOM_PLAN_ID
+              ? "Talk to sales"
+              : "Continue"}
         </button>
-
-        {/* Team and Enterprise carry no self-serve price — a checkout naming
-            either is refused by the backend rather than quietly downgraded. So
-            they are a conversation, not a card. Deliberately a link and not a
-            fourth card: offering a plan nobody can buy here is worse than
-            saying who to talk to. */}
-        <p className="onb-plan-sales">
-          Need Team or Enterprise?{" "}
-          <a href={`mailto:${SALES_CONTACT}`}>Talk to us</a> — start on a plan
-          above and we'll move you across, no double billing.
-        </p>
       </div>
       {back}
     </div>
