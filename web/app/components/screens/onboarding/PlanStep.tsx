@@ -515,9 +515,13 @@ export function PlanStep() {
             happens. Printing the address means the answer is always on screen
             and copying it is a convenience rather than the only route.
 
-            It also says what to put IN the mail. "Talk to sales" with no brief
-            makes the reader compose the first message of a negotiation from
-            nothing, which is how a warm lead turns into a tab they close. */}
+            It also says what to put IN the mail, and when to expect a reply.
+            "Talk to sales" with no brief makes the reader compose the first
+            message of a negotiation from nothing, which is how a warm lead
+            turns into a tab they close. Deliberately no list of examples —
+            naming seats, SSO and the rest reads as a menu to pick from, and
+            a reader who wants none of them concludes the question is not for
+            them. */}
         {plan === CUSTOM_PLAN_ID ? (
           <div className="onb-plan-custom" data-testid="plan-custom-panel">
             <div className="onb-plan-custom-h">Email us and we'll size it with you</div>
@@ -535,8 +539,7 @@ export function PlanStep() {
               </button>
             </div>
             <p className="onb-plan-custom-body">
-              Tell us your team size and what you need us to cover — seats,
-              invoicing, SSO, anything about where your data lives. We answer
+              Tell us your team size and what you need us to cover. We answer
               within one business day.
             </p>
             <p className="onb-plan-custom-body">
