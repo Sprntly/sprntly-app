@@ -914,8 +914,13 @@ async def upload_project_document(
     file: UploadFile = File(...),
     ctx: WorkspaceContext = Depends(require_workspace),
 ):
-    """Upload a document file; it becomes a `custom_artifact` (kind
-    "document") attached to this project, and the agent can READ its text.
+    """Upload a document file — or a ZIP of them; each becomes a
+    `custom_artifact` (kind "document") attached to this project, and the agent
+    can READ its text.
+
+    RETURNS A LIST, always, even for one file. A zip yields as many documents
+    as it holds readable members, and a response that named only the first
+    would leave the drawer showing one of five until someone reloaded.
 
     TEXT-ONLY MVP: the file is converted to markdown server-side (the same
     `app.ingest.convert` the chat-attachment extractor uses — no LLM, no OCR),
@@ -942,9 +947,113 @@ async def upload_project_document(
         raise HTTPException(413, "File too large (max 25 MB).")
 
     filename = file.filename or "upload"
+
+    # ── A ZIP IS A BAG OF DOCUMENTS, not a document ──
+    #
+    # `convert` cannot read an archive — it extracts an "unparsed stub", so
+    # before this a zip came back as the 422 "we could not read this file",
+    # which is true of the container and useless about the five readable
+    # documents inside it. People zip things precisely because they have
+    # several; refusing that is refusing the normal case.
+    #
+    # Members are expanded through `app.zip_safe`, which owns the traversal /
+    # bomb / count guards, and each one then walks the SAME path a directly
+    # uploaded file walks — same converter, same unreadable check, same
+    # sanitizer, same size ceiling. A zip is a delivery mechanism here and
+    # earns no shortcut past any of it.
+    if _looks_like_zip(filename, data):
+        return await _upload_zip_members(project_id, filename, data, ctx)
+
+    return [await _document_from_bytes(project_id, filename, data, ctx)]
+
+
+def _looks_like_zip(filename: str, data: bytes) -> bool:
+    """Extension OR magic bytes.
+
+    Either alone is wrong. A `.zip` extension on a renamed PDF would send it
+    down the archive path to fail confusingly; an archive named `.docx`… is a
+    zip, and that is exactly why the magic check cannot stand alone either —
+    DOCX, XLSX and PPTX are all zip containers, and expanding one into its
+    XML parts would turn a readable document into a pile of unreadable
+    fragments. So: the extension decides, and the magic bytes only stop a
+    misnamed file from reaching the zip reader.
+    """
+    if not filename.lower().endswith(".zip"):
+        return False
+    return data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
+
+
+async def _upload_zip_members(
+    project_id: int, filename: str, data: bytes, ctx: WorkspaceContext
+) -> list[dict]:
+    """Expand an archive and import every member we can read.
+
+    UNREADABLE MEMBERS ARE SKIPPED, NOT FATAL. An archive of twelve documents
+    where one is a scanned PDF should import eleven — failing the upload
+    because of the one would cost the reader the other eleven, and they cannot
+    fix the scan anyway. If NOTHING in it could be read, that is worth a 422:
+    the upload genuinely achieved nothing and silence would look like success.
+    """
+    from app import zip_safe
+
+    try:
+        members = await asyncio.to_thread(zip_safe.read_members, data)
+    except zip_safe.NotAZip:
+        raise HTTPException(400, f"{filename!r} is not a readable ZIP archive.")
+    except zip_safe.ZipTooLarge as exc:
+        raise HTTPException(413, str(exc))
+
+    if not members:
+        raise HTTPException(422, "That archive is empty.")
+
+    created: list[dict] = []
+    skipped: list[str] = []
+    for name, raw in members:
+        if not raw or len(raw) > _MAX_DOCUMENT_BYTES:
+            skipped.append(name)
+            continue
+        try:
+            created.append(await _document_from_bytes(project_id, name, raw, ctx))
+        except HTTPException:
+            # An unreadable or oversized member — the same 4xx a direct upload
+            # would raise. One bad file does not cost the reader the rest.
+            skipped.append(name)
+
+    logger.info(
+        "project_zip_uploaded project_id=%s archive=%s imported=%s skipped=%s",
+        project_id, filename, len(created), len(skipped),
+    )
+    if not created:
+        raise HTTPException(
+            422,
+            "Nothing in that archive could be read. Scanned PDFs and images "
+            "have no text to extract.",
+        )
+    return created
+
+
+async def _document_from_bytes(
+    project_id: int, filename: str, data: bytes, ctx: WorkspaceContext
+) -> dict:
+    """One file → one attached document. The body of the original single-file
+    route, lifted so the zip path reuses it verbatim rather than growing a
+    second, subtly different import."""
     # `convert` is blocking (BeautifulSoup/pdf/docx parsing) — off the loop, the
     # same way `extract_file` runs it.
-    markdown = await asyncio.to_thread(convert, filename, data)
+    try:
+        markdown = await asyncio.to_thread(convert, filename, data)
+    except Exception as exc:  # noqa: BLE001 — an unreadable file, not a bug
+        # `convert` RAISES on a corrupt container — pypdf on a truncated PDF,
+        # a KeyError on a DOCX missing its content-types part — rather than
+        # returning the unparsed stub it gives for a merely unsupported type.
+        # Both mean the same thing to the person who uploaded it, so both get
+        # the same 422 rather than a 500. Load-bearing for archives: without
+        # this, one corrupt member takes down the import of every good file
+        # beside it.
+        logger.info(
+            "project_document_unreadable file=%s err=%s", filename, exc,
+        )
+        raise HTTPException(422, _UNREADABLE_FILE_MESSAGE)
     # `extract_file` refuses on empty text; a binary/legacy type extracts to a
     # NON-empty "unparsed stub" (see `ingest.is_unparsed_stub`), which a plain
     # empty-check would let through as a bogus document — so both cases are the

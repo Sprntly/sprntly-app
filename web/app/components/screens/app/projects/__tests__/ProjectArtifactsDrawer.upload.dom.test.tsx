@@ -112,7 +112,7 @@ describe("ProjectArtifactsDrawer — V2 upload UI", () => {
 
   it("uploads a chosen file: optimistic processing row, then the resolved DOC row", async () => {
     artifactsMock.mockResolvedValueOnce([])
-    const gate = deferred<ArtifactItem>()
+    const gate = deferred<ArtifactItem[]>()
     uploadDocumentMock.mockReturnValueOnce(gate.promise)
     renderDrawer()
     await screen.findByTestId("artifacts-drawer-upload-strip")
@@ -132,8 +132,10 @@ describe("ProjectArtifactsDrawer — V2 upload UI", () => {
     expect(procRow.getAttribute("data-upload-state")).toBe("uploading")
 
     // Resolve → processing row removed, the real DOC row (returned DTO) appears.
+    // The endpoint returns a LIST since 2026-09-08 — a .zip yields one document
+    // per readable member, and a single file yields a list of one.
     await act(async () => {
-      gate.resolve(docItem(42, "Launch Plan"))
+      gate.resolve([docItem(42, "Launch Plan")])
       await gate.promise
     })
     await waitFor(() =>
@@ -143,9 +145,37 @@ describe("ProjectArtifactsDrawer — V2 upload UI", () => {
     expect(screen.getByText("Launch Plan")).toBeTruthy()
   })
 
+  it("shows EVERY document a zip yields, not just the first", async () => {
+    // The response became a list precisely for this: an archive of five
+    // documents that surfaced one until the next reload would read as four
+    // uploads silently failing.
+    artifactsMock.mockResolvedValueOnce([])
+    const gate = deferred<ArtifactItem[]>()
+    uploadDocumentMock.mockReturnValueOnce(gate.promise)
+    renderDrawer()
+    await screen.findByTestId("artifacts-drawer-upload-strip")
+
+    fireEvent.change(screen.getByTestId("artifacts-drawer-file-input"), {
+      target: { files: [new File(["zip"], "docs.zip", { type: "application/zip" })] },
+    })
+
+    await act(async () => {
+      gate.resolve([docItem(1, "Brief"), docItem(2, "Spec"), docItem(3, "Notes")])
+      await gate.promise
+    })
+
+    await waitFor(() =>
+      expect(screen.getByTestId("artifacts-drawer-row-custom_artifact-1")).toBeTruthy(),
+    )
+    expect(screen.getByTestId("artifacts-drawer-row-custom_artifact-2")).toBeTruthy()
+    expect(screen.getByTestId("artifacts-drawer-row-custom_artifact-3")).toBeTruthy()
+    // And the optimistic row for the archive itself is gone.
+    expect(screen.queryByText("docs.zip")).toBeNull()
+  })
+
   it("maps a 413 to a specific error and removes the processing spinner", async () => {
     artifactsMock.mockResolvedValueOnce([])
-    const gate = deferred<ArtifactItem>()
+    const gate = deferred<ArtifactItem[]>()
     uploadDocumentMock.mockReturnValueOnce(gate.promise)
     renderDrawer()
     await screen.findByTestId("artifacts-drawer-upload-strip")
@@ -169,7 +199,7 @@ describe("ProjectArtifactsDrawer — V2 upload UI", () => {
 
   it("maps a 422 (unreadable) to its own message", async () => {
     artifactsMock.mockResolvedValueOnce([])
-    const gate = deferred<ArtifactItem>()
+    const gate = deferred<ArtifactItem[]>()
     uploadDocumentMock.mockReturnValueOnce(gate.promise)
     renderDrawer()
     await screen.findByTestId("artifacts-drawer-upload-strip")

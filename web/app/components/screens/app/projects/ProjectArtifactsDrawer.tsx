@@ -1100,21 +1100,23 @@ export function ProjectArtifactsDrawer({
         ])
         projectsApi
           .uploadDocument(projectId, file)
-          .then((item) => {
+          .then((items) => {
             setUploads((prev) => prev.filter((u) => u.id !== id))
-            setState((prev) =>
-              prev.status === "ready"
-                ? {
-                    status: "ready",
-                    // Prepend the new doc; dedupe by key in case a concurrent
-                    // reload already surfaced it.
-                    artifacts: [
-                      item,
-                      ...prev.artifacts.filter((a) => `${a.type}-${a.id}` !== `${item.type}-${item.id}`),
-                    ],
-                  }
-                : prev,
-            )
+            setState((prev) => {
+              if (prev.status !== "ready") return prev
+              // A zip lands as MANY documents, so prepend all of them — taking
+              // items[0] would show one of five until a reload.
+              const keys = new Set(items.map((i) => `${i.type}-${i.id}`))
+              return {
+                status: "ready",
+                // Dedupe by key in case a concurrent reload already surfaced
+                // any of them.
+                artifacts: [
+                  ...items,
+                  ...prev.artifacts.filter((a) => !keys.has(`${a.type}-${a.id}`)),
+                ],
+              }
+            })
             onArtifactsChanged?.()
           })
           .catch((err: unknown) => {

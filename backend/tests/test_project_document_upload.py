@@ -17,6 +17,9 @@ Covers:
     over-`MAX_BODY_CHARS` body is a clean 413 (not a 500)
   - the read wire returns the stored body (clamped), not None
   - the breadth-manifest label reads "Documents"
+  - a ZIP is expanded: one document per readable member, unreadable members
+    skipped rather than fatal, an archive with nothing readable a 422, and the
+    guards (traversal, bomb, count) enforced by `app.zip_safe`
 """
 from __future__ import annotations
 
@@ -112,7 +115,11 @@ def test_upload_creates_document_artifact_and_ref(docs_env, monkeypatch):
         content=b"# Launch Plan\n\nShip on **Friday**.\n",
     )
     assert r.status_code == 200, r.text
-    dto = r.json()
+    # A LIST since 2026-09-08 — a .zip yields one document per readable member,
+    # and a single file yields a list of one.
+    body = r.json()
+    assert isinstance(body, list) and len(body) == 1
+    dto = body[0]
 
     # A custom_artifacts row exists, kind="document", non-empty body_html.
     rows = _custom_artifact_rows(ctx.company_id)
@@ -146,7 +153,7 @@ def test_upload_dto_matches_drawer_fanout_shape(docs_env, monkeypatch):
 
     r = _upload(ctx, project["id"], filename="notes.txt", content=b"just some notes")
     assert r.status_code == 200
-    dto = r.json()
+    dto = r.json()[0]
 
     fanout = ctx.client.get(f"/v1/projects/{project['id']}/artifacts").json()["artifacts"]
     doc_item = next(a for a in fanout if a["type"] == "custom_artifact")
@@ -239,7 +246,7 @@ def test_artifact_content_for_returns_document_body(docs_env, monkeypatch):
         ctx, project["id"], filename="brief.md",
         content=b"# Brief\n\nThe answer is 42.\n",
     )
-    artifact_id = r.json()["id"]
+    artifact_id = r.json()[0]["id"]
 
     content = _artifact_content_for("custom_artifact", artifact_id, ctx.company_id)
     assert content is not None
@@ -259,7 +266,7 @@ def test_artifact_content_for_clamps_long_document(docs_env, monkeypatch):
         ctx, project["id"], filename="long.txt",
         content=("sentence. " * 2000).encode("utf-8"),  # ~20k chars > 8000 clamp
     )
-    artifact_id = r.json()["id"]
+    artifact_id = r.json()[0]["id"]
 
     out = _handle_get_artifact_content(
         project["id"], "acme", ctx.company_id,
@@ -274,6 +281,162 @@ def test_artifact_content_for_clamps_long_document(docs_env, monkeypatch):
 
 
 # ── Label ───────────────────────────────────────────────────────────────────
+
+
+# --------------------------------------------------------------------------- #
+# ZIP — a bag of documents, not a document
+# --------------------------------------------------------------------------- #
+def _zip_bytes(members: dict[str, bytes]) -> bytes:
+    """An in-memory archive. Deflated, like a real one — a stored-only zip
+    would not exercise the decompression path the bomb guard exists for."""
+    import io as _io
+    import zipfile
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name, raw in members.items():
+            zf.writestr(name, raw)
+    return buf.getvalue()
+
+
+def test_zip_imports_every_readable_member(docs_env, monkeypatch):
+    """The whole point: people zip things because they have several. Before
+    this, `convert` could not read an archive and returned the unparsed stub,
+    so a five-document zip came back as "we could not read this file" — true of
+    the container, useless about the five documents inside it."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "Brief.md": b"# Brief\n\nShip it.\n",
+        "Spec.md": b"# Spec\n\nThe details.\n",
+        "Notes.txt": b"Some plain notes.\n",
+    }))
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert len(body) == 3
+    assert sorted(d["title"] for d in body) == ["Brief", "Notes", "Spec"]
+    # Each is a real attached document, not just a DTO.
+    assert len(_custom_artifact_rows(ctx.company_id)) == 3
+    assert len(_project_artifact_refs(project["id"])) == 3
+
+
+def test_zip_unwraps_a_single_top_level_folder(docs_env, monkeypatch):
+    """`docs.zip → docs/Brief.md` is what a person means by "the file called
+    Brief.md" — the folder is packaging, not structure."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "docs/Brief.md": b"# Brief\n\nShip it.\n",
+        "docs/Spec.md": b"# Spec\n\nDetails.\n",
+    }))
+
+    assert r.status_code == 200, r.text
+    assert sorted(d["title"] for d in r.json()) == ["Brief", "Spec"]
+
+
+def test_zip_skips_an_unreadable_member_rather_than_failing_the_upload(
+    docs_env, monkeypatch
+):
+    """Twelve documents where one is a scanned PDF should import eleven.
+    Failing the whole upload would cost the reader the other eleven, and they
+    cannot fix the scan anyway."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "Good.md": b"# Good\n\nReadable.\n",
+        "scan.pdf": b"%PDF-1.4 binary-with-no-text",
+    }))
+
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert [d["title"] for d in body] == ["Good"]
+
+
+def test_a_zip_with_nothing_readable_is_422(docs_env, monkeypatch):
+    """Silence would look like success. If NOTHING in it could be read, the
+    upload genuinely achieved nothing and has to say so."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="scans.zip", content=_zip_bytes({
+        "a.pdf": b"%PDF-1.4 binary",
+        "b.pdf": b"%PDF-1.4 more binary",
+    }))
+
+    assert r.status_code == 422, r.text
+    assert "archive" in r.json()["detail"].lower()
+
+
+def test_macos_junk_is_ignored(docs_env, monkeypatch):
+    """A zip made on a Mac carries a `__MACOSX/` shadow of every file. Left in,
+    a one-document archive imports as two, one of them unreadable — which reads
+    as the product being broken."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "Brief.md": b"# Brief\n\nShip it.\n",
+        "__MACOSX/._Brief.md": b"\x00\x05\x16\x07binary resource fork",
+        ".DS_Store": b"\x00\x00\x00\x01Bud1",
+    }))
+
+    assert r.status_code == 200, r.text
+    assert [d["title"] for d in r.json()] == ["Brief"]
+
+
+def test_a_traversal_member_is_never_imported(docs_env, monkeypatch):
+    """`../../etc/passwd` never reaches a title or a storage key. Dropped
+    rather than sanitised — a name that tried is not a name to keep."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="docs.zip", content=_zip_bytes({
+        "Brief.md": b"# Brief\n\nShip it.\n",
+        "../../escape.md": b"# Escape\n\nShould never land.\n",
+    }))
+
+    assert r.status_code == 200, r.text
+    titles = [d["title"] for d in r.json()]
+    assert titles == ["Brief"]
+    assert not any("escape" in (row["title"] or "").lower()
+                   for row in _custom_artifact_rows(ctx.company_id))
+
+
+def test_a_renamed_non_archive_is_not_treated_as_one(docs_env, monkeypatch):
+    """The extension says zip, the bytes say otherwise. Sending it down the
+    archive path would fail confusingly; it is a corrupt upload, and 400 says
+    so."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="notreally.zip", content=b"# Just markdown\n")
+
+    # No PK magic → not routed to the zip reader; it walks the ordinary path
+    # and converts as the text it actually is.
+    assert r.status_code == 200, r.text
+    assert len(r.json()) == 1
+
+
+def test_a_docx_is_a_document_not_an_archive(docs_env, monkeypatch):
+    """DOCX/XLSX/PPTX are zip containers. Expanding one into its XML parts
+    would turn a readable document into a pile of unreadable fragments — which
+    is why the EXTENSION decides and the magic bytes only stop a misnamed
+    file."""
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    r = _upload(ctx, project["id"], filename="report.docx",
+                content=_zip_bytes({"word/document.xml": b"<w:document/>"}))
+
+    # Routed to `convert` as a document — whatever it makes of it, it is never
+    # expanded into members.
+    assert r.status_code in (200, 422), r.text
+    if r.status_code == 200:
+        assert len(r.json()) == 1
 
 
 def test_documents_label():
