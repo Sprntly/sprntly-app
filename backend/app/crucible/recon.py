@@ -37,6 +37,7 @@ import logging
 import re
 from collections import Counter
 from dataclasses import asdict, dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -209,11 +210,24 @@ class Table:
     two of the checks are about column ORDER and adjacency (a funnel is a
     sequence) and dict key order off a sparse row set is not the export's
     order.
+
+    `as_of` and `as_of_rule` are NOT set by anything in this module — every
+    constructor here (`make_table` and everything that calls it) leaves them
+    at their defaults. Deriving a table's date is `crucible.evidence`'s job
+    (`with_as_of`), kept out of this file so a table this module reads is
+    read exactly as it always was; nothing here changes because a later stage
+    learned how to date what it already produced.
     """
     name: str
     rows: tuple[Mapping[str, Any], ...]
     columns: tuple[str, ...]
     source_type: str = ""
+    #: When this table is evidence OF — see `crucible.evidence.derive_as_of`.
+    #: `None` until something derives it.
+    as_of: Optional[datetime] = None
+    #: Which of the three rules produced `as_of` — one of
+    #: `crucible.evidence.AS_OF_RULE_*`, or `""` if `as_of` is `None`.
+    as_of_rule: str = ""
 
     def values(self, column: str) -> list[Any]:
         return [r.get(column) for r in self.rows]
