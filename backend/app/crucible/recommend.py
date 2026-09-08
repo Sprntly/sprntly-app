@@ -1649,6 +1649,22 @@ def build_deep_recommendations(
     # count`, the citation gate, and a total failure never disagree about
     # which count they printed.
     if len(kept) < n:
+        # "STILL STANDS FOR EACH" ASSERTED A FLAT RECOMMENDATION THAT MAY NOT
+        # EXIST. The shortfall set is the deep candidates that failed the
+        # citation bar; the claim was that every one of them still carries the
+        # flat suggestion rendered above. The CAP is not what breaks it — deep
+        # candidates are the top n <= 5 of the same `relevant` list the flat
+        # pass takes its top 8 from, so a deep candidate is always inside the
+        # flat pass's reach. A flat-pass FAILURE or a per-item drop is, and
+        # both are ordinary.
+        #
+        # THE COUNTED VERSION OF THIS SENTENCE IS NOT WRITABLE HERE. It needs
+        # the rendered rows, and the two passes run concurrently — this one
+        # cannot see what the flat pass produced. `report` already does it
+        # properly, counting flat recommendations off the same rows the cards
+        # come from. So this says only what it can support: the flat
+        # recommendation stands wherever there is one.
+        #
         # SINGULAR IS NOT A COSMETIC CASE HERE. With one candidate these
         # sentences read "None of the 1 met the citation bar … still stands
         # for each", which is the shape that makes a reader distrust every
@@ -1658,21 +1674,22 @@ def build_deep_recommendations(
         if fail_reason is not None:
             tail = (
                 "the one finding is not shown below — the flat "
-                "recommendation above still stands for it."
+                "recommendation above still stands where it carries one."
                 if one else
                 f"none of the {n} are shown below — the flat recommendation "
-                f"above still stands for each."
+                f"above still stands under the findings that carry one."
             )
             gate_note = f" {fail_reason[0].upper()}{fail_reason[1:]}, so {tail}"
         elif not kept:
             gate_note = (
                 " The one finding did not meet the citation bar for a full "
                 "recommendation, so it is not shown below — the flat "
-                "recommendation above still stands for it."
+                "recommendation above still stands where it carries one."
                 if one else
                 f" None of the {n} met the citation bar for a full "
                 f"recommendation, so none are shown below — the flat "
-                f"recommendation above still stands for each."
+                f"recommendation above still stands under the findings that "
+                f"carry one."
             )
         elif len(kept) == 1:
             gate_note = (

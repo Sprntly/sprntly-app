@@ -1120,3 +1120,110 @@ def test_the_monetary_gap_step_states_the_unit_it_is_actually_run_at():
     for step in (counted, weighted):
         assert "signals do." in step.why, (
             "the measurement must survive the correction or this is vacuous")
+
+
+# ─── The cut-off, stated at the gate in numbers a reader can object to ─────
+
+
+def _write_up_step(**kw):
+    """Step 23 off the deterministic spine — what every rendered plan shows."""
+    steps = planner.minimal_plan(
+        goal_text="reduce churn", currency="accounts", report=_prose_report(),
+        source_types=("pm_manual", "customer_voice"), **kw)
+    return next(s for s in steps if s.primitive == "select_top_n")
+
+
+def test_the_write_up_cut_off_is_a_number_rather_than_the_few():
+    """P5: "the ranking rule and cut-off are stated before the work runs, so
+    the user can object to the method at the approval step." "Write up only
+    the few that get a full treatment" gives a reader nothing to object TO —
+    they cannot tell whether "the few" is three or thirty until the document
+    arrives."""
+    step = _write_up_step()
+    said = f"{step.what} {step.why}"
+    assert "the few" not in said.lower(), f"still unobjectable: {said}"
+    assert "at most 2 findings" in said, said
+
+
+def test_every_cut_off_stated_is_the_constant_the_run_actually_applies():
+    """READ FROM THE CONSTANTS, so the sentence cannot drift from the caps.
+    An earlier draft of this change proposed stating 5 as the write-up count;
+    the document writes up 2. A test that hardcoded the prose would have
+    ratified whichever number the prose happened to say."""
+    from app.crucible.recommend import (
+        DEFAULT_RECOMMENDATION_COUNT, MAX_DEEP_RECOMMENDED, MAX_RECOMMENDED,
+    )
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
+
+    step = _write_up_step()
+    said = f"{step.what} {step.why}"
+    assert f"at most {MAX_WRITTEN_UP_FINDINGS} findings" in said
+    assert f"top {DEFAULT_RECOMMENDATION_COUNT} get a full recommendation" in said
+    assert f"capped at {MAX_DEEP_RECOMMENDED}" in said
+    assert f"up to {MAX_RECOMMENDED} carry a plain suggestion" in said
+
+
+def test_the_cut_off_step_survives_the_figure_gate_it_now_quotes_numbers():
+    """THE HAZARD THIS CHANGE WALKS INTO. `verify` DROPS any step stating a
+    figure that is not in an observation, the step's own params, or
+    `_engine_figures` — silently, into `dropped`. Before this change none of
+    the four reader-visible caps was registered, so stating them would have
+    deleted the very step P5 needs. A test asserting only the wording would
+    pass against a plan the reader never sees."""
+    step = _write_up_step()
+    kept, dropped = planner.verify([step], [])
+    assert [s.primitive for s in kept] == ["select_top_n"], (
+        f"the cut-off step was dropped by its own figure gate: {dropped}")
+    assert not dropped
+
+
+def test_the_deep_cap_a_reader_never_sees_is_not_what_the_plan_states():
+    """`DEFAULT_DEEP_CAP = 5` caps the stored `tier`, not what is written up,
+    and it was the ONLY member of this family the figure gate knew — so a
+    plan claiming five full write-ups sailed through while the true cap of
+    two would have been dropped. The gate now knows the numbers the reader
+    actually experiences."""
+    from app.crucible.pipeline import DEFAULT_DEEP_CAP
+    from app.crucible.report import MAX_WRITTEN_UP_FINDINGS
+
+    figures = planner._engine_figures()
+    assert figures["written_up"] == float(MAX_WRITTEN_UP_FINDINGS)
+    assert MAX_WRITTEN_UP_FINDINGS != DEFAULT_DEEP_CAP, (
+        "the two caps have converged; this guard no longer distinguishes them")
+    step = _write_up_step()
+    assert f"at most {DEFAULT_DEEP_CAP} findings" not in f"{step.what} {step.why}"
+
+
+def test_both_homes_of_the_cut_off_wording_were_changed_together():
+    """STEP 23'S WORDING LIVES IN TWO PLACES. `planner`'s deterministic spine
+    is what every rendered plan has shown; `primitives`' catalogue entry is
+    what the model is offered when a plan is GENERATED rather than composed.
+    Change one and the vaguer sentence returns the first time the other path
+    runs."""
+    from app.crucible import primitives as prim
+
+    entry = next(p for p in prim._PRIMITIVES if p.id == "select_top_n")
+    assert "the few" not in entry.description.lower(), entry.description
+    assert "at most 2 findings" in entry.description, entry.description
+
+
+def test_the_stated_recommendation_rule_is_the_one_the_engine_runs():
+    """A RULE, NOT AN OUTCOME. How many get a full recommendation is only
+    knowable at plan time for two of `resolve_recommendation_count`'s three
+    branches — a named target is summed against impacts the run has not
+    produced yet. So the plan states the branch structure, and this pins the
+    prose to the function's real behaviour rather than to a number that would
+    be a guess."""
+    from app.crucible.recommend import resolve_recommendation_count
+
+    default = resolve_recommendation_count("reduce churn", [])
+    assert default.count == 2, "the default the plan states is no longer 2"
+
+    named = resolve_recommendation_count("give me 3 things to reduce churn", [])
+    assert named.count == 3, (
+        "a named count is no longer honoured, so 'more if you name a count' "
+        "is now false")
+
+    over = resolve_recommendation_count("give me 40 things to reduce churn", [])
+    assert over.count == 5, (
+        "a named count is no longer capped at 5, so 'capped at 5' is false")

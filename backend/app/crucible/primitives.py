@@ -524,8 +524,13 @@ _PRIMITIVES: tuple[Primitive, ...] = (
     Primitive(
         id="select_top_n",
         group="ranking",
-        description="Take only the few that get a full write-up, because "
-                    "twenty-five equally weighted options is not a decision.",
+        # THE SECOND HOME OF STEP 23'S WORDING. `planner`'s deterministic
+        # spine is what every rendered plan has actually shown, but this
+        # catalogue entry is what the model is offered — leave it saying "the
+        # few" and the vaguer sentence comes back the moment a plan is
+        # generated rather than composed.
+        description="Write up at most 2 findings in full, because twenty-five "
+                    "equally weighted options is not a decision.",
         params=(
             _p("top_n", "int", required=False, note="defaults to 5"),
         ),

@@ -1134,16 +1134,6 @@ function PlanBody({
         </section>
       ) : null}
 
-      {/* WHAT THE PLAN STILL NEEDS — a forward reference, not the questions
-          themselves. They come after the approval, because they are about the
-          plan that was approved. */}
-      {settled || !questionCount ? null : (
-        <p className="ga-doc-note" data-testid="goal-plan-needs">
-          After you approve this I will ask you {questionCount} thing
-          {questionCount === 1 ? "" : "s"} I cannot work out from your sources.
-        </p>
-      )}
-
       {gaps.length ? (
         <section className="ga-plan-section" data-testid="goal-plan-gaps">
           <h2 className={s.sectionLabel}>What I will not be able to answer</h2>
@@ -1161,6 +1151,30 @@ function PlanBody({
           </ul>
         </section>
       ) : null}
+
+      {/* WHAT THE PLAN STILL NEEDS — a forward reference, not the questions
+          themselves. They come after the approval, because they are about the
+          plan that was approved.
+
+          IT SITS BELOW THE GAPS, AND SAYS WHICH LIST IT IS NOT TALKING ABOUT.
+          It used to sit immediately ABOVE "What I will not be able to answer",
+          where "I will ask you 2 things" read as the heading for the three
+          gaps listed underneath — so the document appeared to miscount its own
+          list. The two are unrelated: `questionCount` is the reconnaissance
+          questions the reader will be asked after approving, and the gaps are
+          what this run cannot answer at all. Making the numbers agree would be
+          the wrong repair: it would state one list's length about the other.
+          The fix is to stop the sentence pointing at a list that is not its
+          own. */}
+      {settled || !questionCount ? null : (
+        <p className="ga-doc-note" data-testid="goal-plan-needs">
+          {/* The disambiguating clause is only true when there IS a list
+              above to be separate from. */}
+          {gaps.length ? "Separately from the gaps above, after" : "After"} you
+          approve this I will ask you {questionCount} thing
+          {questionCount === 1 ? "" : "s"} I cannot work out from your sources.
+        </p>
+      )}
     </>
   )
 }

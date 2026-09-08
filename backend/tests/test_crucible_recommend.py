@@ -961,7 +961,12 @@ def test_the_shortfall_sentence_reads_correctly_for_a_single_candidate(monkeypat
     assert "for each" not in basis, "one finding is not 'each'"
     assert "The one finding did not meet the citation bar" in basis
     assert "it is not shown below" in basis
-    assert "still stands for it" in basis
+    # WAS "still stands for it", which asserted a flat recommendation exists
+    # for that finding. It may not: the flat pass can fail, or drop the item.
+    # The singular BRANCH is what this test defends and it is intact — the
+    # plural wording must still be absent.
+    assert "still stands where it carries one" in basis
+    assert "under the findings" not in basis, "the plural wording leaked in"
 
 
 def test_the_plural_shortfall_sentence_is_unchanged(monkeypatch):
@@ -975,7 +980,10 @@ def test_the_plural_shortfall_sentence_is_unchanged(monkeypatch):
     assert deep.count.count == 2
     assert "None of the 2 met the citation bar" in basis
     assert "none are shown below" in basis
-    assert "still stands for each" in basis
+    # WAS "still stands for each" — a universal over the shortfall set that
+    # the module cannot support and does not need to make.
+    assert "still stands under the findings that carry one" in basis
+    assert "for each" not in basis, "the universal claim is back"
 
 
 def test_the_named_count_sentence_agrees_in_the_singular():
@@ -1740,3 +1748,28 @@ def test_synthesis_never_moves_the_ranking():
     assert [i.value for i in after.impacts] == [i.value for i in before.impacts]
     assert [c.band for c in after.confidences] == [c.band for c in before.confidences]
     assert [c.score for c in after.confidences] == [c.score for c in before.confidences]
+
+
+def test_no_shortfall_sentence_claims_a_flat_recommendation_for_every_finding():
+    """THE UNIVERSAL, SWEPT RATHER THAN SPOT-CHECKED. Two branches wrote four
+    variants of "the flat recommendation above still stands for each/for it",
+    and the singular/plural split means a fix applied to one pair leaves the
+    other asserting that every member of the shortfall set carries a flat
+    suggestion. It need not: the flat pass can fail outright, or drop an item
+    within its reach. `report` makes the counted version of this claim off the
+    rendered rows; this module cannot see them, so it must not generalise.
+    """
+    from pathlib import Path
+
+    import app.crucible.recommend as rec
+
+    source = Path(rec.__file__).read_text(encoding="utf-8")
+    assert source.strip(), "source read as empty; this guard would be vacuous"
+    for claim in ("still stands for each", "still stands for it"):
+        assert claim not in source, (
+            f"a shortfall sentence claims a flat recommendation exists for "
+            f"every finding it names: {claim!r}")
+    # And the replacement really is present, so this cannot be satisfied by
+    # deleting the sentence altogether.
+    assert "still stands under the findings that carry one" in source
+    assert "still stands where it carries one" in source

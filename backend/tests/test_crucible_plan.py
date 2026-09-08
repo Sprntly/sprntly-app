@@ -161,50 +161,61 @@ def test_the_disclosure_does_not_claim_a_goal_filter_production_never_runs():
         )
 
 
-def test_no_prospect_writer_exists_or_this_disclosure_is_stale():
-    """THE PREMISE, PINNED. The gap says the distinction is not recorded. It
-    is true because nothing in `app/` ever writes a prospect key — the day
-    something does, this sentence becomes a lie in the reader's own document
-    and the failure has to land here rather than in production.
+def test_nothing_consumes_the_side_or_this_disclosure_is_stale():
+    """THE PREMISE, PINNED — AND IT IS A CONSUMER PREMISE, NOT A WRITER ONE.
 
-    Read as SOURCE over the tree, with each file asserted non-empty: a text
-    search that excludes a source file can be satisfied by that file's
-    `.pyc`, and the failure mode of a guard like this is passing because it
-    read nothing.
+    THE GUARD THIS REPLACES SCANNED FOR A WRITER, AND WAS PASSING BECAUSE IT
+    READ NOTHING. It searched every source for the dict-key literal
+    `"prospect":`. `graph.extractor` records the side as a VALUE under
+    `account_side`, so the literal never appears, and the scan stayed green
+    while the sentence it guarded ("no connected source records a side")
+    became false. A writer scan also cannot be repaired: this change does not
+    remove the writer, so scanning for one would fail before and after.
 
-    `prospect` ONLY, THOUGH `PROSPECT_KEYS` HAS TWO. `candidate` is an
-    ordinary English word this codebase already uses for unrelated things —
-    a goal resolution status, a column-rename suggestion — so scanning for it
-    as a dict key would fire on noise, and a guard that cries wolf is one
-    somebody deletes. The realistic way this premise dies is a connector
-    landing a `prospect` field, which this does catch. It is deliberately
-    loose in the safe direction: it cannot manufacture a writer that is not
-    there.
+    SO PIN WHAT THE SENTENCE NOW RESTS ON. It no longer claims nothing
+    RECORDS a side — it claims nothing ACTS on one. That is true because
+    reach is counted over the unfiltered `accounts` segment, and the
+    `customer_side` segment `claims._population` builds is read nowhere. Flip
+    either and every reach count in the document starts depending on a side,
+    while the plan still tells the reader it does not — which is the exact
+    failure this guard exists to make loud.
     """
     from pathlib import Path
 
-    from app.crucible import claims
+    from app.crucible import claims, pipeline
 
-    assert "prospect" in claims.PROSPECT_KEYS, (
-        "the key this scans for is no longer one the engine reads")
+    # 1. Reach is taken over the UNFILTERED segment.
+    assert pipeline._REACH_SEGMENT == "accounts", (
+        "reach is no longer counted over every named account, so the plan's "
+        "disclosure that the side is not acted on is false")
+
+    # 2. And the side-filtered segment still has no reader. Scanned as SOURCE
+    #    with each file asserted non-empty, keeping the discipline of the
+    #    guard this replaces: a text search that reads nothing passes.
+    built = claims._population({"customer": "Northwind Traders"}, {})
+    assert "customer_side" in built.segments, (
+        "the segment this scans for is no longer the one that is built")
 
     root = Path(claims.__file__).resolve().parents[2] / "app"
     files = sorted(root.rglob("*.py"))
     assert len(files) > 50, f"only {len(files)} sources scanned; guard is vacuous"
 
-    writers = []
-    for p in files:
-        text = p.read_text(encoding="utf-8", errors="replace")
-        assert text.strip() or p.name == "__init__.py", f"{p} read as empty"
-        # An ASSIGNMENT into a mapping under the key. Reading one
-        # (`props.get("prospect")`) is what the engine does today and is not
-        # a writer; `claims.py` itself is the reader and is exempt.
-        if p.name == "claims.py":
+    readers = []
+    for f in files:
+        text = f.read_text(encoding="utf-8", errors="replace")
+        assert text.strip() or f.name == "__init__.py", f"{f} read as empty"
+        # `claims.py` BUILDS the segment and is the one legitimate mention of
+        # it outside a comment. Every other hit is a read.
+        if f.name == "claims.py":
             continue
-        if '"prospect":' in text or "'prospect':" in text:
-            writers.append(str(p.relative_to(root)))
-    assert not writers, (
-        "something now records which side of the sale an account is on, so "
-        "the plan's disclosure that nothing does is false:\n  "
-        + "\n  ".join(writers)
+        for line in text.splitlines():
+            stripped = line.lstrip()
+            if stripped.startswith("#"):
+                continue
+            if "customer_side" in stripped:
+                readers.append(f"{f.relative_to(root)}: {stripped}")
+    assert not readers, (
+        "something now reads the customer-side segment, so reach depends on "
+        "which side of the sale an account is on and the plan's disclosure "
+        "that it does not is false:\n  " + "\n  ".join(readers)
     )
