@@ -80,7 +80,21 @@ _EXTRACT_SCHEMA = {
                     "content": {"type": "string", "description":
                                 "One self-contained factual statement, with numbers when present"},
                     "source_type": {"type": "string", "description":
-                                    "analytics|project_mgmt|communication|customer_voice|revenue|verbal_claim|pm_manual|agent_inferred"},
+                                    "analytics|project_mgmt|communication|customer_voice|revenue|"
+                                    "verbal_claim|pm_manual|agent_inferred|outcome_measured. "
+                                    "outcome_measured is the RARE, STRICT one: it requires BOTH a "
+                                    "named change that already happened (a feature shipped, a "
+                                    "price changed, a campaign ran, an experiment concluded) AND a "
+                                    "stated after-effect measured against that change. It is NOT a "
+                                    "metric, NOT a trend, NOT a correlation, NOT a plan, NOT a "
+                                    "prediction — a number alone, however precise, is never enough. "
+                                    "'Activation is 34%' is analytics: a snapshot, nothing changed. "
+                                    "'MAU grew 12% year on year' is analytics: a trend over time, no "
+                                    "named intervention. 'Activation rose 12% after we shipped "
+                                    "templates' IS outcome_measured: a named change (shipped "
+                                    "templates) and its measured result (rose 12%). If the text "
+                                    "does not name what changed, or only states a figure or a "
+                                    "trend, use analytics — never outcome_measured on a guess."},
                     "theme": {"type": "string", "description":
                               "Short feature-area / problem label this signal is about, e.g. 'AI authoring'"},
                     "relationship": {"type": "string", "description":
