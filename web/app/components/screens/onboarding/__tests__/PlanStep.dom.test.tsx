@@ -149,10 +149,79 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
     expect(screen.queryByTestId("plan-enterprise")).toBeNull()
   })
 
-  it("points Team and Enterprise at a conversation instead of a dead button", () => {
+  it("offers Custom as a third card, priceless and unbuyable", () => {
+    // Team and Enterprise carry no self-serve price. They used to be a line of
+    // text under the grid; at the end of onboarding that reads as "we do not
+    // do what you need", so they are a card (owner decision 2026-09-08).
     render(<PlanStep />)
-    const link = screen.getByText("Talk to us").closest("a")!
-    expect(link.getAttribute("href")).toBe("mailto:sales@sprntly.ai")
+    const custom = screen.getByTestId("plan-custom")
+    expect(custom).toBeTruthy()
+    expect(custom.textContent).toMatch(/Let.s talk/)
+    // No price on it, and it is still not a plan the backend sells.
+    expect(custom.textContent).not.toMatch(/\$\d/)
+    expect(screen.queryByTestId("plan-team")).toBeNull()
+    expect(screen.queryByTestId("plan-enterprise")).toBeNull()
+  })
+
+  it("shows the sales address ON THE PAGE when Custom is picked", () => {
+    // NOT a `mailto:`. A browser with no default mail client registered — a
+    // webmail user on a fresh machine, which is most of them — swallows a
+    // mailto click silently, so the reader presses the only button on screen
+    // and nothing happens at all. The address being printed is what makes
+    // this work for everyone.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+
+    const panel = screen.getByTestId("plan-custom-panel")
+    expect(panel.textContent).toContain("sales@sprntly.ai")
+    // And it says what to put in the mail, rather than leaving the reader to
+    // open the first message of a negotiation on a blank page.
+    expect(panel.textContent).toMatch(/team size/i)
+    expect(panel.textContent).toMatch(/business day/i)
+  })
+
+  it("replaces Continue rather than relabelling it — there is nothing to continue to", () => {
+    // `custom` is not in plans.SELF_SERVE_PLANS, so a checkout naming it is
+    // refused by the backend. A Continue that cannot continue is worse than
+    // no Continue, so the panel takes its place entirely.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+    expect(checkout).not.toHaveBeenCalled()
+  })
+
+  it("copies the address, and still shows it when the clipboard refuses", async () => {
+    // The copy is a shortcut. A refused clipboard (insecure context, a
+    // dismissed permission prompt) must cost the reader nothing, because the
+    // address is selectable text either way.
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"))
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    })
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+    fireEvent.click(screen.getByTestId("plan-custom-copy"))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("sales@sprntly.ai"))
+    // No "Copied" claimed on a failure, and the address is still on screen.
+    expect(screen.getByTestId("plan-custom-copy").textContent).toBe("Copy")
+    expect(screen.getByTestId("plan-custom-panel").textContent).toContain(
+      "sales@sprntly.ai",
+    )
+  })
+
+  it("goes back to buying when a priced plan is picked again", () => {
+    // Custom must not be a trap: selecting it and changing your mind has to
+    // restore a Continue that actually buys something.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+
+    fireEvent.click(screen.getByTestId("plan-starter"))
+    expect(screen.getByTestId("plan-continue").textContent).toMatch(/Continue/)
+    expect(screen.queryByTestId("plan-custom-panel")).toBeNull()
   })
 
   it("promises no trial, because the backend grants none", () => {
@@ -193,6 +262,37 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
     search = "checkout=cancelled"
     render(<PlanStep />)
     expect(screen.getByText(/nothing was charged/i)).toBeTruthy()
+  })
+})
+
+describe.skipIf(!BILLING_ENABLED)("going back", () => {
+  // The screen predates being a step: it was an unnumbered gate you were
+  // redirected to, so it rendered its own shell with no footer. Moving it to
+  // the end of the flow left it the only step with no way out but forwards.
+  it("offers Back to the step before it", () => {
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-back"))
+    expect(push).toHaveBeenCalledWith("/onboarding/personalize")
+  })
+
+  it("offers it to a member who cannot buy — they are the most stuck of all", () => {
+    // They cannot act on this screen at all, so leaving them here with no exit
+    // is worse than for anyone else.
+    orgRole = "member"
+    render(<PlanStep />)
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+    expect(screen.getByTestId("plan-back")).toBeTruthy()
+  })
+
+  it("withdraws it once the money has moved", async () => {
+    // Back while the subscription is being confirmed invites someone to walk
+    // away mid-write, and there is nothing behind them to go back TO — they
+    // have paid.
+    search = "checkout=success"
+    summary.mockResolvedValue({ plan: "starter", subscription_status: null })
+    render(<PlanStep />)
+    expect(screen.getByRole("status")).toBeTruthy()
+    expect(screen.queryByTestId("plan-back")).toBeNull()
   })
 })
 

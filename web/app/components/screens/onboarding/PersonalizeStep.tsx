@@ -299,7 +299,6 @@ export function PersonalizeStep() {
         </>
       }
       subtitle="Your workspace is where Sprntly sends insights about how your product is performing, how users are using it, and what to build next. Tell us what you want to surface."
-      footerMeta="Personalize your workspace"
       onBack={() => router.push("/onboarding/review")}
       onContinue={() => void save()}
       continueLabel={

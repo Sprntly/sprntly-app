@@ -1,6 +1,6 @@
 "use client"
 
-import { useEffect, useMemo, useState } from "react"
+import { useEffect, useMemo, useRef, useState } from "react"
 import type { ReactElement, SVGProps } from "react"
 import { useRouter } from "next/navigation"
 import { useAuth } from "../../../lib/auth"
@@ -37,8 +37,10 @@ import {
  * they're on, expanded. Categories they haven't reached yet are NOT rendered
  * at all (no locked placeholder rows): the list grows downward as they go.
  *
- * The FOOTER drives it: Skip / Continue complete the open category, collapse
- * it, and reveal the next. Once none are left Continue leaves the step,
+ * The FOOTER drives it: ONE button — Continue — completes the open category,
+ * collapses it, and reveals the next. (A Skip sat beside it until 2026-09-08
+ * calling the same handler; see onFooterAdvance.) Once none are left it leaves
+ * the step,
  * relabelled "See what we learned" — the review step's own headline, since
  * the api-key step this used to name is gone. A progress bar + "N of M
  * reviewed" counter track position within the step.
@@ -221,6 +223,10 @@ export function Connectors() {
   // Accordion state: which categories are done/skipped + which is expanded.
   const [doneCats, setDoneCats] = useState<Set<number>>(new Set())
   const [openCat, setOpenCat] = useState<number | null>(0)
+  // The high-water mark of how far down the list the PM has been. Only ever
+  // grows; see the note where it is used for why collapsing a section must not
+  // rewind it. Starts at 0 because the first category is open on arrival.
+  const furthestReachedRef = useRef(0)
   const [connected, setConnected] = useState<Set<string>>(new Set())
   const [connections, setConnections] = useState<ConnectionSummary[]>([])
   const [modalProvider, setModalProvider] = useState<string | null>(null)
@@ -313,7 +319,7 @@ export function Connectors() {
     setOpenCat((cur) => (cur === i ? null : i))
   }
 
-  /** Skip / Continue: mark done, collapse, open the next incomplete one. */
+  /** Mark done, collapse, open the next incomplete one. */
   function completeCategory(i: number) {
     const nextDone = markCategoryDone(doneCats, i)
     setDoneCats(nextDone)
@@ -432,12 +438,29 @@ export function Connectors() {
    * reviewed, plus the one currently open. Unreached categories are omitted
    * entirely rather than shown as locked placeholders, so the card grows
    * downward one category at a time.
+   *
+   * HOW FAR THEY GOT IS NOT THE SAME QUESTION AS WHAT IS OPEN, and conflating
+   * the two emptied the screen. This used to be
+   * `Math.max(openCat ?? -1, ...doneCats)`, so clicking the open category's own
+   * header — which collapses it, setting `openCat` to null — dropped this to -1
+   * on a fresh arrival and sliced the list to nothing. The card went blank,
+   * with no header left to click to get it back: the only ways out were the
+   * footer or a reload. Deeper in, the same arithmetic made the category you
+   * collapsed vanish rather than close, since `doneCats` only reaches the one
+   * behind it.
+   *
+   * So it LATCHES. A ref rather than state because the value is needed in the
+   * same render that opens a category — deriving it in an effect would paint
+   * one frame with the newly-opened category still missing — and writing it
+   * during render is safe here precisely because `Math.max` is idempotent:
+   * StrictMode's double invoke lands on the same number.
    */
-  const furthestReached = Math.max(
+  furthestReachedRef.current = Math.max(
+    furthestReachedRef.current,
     openCat ?? -1,
     doneCats.size ? Math.max(...doneCats) : -1,
   )
-  const reachedCategories = categories.slice(0, furthestReached + 1)
+  const reachedCategories = categories.slice(0, furthestReachedRef.current + 1)
   const anySelected = categories
     .flatMap((c) => c.items)
     .some((it) => selected.has(it.id))
@@ -454,17 +477,28 @@ export function Connectors() {
   const leavesStep = firstIncompleteCategory(doneAfterOpen, total) === null
 
   /**
-   * Footer Skip/Continue. Within the accordion they complete the open category
-   * and expand the next incomplete one; once none are left they leave the step.
-   * `skipped` only records intent when they leave having wired nothing at all.
+   * The footer's one button. It completes the open category and expands the
+   * next incomplete one; once none are left it leaves the step.
+   *
+   * THERE WAS A SKIP BESIDE IT, and it did the same thing. Both called this
+   * with a flag that changed nothing until the very last category, where Skip
+   * alone recorded that connectors had been passed over. So for seven of eight
+   * categories the two buttons were identical, and the reader had to decide
+   * between them anyway.
+   *
+   * The record survives the button. `skipped` is now derived from what
+   * actually happened — nothing selected and nothing uploaded — rather than
+   * from which button was pressed, which is strictly more accurate: someone
+   * who wired nothing and clicked Continue was skipping connectors too, and
+   * used to go unrecorded.
    */
-  function onFooterAdvance(isSkip: boolean) {
+  function onFooterAdvance() {
     const nextOpen = firstIncompleteCategory(doneAfterOpen, total)
     setDoneCats(doneAfterOpen)
     setUploadNotice(null)
     setOpenCat(nextOpen)
     if (nextOpen === null) {
-      void go(isSkip && !anySelected && uploadedCats.size === 0)
+      void go(!anySelected && uploadedCats.size === 0)
     }
   }
 
@@ -477,7 +511,7 @@ export function Connectors() {
           Connect your <em>tools.</em>
         </>
       }
-      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Skip anything you'll wire later."
+      subtitle="The more Sprntly can see, the sharper your briefs. Connect what you use — each one opens the next. Leave anything you'll wire later."
       footerMeta={
         <>
           <strong>
@@ -487,8 +521,7 @@ export function Connectors() {
         </>
       }
       onBack={() => router.push("/onboarding/company")}
-      onSkip={() => onFooterAdvance(true)}
-      onContinue={() => onFooterAdvance(false)}
+      onContinue={() => onFooterAdvance()}
       // NAMES THE NEXT SCREEN, and that screen has changed twice underneath
       // this label. Leaving here now goes to `/onboarding/invite`, whose own
       // heading is "Invite your team." So the button says that — a Continue

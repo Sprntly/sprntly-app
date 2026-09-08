@@ -263,7 +263,6 @@ export function CompanyStep() {
         </>
       }
       subtitle="Just the basics — everything else is in Settings, whenever you want it."
-      footerMeta="Company & Product"
       onContinue={() => void save()}
       continueLabel="Next"
       continueDisabled={saving}
