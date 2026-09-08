@@ -85,6 +85,11 @@ function rowToCompany(
     plan: (row.plan as string | null) ?? null,
     subscription_status: (row.subscription_status as string | null) ?? null,
     current_period_end: (row.current_period_end as string | null) ?? null,
+    // `?? null` rather than `?? 0`: a row with no column yet is UNKNOWN, and
+    // rendering "you have 0 credits" at someone whose balance we never read
+    // is the one mistake this banner must not make.
+    credit_balance:
+      typeof row.credit_balance === "number" ? row.credit_balance : null,
     slug: String(row.slug),
     display_name: String(row.display_name),
     product_description: (row.product_description as string | null) ?? null,
