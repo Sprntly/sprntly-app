@@ -20090,6 +20090,58 @@
     width: 100%;
   }
 
+  /* The Custom card's panel: the sales address in plain sight, what to say,
+     and the reassurance that picking a priced plan today is not a wrong turn.
+     Replaces the Continue button rather than sitting beside it — see
+     PlanStep. */
+  .onb-plan-custom {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--surface-3);
+    padding: 16px;
+  }
+
+  .onb-plan-custom-h {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 10px;
+  }
+
+  .onb-plan-custom-mail {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 12px;
+  }
+
+  /* Selectable on purpose: the copy button is a shortcut, not the only way
+     to get the address out of the page. */
+  .onb-plan-custom-addr {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 13px;
+    color: var(--ink);
+    user-select: all;
+    word-break: break-all;
+  }
+
+  .onb-plan-custom-body {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--ink-3);
+    line-height: 1.5;
+  }
+
+  .onb-plan-custom-body:last-child {
+    margin-bottom: 0;
+  }
+
+  .onb-plan-custom-body strong {
+    color: var(--ink-2);
+    font-weight: 600;
+  }
+
   .onb-plan-sales {
     margin: 14px 0 0;
     font-size: 12px;

@@ -105,6 +105,7 @@ export function PlanStep() {
   const [phase, setPhase] = useState<Phase>({ kind: "choosing" })
   const [error, setError] = useState<string | null>(null)
   const [slow, setSlow] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const checkout = params.get("checkout")
   const cancelled = checkout === "cancelled"
@@ -283,19 +284,27 @@ export function PlanStep() {
    * sentence that said otherwise.
    *
    * So it is the third card, and it is selectable — but it never reaches
-   * Stripe. This id is not in SELF_SERVE_PLANS, `chooseAndContinue` sends it to
-   * sales instead of to checkout, and the backend would refuse it anyway if a
-   * stale client ever posted it.
+   * Stripe. This id is not in SELF_SERVE_PLANS; selecting it replaces the
+   * Continue button with the sales panel rather than relabelling it, because a
+   * Continue that cannot continue is worse than no Continue. The backend would
+   * refuse the id anyway if a stale client ever posted it.
    */
   const CUSTOM_PLAN_ID = "custom"
 
-  /** Continue's one job, whichever card is selected. */
-  function chooseAndContinue() {
-    if (plan === CUSTOM_PLAN_ID) {
-      window.location.href = `mailto:${SALES_CONTACT}`
-      return
+  /**
+   * Copy the sales address. A CONVENIENCE, never the only way to get it — the
+   * address is rendered as plain selectable text beside this, so a refused or
+   * missing clipboard (insecure context, an older browser, a permission
+   * prompt someone dismisses) costs the reader nothing but a manual select.
+   */
+  async function copySalesEmail() {
+    try {
+      await navigator.clipboard.writeText(SALES_CONTACT)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2_000)
+    } catch {
+      /* the address is on screen regardless */
     }
-    void startCheckout()
   }
 
   async function startCheckout() {
@@ -498,19 +507,55 @@ export function PlanStep() {
           </button>
         </div>
 
-        <button
-          type="button"
-          className="btn primary onb-plan-continue"
-          disabled={phase.kind === "redirecting"}
-          data-testid="plan-continue"
-          onClick={chooseAndContinue}
-        >
-          {phase.kind === "redirecting"
-            ? "Opening checkout…"
-            : plan === CUSTOM_PLAN_ID
-              ? "Talk to sales"
-              : "Continue"}
-        </button>
+        {/* PICKING CUSTOM SHOWS THE ADDRESS, it does not fire a `mailto:`.
+            A mailto is silent when it fails, and it fails often — a browser
+            with no default mail client registered (a webmail user on a fresh
+            Windows box is the common case) swallows the click entirely, so the
+            reader clicks the one button on the screen and nothing whatsoever
+            happens. Printing the address means the answer is always on screen
+            and copying it is a convenience rather than the only route.
+
+            It also says what to put IN the mail. "Talk to sales" with no brief
+            makes the reader compose the first message of a negotiation from
+            nothing, which is how a warm lead turns into a tab they close. */}
+        {plan === CUSTOM_PLAN_ID ? (
+          <div className="onb-plan-custom" data-testid="plan-custom-panel">
+            <div className="onb-plan-custom-h">Email us and we'll size it with you</div>
+            <div className="onb-plan-custom-mail">
+              {/* Selectable text FIRST, button second: the address is the
+                  content, the copy is the shortcut. */}
+              <span className="onb-plan-custom-addr">{SALES_CONTACT}</span>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                data-testid="plan-custom-copy"
+                onClick={() => void copySalesEmail()}
+              >
+                {copied ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <p className="onb-plan-custom-body">
+              Tell us your team size and what you need us to cover — seats,
+              invoicing, SSO, anything about where your data lives. We answer
+              within one business day.
+            </p>
+            <p className="onb-plan-custom-body">
+              <strong>You don't have to wait to get started.</strong> Pick
+              Starter or Product Builder above and we'll move you across when we
+              talk — no double billing, and nothing you set up today is lost.
+            </p>
+          </div>
+        ) : (
+          <button
+            type="button"
+            className="btn primary onb-plan-continue"
+            disabled={phase.kind === "redirecting"}
+            data-testid="plan-continue"
+            onClick={() => void startCheckout()}
+          >
+            {phase.kind === "redirecting" ? "Opening checkout…" : "Continue"}
+          </button>
+        )}
       </div>
       {back}
     </div>

@@ -163,17 +163,53 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
     expect(screen.queryByTestId("plan-enterprise")).toBeNull()
   })
 
-  it("turns Continue into Talk to sales when Custom is picked, and never opens checkout", () => {
-    // THE LINE THAT MATTERS. `custom` is not in plans.SELF_SERVE_PLANS, so a
-    // checkout naming it is refused by the backend — this stops the client
-    // asking in the first place.
+  it("shows the sales address ON THE PAGE when Custom is picked", () => {
+    // NOT a `mailto:`. A browser with no default mail client registered — a
+    // webmail user on a fresh machine, which is most of them — swallows a
+    // mailto click silently, so the reader presses the only button on screen
+    // and nothing happens at all. The address being printed is what makes
+    // this work for everyone.
     render(<PlanStep />)
     fireEvent.click(screen.getByTestId("plan-custom"))
 
-    const cta = screen.getByTestId("plan-continue")
-    expect(cta.textContent).toMatch(/Talk to sales/)
-    fireEvent.click(cta)
+    const panel = screen.getByTestId("plan-custom-panel")
+    expect(panel.textContent).toContain("sales@sprntly.ai")
+    // And it says what to put in the mail, rather than leaving the reader to
+    // open the first message of a negotiation on a blank page.
+    expect(panel.textContent).toMatch(/team size/i)
+    expect(panel.textContent).toMatch(/business day/i)
+  })
+
+  it("replaces Continue rather than relabelling it — there is nothing to continue to", () => {
+    // `custom` is not in plans.SELF_SERVE_PLANS, so a checkout naming it is
+    // refused by the backend. A Continue that cannot continue is worse than
+    // no Continue, so the panel takes its place entirely.
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
     expect(checkout).not.toHaveBeenCalled()
+  })
+
+  it("copies the address, and still shows it when the clipboard refuses", async () => {
+    // The copy is a shortcut. A refused clipboard (insecure context, a
+    // dismissed permission prompt) must cost the reader nothing, because the
+    // address is selectable text either way.
+    const writeText = vi.fn().mockRejectedValue(new Error("denied"))
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText },
+      configurable: true,
+    })
+    render(<PlanStep />)
+    fireEvent.click(screen.getByTestId("plan-custom"))
+    fireEvent.click(screen.getByTestId("plan-custom-copy"))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith("sales@sprntly.ai"))
+    // No "Copied" claimed on a failure, and the address is still on screen.
+    expect(screen.getByTestId("plan-custom-copy").textContent).toBe("Copy")
+    expect(screen.getByTestId("plan-custom-panel").textContent).toContain(
+      "sales@sprntly.ai",
+    )
   })
 
   it("goes back to buying when a priced plan is picked again", () => {
@@ -181,8 +217,11 @@ describe.skipIf(!BILLING_ENABLED)("choosing a plan", () => {
     // restore a Continue that actually buys something.
     render(<PlanStep />)
     fireEvent.click(screen.getByTestId("plan-custom"))
+    expect(screen.queryByTestId("plan-continue")).toBeNull()
+
     fireEvent.click(screen.getByTestId("plan-starter"))
     expect(screen.getByTestId("plan-continue").textContent).toMatch(/Continue/)
+    expect(screen.queryByTestId("plan-custom-panel")).toBeNull()
   })
 
   it("promises no trial, because the backend grants none", () => {
