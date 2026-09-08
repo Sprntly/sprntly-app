@@ -506,6 +506,163 @@ def test_a_missing_table_is_withheld_with_a_reason_and_no_as_of():
     assert "not attached" in out[0].suppression_reason
 
 
+# ── Account identity: carried out of the rows, per group, never guessed ────
+#
+# `ComputedComparison` used to carry no account identity at all. These prove
+# the four things that matter: it fires on a real account column (and stays
+# out of the way of the arithmetic above), it stands down cleanly when no
+# column names the customer, it refuses to guess between two candidates, and
+# the per-group membership tracks exactly the rows each group's own `n`
+# already counts — no more, no fewer.
+
+
+def test_computed_comparison_carries_raw_accounts_per_group_in_sheet_order():
+    table = _accounts_table()
+    comparison = ts.Comparison(
+        table=table.name, dimension="plan_tier", outcome="mrr",
+        measure="median", level=None, edges=(), why="median spend by tier")
+    computed = ts._compute_one(comparison, table, today=_NOW)
+    assert computed.account_column == "account"
+    assert computed.account_note == ""
+    by_group = {g.group: g.accounts for g in computed.groups}
+    assert by_group["Basic"] == ("A1", "A2", "A3", "A4", "A5")
+    assert by_group["Pro"] == ("A6", "A7", "A8", "A9", "A10")
+
+
+def test_an_account_repeated_within_a_group_is_named_once_in_sheet_order():
+    # A1 files two rows in the Basic group (two support tickets, say) — it is
+    # named once, at its FIRST position, not twice.
+    rows = [
+        {"account": "A1", "plan_tier": "Basic", "mrr": 10},
+        {"account": "A1", "plan_tier": "Basic", "mrr": 15},
+        {"account": "A2", "plan_tier": "Basic", "mrr": 20},
+        {"account": "A3", "plan_tier": "Basic", "mrr": 30},
+        {"account": "A4", "plan_tier": "Basic", "mrr": 40},
+        {"account": "A5", "plan_tier": "Basic", "mrr": 45},
+    ]
+    table = make_table("workbook:repeats", rows,
+                        columns=["account", "plan_tier", "mrr"])
+    comparison = ts.Comparison(
+        table=table.name, dimension="plan_tier", outcome="mrr",
+        measure="median", level=None, edges=(), why="median spend by tier")
+    computed = ts._compute_one(comparison, table, today=_NOW)
+    basic = next(g for g in computed.groups if g.group == "Basic")
+    assert basic.n == 6  # every row still counts toward n
+    assert basic.accounts == ("A1", "A2", "A3", "A4", "A5")  # named once
+
+
+def test_a_table_with_no_account_column_leaves_arithmetic_untouched():
+    # Same shape and same hand-computed expectation as
+    # `test_the_min_group_n_guard_fires_and_says_why` — the guard's own
+    # arithmetic proof, replayed here to show account identity adds nothing
+    # to it when no column names the customer.
+    table = make_table(
+        "workbook:segments",
+        [{"segment": "Tiny", "mrr": 10}, {"segment": "Tiny", "mrr": 20},
+         *[{"segment": "Big", "mrr": v} for v in (30, 40, 50, 60, 70, 80)]],
+        columns=["segment", "mrr"],
+    )
+    comparison = ts.Comparison(
+        table=table.name, dimension="segment", outcome="mrr",
+        measure="median", level=None, edges=(), why="median by segment")
+    computed = ts._compute_one(comparison, table, today=_NOW)
+    assert computed.account_column is None
+    assert computed.account_note == "no column name suggests it identifies the customer"
+    by_group = {g.group: g for g in computed.groups}
+    tiny, big = by_group["Tiny"], by_group["Big"]
+    # Unchanged from the base arithmetic: value, n and suppression exactly as
+    # `test_the_min_group_n_guard_fires_and_says_why` already proves.
+    assert tiny.suppressed is True and tiny.value is None and tiny.n == 2
+    assert big.suppressed is False and big.value == 55.0
+    assert tiny.accounts == () and big.accounts == ()
+
+
+def test_two_candidate_account_columns_are_reported_ambiguous_not_guessed():
+    rows = [
+        {"account": "A1", "customer_name": "Northwind", "plan_tier": "Basic", "mrr": 10},
+        {"account": "A2", "customer_name": "Acme", "plan_tier": "Basic", "mrr": 20},
+        {"account": "A3", "customer_name": "Globex", "plan_tier": "Basic", "mrr": 30},
+        {"account": "A4", "customer_name": "Initech", "plan_tier": "Basic", "mrr": 40},
+        {"account": "A5", "customer_name": "Umbrella", "plan_tier": "Basic", "mrr": 45},
+    ]
+    table = make_table("workbook:ambiguous", rows,
+                        columns=["account", "customer_name", "plan_tier", "mrr"])
+    comparison = ts.Comparison(
+        table=table.name, dimension="plan_tier", outcome="mrr",
+        measure="median", level=None, edges=(), why="median spend by tier")
+    computed = ts._compute_one(comparison, table, today=_NOW)
+    assert computed.account_column is None
+    assert "ambiguous" in computed.account_note
+    assert "account" in computed.account_note
+    assert "customer_name" in computed.account_note
+    # Arithmetic is unaffected by the ambiguity — it still runs.
+    assert computed.suppressed is False
+    assert all(g.accounts == () for g in computed.groups)
+
+
+def test_an_id_suffixed_column_does_not_fire_the_account_rule():
+    # `account_id` matches the `account` hint by substring but is excluded by
+    # the id-suffix guard — an id is not a name a reader recognises, and
+    # nothing else on this table names the customer either.
+    rows = [
+        {"account_id": "ACC-001", "plan_tier": "Basic", "mrr": 10},
+        {"account_id": "ACC-002", "plan_tier": "Basic", "mrr": 20},
+        {"account_id": "ACC-003", "plan_tier": "Basic", "mrr": 30},
+        {"account_id": "ACC-004", "plan_tier": "Basic", "mrr": 40},
+        {"account_id": "ACC-005", "plan_tier": "Basic", "mrr": 45},
+    ]
+    table = make_table("workbook:ids-only", rows,
+                        columns=["account_id", "plan_tier", "mrr"])
+    comparison = ts.Comparison(
+        table=table.name, dimension="plan_tier", outcome="mrr",
+        measure="median", level=None, edges=(), why="median spend by tier")
+    computed = ts._compute_one(comparison, table, today=_NOW)
+    assert computed.account_column is None
+    assert computed.account_note == "no column name suggests it identifies the customer"
+    assert all(g.accounts == () for g in computed.groups)
+
+
+def test_rate_names_an_account_whose_outcome_is_blank_median_does_not():
+    # `rate`'s denominator is every row with a present group key, blank
+    # outcome included — A2's blank `churned` still counts toward `n` and
+    # still names A2. `median`'s denominator is rows with a PRESENT numeric
+    # outcome — a blank `mrr` neither counts toward `n` nor names anyone.
+    rate_rows = [
+        {"account": "A1", "plan_tier": "Basic", "churned": "Yes"},
+        {"account": "A2", "plan_tier": "Basic", "churned": None},
+        {"account": "A3", "plan_tier": "Basic", "churned": "Yes"},
+        {"account": "A4", "plan_tier": "Basic", "churned": "No"},
+        {"account": "A5", "plan_tier": "Basic", "churned": "No"},
+    ]
+    rate_table = make_table("workbook:rate-blank", rate_rows,
+                             columns=["account", "plan_tier", "churned"])
+    rate_comparison = ts.Comparison(
+        table=rate_table.name, dimension="plan_tier", outcome="churned",
+        measure="rate", level="Yes", edges=(), why="churn rate by tier")
+    rate_computed = ts._compute_one(rate_comparison, rate_table, today=_NOW)
+    basic = next(g for g in rate_computed.groups if g.group == "Basic")
+    assert basic.n == 5
+    assert basic.accounts == ("A1", "A2", "A3", "A4", "A5")
+
+    median_rows = [
+        {"account": "A1", "plan_tier": "Basic", "mrr": 10},
+        {"account": "A2", "plan_tier": "Basic", "mrr": None},
+        {"account": "A3", "plan_tier": "Basic", "mrr": 30},
+        {"account": "A4", "plan_tier": "Basic", "mrr": 40},
+        {"account": "A5", "plan_tier": "Basic", "mrr": 45},
+        {"account": "A6", "plan_tier": "Basic", "mrr": 50},
+    ]
+    median_table = make_table("workbook:median-blank", median_rows,
+                               columns=["account", "plan_tier", "mrr"])
+    median_comparison = ts.Comparison(
+        table=median_table.name, dimension="plan_tier", outcome="mrr",
+        measure="median", level=None, edges=(), why="median spend by tier")
+    median_computed = ts._compute_one(median_comparison, median_table, today=_NOW)
+    basic_median = next(g for g in median_computed.groups if g.group == "Basic")
+    assert basic_median.n == 5  # A2 excluded — blank mrr
+    assert basic_median.accounts == ("A1", "A3", "A4", "A5", "A6")
+
+
 # ── AC7: every computed comparison carries as_of and today ─────────────────
 
 
