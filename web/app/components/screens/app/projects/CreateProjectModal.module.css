@@ -73,6 +73,43 @@
   margin: 8px 0 0;
 }
 
+/* ── Staged documents (manual tab) ──
+   The list of files picked but not yet uploaded — they upload after the
+   project row exists, so this is the only place they are visible until then.
+   Rows reuse the invite row's remove button (`invite-remove-btn`, globals)
+   rather than growing a second one. */
+
+.fileList {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+
+/* Long filenames truncate rather than pushing the remove button off the row
+   or wrapping the dialog wider. */
+.fileName {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .errorBanner {
   font-size: 12.5px;
   color: var(--danger-ink);

@@ -35,11 +35,25 @@
 // user invite is a fast-follow, out of scope) never blocks project
 // creation or navigation.
 //
+// FILES AT CREATION (2026-09-08): the manual tab also takes documents. They
+// upload AFTER the project row exists — `POST /v1/projects/{id}/documents`
+// needs an id — so this is the same create-then-follow-up shape the artifact
+// tab and the invite rows already use. Each file becomes a `custom_artifact`
+// the project agent can READ, which is the point: a project created with its
+// brief already attached can answer questions on the first turn, where one
+// created empty needs a second trip through Add artifact first.
+//
+// DELIBERATELY NO FILE-COUNT CAP here (owner decision 2026-09-08). The server
+// caps each file at 25 MB and refuses what it cannot read; a count limit on
+// top would be an invention with no rule behind it. The chat composer is a
+// different question and is not touched by this.
+//
 // On create (AC2/AC3/AD-P14): `projectsApi.create` then navigate to the
 // FLAT `/projects?id=<new_id>` route — never `/projects/<new_id>`.
 import { useCallback, useEffect, useRef, useState } from "react"
 import { useRouter } from "next/navigation"
 import { useCompany } from "../../../../context/CompanyContext"
+import { useNavigation } from "../../../../context/NavigationContext"
 import { projectPath } from "../../../../lib/routes"
 import { artifactsApi, projectsApi, isProjectArtifactType, type ArtifactItem, type ProjectArtifactType } from "../../../../lib/api"
 import type { InviteRole } from "../../../../lib/teamApi"
@@ -107,6 +121,10 @@ export type CreateProjectModalViewProps = {
   onSelectArtifact: (a: ArtifactItem) => void
   selectedPrd: ArtifactItem | null
   onSelectPrd: (a: ArtifactItem) => void
+  /** Files staged for upload after the project is created. */
+  files: File[]
+  onAddFiles: (picked: FileList | null) => void
+  onRemoveFile: (i: number) => void
   creating: boolean
   error: string | null
   onCancel: () => void
@@ -132,6 +150,9 @@ export function CreateProjectModalView({
   onSelectArtifact,
   selectedPrd,
   onSelectPrd,
+  files,
+  onAddFiles,
+  onRemoveFile,
   creating,
   error,
   onCancel,
@@ -286,6 +307,50 @@ export function CreateProjectModalView({
                   onChange={(e) => onWhyChange(e.target.value)}
                   data-testid="create-project-why-input"
                 />
+              </div>
+
+              {/* Documents, before the invite rows: what the project is made
+                  of belongs nearer its name than who else can see it. */}
+              <div className={styles.field}>
+                <label className="field-label" htmlFor="create-project-files">
+                  Add documents <span className={styles.hint}>(optional)</span>
+                </label>
+                <input
+                  id="create-project-files"
+                  className="input"
+                  type="file"
+                  multiple
+                  onChange={(e) => {
+                    onAddFiles(e.target.files)
+                    // Clear the control so picking the SAME file again after
+                    // removing it still fires a change event.
+                    e.target.value = ""
+                  }}
+                  data-testid="create-project-files-input"
+                />
+                {files.length > 0 ? (
+                  <ul className={styles.fileList} data-testid="create-project-file-list">
+                    {files.map((f, i) => (
+                      <li key={`${f.name}-${i}`} className={styles.fileRow}>
+                        <span className={styles.fileName}>{f.name}</span>
+                        <button
+                          type="button"
+                          className="invite-remove-btn"
+                          onClick={() => onRemoveFile(i)}
+                          aria-label={`Remove ${f.name}`}
+                          data-testid={`create-project-file-remove-${i}`}
+                        >
+                          <IconClose size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : null}
+                <p className={styles.hint} data-testid="create-project-files-hint">
+                  We read the text and attach each one to the project, so the
+                  project chat can use them from the first question. Up to 25 MB
+                  a file.
+                </p>
               </div>
 
               <div className={styles.field}>
@@ -493,6 +558,7 @@ export function CreateProjectModalView({
 export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: () => void }) {
   const router = useRouter()
   const { activeCompany } = useCompany()
+  const { showToast } = useNavigation()
 
   const [tab, setTab] = useState<CreateTab>("manual")
   const [name, setName] = useState("")
@@ -502,6 +568,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([])
   const [selectedArtifact, setSelectedArtifact] = useState<ArtifactItem | null>(null)
   const [selectedPrd, setSelectedPrd] = useState<ArtifactItem | null>(null)
+  const [files, setFiles] = useState<File[]>([])
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -516,6 +583,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setRows([{ email: "", role: "member" }])
     setSelectedArtifact(null)
     setSelectedPrd(null)
+    setFiles([])
     setCreating(false)
     setError(null)
     setArtifactsStatus("loading")
@@ -548,6 +616,18 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
     setRows((prev) => (prev.length > 1 ? prev.filter((_, idx) => idx !== i) : prev))
   }, [])
 
+  /** APPEND, never replace. A picker fires once per visit, so someone adding
+   *  three files in three visits must end up with three — assigning would
+   *  leave them with the last one and no sign the others were dropped. */
+  const onAddFiles = useCallback((picked: FileList | null) => {
+    if (!picked || picked.length === 0) return
+    setFiles((prev) => [...prev, ...Array.from(picked)])
+  }, [])
+
+  const onRemoveFile = useCallback((i: number) => {
+    setFiles((prev) => prev.filter((_, idx) => idx !== i))
+  }, [])
+
   const onCreate = useCallback(() => {
     if (creating) return
     setError(null)
@@ -573,6 +653,39 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
           ).then(() => project)
         })
         .then((project) => {
+          // Uploads run AFTER creation because the endpoint is keyed on the
+          // project id, and they are AWAITED before navigating so the reader
+          // lands on a project whose documents are already there rather than
+          // watching them appear.
+          //
+          // Best-effort, exactly like the member-add above: the server refuses
+          // a file it cannot read (a scanned PDF is a 422) and one bad file
+          // must not cost someone the project and everything else in it. What
+          // failed is named on arrival — a document silently missing from a
+          // project is worse than a sentence saying which one.
+          if (files.length === 0) return { project, failed: [] as string[] }
+          return Promise.allSettled(
+            files.map((f) => projectsApi.uploadDocument(project.id, f)),
+          ).then((results) => ({
+            project,
+            failed: files
+              .filter((_, i) => results[i]?.status === "rejected")
+              .map((f) => f.name),
+          }))
+        })
+        .then(({ project, failed }) => {
+          // SAY WHICH FILE DIDN'T TAKE. The project is created and we are about
+          // to navigate into it, so an error inside the modal would vanish with
+          // the modal — the toast is the only surface that survives the
+          // navigation. A document silently missing from a project is the
+          // failure worth avoiding: nobody re-checks an upload they were not
+          // told about.
+          if (failed.length > 0) {
+            showToast(
+              failed.length === 1 ? "One file couldn't be read" : `${failed.length} files couldn't be read`,
+              `${failed.join(", ")} — the project was created without ${failed.length === 1 ? "it" : "them"}. Scanned PDFs and images aren't readable yet; try again from Add artifact.`,
+            )
+          }
           router.push(projectPath(project.id))
           onClose()
         })
@@ -663,7 +776,7 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
         .catch(() => setError("Couldn't create the project. Try again."))
         .finally(() => setCreating(false))
     }
-  }, [creating, tab, name, whyText, rows, selectedArtifact, selectedPrd, router, onClose])
+  }, [creating, tab, name, whyText, rows, files, selectedArtifact, selectedPrd, router, onClose, showToast])
 
   return (
     <CreateProjectModalView
@@ -685,6 +798,9 @@ export function CreateProjectModal({ open, onClose }: { open: boolean; onClose: 
       onSelectArtifact={setSelectedArtifact}
       selectedPrd={selectedPrd}
       onSelectPrd={setSelectedPrd}
+      files={files}
+      onAddFiles={onAddFiles}
+      onRemoveFile={onRemoveFile}
       creating={creating}
       error={error}
       onCancel={onClose}
