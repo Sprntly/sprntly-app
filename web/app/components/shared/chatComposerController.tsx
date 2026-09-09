@@ -76,7 +76,9 @@ export async function resolveAttachmentRefs(
   opts?: { preExtracted?: (string | null)[] | null },
 ): Promise<AttachmentRef[]> {
   const preExtracted = opts?.preExtracted ?? null
-  return Promise.all(
+  // Why each attachment failed, by index — read back by `attachmentFailureNote`.
+  const failures: (string | undefined)[] = []
+  const refs = await Promise.all(
     items.map(async (a, idx) => {
       const [text, stored] = await Promise.all([
         a.content
@@ -84,7 +86,30 @@ export async function resolveAttachmentRefs(
           : preExtracted?.[idx] != null
           ? Promise.resolve(preExtracted[idx] as string)
           : a.file
-          ? askApi.extractFile(a.file).then((r) => r.markdown.slice(0, 50000))
+          ? askApi
+              .extractFile(a.file)
+              .then((r) => r.markdown.slice(0, 50000))
+              // ONE UNREADABLE FILE MUST NOT COST THE MESSAGE. This rejection
+              // used to escape the `Promise.all` below and abort the whole
+              // send: five files attached, two of them scans, and the question
+              // and the other three went with them. The reader is then holding
+              // a toast about a file they cannot fix and a composer they have
+              // to re-send by hand.
+              //
+              // Empty content, so the file is still listed on the turn and
+              // still uploaded — it just contributes no text, which is the
+              // truth about it. `unreadableAttachmentNames` names them for the
+              // caller's notice.
+              //
+              // THE REASON IS KEPT, not just the failure. A 503 here means the
+              // model was unreachable — an account out of credit, a rate limit
+              // — and nothing is wrong with the file. Reporting that as "we
+              // could not read your file" sends the reader to inspect four
+              // perfectly good PDFs, which is exactly what it did.
+              .catch((e: unknown) => {
+                failures[idx] = e instanceof Error ? e.message : String(e)
+                return ""
+              })
           : Promise.resolve(a.content ?? ""),
         a.file
           ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
@@ -99,6 +124,46 @@ export async function resolveAttachmentRefs(
       }
     }),
   )
+  lastFailures = failures
+  return refs
+}
+
+/**
+ * Why the last resolve's attachments failed, by index.
+ *
+ * Module-level rather than a field on `AttachmentRef` on purpose: the refs are
+ * persisted to `conversation_turns.attachments`, and a transient "the provider
+ * is out of credit" has no business being written onto a turn forever. It is
+ * only ever read immediately after the resolve that set it.
+ */
+let lastFailures: (string | undefined)[] = []
+
+/** The provider's own sentence, when the model — not the file — was the
+ *  problem. Null when the failures are ordinary unreadable files.
+ *
+ *  Matched on the wording `app/llm_errors.py` produces for a provider refusal,
+ *  which already names the admin action and says nothing was lost. */
+export function attachmentFailureNote(): string | null {
+  const provider = lastFailures.find((m) => m && /AI provider|usage limit|out of\s+credits/i.test(m))
+  return provider ?? null
+}
+
+/**
+ * The attachments that reached the turn carrying nothing.
+ *
+ * A file whose text could not be extracted is kept (it is listed on the turn,
+ * and its bytes are stored) but contributes no context — so the send proceeds
+ * and the reader is TOLD, rather than the message failing whole. Callers with
+ * a toast surface show these names; the answer is otherwise about the files
+ * that did read.
+ */
+export function unreadableAttachmentNames(refs: AttachmentRef[]): string[] {
+  return refs.filter((r) => !r.content?.trim()).map((r) => r.name)
+}
+
+/** Reset the recorded reasons. Tests only — the resolve itself overwrites. */
+export function __resetAttachmentFailures(): void {
+  lastFailures = []
 }
 
 /** One attached file, reduced to what a RUN needs: where the bytes are, and

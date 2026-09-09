@@ -26,6 +26,7 @@ from __future__ import annotations
 import pytest
 
 from tests import _fake_supabase
+from app import vision_extract
 from tests._company_helpers import company_client
 from tests._project_helpers import seed_same_tenant_non_member
 
@@ -203,10 +204,24 @@ def test_oversize_file_is_413(docs_env, monkeypatch):
 
 
 def test_unreadable_binary_is_422(docs_env, monkeypatch):
-    """A binary/unsupported type extracts to the non-empty unparsed stub, which
-    must still be refused as unreadable — same 422 the chat extractor gives."""
+    """A file neither extraction nor a vision read can open is still refused.
+
+    A PNG is a vision CANDIDATE now, so this pins the residual case rather than
+    the old one: the fallback ran, came back with nothing, and the upload is
+    refused exactly as before. `read_with_vision` never raises by contract, so
+    an empty return is how the real failures (an encrypted PDF, a timeout, no
+    key configured) reach here.
+    """
     ctx = company_client(monkeypatch)
     project = _create_project(ctx)
+    seen: list[str] = []
+
+    def _no_vision(*, filename, data, enterprise_id):  # noqa: ARG001
+        seen.append(filename)
+        return ""
+
+    monkeypatch.setattr(vision_extract, "read_with_vision", _no_vision)
+
     # PNG magic + a NUL byte → `_looks_textual` False → `is_unparsed_stub` True.
     r = _upload(
         ctx, project["id"], filename="scan.png",
@@ -214,9 +229,66 @@ def test_unreadable_binary_is_422(docs_env, monkeypatch):
         content_type="image/png",
     )
     assert r.status_code == 422
-    assert "Scanned/image-only PDFs" in r.json()["detail"]
+    assert "could not read anything in that file" in r.json()["detail"].lower()
+    # The stub is not content: it must have been recognized as a failed read
+    # and handed to vision, not stored as the document body.
+    assert seen == ["scan.png"]
     assert _custom_artifact_rows(ctx.company_id) == []
     assert _project_artifact_refs(project["id"]) == []
+
+
+def test_a_scan_is_read_by_looking_at_it(docs_env, monkeypatch):
+    """The reported case: a file with no text layer becomes a real document.
+
+    `convert` gets nothing out of a screen capture — that is not a bug in
+    `convert`, it is what a picture of text is — and the upload used to end
+    there. The transcription is what lands in `body_html`.
+    """
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+
+    monkeypatch.setattr(
+        vision_extract, "read_with_vision",
+        lambda *, filename, data, enterprise_id: "# Q3 revenue\n\n$412,000",
+    )
+
+    r = _upload(
+        ctx, project["id"], filename="screencapture.png",
+        content=b"\x89PNG\r\n\x1a\n\x00\x00binarynoise",
+        content_type="image/png",
+    )
+    assert r.status_code == 200, r.text
+    rows = _custom_artifact_rows(ctx.company_id)
+    assert len(rows) == 1
+    assert "412,000" in rows[0]["body_html"]
+    assert _project_artifact_refs(project["id"])
+
+
+def test_a_readable_file_never_reaches_the_model(docs_env, monkeypatch):
+    """The fallback is a fallback.
+
+    Vision costs a model call per file, so it must fire ONLY where extraction
+    produced nothing. A .md upload that quietly went to the model would be an
+    invisible bill on the most ordinary path there is.
+    """
+    ctx = company_client(monkeypatch)
+    project = _create_project(ctx)
+    calls: list[str] = []
+
+    def _spy(*, filename, data, enterprise_id):  # noqa: ARG001
+        calls.append(filename)
+        return "should not be used"
+
+    monkeypatch.setattr(vision_extract, "read_with_vision", _spy)
+
+    r = _upload(
+        ctx, project["id"], filename="notes.md",
+        content=b"# Real text\n\nthat converts fine",
+        content_type="text/markdown",
+    )
+    assert r.status_code == 200, r.text
+    assert calls == []
+    assert "Real text" in _custom_artifact_rows(ctx.company_id)[0]["body_html"]
 
 
 def test_over_max_body_chars_is_clean_413_not_500(docs_env, monkeypatch):

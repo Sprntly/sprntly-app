@@ -230,6 +230,10 @@ def llm_call(
     # live. None takes app.llm_batch.DEFAULT_DEADLINE_S. A caller with a real
     # delivery slot (the brief's 3h GENERATION_LEAD) passes its own.
     batch_deadline_s: Optional[float] = None,
+    # Non-text content for the user turn (an `image` or `document` block). The
+    # markdown branch only — a structured call forces a tool, and no caller
+    # wants a schema'd answer ABOUT a file it also has to transcribe.
+    input_blocks: Optional[list[dict]] = None,
 ) -> LLMResult:
     """One attributed, telemetered LLM call. See module docstring.
 
@@ -375,6 +379,7 @@ def llm_call(
                 cache_ttl=cache_ttl,
                 meta_out=meta, stream=stream, timeout=timeout, background=background,
                 temperature=temperature, on_delta=on_delta,
+                user_blocks=input_blocks,
             )
     latency_ms = int((time.monotonic() - t0) * 1000)
     _timing_logger.info(

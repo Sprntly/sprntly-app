@@ -20,7 +20,11 @@ from app.auth import (  # noqa: F401 — require_company re-exported for tests' 
 )
 from app import llm_errors
 from app.graph import token_stream
-from app.ingest import convert
+from app.vision_extract import (
+    MAX_VISION_PER_ARCHIVE,
+    ProviderUnavailable,
+    extract_text,
+)
 from app.db import (
     cancel_ask_job,
     complete_ask_job,
@@ -629,9 +633,13 @@ _MAX_EXTRACT_BYTES = 25 * 1024 * 1024  # 25 MB
 # One wording for "we could not read this", shared by the single-file path and
 # every member of an archive — the reader gets the same explanation wherever
 # the file came from.
+#
+# It survives the vision fallback because vision does not read everything: a
+# password-protected PDF, a format the model cannot look at (legacy .ppt, an
+# audio file), or a file past the vision size ceiling still ends here.
 _EXTRACT_UNREADABLE = (
-    "Could not extract any text from the file. Scanned/image-only PDFs "
-    "and legacy .ppt are not supported — export to PDF or .pptx."
+    "We could not read anything in that file. It may be password-protected, "
+    "empty, or a format we cannot open (legacy .ppt — export to .pptx)."
 )
 
 
@@ -639,15 +647,23 @@ _EXTRACT_UNREADABLE = (
 async def extract_file(
     file: UploadFile = File(...),
     # Attachment extraction only feeds the chat composer → Agents module.
-    company: CompanyContext = Depends(require_agents_module),  # noqa: ARG001 — auth gate only
+    company: CompanyContext = Depends(require_agents_module),
 ):
     """Parse a chat attachment (pptx/pdf/docx/zip/…) to markdown for ask context.
 
     The composer can inline plain-text attachments itself, but binary document
-    formats need server-side parsing (`app.ingest.convert` — no LLM). Returns
-    `{name, markdown}`; the composer appends it to the question as an
+    formats need server-side parsing (`app.vision_extract.extract_text`).
+    Returns `{name, markdown}`; the composer appends it to the question as an
     `[Attached files]` block, so a deck attached to a plain question actually
     reaches the agent instead of being silently dropped.
+
+    A FILE WITH NO TEXT LAYER IS LOOKED AT rather than refused. `convert` is a
+    text extractor, so a screen-capture PDF — pages that are one image apiece —
+    came back empty and this route turned that into "could not extract any
+    text": true of the bytes and useless to someone who attached a screenshot
+    because the picture IS the content. `extract_text` falls through to a
+    vision read for those. The 422 still exists for what neither path can open
+    (an encrypted PDF, legacy .ppt, an oversized file).
 
     A .ZIP IS EXPANDED rather than converted. `convert` has no idea what an
     archive is — it returns the unparsed stub, which this route turned into
@@ -667,9 +683,23 @@ async def extract_file(
 
     filename = file.filename or "upload"
     if _is_zip_upload(filename, data):
-        return {"name": filename, "markdown": await _markdown_from_zip(filename, data)}
+        return {
+            "name": filename,
+            "markdown": await _markdown_from_zip(filename, data, company.company_id),
+        }
 
-    markdown = await _convert_or_422(filename, data)
+    try:
+        markdown = (await extract_text(
+            filename=filename, data=data, enterprise_id=company.company_id
+        )).text
+    except ProviderUnavailable as exc:
+        # 503, NOT 422. The file is fine; we could not reach the model. A 422
+        # here reads as "your upload is bad" and sends the reader to inspect a
+        # file that was never the problem — which is exactly what happened when
+        # the provider account ran out of credit.
+        raise HTTPException(503, exc.message)
+    if not markdown.strip():
+        raise HTTPException(422, _EXTRACT_UNREADABLE)
     return {"name": filename, "markdown": markdown}
 
 
@@ -686,24 +716,7 @@ def _is_zip_upload(filename: str, data: bytes) -> bool:
     return data[:4] in (b"PK\x03\x04", b"PK\x05\x06", b"PK\x07\x08")
 
 
-async def _convert_or_422(filename: str, data: bytes) -> str:
-    """Convert one file, or refuse it in the words the reader can act on."""
-    try:
-        markdown = await asyncio.to_thread(convert, filename, data)
-    except Exception as exc:  # noqa: BLE001 — an unreadable file, not a bug
-        # `convert` RAISES on a corrupt container (pypdf on a truncated PDF, a
-        # KeyError on a DOCX missing its content-types part) rather than
-        # returning the stub it gives for a merely unsupported type. Both mean
-        # the same thing to the person who attached it, so both get the same
-        # 422 instead of a 500.
-        logger.info("extract_file unreadable file=%s err=%s", filename, exc)
-        raise HTTPException(422, _EXTRACT_UNREADABLE)
-    if not markdown.strip():
-        raise HTTPException(422, _EXTRACT_UNREADABLE)
-    return markdown
-
-
-async def _markdown_from_zip(filename: str, data: bytes) -> str:
+async def _markdown_from_zip(filename: str, data: bytes, company_id: str) -> str:
     """Every readable member, under its own heading.
 
     One unreadable member does not cost the reader the rest — an archive of ten
@@ -722,13 +735,30 @@ async def _markdown_from_zip(filename: str, data: bytes) -> str:
         raise HTTPException(400, str(exc))
 
     parts: list[str] = []
+    # Members that need a vision read spend from ONE budget for the whole
+    # archive — see `vision_extract.MAX_VISION_PER_ARCHIVE`. Zipping the
+    # screenshots for a question is the case this exists for; a 500-image
+    # album is not, and it would be 500 model calls.
+    vision_budget = MAX_VISION_PER_ARCHIVE
     for name, raw in members:
         if not raw:
             continue
         try:
-            text = await asyncio.to_thread(convert, name, raw)
-        except Exception:  # noqa: BLE001 — skip this member, keep the rest
+            text, used_vision = await extract_text(
+                filename=name, data=raw, enterprise_id=company_id,
+                allow_vision=vision_budget > 0,
+            )
+        except ProviderUnavailable:
+            # The model is unreachable, so no LATER member will fare better —
+            # stop asking, and import the ones `convert` can read on its own.
+            # Failing the whole archive would cost the reader the text files in
+            # it for a reason that has nothing to do with them.
+            vision_budget = 0
             continue
+        # Charged on the CALL, not on the text: a member `convert` handled
+        # costs nothing, and a scan that came back empty still cost a call.
+        if used_vision:
+            vision_budget -= 1
         if not text.strip():
             continue
         # The filename heading is what lets the model attribute a passage. A
@@ -738,8 +768,8 @@ async def _markdown_from_zip(filename: str, data: bytes) -> str:
     if not parts:
         raise HTTPException(
             422,
-            "Could not read anything in that archive. Scanned/image-only PDFs "
-            "have no text to extract.",
+            "We could not read anything in that archive — its files may be "
+            "password-protected, empty, or formats we cannot open.",
         )
     return "\n\n".join(parts)
 

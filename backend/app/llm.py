@@ -579,6 +579,7 @@ def _build_base_kwargs(
     user_cacheable_prefix: str | None,
     temperature: float | None = None,
     cache_ttl: str | None = None,
+    user_blocks: list[dict] | None = None,
 ) -> dict:
     """Build the kwargs dict passed to `messages.create`.
 
@@ -605,6 +606,19 @@ def _build_base_kwargs(
     `temperature` (when not None) is threaded straight through to
     `messages.create` — omitted entirely when None so the API default (1.0) is
     used, keeping every existing caller byte-identical.
+
+    `user_blocks` carries non-text content — an `image` or `document` block —
+    into the user turn. They go FIRST, ahead of both the cacheable prefix and
+    the instruction, because Anthropic's own guidance is to place a document
+    before the text that asks about it. None (the case for every existing
+    caller) leaves the request shape exactly as it was; a caller that passes
+    blocks always gets the list form of `content`, since a media block cannot
+    ride a plain string.
+
+    NOT CACHE-CONTROLLED. A `cache_control` on the media block would only pay
+    off if the SAME file were sent again inside the TTL, which is not what any
+    caller does — the one user is a one-shot read of a file someone just
+    uploaded.
     """
     cc = _cache_control(cache_ttl)
     cache_system = _is_cacheable(system, model)
@@ -618,7 +632,14 @@ def _build_base_kwargs(
                 if cache_system
                 else system
             ),
-            "messages": [{"role": "user", "content": user}],
+            "messages": [{
+                "role": "user",
+                "content": (
+                    [*user_blocks, {"type": "text", "text": user}]
+                    if user_blocks
+                    else user
+                ),
+            }],
         }
         if temperature is not None:
             base["temperature"] = temperature
@@ -630,6 +651,7 @@ def _build_base_kwargs(
         else {"type": "text", "text": system}
     ]
     content = [
+        *(user_blocks or []),
         {"type": "text", "text": user_cacheable_prefix, "cache_control": cc},
         {"type": "text", "text": user},
     ]
@@ -868,6 +890,7 @@ def call_md(
     batch: bool = False,
     batch_label: str = "",
     batch_deadline_s: float | None = None,
+    user_blocks: list[dict] | None = None,
 ) -> str:
     """Call Claude expecting plain markdown output.
 
@@ -890,6 +913,10 @@ def call_md(
     within the cache TTL instead of being re-processed on every call and retry.
     When None, the kwargs shape is byte-identical to before (plain string system
     + content), so every existing caller is unchanged.
+
+    `user_blocks` attaches media (an image or a PDF) to the user turn — see
+    `_build_base_kwargs`. Markdown-out is the right branch for it: the callers
+    are asking Claude to READ something and hand back its text.
     """
     kwargs: dict = _build_base_kwargs(
         model=model,
@@ -899,6 +926,7 @@ def call_md(
         user_cacheable_prefix=user_cacheable_prefix,
         cache_ttl=cache_ttl,
         temperature=temperature,
+        user_blocks=user_blocks,
     )
     if timeout is not None:
         kwargs["timeout"] = timeout

@@ -68,7 +68,12 @@ from app.delegation_status_ingest import maybe_ingest_status, notify_requester_t
 from app.project_memory import maybe_promote_turn, schedule_regen
 from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
-from app.ingest import convert, is_unparsed_stub
+from app.vision_extract import (
+    MAX_VISION_PER_ARCHIVE,
+    ProviderUnavailable,
+    extract_text,
+    vision_block,
+)
 from app.report_markdown import to_html
 from app.routes.ask import _load_history
 from app.routes.chat import _dataset_for
@@ -901,10 +906,12 @@ def add_project_artifact(
 _MAX_DOCUMENT_BYTES = 25 * 1024 * 1024  # 25 MB
 
 # Message reused VERBATIM from `routes/ask.py::extract_file` so the two upload
-# surfaces refuse an unreadable file with the same words.
+# surfaces refuse an unreadable file with the same words. Both now refuse only
+# after the vision fallback has also failed, so the sentence no longer names
+# scans — those are read.
 _UNREADABLE_FILE_MESSAGE = (
-    "Could not extract any text from the file. Scanned/image-only PDFs "
-    "and legacy .ppt are not supported — export to PDF or .pptx."
+    "We could not read anything in that file. It may be password-protected, "
+    "empty, or a format we cannot open (legacy .ppt — export to .pptx)."
 )
 
 
@@ -922,10 +929,12 @@ async def upload_project_document(
     as it holds readable members, and a response that named only the first
     would leave the drawer showing one of five until someone reloaded.
 
-    TEXT-ONLY MVP: the file is converted to markdown server-side (the same
-    `app.ingest.convert` the chat-attachment extractor uses — no LLM, no OCR),
-    rendered to sanitized HTML, and STORED as the document's `body_html`. The
-    raw bytes are NOT retained (a download-the-original follow-up would wire
+    The file is converted to markdown server-side through the same
+    `app.vision_extract.extract_text` the chat-attachment extractor uses — text
+    extraction first, then a vision read for a file that has no text layer
+    (a scan, a screenshot, a screen-capture PDF) — then rendered to sanitized
+    HTML and STORED as the document's `body_html`. The raw bytes are NOT
+    retained (a download-the-original follow-up would wire
     `attachments_storage.stage_attachment`; out of scope here).
 
     Membership-gated (`_require_project_member`, AD-P11) like every other
@@ -934,9 +943,9 @@ async def upload_project_document(
     `WorkspaceContext`; nothing client-supplied names a tenant.
 
     Validation mirrors `routes/ask.py::extract_file` VERBATIM: empty → 400,
-    > 25 MB → 413, an unreadable file (scanned/image-only PDF, or an
-    unsupported/legacy type whose only extraction is the unparsed stub) → 422
-    with the same message. An over-`MAX_BODY_CHARS` body is a clean 4xx (413),
+    > 25 MB → 413, an unreadable file (one neither text extraction nor a vision
+    read could open — an encrypted PDF, a legacy type whose only extraction is
+    the unparsed stub) → 422 with the same message. An over-`MAX_BODY_CHARS` body is a clean 4xx (413),
     never a 500."""
     _require_project_member(project_id, ctx)  # 403/404 gate
 
@@ -968,7 +977,7 @@ async def upload_project_document(
     if _looks_like_zip(filename, data):
         return await _upload_zip_members(project_id, filename, data, ctx)
 
-    return [await _document_from_bytes(project_id, filename, data, ctx)]
+    return [(await _document_from_bytes(project_id, filename, data, ctx))[0]]
 
 
 def _looks_like_zip(filename: str, data: bytes) -> bool:
@@ -1013,13 +1022,31 @@ async def _upload_zip_members(
 
     created: list[dict] = []
     skipped: list[str] = [e.get("filename", "?") for e in member_errors]
+    # One vision budget for the whole archive — see
+    # `vision_extract.MAX_VISION_PER_ARCHIVE`. Charged only when a member
+    # actually needed the fallback, so a zip of ordinary documents never
+    # touches it.
+    vision_budget = MAX_VISION_PER_ARCHIVE
+    provider_down = False
     for name, raw in members:
         if not raw:
             skipped.append(name)
             continue
+        # A 503 from one member means the model is unreachable, so no later
+        # member will fare better. `_document_from_bytes` raises it as an
+        # HTTPException, which the arm below already skips — this stops the
+        # archive making the same doomed call once per scan.
+        allow_vision = vision_budget > 0 and not provider_down
         try:
-            created.append(await _document_from_bytes(project_id, name, raw, ctx))
-        except HTTPException:
+            doc, used_vision = await _document_from_bytes(
+                project_id, name, raw, ctx, allow_vision=allow_vision,
+            )
+            created.append(doc)
+            if used_vision:
+                vision_budget -= 1
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                provider_down = True
             # An unreadable or oversized member — the same 4xx a direct upload
             # would raise. One bad file does not cost the reader the rest.
             skipped.append(name)
@@ -1038,32 +1065,31 @@ async def _upload_zip_members(
 
 
 async def _document_from_bytes(
-    project_id: int, filename: str, data: bytes, ctx: WorkspaceContext
-) -> dict:
-    """One file → one attached document. The body of the original single-file
-    route, lifted so the zip path reuses it verbatim rather than growing a
-    second, subtly different import."""
-    # `convert` is blocking (BeautifulSoup/pdf/docx parsing) — off the loop, the
-    # same way `extract_file` runs it.
+    project_id: int, filename: str, data: bytes, ctx: WorkspaceContext,
+    *, allow_vision: bool = True,
+) -> tuple[dict, bool]:
+    """One file → one attached document, plus whether reading it took a vision
+    call (the archive loop's budget is charged on that, not on the result).
+
+    The body of the original single-file route, lifted so the zip path reuses
+    it verbatim rather than growing a second, subtly different import."""
+    # `vision_extract.extract_text` owns every way a file can fail to yield
+    # text — `convert` raising on a corrupt container, returning empty on an
+    # image-only PDF, or returning the non-empty "unparsed stub" for a type it
+    # has no parser for — and then falls through to a vision read. It is shared
+    # with `routes/ask.py::extract_file` so a file readable when attached to a
+    # chat is readable when uploaded to a project.
     try:
-        markdown = await asyncio.to_thread(convert, filename, data)
-    except Exception as exc:  # noqa: BLE001 — an unreadable file, not a bug
-        # `convert` RAISES on a corrupt container — pypdf on a truncated PDF,
-        # a KeyError on a DOCX missing its content-types part — rather than
-        # returning the unparsed stub it gives for a merely unsupported type.
-        # Both mean the same thing to the person who uploaded it, so both get
-        # the same 422 rather than a 500. Load-bearing for archives: without
-        # this, one corrupt member takes down the import of every good file
-        # beside it.
-        logger.info(
-            "project_document_unreadable file=%s err=%s", filename, exc,
+        markdown, used_vision = await extract_text(
+            filename=filename, data=data, enterprise_id=ctx.company_id,
+            allow_vision=allow_vision,
         )
-        raise HTTPException(422, _UNREADABLE_FILE_MESSAGE)
-    # `extract_file` refuses on empty text; a binary/legacy type extracts to a
-    # NON-empty "unparsed stub" (see `ingest.is_unparsed_stub`), which a plain
-    # empty-check would let through as a bogus document — so both cases are the
-    # one "we could not read this" 422 here.
-    if is_unparsed_stub(markdown) or not markdown.strip():
+    except ProviderUnavailable as exc:
+        # 503, not 422 — see the same guard in `routes/ask.py::extract_file`.
+        # The upload is fine; the model is not reachable.
+        raise HTTPException(503, exc.message)
+    if not markdown.strip():
+        logger.info("project_document_unreadable file=%s", filename)
         raise HTTPException(422, _UNREADABLE_FILE_MESSAGE)
 
     # Markdown → sanitized HTML via the SHARED report/document primitive
@@ -1103,7 +1129,7 @@ async def _document_from_bytes(
     # source of truth — `db/artifacts.py::custom_artifact_item`), so the FE can
     # optimistically insert this upload without a refetch. A just-uploaded
     # document has no originating conversation → conversation_title None.
-    return custom_artifact_item(row)
+    return custom_artifact_item(row), used_vision
 
 
 # The exact `conversation_turns` read-DTO key set published on a fresh

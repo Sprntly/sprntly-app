@@ -474,23 +474,30 @@ describe("ChatScreen — import phrasings and non-command sends over an attached
     expect(importDoc).not.toHaveBeenCalled()
   })
 
-  it("keeps the attachment and does not send when extraction fails", async () => {
-    // Persistent rejection, not `…Once`: extraction now runs twice per send —
-    // an early best-effort read that feeds the planner, then the real gate the
-    // send hangs on. A single rejection only fails the early read, which is
-    // DESIGNED to swallow errors (the planner just sees the bare message), so
-    // the retry would succeed and the send would proceed.
+  it("sends anyway when a file cannot be read, and says which one", async () => {
+    // REVERSED DELIBERATELY. This used to abort the send: one unreadable file
+    // rolled back the turn, the question and every other attachment with it.
+    // Reported with five files, two of them screen-capture PDFs — the reader
+    // got a toast about a file they cannot fix and a composer to re-send by
+    // hand, having lost the three files that read perfectly well.
+    //
+    // Persistent rejection, not `…Once`: extraction runs twice per send — an
+    // early best-effort read that feeds the planner, then the read whose text
+    // rides the question. The early one already swallowed its errors.
     extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc()
     await typeAndSend("What does this deck say?")
 
-    // Both reads failed: the early planner read, then the real send gate.
     await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
-    // The send is aborted — nothing reaches the ask agent…
-    expect(runAskGeneration).not.toHaveBeenCalled()
-    // …and the attachment chip is still there for a retry (not silently lost).
-    await waitFor(() => expect(document.body.textContent).toContain("Fraznet Enhancements.pptx"))
+    // The question still reaches the agent. It is answered with what the
+    // thread already knows rather than not answered at all.
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    // The file still rides the turn: dropping it would leave the reader
+    // unable to tell whether it was sent at all. (The notice naming it is a
+    // toast, which this harness does not mount — see
+    // `chatComposerController.unreadable.test.ts` for the naming itself.)
+    expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
   })
 })
 
@@ -560,21 +567,20 @@ describe("ChatScreen — optimistic render precedes the network call", () => {
     expect(query).not.toContain("pptx-bytes")
   })
 
-  it("extraction failure after the optimistic render removes the ghost turn but keeps the attachment", async () => {
-    // Persistent, not `…Once` — the early planner read swallows the first
-    // failure by design; only the real gate's failure aborts the send.
+  it("extraction failure after the optimistic render keeps the turn and sends it", async () => {
+    // The counterpart to the abort reversal above, on the optimistic path: the
+    // turn the composer already rendered STAYS. Rolling it back was the right
+    // answer while the send was being cancelled; now that the send proceeds,
+    // removing it would make the reader watch their own message disappear.
     extractFile.mockRejectedValue(new Error("could not parse file"))
     renderChat()
     await attachDoc("Fraznet Enhancements.pptx")
     await typeAndSend("What does this deck say?")
 
     await waitFor(() => expect(extractFile).toHaveBeenCalledTimes(2))
-    // The send is aborted — nothing reaches the ask agent…
-    expect(runAskGeneration).not.toHaveBeenCalled()
-    // …the optimistic turn is rolled back (no stranded "thinking" ghost): no
-    // in-flight thinking skeleton lingers…
-    await waitFor(() => expect(document.querySelector(".cw")).toBeNull())
-    // …and the attachment chip survives for a retry (not silently dropped).
+    await waitFor(() => expect(runAskGeneration).toHaveBeenCalled())
+    // The user's own turn is still on screen, chip and all.
+    expect(document.body.textContent).toContain("What does this deck say?")
     expect(document.body.textContent).toContain("Fraznet Enhancements.pptx")
   })
 })
