@@ -2,43 +2,96 @@
 
    `position: fixed` off the selection's own client rect — the transcript
    scrolls inside its own viewport, so an absolutely-positioned toolbar would
-   be clipped by that overflow. The z-index sits above the dock but below
-   modals/overlays: quoting is a transcript-level action, and it must never
-   float over an open panel. */
+   be clipped by that overflow. The component sets `position` inline too; see
+   its header note for why that redundancy is deliberate.
+
+   The z-index sits above the dock but below modals/overlays: quoting is a
+   transcript-level action, and it must never float over an open panel. */
 
 .toolbar {
   position: fixed;
   z-index: 60;
   /* Anchored at the TOP-CENTRE of the selection, then lifted clear of it —
      the button sits above the words it is about, never covering them. */
-  transform: translate(-50%, calc(-100% - 8px));
+  transform: translate(-50%, calc(-100% - 10px));
   pointer-events: auto;
+  /* The browser paints its own selection highlight under this; a fade-in makes
+     the button read as a response to the highlight rather than as chrome that
+     was already there. `both` holds the start frame, so it never flashes at
+     full opacity on the first paint. */
+  animation: sel-reply-in 0.12s ease both;
 }
 
+@keyframes sel-reply-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, calc(-100% - 4px));
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, calc(-100% - 10px));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toolbar {
+    animation: none;
+  }
+}
+
+/* DARK, not another white pill.
+
+   It floats over the answer's own white surface and directly beside the
+   browser's blue selection highlight, and a light chip on light text with a
+   hairline border is what read as "unstyled" — it looked like a stray form
+   control sitting in the page rather than something belonging to the
+   selection. A dark pill is unambiguously a floating control, which is the
+   convention every editor uses for exactly this gesture. */
 .button {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 11px;
-  border: 1px solid var(--line, #12201a17);
+  padding: 7px 13px 7px 11px;
+  border: 0;
   border-radius: 999px;
-  background: var(--surface-2, #fff);
-  color: var(--ink, #15201b);
+  background: var(--ink, #16181a);
+  color: var(--surface-2, #fff);
   font-family: inherit;
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 12.5px;
+  font-weight: 550;
+  letter-spacing: 0.01em;
   line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  box-shadow: 0 6px 18px rgba(10, 25, 18, 0.16);
-  transition: background 0.14s, border-color 0.14s;
+  /* Two shadows: a tight one that reads as a lifted edge, and a wide soft one
+     that separates the pill from body text passing directly under it. */
+  box-shadow:
+    0 1px 2px rgba(10, 25, 18, 0.18),
+    0 8px 22px rgba(10, 25, 18, 0.22);
+  transition: background 0.14s ease, transform 0.1s ease;
 }
 
 .button:hover {
-  background: var(--surface-3, #f2f7f4);
+  background: var(--ink-2, #4b5054);
+}
+
+.button:active {
+  transform: translateY(1px);
 }
 
 .button:focus-visible {
-  outline: 2px solid var(--accent, #0e6e49);
-  outline-offset: 2px;
+  /* White ring inside the dark pill, dark ring outside it — legible on the
+     page and against the pill, without needing to know either colour. */
+  outline: 2px solid var(--surface-2, #fff);
+  outline-offset: -4px;
+  box-shadow:
+    0 0 0 2px var(--ink, #16181a),
+    0 8px 22px rgba(10, 25, 18, 0.22);
+}
+
+.button svg {
+  /* The arrow is a label, not an icon button — sized to the cap height of the
+     word beside it so the two read as one unit. */
+  flex: none;
+  opacity: 0.85;
 }

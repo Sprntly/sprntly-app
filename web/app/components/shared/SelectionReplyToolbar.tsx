@@ -23,6 +23,20 @@
  * needs no layout relationship to the transcript and cannot be clipped by the
  * scroll viewport's overflow. It hides on scroll rather than tracking, because
  * a button chasing text down the page reads as a glitch.
+ *
+ * `position: fixed` is set INLINE as well as in the stylesheet, deliberately.
+ * It is not decoration here — it is the difference between a button over the
+ * words and a button in the document flow. Reported as a "Reply" sitting at the
+ * bottom-left of the screen, nowhere near the highlight and wearing the
+ * browser's default button chrome: with the class missing, the coordinates
+ * below are inert (a static box ignores `top`/`left`) and the toolbar lands
+ * wherever the flex column happens to put it — just above the composer, at the
+ * column's left edge. The look degrades; the placement must not.
+ *
+ * Coordinates are CLAMPED to the viewport. Unclamped, a selection on the first
+ * visible line anchors the button at a negative `top` (off the top of the
+ * screen) and one near an edge pushes half of it out of frame — the same
+ * failure `DocumentTab`'s own quote CTA already guards against.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react"
@@ -104,6 +118,35 @@ export function rangeToText(range: Range): string {
 
 type Anchor = { top: number; left: number; text: string }
 
+/** Half the button's width, and its height plus the gap above the selection.
+ *  Approximate on purpose: the clamp only has to keep the pill on screen, and
+ *  measuring it would mean rendering it somewhere first. */
+const HALF_W = 52
+const LIFT = 40
+
+/**
+ * The selection's anchor, kept inside the viewport.
+ *
+ * A passage on the first visible line has `rect.top` near 0, and the button is
+ * drawn a row ABOVE that — so unclamped it renders off the top of the screen
+ * and the reader sees nothing at all after highlighting. The same happens
+ * horizontally at either edge. When there is no room above, the button flips
+ * BELOW the selection rather than covering it.
+ */
+function clampToViewport(rect: DOMRect | null, text: string): Anchor {
+  if (!rect) return { top: LIFT, left: HALF_W + 8, text }
+  const vw = typeof window !== "undefined" ? window.innerWidth : 0
+  const vh = typeof window !== "undefined" ? window.innerHeight : 0
+  const centre = rect.left + rect.width / 2
+  return {
+    // Below the passage when the row above it is off-screen — the toolbar's
+    // own transform lifts it, so this is the anchor it lifts from.
+    top: rect.top < LIFT ? Math.min(rect.bottom + LIFT, vh || rect.bottom + LIFT) : rect.top,
+    left: vw ? Math.min(Math.max(centre, HALF_W + 8), vw - HALF_W - 8) : centre,
+    text,
+  }
+}
+
 export function SelectionReplyToolbar({
   containerRef,
   onReply,
@@ -157,11 +200,7 @@ export function SelectionReplyToolbar({
         rect = null
       }
     }
-    setAnchor({
-      top: rect ? rect.top : 0,
-      left: rect ? rect.left + rect.width / 2 : 0,
-      text,
-    })
+    setAnchor(clampToViewport(rect, text))
   }, [containerRef, bodySelector, clear])
 
   // `mouseup` settles a drag selection; `keyup` covers Shift+Arrow and
@@ -211,7 +250,10 @@ export function SelectionReplyToolbar({
     <div
       ref={toolbarRef}
       className={styles.toolbar}
-      style={{ top: anchor.top, left: anchor.left }}
+      // `position` inline beside the coordinates it governs — see the header
+      // note. The stylesheet declares it too; this is what makes the button
+      // land on the highlight even if the class never arrives.
+      style={{ position: "fixed", top: anchor.top, left: anchor.left }}
       data-testid="selection-reply-toolbar"
       role="toolbar"
       aria-label="Selected text"
