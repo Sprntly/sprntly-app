@@ -278,6 +278,80 @@ function fileTypeLabel(name: string): string {
   return dot > 0 && dot < name.length - 1 ? name.slice(dot + 1).toUpperCase() : ""
 }
 
+/**
+ * How many attachment cards a turn shows before it stops.
+ *
+ * FOUR fills one row at every width the thread is rendered at, which is the
+ * point: the cards are there to say what the question was asked ABOUT, and a
+ * block of fourteen says it worse than four and a count. Observed at fourteen
+ * — the cards pushed the question itself off screen, so the thread showed a
+ * wall of filenames with no visible reason for them.
+ *
+ * Live sends now cap at MAX_CHAT_ATTACHMENTS (5), but this is not that cap's
+ * mirror and must not be conflated with it: every turn already in every
+ * thread was written before the cap existed, and `TurnIn.attachments` still
+ * accepts 16 for senders that legitimately carry more.
+ */
+const ATTACHMENTS_BEFORE_FOLD = 4
+
+
+function AttachmentCards({
+  attachments,
+  onOpen,
+}: {
+  attachments: ChatBubbleAttachment[]
+  onOpen?: (attachment: ChatBubbleAttachment) => void
+}) {
+  const [expanded, setExpanded] = useState(false)
+  const overflow = attachments.length - ATTACHMENTS_BEFORE_FOLD
+  const shown = expanded ? attachments : attachments.slice(0, ATTACHMENTS_BEFORE_FOLD)
+
+  return (
+    <div className="bc-user-attachments">
+      {shown.map((a, i) => {
+        const viewable = !!a.content || !!a.downloadable
+        return (
+          <button
+            key={i}
+            type="button"
+            className="bc-file-card"
+            data-testid="turn-attachment-chip"
+            onClick={viewable ? () => onOpen?.(a) : undefined}
+            disabled={!viewable}
+            title={viewable ? `View ${a.name}` : a.name}
+            aria-label={viewable ? `View ${a.name}` : a.name}
+          >
+            <span className="bc-file-card-icon" aria-hidden>
+              <FileIcon />
+            </span>
+            <span className="bc-file-card-text">
+              <span className="bc-file-card-name">{a.name}</span>
+              <span className="bc-file-card-meta">{attachmentMeta(a.name, a.content)}</span>
+            </span>
+          </button>
+        )
+      })}
+      {overflow > 0 ? (
+        /* A COUNT, NOT A SCROLLER. A horizontal strip hides the same files
+           behind a gesture people miss on a trackpad and cannot do at all on
+           a keyboard; a count says how many there are and opens them in
+           place. Collapsing again matters as much as expanding — someone who
+           opened it to check one name should be able to put the wall back. */
+        <button
+          type="button"
+          className="bc-file-more"
+          data-testid="turn-attachment-more"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((v) => !v)}
+        >
+          {expanded ? "Show fewer" : `+${overflow} more`}
+        </button>
+      ) : null}
+    </div>
+  )
+}
+
+
 function attachmentMeta(name: string, content?: string): string {
   const type = fileTypeLabel(name)
   if (!content) return type || "File"
@@ -565,31 +639,10 @@ export function ChatBubble(props: ChatBubbleProps) {
               </div>
             ) : null}
             {user?.attachments?.length ? (
-              <div className="bc-user-attachments">
-                {user.attachments.map((a, i) => {
-                  const viewable = !!a.content || !!a.downloadable
-                  return (
-                    <button
-                      key={i}
-                      type="button"
-                      className="bc-file-card"
-                      data-testid="turn-attachment-chip"
-                      onClick={viewable ? () => user.onOpenAttachment?.(a) : undefined}
-                      disabled={!viewable}
-                      title={viewable ? `View ${a.name}` : a.name}
-                      aria-label={viewable ? `View ${a.name}` : a.name}
-                    >
-                      <span className="bc-file-card-icon" aria-hidden>
-                        <FileIcon />
-                      </span>
-                      <span className="bc-file-card-text">
-                        <span className="bc-file-card-name">{a.name}</span>
-                        <span className="bc-file-card-meta">{attachmentMeta(a.name, a.content)}</span>
-                      </span>
-                    </button>
-                  )
-                })}
-              </div>
+              <AttachmentCards
+                attachments={user.attachments}
+                onOpen={user.onOpenAttachment}
+              />
             ) : null}
             {user?.quote && !editing ? <UserQuote text={user.quote} onOpen={user.onOpenQuote} /> : null}
             {/* Editing REPLACES the bubble rather than sitting beside it — two

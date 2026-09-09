@@ -33,6 +33,22 @@ const DRAFT_COUNTER_FROM = Math.floor(DRAFT_MAX_CHARS * 0.9)
 /** Send is disabled below this — mirrors the backend's `min_length=3`. */
 export const DRAFT_MIN_CHARS = 3
 
+/**
+ * How many files one chat message may carry (owner decision 2026-09-09).
+ *
+ * Fourteen files on one turn is what prompted this: the thread filled with
+ * chips, the composer pushed the question off screen, and every one of them
+ * was read, extracted and folded into a prompt. Five is enough to bring the
+ * evidence for a question and few enough to still see the question.
+ *
+ * A CLIENT limit, deliberately. `TurnIn.attachments` on the server stays at
+ * 16 — it guards the write for every sender, including project chats and
+ * replays of older turns that legitimately carry more, and rejecting a
+ * historical turn is not what this decision is about. This is what the
+ * composer will let someone assemble.
+ */
+export const MAX_CHAT_ATTACHMENTS = 5
+
 /** `ChatScreen`'s original hardcoded placeholder — the default here so the
  *  extraction changes nothing about `ChatScreen`'s own behaviour. */
 export const COMPOSER_PLACEHOLDER = "Ask Sprntly anything, or type / for skills"

@@ -36,7 +36,7 @@ import {
 import { askApi, attachmentsApi, type SkillInfo } from "../../lib/api"
 import { SlashSkillMenu } from "./SlashSkillMenu"
 import { AssistantWaitState } from "./AssistantWaitState"
-import { DRAFT_MIN_CHARS, type PinnedSkill } from "./ChatComposer"
+import { DRAFT_MIN_CHARS, MAX_CHAT_ATTACHMENTS, type PinnedSkill } from "./ChatComposer"
 import { isClientReadableText } from "../../lib/attachmentText"
 import type {
   AgentRunStatus,
@@ -267,7 +267,12 @@ export function useChatComposerController(config: ChatComposerControllerConfig):
   const onFileSelect = useCallback((e: ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
-    Array.from(files).forEach((file) => {
+    // Counted against what is already staged — see the same guard in main's
+    // `useComposer`. This surface has no toast, so the overflow is dropped
+    // silently here and the chip row is what shows the count; the cap itself
+    // is the shared constant either way.
+    const room = Math.max(0, MAX_CHAT_ATTACHMENTS - attachmentsRef.current.length)
+    Array.from(files).slice(0, room).forEach((file) => {
       if (!isClientReadableText(file.name)) {
         // Keep the real File and an empty `content` — that empty is precisely
         // what routes it to `askApi.extractFile`, where a .zip is expanded

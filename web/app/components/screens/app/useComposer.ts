@@ -19,7 +19,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
-import { DRAFT_MAX_CHARS, type PinnedSkill } from "../../shared/ChatComposer"
+import { DRAFT_MAX_CHARS, MAX_CHAT_ATTACHMENTS, type PinnedSkill } from "../../shared/ChatComposer"
 import { useSpeechInput } from "../../../lib/useSpeechInput"
 import type { SkillInfo } from "../../../lib/api"
 import { isClientReadableText } from "../../../lib/attachmentText"
@@ -98,6 +98,11 @@ export function useComposer({ showToast }: UseComposerDeps) {
   // ("import this as a PRD" → POST /v1/prd/import) or, for a plain question,
   // server-side text extraction at send time (POST /v1/ask/extract-file).
   const [attachments, setAttachments] = useState<{ name: string; content: string; file?: File }[]>([])
+  // How many are staged RIGHT NOW. `handleFileSelect` is memoised, so reading
+  // `attachments` inside it would see the array from the render that created
+  // the callback — and the cap would then let every pick start from zero.
+  const attachmentsLenRef = useRef(attachments.length)
+  attachmentsLenRef.current = attachments.length
   const composerRef = useRef<HTMLTextAreaElement>(null)
   // Landing on a chat tab means you can just start typing. Selecting a tab — or
   // opening one with "+" — used to leave focus on the document body, so every
@@ -166,7 +171,24 @@ export function useComposer({ showToast }: UseComposerDeps) {
   const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files
     if (!files) return
-    Array.from(files).forEach((file) => {
+    // The cap is counted against what is ALREADY staged, not against this
+    // pick: three files chosen twice is six, and a per-pick check would wave
+    // that through.
+    const room = Math.max(0, MAX_CHAT_ATTACHMENTS - attachmentsLenRef.current)
+    const picked = Array.from(files)
+    if (picked.length > room) {
+      // Say WHICH were dropped rather than a bare limit — a silent truncation
+      // at the boundary is how someone sends a question missing the file it
+      // was about.
+      const dropped = picked.slice(room).map((f) => f.name)
+      showToast(
+        room === 0
+          ? `You can attach ${MAX_CHAT_ATTACHMENTS} files to a message`
+          : `Only ${room} more ${room === 1 ? "file" : "files"} would fit`,
+        `${dropped.join(", ")} ${dropped.length === 1 ? "was" : "were"} not added. Send these first, then attach the rest to a follow-up.`,
+      )
+    }
+    picked.slice(0, room).forEach((file) => {
       if (!isClientReadableText(file.name)) {
         setAttachments((prev) => [...prev, { name: file.name, content: "", file }])
         return
