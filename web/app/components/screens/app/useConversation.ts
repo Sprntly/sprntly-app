@@ -43,7 +43,7 @@ import {
 import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import {
-  resolveAttachmentRefs, spliceSkill, uploadAttachmentKeys,
+  resolveAttachmentRefs, spliceSkill, unreadableAttachmentNames, uploadAttachmentKeys,
 } from "../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 // Highlight-to-reply: the send appends the parked quote as a trailing
@@ -1118,7 +1118,25 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
           // the project composers via `resolveAttachmentRefs`. `earlyExtracted`
           // (done above for the planner) is passed so a document isn't parsed twice.
           const extracted = await resolveAttachmentRefs(pending, { preExtracted: earlyExtracted })
+          // A file that could not be read no longer fails the send (see
+          // `resolveAttachmentRefs`) — it arrives with empty content. Say so and
+          // carry on: the question and the files that DID read are worth more
+          // than a clean abort, and the reader cannot fix a scan anyway.
+          const unreadable = unreadableAttachmentNames(extracted)
+          if (unreadable.length > 0) {
+            showToast(
+              unreadable.length === 1
+                ? `We could not read ${unreadable[0]}`
+                : `We could not read ${unreadable.length} of your files`,
+              `${unreadable.join(", ")} — the answer uses the rest.`,
+            )
+          }
           ctx = extracted
+            // A file with no text contributes its NAME, not an empty section. A
+            // "--- invoice.pdf ---" followed by nothing reads to the model as a
+            // document that exists and says nothing, which is how an answer ends
+            // up asserting something about a file it never saw.
+            .filter((e) => e.content?.trim())
             .map((e) => `--- ${e.name} ---\n${e.content}`)
             .join("\n\n")
             .slice(0, 100000)
