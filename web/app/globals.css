@@ -8045,6 +8045,27 @@
     margin-bottom: 6px;
   }
 
+  /* "+3 more" / "Show fewer". Sized to sit in the same row as the cards
+     without imitating one — it is a control, not a file, and a reader
+     scanning filenames should not have to read it twice to tell. */
+  .bc-file-more {
+    display: inline-flex;
+    align-items: center;
+    padding: 0 12px;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--radius-sm);
+    background: none;
+    font-size: 12.5px;
+    color: var(--ink-3);
+    cursor: pointer;
+    transition: border-color 0.12s, color 0.12s;
+  }
+
+  .bc-file-more:hover {
+    border-color: var(--ink-3);
+    color: var(--ink);
+  }
+
   .bc-file-card {
     display: inline-flex;
     align-items: center;
