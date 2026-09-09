@@ -42,6 +42,37 @@ module is where both are enforced:
    `COMPUTED_COMPARISON_KIND`, so nothing existing changes bucket or rank by
    this change landing.
 
+── ONE FINDING PER COMPARISON, NOT PER GROUP ───────────────────────────────
+
+A comparison is a TABLE and each group is a ROW of it. The first version of
+this module minted a distinct theme entity per (comparison, group), so every
+row became its own top-level finding: measured on a real nine-run benchmark,
+**89 distinct `(dimension, statistic)` comparisons became 372 findings, a
+4.2x multiplier**, and the single most valuable thing a comparison can say —
+"aggregate retention hides the segment split" — was shredded across seven
+non-adjacent ranks (#20, #31, #38, #49, #51, #52, #55) and sorted by group
+size, the one ordering guaranteed to separate the rows of one table.
+
+So the entity id is now keyed on the COMPARISON alone. Every account the
+comparison covers, in any of its groups, shares one theme entity and clusters
+into one finding whose label states the dimension, the statistic and every
+group with its value and its count — a reader sees the split AS a split.
+
+Three consequences, each of which bites if missed:
+
+- **THE UNION OF ACCOUNTS, NOT ONE GROUP'S `n`.** `impact_value` reads
+  `population.segments["accounts"]`, so it now sizes the whole comparison.
+  Nothing sums group counts: an account is emitted ONCE per comparison even
+  where it files rows in several groups (a support-ticket table groups the
+  same customer under two priorities), because two rows for one account under
+  one entity id would collide on `id` and double-count reach.
+- **THE ECHO GATE STILL DEPENDS ON THE ARTIFACT IDS, NOT THE ENTITY ID** —
+  §2 below is unchanged and is the reason collapsing findings is safe. The
+  artifact id is keyed per ACCOUNT, so collapsing groups can only ever raise
+  the distinct-artifact count within a cluster, never lower it.
+- **A ONE-GROUP COMPARISON IS STILL A FINDING**, labelled as the single group
+  it is rather than as a range of one.
+
 ── THE FOUR THINGS THIS PRODUCER MUST GET RIGHT, EACH MEASURED ─────────────
 
 **1. ONE ROW PER ACCOUNT.** `claims._population` reads at most one name per
@@ -170,7 +201,10 @@ class TabularEvidence:
         return {
             "comparisons": len(self.computed),
             "rows": len(self.rows),
-            "groups": len({tm[0] for tm in self.theme_map.values()}),
+            # One entity per comparison that produced rows — the count of
+            # findings this stage will contribute, which is what a caller
+            # disclosing the stage actually wants to say.
+            "findings": len({tm[0] for tm in self.theme_map.values()}),
         }
 
 
@@ -210,13 +244,42 @@ def _group_signature(cc: "table_select.Comparison | table_select.ComputedCompari
     return f"{cc.table}|{cc.dimension}|{cc.outcome}|{cc.measure}|{level}|{edges}"
 
 
-def _entity_id(comparison_signature: str, group_key: str) -> str:
-    """One deterministic id per (comparison, group) — identical across every
-    row of one group (so they cluster together, module docstring §3),
-    different across groups and comparisons (so they never merge)."""
+def _entity_id(comparison_signature: str) -> str:
+    """One deterministic id per COMPARISON — identical across every row of
+    every group of that comparison (so the whole comparison clusters into ONE
+    finding, module docstring §"one finding per comparison"), different across
+    comparisons (so two comparisons never merge).
+
+    IT USED TO TAKE A GROUP KEY, and that is precisely the defect this
+    replaces: a distinct entity id per group became a distinct cluster, which
+    became a distinct top-level finding, which is how one segment split
+    reached the reader as seven unrelated statements. The digest is still over
+    the comparison signature alone, so it stays stable across runs over the
+    same selection.
+    """
     digest = hashlib.sha256(
-        f"{comparison_signature}\x1f{group_key}".encode("utf-8")).hexdigest()[:20]
+        comparison_signature.encode("utf-8")).hexdigest()[:20]
     return f"{ENTITY_ID_PREFIX}:{digest}"
+
+
+#: How long a comparison label may get before it starts saying "+K more".
+#:
+#: `report.MAX_STATEMENT_CHARS = 400` is what clips a finding's HEADING, and
+#: `report.MAX_PARAM_NAME_CHARS = 120` clips the same label in the ranking
+#: table — so the head of the label (dimension, statistic, span, group count)
+#: has to carry the finding on its own, and the group-by-group breakdown that
+#: follows has to fit inside the heading's budget with room for the ellipsis
+#: the clipper adds. `table_select.MAX_GROUP_COUNT = 12` bounds how many
+#: groups can ever arrive here; twelve short group names fit, twelve long
+#: tenant strings do not, and the ones past the budget are SUMMARISED rather
+#: than silently dropped.
+MAX_LABEL_CHARS = 360
+
+#: The same budget for the per-account content sentence. `cluster.example_for`
+#: clips a rendered example at 200 characters, so anything past this is for
+#: the stored row rather than for the page — kept bounded anyway so one
+#: pathological workbook cannot write a paragraph into every claim.
+MAX_CONTENT_CHARS = 420
 
 
 def _stat_phrase(cc: "table_select.ComputedComparison") -> str:
@@ -231,40 +294,137 @@ def _format_value(cc: "table_select.ComputedComparison", value: float) -> str:
     return f"{value:,.3g}"
 
 
-def _label(cc: "table_select.ComputedComparison", group_key: str, value: float, n: int) -> str:
-    """The theme label — becomes `Claim.subject` for every row in the
-    group via `kg_themes.assign_themes`."""
-    return (f"{cc.dimension} = {group_key}: {_stat_phrase(cc)} = "
-            f"{_format_value(cc, value)} (n={n})")
+def _shown_groups(
+    cc: "table_select.ComputedComparison",
+) -> tuple["table_select.GroupValue", ...]:
+    """Every group of CC that has a real number and at least one named
+    account, STRONGEST FIRST.
+
+    A suppressed group (`n` under `table_select.MIN_GROUP_N`) has no value by
+    construction and an unnamed one has nobody to attribute a row to, so
+    neither can appear in the comparison's table. Ordering by value descending
+    — ties broken by group name so the order is stable across runs — is what
+    makes the label read as a SPLIT rather than as a list: the reader sees the
+    worst and the best group beside each other rather than having to sort
+    twelve numbers themselves. Sorting by group SIZE is what the per-group
+    version effectively did, and it is the one ordering that hides a split.
+    """
+    shown = [g for g in cc.groups
+             if not g.suppressed and g.value is not None and g.accounts]
+    shown.sort(key=lambda g: (-(g.value or 0.0), g.group))
+    return tuple(shown)
+
+
+def _group_phrase(
+    cc: "table_select.ComputedComparison", g: "table_select.GroupValue",
+) -> str:
+    return f"{g.group} {_format_value(cc, g.value or 0.0)} (n={g.n})"
+
+
+def _group_list(
+    cc: "table_select.ComputedComparison",
+    shown: Sequence["table_select.GroupValue"], *, budget: int, used: int,
+) -> str:
+    """The groups, in order, until BUDGET is spent — then how many are left.
+
+    SUMMARISED, NEVER TRUNCATED SILENTLY. A label that simply stopped would
+    read as though the comparison had four groups when it had eleven, which
+    is a worse failure than a long label: the whole point of collapsing to one
+    finding per comparison is that the reader can see how many groups there
+    are and where each sits.
+    """
+    parts: list[str] = []
+    for i, g in enumerate(shown):
+        piece = _group_phrase(cc, g)
+        if parts and used + len(piece) + 2 > budget:
+            parts.append(f"+{len(shown) - i} more")
+            break
+        parts.append(piece)
+        used += len(piece) + 2
+    return "; ".join(parts)
+
+
+def _label(
+    cc: "table_select.ComputedComparison",
+    shown: Sequence["table_select.GroupValue"],
+) -> str:
+    """The theme label for a WHOLE COMPARISON — becomes `Claim.subject` on
+    every row of every group via `kg_themes.assign_themes`, and therefore
+    `Finding.label` (`pipeline._label` takes the most common subject in the
+    cluster, and here every claim carries the same one).
+
+    THE HEAD CARRIES THE FINDING ALONE. `report` clips this to 120 characters
+    in the ranking table and to 400 as the write-up heading, so the dimension,
+    the statistic, the number of groups and the span come first and the
+    group-by-group breakdown follows. A reader who sees only the first clause
+    still knows what was compared and how far apart the groups are.
+    """
+    head = f"{cc.dimension}: {_stat_phrase(cc)}"
+    if len(shown) == 1:
+        return f"{head} — {_group_phrase(cc, shown[0])}"
+    lo, hi = shown[-1], shown[0]
+    head = (
+        f"{head} across {len(shown)} groups, "
+        f"{_format_value(cc, lo.value or 0.0)}–{_format_value(cc, hi.value or 0.0)}"
+    )
+    return f"{head} — " + _group_list(
+        cc, shown, budget=MAX_LABEL_CHARS, used=len(head) + 3)
 
 
 def _content(
-    account: str, cc: "table_select.ComputedComparison", group_key: str,
-    value: float, n: int,
+    account: str, cc: "table_select.ComputedComparison",
+    shown: Sequence["table_select.GroupValue"],
+    member: Sequence["table_select.GroupValue"], total_accounts: int,
 ) -> str:
+    """One account's row of the comparison, said as a sentence.
+
+    NAMES THE ACCOUNT'S OWN GROUP AND THEN THE WHOLE TABLE, in that order —
+    the row is what makes this claim about this account (`claims._population`
+    reads exactly one name per row), and the table is what makes the finding
+    worth reading. `member` is every group this account appears in; on most
+    tables that is exactly one, but a per-EVENT table (support tickets, say)
+    can file the same customer under two priorities, and saying so is cheaper
+    than pretending a partition exists that does not.
+    """
     as_of_txt = cc.as_of.date().isoformat() if cc.as_of else "an unspecified date"
     why = f" {cc.why}" if cc.why else ""
-    return (
-        f"{account} is one of {n} accounts in the attached {cc.table!r} "
-        f"table where {cc.dimension} = {group_key!r}; for that group, "
-        f"{_stat_phrase(cc)} is {_format_value(cc, value)} as of {as_of_txt}."
-        f"{why}"
+    if not member:
+        where = ""
+    elif len(member) == 1:
+        where = (f", where {cc.dimension} = {member[0].group!r}")
+    else:
+        where = (
+            f", filing rows under {len(member)} of the {cc.dimension} values "
+            f"compared ({', '.join(repr(g.group) for g in member)})"
+        )
+    head = (
+        f"{account} is one of {total_accounts} accounts covered by a "
+        f"comparison over the attached {cc.table!r} table{where}. "
+        f"Grouped by {cc.dimension}, {_stat_phrase(cc)} is "
     )
+    body = _group_list(cc, shown, budget=MAX_CONTENT_CHARS, used=len(head))
+    return f"{head}{body}, as of {as_of_txt}.{why}"
 
 
 def rows_for_computed(
     computed: Sequence["table_select.ComputedComparison"], *, now: datetime,
 ) -> tuple[tuple[dict, ...], dict[str, tuple[str, str, Optional[str]]]]:
-    """Every un-suppressed, sizeable group across COMPUTED -> one row per
-    account, plus the theme-map entries that keep each group's rows
-    clustered together and off the ungroupable path.
+    """Every un-suppressed, sizeable COMPARISON across COMPUTED -> one row per
+    account it covers, plus the theme-map entries that keep all of a
+    comparison's rows clustered into ONE finding and off the ungroupable path.
+
+    ONE ROW PER ACCOUNT PER COMPARISON, NOT PER (ACCOUNT, GROUP). The row id
+    is `(entity_id, account)` and the entity id is now the comparison's, so an
+    account that files rows under two group values would otherwise produce two
+    rows with the SAME id — a duplicate `claims._population` would count
+    twice. The account is emitted once, and its `content` names every group it
+    appears in.
 
     Skips a whole comparison when `account_column is None` — it cannot be
     sized by account at all, and guessing which column names the customer is
     exactly the failure `table_select._account_column` already refused to
-    commit. Skips a single group when it is suppressed (below `MIN_GROUP_N`,
-    or the whole comparison over the group-count ceiling) or names no
-    accounts — nothing to build a row from.
+    commit. Skips a comparison with no showable group (every group under
+    `MIN_GROUP_N`, or naming no accounts): there is no table left to state.
     """
     rows: list[dict] = []
     theme_map: dict[str, tuple[str, str, Optional[str]]] = {}
@@ -277,39 +437,63 @@ def rows_for_computed(
                 "account (%s); no rows produced",
                 cc.orientation(), cc.account_note or "no reason given")
             continue
-        signature = _group_signature(cc)
-        for g in cc.groups:
-            if g.suppressed or g.value is None or not g.accounts:
-                continue
-            entity_id = _entity_id(signature, g.group)
-            label = _label(cc, g.group, g.value, g.n)
-            content = None  # built per-account below
+        shown = _shown_groups(cc)
+        if not shown:
+            logger.info(
+                "crucible: computed comparison %s has no group with both a "
+                "value and a named account; no rows produced",
+                cc.orientation())
+            continue
+        entity_id = _entity_id(_group_signature(cc))
+        label = _label(cc, shown)
+
+        # WHICH GROUPS EACH ACCOUNT IS IN. Insertion order is (group order,
+        # then sheet order within the group), so the emitted rows are
+        # deterministic for a given selection over a given table.
+        member: dict[str, list["table_select.GroupValue"]] = {}
+        for g in shown:
             for account in g.accounts:
-                account_digest = hashlib.sha256(
-                    account.encode("utf-8")).hexdigest()[:16]
-                row_id = f"{entity_id}:{account_digest}"
-                # A DISTINCT ARTIFACT PER ROW — module docstring §2. Keyed on
-                # the TABLE and the ACCOUNT, not on the comparison or group,
-                # so the SAME account named by two different comparisons
-                # over the same table is (correctly) treated as the same
-                # underlying record — while every account within one group
-                # still reads as a separate source document to `_refute`.
-                artifact_id = f"{ENTITY_ID_PREFIX}:{cc.table}:{account}"
-                content = _content(account, cc, g.group, g.value, g.n)
-                rows.append({
-                    "id": row_id,
-                    "kind": COMPUTED_COMPARISON_KIND,
-                    "source_type": COMPUTED_SOURCE_TYPE,
-                    "content": content,
-                    "properties": {"account": account},
-                    "provenance": {
-                        "doc": artifact_id, "channel": ATTACHMENT_CHANNEL,
-                    },
-                    "valid_at": cc.as_of.isoformat() if cc.as_of else now.isoformat(),
-                    "created_at": now.isoformat(),
-                    "source_id": artifact_id,
-                })
-                theme_map[row_id] = (entity_id, label, None)
+                member.setdefault(account, []).append(g)
+        overlapping = sum(1 for gs in member.values() if len(gs) > 1)
+        if overlapping:
+            # NOT AN ERROR, AND WORTH SAYING OUT LOUD. A per-ACCOUNT table
+            # partitions its accounts across the groups of any dimension; a
+            # per-EVENT table (tickets, sessions) does not, and the difference
+            # decides whether the union below is also the sum. Logged rather
+            # than assumed either way.
+            logger.info(
+                "crucible: %s of %s accounts appear in more than one group of "
+                "computed comparison %s — the comparison is sized by the "
+                "union, not the sum",
+                overlapping, len(member), cc.orientation())
+
+        for account, groups in member.items():
+            account_digest = hashlib.sha256(
+                account.encode("utf-8")).hexdigest()[:16]
+            row_id = f"{entity_id}:{account_digest}"
+            # A DISTINCT ARTIFACT PER ROW — module docstring §2, and the
+            # property collapsing the findings must not disturb. Keyed on the
+            # TABLE and the ACCOUNT, not on the comparison or the group, so
+            # the SAME account named by two different comparisons over the
+            # same table is (correctly) the same underlying record — while
+            # every account within one comparison still reads as a separate
+            # source document to `pipeline._refute`. Collapsing groups can
+            # only ever RAISE the distinct-artifact count inside a cluster.
+            artifact_id = f"{ENTITY_ID_PREFIX}:{cc.table}:{account}"
+            rows.append({
+                "id": row_id,
+                "kind": COMPUTED_COMPARISON_KIND,
+                "source_type": COMPUTED_SOURCE_TYPE,
+                "content": _content(account, cc, shown, groups, len(member)),
+                "properties": {"account": account},
+                "provenance": {
+                    "doc": artifact_id, "channel": ATTACHMENT_CHANNEL,
+                },
+                "valid_at": cc.as_of.isoformat() if cc.as_of else now.isoformat(),
+                "created_at": now.isoformat(),
+                "source_id": artifact_id,
+            })
+            theme_map[row_id] = (entity_id, label, None)
     return tuple(rows), theme_map
 
 

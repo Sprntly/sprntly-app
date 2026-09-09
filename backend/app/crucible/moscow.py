@@ -166,6 +166,30 @@ def bucket_for(claim_types: Sequence[str], doc_count: int) -> tuple[str, str]:
     """The bucket a finding earns, and why — mirrors `rice.impact_for`'s
     "strongest type decides, and says which"."""
     kind = type_bucket(claim_types)
+    # THE BRANCH THAT WAS MISSING, AND THE COST OF ITS ABSENCE. `type_bucket`
+    # returns four values and this function branched on two, so
+    # `TYPE_BUCKET_COMPUTED = 0` fell through the same `return` as
+    # `TYPE_BUCKET_NEITHER = 3`. Measured on a real nine-run benchmark: all
+    # 372 computed findings — 80% of the output, holding ranks #1-#5 on every
+    # run with a table attached — displayed as `unranked`, under the words
+    # "describes the world rather than asking for or blocking something".
+    # `_moscow_section` then counted them and told the reader MoSCoW does not
+    # bucket them. Three separate readers concluded the ranking layer was
+    # broken; it had ranked them first and then denied it.
+    #
+    # MEASURED IS NOT A MOSCOW WORD, DELIBERATELY. MUST/SHOULD/COULD grade
+    # what somebody ASKED FOR; a differential computed from the customer's own
+    # records is not a request at any strength, so giving it one of those
+    # names would misdescribe it in the other direction. It gets its own name,
+    # above the others because `type_bucket` already ranks it there.
+    if kind == TYPE_BUCKET_COMPUTED:
+        return (
+            "MEASURED",
+            f"a difference computed from your own records, not something "
+            f"anyone reported — counted across "
+            f"{doc_count} {'accounts' if doc_count != 1 else 'account'} in "
+            f"the attached table",
+        )
     if kind == TYPE_BUCKET_BLOCKER:
         if doc_count < THIN_EVIDENCE_DOCS:
             return (
@@ -239,4 +263,9 @@ def moscow_for(
 
 #: MoSCoW's own vocabulary, for anything that wants to validate a bucket
 #: value against the real set rather than a magic string.
-BUCKET_ORDER = ("MUST", "MUST?", "SHOULD", "COULD", "unranked")
+#:
+#: IN `type_bucket` ORDER, and `MEASURED` leads it because that is where
+#: `TYPE_BUCKET_COMPUTED = 0` sits. It is not a MoSCoW word and does not
+#: pretend to be one — see `bucket_for` for why a computed differential is
+#: named rather than graded.
+BUCKET_ORDER = ("MEASURED", "MUST", "MUST?", "SHOULD", "COULD", "unranked")

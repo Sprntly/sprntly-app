@@ -51,7 +51,8 @@ from app.crucible.data_gaps import (
     option_numbers, options_are_one_topic, recommended_index,
 )
 from app.crucible.moscow import (
-    CALL_COUNT_FLOOR_NOTE, TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE,
+    CALL_COUNT_FLOOR_NOTE, TYPE_BUCKET_BLOCKER, TYPE_BUCKET_COMPUTED,
+    TYPE_BUCKET_PREFERENCE,
     has_call_count, type_bucket,
 )
 
@@ -308,7 +309,15 @@ def _claim_sentence(finding: dict) -> str:
     sized = finding.get("impact_value") is not None
     unit = (finding.get("currency") or "accounts").strip()
 
-    if bucket == TYPE_BUCKET_BLOCKER:
+    # THE BRANCH THAT WAS MISSING. `TYPE_BUCKET_COMPUTED` fell through to
+    # "talk about", so the rank-1 finding of every run with a table attached
+    # was narrated as "50 accounts talk about priority = P3 - Normal…" and
+    # then told the reader to treat it as context. Nobody talked about it: it
+    # is arithmetic over rows the customer supplied, and the verb has to say
+    # so or the strongest evidence class in the engine reads as chatter.
+    if bucket == TYPE_BUCKET_COMPUTED:
+        verb = f"sit in a comparison counted from your own records — {topic}"
+    elif bucket == TYPE_BUCKET_BLOCKER:
         verb = f"report being blocked by {topic}"
     elif bucket == TYPE_BUCKET_PREFERENCE:
         verb = f"have asked for {topic}"
@@ -336,7 +345,20 @@ def _claim_sentence(finding: dict) -> str:
             "small.",
         ]
 
-    if bucket not in (TYPE_BUCKET_BLOCKER, TYPE_BUCKET_PREFERENCE):
+    if bucket == TYPE_BUCKET_COMPUTED:
+        # THE SAME MISSING BRANCH, AND THE HALF THAT DID THE DAMAGE. The
+        # append below is right about a theme nobody framed as a problem and
+        # exactly wrong about a computed differential — it instructed the
+        # reader to disregard the one class of evidence in this engine that
+        # was not reported by anybody. What a computed finding owes the reader
+        # instead is what it is and what it is not: a real difference between
+        # groups, and no statement about why the difference is there.
+        parts.append(
+            "This is a difference between groups in the table you attached, "
+            "counted rather than reported. It says the groups differ, not "
+            "why."
+        )
+    elif bucket != TYPE_BUCKET_BLOCKER and bucket != TYPE_BUCKET_PREFERENCE:
         parts.append(
             "Nothing in it reads as blocked or as a request, so take it as "
             "context rather than as something stopping you."
@@ -991,6 +1013,9 @@ def _moscow_section(
         if framework_reason:
             out.append(_p(framework_reason))
         out.append(_ul([
+            "<strong>MEASURED</strong> — a difference counted in a table you "
+            "attached, not something anyone said. Placed above the rest "
+            "because nothing judged it: the comparison was computed in code.",
             "<strong>MUST</strong> — a stated blocker: something is stopping "
             "an account today. <em>Marked <strong>MUST?</strong> when only "
             "one source document backs it — real, worth confirming.</em>",
@@ -2939,6 +2964,15 @@ def _rank_reason(first: dict, second: dict) -> str:
         )
     a_bucket = type_bucket([str(t) for t in _as_list(first.get("claim_types"))])
     b_bucket = type_bucket([str(t) for t in _as_list(second.get("claim_types"))])
+    # THE TOP BUCKET, NAMED. Without this branch the sentence explaining why
+    # the first outranks the second skipped straight past the one boundary
+    # that actually decided it whenever the winner was a computed comparison.
+    if a_bucket != b_bucket and a_bucket == TYPE_BUCKET_COMPUTED:
+        return (
+            "The first is a difference counted in your own records; the "
+            "second is something somebody reported. We put what was counted "
+            "above what was said, whatever their sizes."
+        )
     if a_bucket != b_bucket and a_bucket == TYPE_BUCKET_BLOCKER:
         return (
             "The first is something accounts are blocked by; the second is "
@@ -3340,7 +3374,13 @@ def _why_not_chosen(finding: dict) -> str:
     if band:
         bits.append(f"{_esc(band)} confidence")
     bucket = type_bucket([str(t) for t in _as_list(finding.get("claim_types"))])
-    if bucket == TYPE_BUCKET_BLOCKER:
+    # SAME CLOSED SET AS `_claim_sentence`, SAME MISSING BRANCH. A computed
+    # differential fell through to "describes rather than blocks or asks",
+    # which is the chip version of telling the reader the top finding is
+    # background.
+    if bucket == TYPE_BUCKET_COMPUTED:
+        bits.append("counted from your own records")
+    elif bucket == TYPE_BUCKET_BLOCKER:
         bits.append("stated as blocking accounts")
     elif bucket == TYPE_BUCKET_PREFERENCE:
         bits.append("asked for rather than blocking")

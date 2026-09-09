@@ -46,6 +46,47 @@ def _sql() -> str:
     return MIGRATION.read_text(encoding="utf-8").lower()
 
 
+def _migration_set_sql() -> str:
+    """EVERY migration in the directory, oldest first, concatenated.
+
+    THE VOCABULARY CHECK BELOW READ ONE FILE AND THAT WAS ITS DEFECT. A CHECK
+    constraint is not a property of the file that first wrote it; it is a
+    property of the schema after every migration has been applied in
+    timestamp order. Reading `20260819100000_crucible_core.sql` alone meant a
+    later `ALTER TABLE ... ADD CONSTRAINT` correcting a drifted vocabulary was
+    invisible — so the test could only ever fail, never be fixed the way the
+    schema actually gets fixed. It failed for exactly that reason when
+    `computed_differential` was added to `app.crucible.types`.
+
+    Every OTHER test in this file still reads the core file alone, deliberately:
+    they pin what that migration created (a column's nullability, a policy's
+    `TO service_role` clause, an index predicate), and a later file must not be
+    able to satisfy them by coincidence.
+    """
+    return "\n".join(
+        path.read_text(encoding="utf-8").lower()
+        for path in sorted(MIGRATION.parent.glob("*.sql"))
+    )
+
+
+def _last_check_vocabulary(column: str) -> set[str]:
+    """The values a `check (COLUMN in (...))` allows AFTER the whole migration
+    set has been applied — the LAST such constraint in timestamp order wins,
+    because that is what a later `add constraint` does to the database.
+
+    Returns the literals as a SET so the assertion can be an equality rather
+    than a substring search. A substring search over the concatenated set
+    passes on a value that appears anywhere at all — in a comment, in an
+    unrelated table's constraint, in a data migration's `update ... set` — and
+    a check that cannot fail is not a check.
+    """
+    hits = re.findall(
+        rf"check\s*\(\s*{re.escape(column)}\s+in\s*\((.*?)\)\s*\)",
+        _migration_set_sql(), re.DOTALL)
+    assert hits, f"no CHECK constraint on {column!r} anywhere in the migration set"
+    return set(re.findall(r"'([^']*)'", hits[-1]))
+
+
 def _sql_without_comments() -> str:
     """DDL only. The header explains at length that a definition is never
     `inferred`, so a naive substring check for that word finds the prose that
@@ -164,11 +205,17 @@ def test_claim_and_strength_vocabularies_match_the_types_module():
     )
     CLAIM_TYPES, EVIDENCE_STRENGTHS = types.CLAIM_TYPES, types.EVIDENCE_STRENGTHS
 
-    sql = _sql()
-    for value in CLAIM_TYPES:
-        assert f"'{value}'" in sql, f"claim type {value!r} missing from the CHECK"
-    for value in EVIDENCE_STRENGTHS:
-        assert f"'{value}'" in sql, f"strength {value!r} missing from the CHECK"
+    # READ AS THE DATABASE READS IT: the whole migration set, in timestamp
+    # order, last constraint wins. See `_migration_set_sql`.
+    assert _last_check_vocabulary("claim_type") == set(CLAIM_TYPES), (
+        "crucible_claims.claim_type's CHECK and app.crucible.types.CLAIM_TYPES "
+        "have drifted — a claim the code can build the database would reject, "
+        "or a value the database allows the code can never produce"
+    )
+    assert _last_check_vocabulary("strength") == set(EVIDENCE_STRENGTHS), (
+        "crucible_claims.strength's CHECK and "
+        "app.crucible.types.EVIDENCE_STRENGTHS have drifted"
+    )
 
 
 def test_observed_at_is_required():
