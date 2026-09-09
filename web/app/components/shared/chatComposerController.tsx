@@ -76,7 +76,9 @@ export async function resolveAttachmentRefs(
   opts?: { preExtracted?: (string | null)[] | null },
 ): Promise<AttachmentRef[]> {
   const preExtracted = opts?.preExtracted ?? null
-  return Promise.all(
+  // Why each attachment failed, by index — read back by `attachmentFailureNote`.
+  const failures: (string | undefined)[] = []
+  const refs = await Promise.all(
     items.map(async (a, idx) => {
       const [text, stored] = await Promise.all([
         a.content
@@ -98,7 +100,16 @@ export async function resolveAttachmentRefs(
               // still uploaded — it just contributes no text, which is the
               // truth about it. `unreadableAttachmentNames` names them for the
               // caller's notice.
-              .catch(() => "")
+              //
+              // THE REASON IS KEPT, not just the failure. A 503 here means the
+              // model was unreachable — an account out of credit, a rate limit
+              // — and nothing is wrong with the file. Reporting that as "we
+              // could not read your file" sends the reader to inspect four
+              // perfectly good PDFs, which is exactly what it did.
+              .catch((e: unknown) => {
+                failures[idx] = e instanceof Error ? e.message : String(e)
+                return ""
+              })
           : Promise.resolve(a.content ?? ""),
         a.file
           ? Promise.resolve().then(() => attachmentsApi.upload(a.file!)).catch(() => null)
@@ -113,6 +124,28 @@ export async function resolveAttachmentRefs(
       }
     }),
   )
+  lastFailures = failures
+  return refs
+}
+
+/**
+ * Why the last resolve's attachments failed, by index.
+ *
+ * Module-level rather than a field on `AttachmentRef` on purpose: the refs are
+ * persisted to `conversation_turns.attachments`, and a transient "the provider
+ * is out of credit" has no business being written onto a turn forever. It is
+ * only ever read immediately after the resolve that set it.
+ */
+let lastFailures: (string | undefined)[] = []
+
+/** The provider's own sentence, when the model — not the file — was the
+ *  problem. Null when the failures are ordinary unreadable files.
+ *
+ *  Matched on the wording `app/llm_errors.py` produces for a provider refusal,
+ *  which already names the admin action and says nothing was lost. */
+export function attachmentFailureNote(): string | null {
+  const provider = lastFailures.find((m) => m && /AI provider|usage limit|out of\s+credits/i.test(m))
+  return provider ?? null
 }
 
 /**
@@ -126,6 +159,11 @@ export async function resolveAttachmentRefs(
  */
 export function unreadableAttachmentNames(refs: AttachmentRef[]): string[] {
   return refs.filter((r) => !r.content?.trim()).map((r) => r.name)
+}
+
+/** Reset the recorded reasons. Tests only — the resolve itself overwrites. */
+export function __resetAttachmentFailures(): void {
+  lastFailures = []
 }
 
 /** One attached file, reduced to what a RUN needs: where the bytes are, and

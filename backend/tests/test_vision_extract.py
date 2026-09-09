@@ -265,3 +265,67 @@ def test_the_gateway_forwards_them():
 
     assert "input_blocks" in inspect.signature(llm_call).parameters
     assert "user_blocks" in inspect.signature(call_md).parameters
+
+
+# ── a provider outage is not a broken file ──────────────────────────────────
+#
+# Reported after the Anthropic account ran out of credit: four screen-capture
+# PDFs came back as "we could not read anything in that file — it may be
+# password-protected, empty, or a format we cannot open". Nothing was wrong
+# with the files, and the obvious next move is to go and inspect them.
+
+def _credit_error():
+    import anthropic
+    import httpx
+
+    body = {"type": "error", "error": {
+        "type": "invalid_request_error",
+        "message": "Your credit balance is too low to access the Anthropic API.",
+    }}
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    response = httpx.Response(400, json=body, request=request)
+    # The real SDK error stringifies the whole body, which is where the
+    # "credit balance is too low" marker `llm_errors` keys on actually lives.
+    return anthropic.BadRequestError(
+        "Error code: 400 - " + repr(body), response=response, body=body,
+    )
+
+
+def test_an_unreachable_model_raises_instead_of_blaming_the_file(monkeypatch):
+    from app.vision_extract import ProviderUnavailable
+
+    monkeypatch.setattr(
+        "app.graph.gateway.llm_call", lambda **kw: (_ for _ in ()).throw(_credit_error()),
+    )
+
+    with pytest.raises(ProviderUnavailable) as caught:
+        read_with_vision(filename="scan.pdf", data=b"pdf", enterprise_id="c1")
+
+    # The sentence names an admin action and says nothing was lost — it comes
+    # from `llm_errors`, so every surface explains a provider limit the same way.
+    assert "provider" in caught.value.message.lower()
+    assert caught.value.code == "provider_limit"
+
+
+def test_extract_text_propagates_it(monkeypatch):
+    """Flattening it to "" here would put the misleading 422 straight back."""
+    from app.vision_extract import ProviderUnavailable
+
+    def _down(**kwargs):
+        raise ProviderUnavailable("provider is out of credits", "provider_limit")
+
+    monkeypatch.setattr(vision_extract, "read_with_vision", _down)
+
+    with pytest.raises(ProviderUnavailable):
+        _run(filename="scan.pdf", data=b"\x89PNG\r\n\x1a\n\x00\x00noise")
+
+
+def test_an_ordinary_failure_still_just_returns_nothing(monkeypatch):
+    """Only PROVIDER failures raise. A malformed response, a bug in the call —
+    anything `llm_errors` does not recognize — keeps the old outcome, because a
+    fallback behind a failed extraction must not turn a 422 into a 500."""
+    monkeypatch.setattr(
+        "app.graph.gateway.llm_call",
+        lambda **kw: (_ for _ in ()).throw(ValueError("something local broke")),
+    )
+    assert read_with_vision(filename="scan.pdf", data=b"pdf", enterprise_id="c1") == ""

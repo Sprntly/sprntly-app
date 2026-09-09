@@ -18,7 +18,11 @@ vi.mock("../../../lib/api", () => ({
   attachmentsApi: { upload: (f: File) => upload(f) },
 }))
 
-import { resolveAttachmentRefs, unreadableAttachmentNames } from "../chatComposerController"
+import {
+  attachmentFailureNote,
+  resolveAttachmentRefs,
+  unreadableAttachmentNames,
+} from "../chatComposerController"
 
 const doc = (name: string) => ({ name, file: new File(["x"], name) })
 
@@ -79,5 +83,35 @@ describe("a file whose text will not come out", () => {
     const refs = await resolveAttachmentRefs([doc("a.pdf"), doc("b.pdf")])
 
     expect(unreadableAttachmentNames(refs)).toEqual([])
+  })
+})
+
+describe("when the model, not the file, was the problem", () => {
+  it("keeps the provider's own reason rather than blaming the files", async () => {
+    // The reported case: the Anthropic account ran out of credit, and four
+    // screen-capture PDFs were reported as unreadable. Nothing was wrong with
+    // them, and the message sent the reader to go and inspect them.
+    extractFile.mockRejectedValue(
+      new Error(
+        "Sprntly's AI provider has hit a usage limit — the account is out of " +
+          "credits or rate limited, so requests can't be processed right now.",
+      ),
+    )
+
+    await resolveAttachmentRefs([doc("a.pdf"), doc("b.pdf")])
+
+    expect(attachmentFailureNote()).toMatch(/AI provider/)
+  })
+
+  it("says nothing when the files really were unreadable", async () => {
+    extractFile.mockRejectedValue(new Error("We could not read anything in that file."))
+    await resolveAttachmentRefs([doc("scan.pdf")])
+    expect(attachmentFailureNote()).toBeNull()
+  })
+
+  it("says nothing when every file read", async () => {
+    extractFile.mockResolvedValue({ markdown: "text" })
+    await resolveAttachmentRefs([doc("a.pdf")])
+    expect(attachmentFailureNote()).toBeNull()
   })
 })

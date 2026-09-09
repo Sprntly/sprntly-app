@@ -20,7 +20,11 @@ from app.auth import (  # noqa: F401 — require_company re-exported for tests' 
 )
 from app import llm_errors
 from app.graph import token_stream
-from app.vision_extract import MAX_VISION_PER_ARCHIVE, extract_text
+from app.vision_extract import (
+    MAX_VISION_PER_ARCHIVE,
+    ProviderUnavailable,
+    extract_text,
+)
 from app.db import (
     cancel_ask_job,
     complete_ask_job,
@@ -684,9 +688,16 @@ async def extract_file(
             "markdown": await _markdown_from_zip(filename, data, company.company_id),
         }
 
-    markdown = (await extract_text(
-        filename=filename, data=data, enterprise_id=company.company_id
-    )).text
+    try:
+        markdown = (await extract_text(
+            filename=filename, data=data, enterprise_id=company.company_id
+        )).text
+    except ProviderUnavailable as exc:
+        # 503, NOT 422. The file is fine; we could not reach the model. A 422
+        # here reads as "your upload is bad" and sends the reader to inspect a
+        # file that was never the problem — which is exactly what happened when
+        # the provider account ran out of credit.
+        raise HTTPException(503, exc.message)
     if not markdown.strip():
         raise HTTPException(422, _EXTRACT_UNREADABLE)
     return {"name": filename, "markdown": markdown}
@@ -732,10 +743,18 @@ async def _markdown_from_zip(filename: str, data: bytes, company_id: str) -> str
     for name, raw in members:
         if not raw:
             continue
-        text, used_vision = await extract_text(
-            filename=name, data=raw, enterprise_id=company_id,
-            allow_vision=vision_budget > 0,
-        )
+        try:
+            text, used_vision = await extract_text(
+                filename=name, data=raw, enterprise_id=company_id,
+                allow_vision=vision_budget > 0,
+            )
+        except ProviderUnavailable:
+            # The model is unreachable, so no LATER member will fare better —
+            # stop asking, and import the ones `convert` can read on its own.
+            # Failing the whole archive would cost the reader the text files in
+            # it for a reason that has nothing to do with them.
+            vision_budget = 0
+            continue
         # Charged on the CALL, not on the text: a member `convert` handled
         # costs nothing, and a scan that came back empty still cost a call.
         if used_vision:

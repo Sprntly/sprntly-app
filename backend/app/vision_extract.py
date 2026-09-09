@@ -99,15 +99,38 @@ def vision_block(filename: str, data: bytes) -> dict | None:
     }
 
 
-def read_with_vision(*, filename: str, data: bytes, enterprise_id: str) -> str:
-    """Transcribe `data` to markdown, or return "" if it cannot be read.
+class ProviderUnavailable(Exception):
+    """The model could not be reached — nothing is wrong with the file.
 
-    NEVER RAISES. This is a fallback behind an extraction that already failed,
-    so every way it can go wrong — an unsupported format, an oversized file, an
-    encrypted PDF the API rejects, a timeout, no API key configured — has the
-    same correct outcome: the caller's original refusal stands. A vision read
-    that turns a "we could not read this" into a 500 would be strictly worse
-    than not trying.
+    THE ONE THING `read_with_vision` RAISES, and it exists because the
+    alternative misdirects. When the Anthropic account ran out of credit, four
+    screen-capture PDFs came back as "we could not read anything in that file —
+    it may be password-protected, empty, or a format we cannot open", and the
+    obvious next move is to go and inspect the files. The files were fine. The
+    account was not, and only the server log said so.
+
+    `message` is `llm_errors.user_message`'s fixed sentence for the class of
+    failure, which already names an admin action and says nothing was lost.
+    """
+
+    def __init__(self, message: str, code: str) -> None:
+        super().__init__(message)
+        self.message = message
+        self.code = code
+
+
+def read_with_vision(*, filename: str, data: bytes, enterprise_id: str) -> str:
+    """Transcribe `data` to markdown, or return "" if the file has nothing in it.
+
+    Raises `ProviderUnavailable` — and ONLY that — when the model could not be
+    reached at all: out of credit, rate limited, overloaded, a bad key. That is
+    not a fact about the file, and reporting it as one sends the reader to
+    inspect a file that was never the problem.
+
+    Every other way this can go wrong — an unsupported format, an oversized
+    file, an encrypted PDF the API rejects, a malformed response — still
+    returns "" and lets the caller's original refusal stand. A fallback behind
+    an extraction that already failed must not turn a 422 into a 500.
     """
     block = vision_block(filename, data)
     if block is None:
@@ -140,6 +163,15 @@ def read_with_vision(*, filename: str, data: bytes, enterprise_id: str) -> str:
         )
     except Exception as exc:  # noqa: BLE001 — a fallback must not become a 500
         logger.info("vision_extract failed file=%s err=%s", filename, exc)
+        # `limit_notice` returns None for anything that is not a provider
+        # refusal (a local gate, a bug, a timeout), so this widens what we can
+        # explain without taking over the general error path — and it logs the
+        # real provider text at WARNING for the operator.
+        from app.llm_errors import limit_notice
+
+        notice = limit_notice(exc)
+        if notice is not None:
+            raise ProviderUnavailable(notice["message"], notice["code"]) from exc
         return ""
 
     text = (result.output or "").strip()
@@ -193,6 +225,10 @@ async def extract_text(
     Only then does the file go to the model. `allow_vision=False` is for
     callers that have spent their budget (see MAX_VISION_PER_ARCHIVE), and
     keeps the pure-text behaviour exactly as it was.
+
+    Propagates `ProviderUnavailable` rather than flattening it to "": a file
+    nobody could look at because the model was unreachable must not be reported
+    as a file with nothing in it.
     """
     import asyncio
 

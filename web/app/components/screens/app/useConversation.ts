@@ -43,7 +43,8 @@ import {
 import type { AppContentState } from "../../../types/content"
 import type { ContentPanelTab } from "../../../context/NavigationContext"
 import {
-  resolveAttachmentRefs, spliceSkill, unreadableAttachmentNames, uploadAttachmentKeys,
+  attachmentFailureNote, resolveAttachmentRefs, spliceSkill,
+  unreadableAttachmentNames, uploadAttachmentKeys,
 } from "../../shared/chatComposerController"
 import { DRAFT_MIN_CHARS } from "../../shared/ChatComposer"
 // Highlight-to-reply: the send appends the parked quote as a trailing
@@ -1124,11 +1125,17 @@ export function useConversation(adapter: MainConversationAdapter): Conversation 
           // than a clean abort, and the reader cannot fix a scan anyway.
           const unreadable = unreadableAttachmentNames(extracted)
           if (unreadable.length > 0) {
+            // BLAME THE RIGHT THING. When the model itself was unreachable the
+            // files are fine, and telling someone their four PDFs are
+            // unreadable sends them to inspect four perfectly good PDFs.
+            const providerNote = attachmentFailureNote()
             showToast(
-              unreadable.length === 1
+              providerNote
+                ? "Your files could not be read right now"
+                : unreadable.length === 1
                 ? `We could not read ${unreadable[0]}`
                 : `We could not read ${unreadable.length} of your files`,
-              `${unreadable.join(", ")} — the answer uses the rest.`,
+              providerNote ?? `${unreadable.join(", ")} — the answer uses the rest.`,
             )
           }
           ctx = extracted

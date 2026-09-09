@@ -70,6 +70,7 @@ from app.chat_envelope import enrich_chat_envelope
 from app.report_capture import capture_report
 from app.vision_extract import (
     MAX_VISION_PER_ARCHIVE,
+    ProviderUnavailable,
     extract_text,
     vision_block,
 )
@@ -1026,11 +1027,16 @@ async def _upload_zip_members(
     # actually needed the fallback, so a zip of ordinary documents never
     # touches it.
     vision_budget = MAX_VISION_PER_ARCHIVE
+    provider_down = False
     for name, raw in members:
         if not raw:
             skipped.append(name)
             continue
-        allow_vision = vision_budget > 0
+        # A 503 from one member means the model is unreachable, so no later
+        # member will fare better. `_document_from_bytes` raises it as an
+        # HTTPException, which the arm below already skips — this stops the
+        # archive making the same doomed call once per scan.
+        allow_vision = vision_budget > 0 and not provider_down
         try:
             doc, used_vision = await _document_from_bytes(
                 project_id, name, raw, ctx, allow_vision=allow_vision,
@@ -1038,7 +1044,9 @@ async def _upload_zip_members(
             created.append(doc)
             if used_vision:
                 vision_budget -= 1
-        except HTTPException:
+        except HTTPException as exc:
+            if exc.status_code == 503:
+                provider_down = True
             # An unreadable or oversized member — the same 4xx a direct upload
             # would raise. One bad file does not cost the reader the rest.
             skipped.append(name)
@@ -1071,10 +1079,15 @@ async def _document_from_bytes(
     # has no parser for — and then falls through to a vision read. It is shared
     # with `routes/ask.py::extract_file` so a file readable when attached to a
     # chat is readable when uploaded to a project.
-    markdown, used_vision = await extract_text(
-        filename=filename, data=data, enterprise_id=ctx.company_id,
-        allow_vision=allow_vision,
-    )
+    try:
+        markdown, used_vision = await extract_text(
+            filename=filename, data=data, enterprise_id=ctx.company_id,
+            allow_vision=allow_vision,
+        )
+    except ProviderUnavailable as exc:
+        # 503, not 422 — see the same guard in `routes/ask.py::extract_file`.
+        # The upload is fine; the model is not reachable.
+        raise HTTPException(503, exc.message)
     if not markdown.strip():
         logger.info("project_document_unreadable file=%s", filename)
         raise HTTPException(422, _UNREADABLE_FILE_MESSAGE)
